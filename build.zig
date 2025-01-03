@@ -84,6 +84,24 @@ pub fn build(b: *std.Build) void {
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build run`
     // This will evaluate the `run` step rather than the default, which is "install".
+
+    // Compile the vertex shader at build time so that it can be imported with '@embedFile'.
+    const compile_vert_shader = b.addSystemCommand(&.{"glslc"});
+    compile_vert_shader.addFileArg(b.path("shaders/simple.vert"));
+    compile_vert_shader.addArgs(&.{ "--target-env=vulkan1.1", "-o" });
+    const triangle_vert_spv = compile_vert_shader.addOutputFileArg("simple.vert.spv");
+    exe.root_module.addAnonymousImport("simple_vert", .{
+        .root_source_file = triangle_vert_spv,
+    });
+
+    // Ditto for the fragment shader.
+    const compile_frag_shader = b.addSystemCommand(&.{"glslc"});
+    compile_frag_shader.addFileArg(b.path("shaders/simple.frag"));
+    compile_frag_shader.addArgs(&.{ "--target-env=vulkan1.1", "-o" });
+    const triangle_frag_spv = compile_frag_shader.addOutputFileArg("simple.frag.spv");
+    exe.root_module.addAnonymousImport("simple_frag", .{
+        .root_source_file = triangle_frag_spv,
+    });
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 

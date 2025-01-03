@@ -1,7 +1,10 @@
 const std = @import("std");
 const Window = @import("window.zig").Window;
+const App = @import("app.zig").App;
 
 pub fn main() !void {
-    const window = try Window.init(.{});
-    while (window.isRunning()) {}
+    var app = App{};
+    try app.init();
+    defer app.deinit();
+    while (app.onUpdate()) {}
 }

@@ -69,9 +69,9 @@ pub const Window = struct {
         self.window.?.destroy();
         glfw.terminate();
     }
-
-    pub fn isRunning(self: Window) bool {
+    pub fn isRunning(self: @This()) bool {
         glfw.pollEvents();
+
         return !self.window.?.shouldClose();
     }
 };
