@@ -187,6 +187,8 @@ pub const Swapchain = struct {
         std.mem.swap(vk.Semaphore, &self.swap_images[result.image_index].image_acquired, &self.next_image_acquired);
         self.image_index = result.image_index;
 
+        std.debug.print("I'm not feeling well {}\n", .{result.result});
+
         return switch (result.result) {
             .success => .optimal,
             .suboptimal_khr => .suboptimal,
@@ -236,6 +238,7 @@ pub const Swapchain = struct {
     }
 
     pub fn createFramebuffers(self: *@This()) !void {
+        std.debug.print("Creating\n", .{});
         const framebuffers = try self.allocator.alloc(vk.Framebuffer, self.swap_images.len);
         errdefer self.allocator.free(framebuffers);
 
@@ -256,6 +259,12 @@ pub const Swapchain = struct {
         }
 
         self.framebuffers = framebuffers;
+    }
+
+    pub fn destroyFramebuffers(self: *@This()) void {
+        std.debug.print("Frame Buffers are dead\n", .{});
+        for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
+        self.allocator.free(self.framebuffers);
     }
 };
 

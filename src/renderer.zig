@@ -72,7 +72,8 @@ pub const Mesh = struct {
     }
 
     pub fn draw(self: @This(), gc: GraphicsContext, cmdbuf: vk.CommandBuffer, buffer: vk.Buffer) void {
-        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, &buffer, &0);
-        gc.vkd.cmdDraw(cmdbuf, self.vertices.items.len, 1, 0, 0);
+        const offset = [_]vk.DeviceSize{0};
+        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buffer)), &offset);
+        gc.vkd.cmdDraw(cmdbuf, @intCast(self.vertices.items.len), 1, 0, 0);
     }
 };

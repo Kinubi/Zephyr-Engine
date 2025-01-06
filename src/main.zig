@@ -8,5 +8,11 @@ pub fn main() !void {
 
     try app.init(allocator);
     defer app.deinit();
-    while (app.onUpdate()) {}
+    var i: u32 = 0;
+    while (try app.onUpdate()) {
+        std.debug.print("i: {}", .{i});
+        if (i == 1)
+            break;
+        i += 1;
+    }
 }

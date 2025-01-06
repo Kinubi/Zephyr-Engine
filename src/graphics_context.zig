@@ -49,6 +49,7 @@ pub const GraphicsContext = struct {
     pdev: vk.PhysicalDevice,
     props: vk.PhysicalDeviceProperties,
     mem_props: vk.PhysicalDeviceMemoryProperties,
+    window: glfw.Window,
 
     dev: vk.Device,
     graphics_queue: Queue,
@@ -146,6 +147,7 @@ pub const GraphicsContext = struct {
         self.present_queue = Queue.init(self.vkd, self.dev, candidate.queues.present_family);
 
         self.mem_props = self.vki.getPhysicalDeviceMemoryProperties(self.pdev);
+        self.window = window;
 
         return self;
     }
@@ -239,45 +241,71 @@ pub const GraphicsContext = struct {
         try self.vkd.queueWaitIdle(self.graphics_queue.handle);
     }
 
-    pub fn createCommandBuffer(self: @This()) !vk.CommandBuffer {
-        var cmdbuf: vk.CommandBuffer = undefined;
-        try self.vkd.allocateCommandBuffers(self.dev, &.{
+    pub fn createCommandBuffers(self: @This(), framebuffers: []vk.Framebuffer, allocator: std.mem.Allocator) ![]vk.CommandBuffer {
+        const cmdbufs = try allocator.alloc(vk.CommandBuffer, framebuffers.len);
+        errdefer allocator.free(cmdbufs);
+
+        try self.vkd.allocateCommandBuffers(self.dev, &vk.CommandBufferAllocateInfo{
             .command_pool = self.command_pool,
             .level = .primary,
-            .command_buffer_count = 1,
-        }, @ptrCast(&cmdbuf));
+            .command_buffer_count = @truncate(cmdbufs.len),
+        }, cmdbufs.ptr);
+        errdefer self.vkd.freeCommandBuffers(self.dev, self.command_pool, @truncate(cmdbufs.len), cmdbufs.ptr);
 
-        return cmdbuf;
+        return cmdbufs;
     }
 
     pub fn freeCommandBuffer(self: @This(), cmdbuf: vk.CommandBuffer) void {
         self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&cmdbuf));
     }
 
-    pub fn beginSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer, framebuffer: vk.Framebuffer, extent: vk.Extent2D) !void {
-        const clear_values = &[][1]vk.ClearValue{
-            .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } },
+    pub fn beginSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer, framebuffer: vk.Framebuffer, render_pass: vk.RenderPass, extent: vk.Extent2D) !void {
+        const clear = vk.ClearValue{
+            .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
         };
+
+        const viewport = vk.Viewport{
+            .x = 0,
+            .y = 0,
+            .width = @as(f32, @floatFromInt(self.window.getSize().width)),
+            .height = @as(f32, @floatFromInt(self.window.getSize().height)),
+            .min_depth = 0,
+            .max_depth = 1,
+        };
+
+        const scissor = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = .{ .width = self.window.getSize().width, .height = self.window.getSize().height },
+        };
+
+        self.vkd.cmdSetViewport(cmdbuf, 0, 1, @as([*]const vk.Viewport, @ptrCast(&viewport)));
+        self.vkd.cmdSetScissor(cmdbuf, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
 
         const render_area = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
             .extent = extent,
         };
-
         self.vkd.cmdBeginRenderPass(
             cmdbuf,
             &.{
-                .render_pass = self.swapchain.render_pass,
+                .render_pass = render_pass,
                 .framebuffer = framebuffer,
                 .render_area = render_area,
                 .clear_value_count = 1,
-                .p_clear_values = clear_values,
+                .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
             },
+            .@"inline",
         );
     }
 
-    pub fn endSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer) void {
+    pub fn endSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer) !void {
         self.vkd.cmdEndRenderPass(cmdbuf);
+        try self.vkd.endCommandBuffer(cmdbuf);
+    }
+
+    pub fn destroyCommandBuffers(self: @This(), cmdbufs: []vk.CommandBuffer, allocator: std.mem.Allocator) void {
+        self.vkd.freeCommandBuffers(self.dev, self.command_pool, @truncate(cmdbufs.len), cmdbufs.ptr);
+        allocator.free(cmdbufs);
     }
 };
 
