@@ -16,6 +16,8 @@ pub const Swapchain = struct {
     present_mode: vk.PresentModeKHR,
     extent: vk.Extent2D,
     handle: vk.SwapchainKHR,
+    render_pass: vk.RenderPass = undefined,
+    framebuffers: []vk.Framebuffer = undefined,
 
     swap_images: []SwapImage,
     image_index: u32,
@@ -108,6 +110,8 @@ pub const Swapchain = struct {
     pub fn deinit(self: Swapchain) void {
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
+        self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
+        for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
     }
 
     pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D) !void {
@@ -188,6 +192,70 @@ pub const Swapchain = struct {
             .suboptimal_khr => .suboptimal,
             else => unreachable,
         };
+    }
+
+    pub fn createRenderPass(self: *@This()) !void {
+        const color_attachment = vk.AttachmentDescription{
+            .flags = .{},
+            .format = self.surface_format.format,
+            .samples = .{ .@"1_bit" = true },
+            .load_op = .clear,
+            .store_op = .store,
+            .stencil_load_op = .dont_care,
+            .stencil_store_op = .dont_care,
+            .initial_layout = .undefined,
+            .final_layout = .present_src_khr,
+        };
+
+        const color_attachment_ref = vk.AttachmentReference{
+            .attachment = 0,
+            .layout = .color_attachment_optimal,
+        };
+
+        const subpass = vk.SubpassDescription{
+            .flags = .{},
+            .pipeline_bind_point = .graphics,
+            .input_attachment_count = 0,
+            .p_input_attachments = undefined,
+            .color_attachment_count = 1,
+            .p_color_attachments = @ptrCast(&color_attachment_ref),
+            .p_resolve_attachments = null,
+            .p_depth_stencil_attachment = null,
+            .preserve_attachment_count = 0,
+            .p_preserve_attachments = undefined,
+        };
+        self.render_pass = try self.gc.vkd.createRenderPass(self.gc.dev, &vk.RenderPassCreateInfo{
+            .flags = .{},
+            .attachment_count = 1,
+            .p_attachments = @ptrCast(&color_attachment),
+            .subpass_count = 1,
+            .p_subpasses = @ptrCast(&subpass),
+            .dependency_count = 0,
+            .p_dependencies = undefined,
+        }, null);
+    }
+
+    pub fn createFramebuffers(self: *@This()) !void {
+        const framebuffers = try self.allocator.alloc(vk.Framebuffer, self.swap_images.len);
+        errdefer self.allocator.free(framebuffers);
+
+        var i: usize = 0;
+        errdefer for (framebuffers[0..i]) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
+
+        for (framebuffers) |*fb| {
+            fb.* = try self.gc.vkd.createFramebuffer(self.gc.dev, &vk.FramebufferCreateInfo{
+                .flags = .{},
+                .render_pass = self.render_pass,
+                .attachment_count = 1,
+                .p_attachments = @ptrCast(&self.swap_images[i].view),
+                .width = self.extent.width,
+                .height = self.extent.height,
+                .layers = 1,
+            }, null);
+            i += 1;
+        }
+
+        self.framebuffers = framebuffers;
     }
 };
 

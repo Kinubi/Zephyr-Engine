@@ -53,6 +53,7 @@ pub const GraphicsContext = struct {
     dev: vk.Device,
     graphics_queue: Queue,
     present_queue: Queue,
+    command_pool: vk.CommandPool,
 
     pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: glfw.Window) !GraphicsContext {
         var self: GraphicsContext = undefined;
@@ -153,6 +154,7 @@ pub const GraphicsContext = struct {
         self.vkd.destroyDevice(self.dev, null);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
         self.vki.destroyInstance(self.instance, null);
+        self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
     }
 
     pub fn deviceName(self: GraphicsContext) []const u8 {
@@ -175,6 +177,107 @@ pub const GraphicsContext = struct {
             .allocation_size = requirements.size,
             .memory_type_index = try self.findMemoryTypeIndex(requirements.memory_type_bits, flags),
         }, null);
+    }
+
+    pub fn createCommandPool(self: *@This()) !void {
+        self.command_pool = try self.vkd.createCommandPool(self.dev, &.{
+            .flags = .{},
+            .queue_family_index = self.graphics_queue.family,
+        }, null);
+    }
+
+    pub fn createBuffer(self: *@This(), size: u64, usage: vk.BufferUsageFlags, flags: vk.MemoryPropertyFlags) !vk.Buffer {
+        const buffer = try self.vkd.createBuffer(self.dev, &.{
+            .flags = .{},
+            .size = size,
+            .usage = usage,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        }, null);
+
+        const requirements = self.vkd.getBufferMemoryRequirements(self.dev, buffer);
+        const memory = try self.allocate(requirements, flags);
+
+        _ = try self.vkd.bindBufferMemory(self.dev, buffer, memory, 0);
+
+        return buffer;
+    }
+
+    pub fn copyBuffer(self: @This(), dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
+        var cmdbuf: vk.CommandBuffer = undefined;
+        try self.vkd.allocateCommandBuffers(self.dev, &.{
+            .command_pool = self.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&cmdbuf));
+
+        try self.vkd.beginCommandBuffer(cmdbuf, &.{
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        });
+
+        const region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = 0,
+            .size = size,
+        };
+        self.vkd.cmdCopyBuffer(cmdbuf, src, dst, 1, @ptrCast(&region));
+
+        try self.vkd.endCommandBuffer(cmdbuf);
+
+        const si = vk.SubmitInfo{
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = undefined,
+            .p_wait_dst_stage_mask = undefined,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cmdbuf),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = undefined,
+        };
+        try self.vkd.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
+        try self.vkd.queueWaitIdle(self.graphics_queue.handle);
+    }
+
+    pub fn createCommandBuffer(self: @This()) !vk.CommandBuffer {
+        var cmdbuf: vk.CommandBuffer = undefined;
+        try self.vkd.allocateCommandBuffers(self.dev, &.{
+            .command_pool = self.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&cmdbuf));
+
+        return cmdbuf;
+    }
+
+    pub fn freeCommandBuffer(self: @This(), cmdbuf: vk.CommandBuffer) void {
+        self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&cmdbuf));
+    }
+
+    pub fn beginSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer, framebuffer: vk.Framebuffer, extent: vk.Extent2D) !void {
+        const clear_values = &[][1]vk.ClearValue{
+            .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } },
+        };
+
+        const render_area = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = extent,
+        };
+
+        self.vkd.cmdBeginRenderPass(
+            cmdbuf,
+            &.{
+                .render_pass = self.swapchain.render_pass,
+                .framebuffer = framebuffer,
+                .render_area = render_area,
+                .clear_value_count = 1,
+                .p_clear_values = clear_values,
+            },
+        );
+    }
+
+    pub fn endSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer) void {
+        self.vkd.cmdEndRenderPass(cmdbuf);
     }
 };
 

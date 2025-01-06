@@ -18,7 +18,6 @@ pub const Pipeline = struct {
     ) !Pipeline {
         var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(alloc);
         for (shader_library.shaders.items) |shader| {
-            std.debug.print("shader: {any}\n", .{shader.shader_type});
             try pssci.append(vk.PipelineShaderStageCreateInfo{
                 .flags = .{},
                 .stage = shader.shader_type,
@@ -42,8 +41,6 @@ pub const Pipeline = struct {
         gpci_var.stage_count = @intCast(pssci.items.len);
         gpci_var.p_stages = pssci.items.ptr;
         gpci_var.p_vertex_input_state = &pvisci;
-
-        //std.debug.print("gpci: {any}\n", .{gpci_var.p_stages});
 
         var pipeline: vk.Pipeline = undefined;
         _ = try gc.vkd.createGraphicsPipelines(

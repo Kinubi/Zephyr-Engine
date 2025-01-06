@@ -8,14 +8,16 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Swapchain = @import("swapchain.zig").Swapchain;
 const vk = @import("vulkan");
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
+const Vertex = @import("renderer.zig").Vertex;
+const Mesh = @import("renderer.zig").Mesh;
 
 pub const App = struct {
     window: Window = undefined,
     swapchain: Swapchain = undefined,
     gc: GraphicsContext = undefined,
-    render_pass: vk.RenderPass = undefined,
     allocator: std.mem.Allocator = undefined,
     var simple_pipeline: ?Pipeline = undefined;
+    var buffer: vk.Buffer = undefined;
 
     pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
         self.window = try Window.init(.{});
@@ -26,13 +28,33 @@ pub const App = struct {
         std.log.debug("Using device: {s}", .{self.gc.deviceName()});
         self.swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
 
-        self.render_pass = try createRenderPass(&self.gc, self.swapchain);
+        try self.swapchain.createRenderPass();
 
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
 
         try shader_library.add(&.{ &simple_frag, &simple_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
 
-        simple_pipeline = try Pipeline.init(self.gc, self.render_pass, shader_library, try Pipeline.defaultLayout(self.gc), self.allocator);
+        simple_pipeline = try Pipeline.init(self.gc, self.swapchain.render_pass, shader_library, try Pipeline.defaultLayout(self.gc), self.allocator);
+
+        try self.swapchain.createFramebuffers();
+        try self.gc.createCommandPool();
+
+        var mesh = Mesh.init(allocator);
+        try mesh.vertices.appendSlice(&.{
+            Vertex{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
+            Vertex{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
+            Vertex{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+        });
+
+        buffer = try self.gc.createBuffer(@sizeOf(Vertex) * mesh.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true }, .{ .device_local_bit = true });
+
+        try mesh.uploadVertices(&self.gc, buffer);
+
+        const cmdbufs = try self.gc.createCommandBuffers();
+
+        try self.gc.beginSwapChainRenderPass(cmdbufs[i], self.swapchain.framebuffers, self.swapchain.extent);
+        try mesh.draw(self.gc, cmdbufs[i], buffer);
+        self.gc.endSwapChainRenderPass(cmdbufs[i]);
     }
 
     pub fn onUpdate(self: @This()) bool {
@@ -40,51 +62,10 @@ pub const App = struct {
     }
 
     pub fn deinit(self: @This()) void {
-        self.window.deinit();
-        self.swapchain.deinit();
-        self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
         simple_pipeline.?.deinit();
+        self.gc.vkd.destroyBuffer(self.gc.dev, buffer, null);
+        self.swapchain.deinit();
+        self.gc.deinit();
+        self.window.deinit();
     }
 };
-
-fn createRenderPass(gc: *const GraphicsContext, swapchain: Swapchain) !vk.RenderPass {
-    const color_attachment = vk.AttachmentDescription{
-        .flags = .{},
-        .format = swapchain.surface_format.format,
-        .samples = .{ .@"1_bit" = true },
-        .load_op = .clear,
-        .store_op = .store,
-        .stencil_load_op = .dont_care,
-        .stencil_store_op = .dont_care,
-        .initial_layout = .undefined,
-        .final_layout = .present_src_khr,
-    };
-
-    const color_attachment_ref = vk.AttachmentReference{
-        .attachment = 0,
-        .layout = .color_attachment_optimal,
-    };
-
-    const subpass = vk.SubpassDescription{
-        .flags = .{},
-        .pipeline_bind_point = .graphics,
-        .input_attachment_count = 0,
-        .p_input_attachments = undefined,
-        .color_attachment_count = 1,
-        .p_color_attachments = @ptrCast(&color_attachment_ref),
-        .p_resolve_attachments = null,
-        .p_depth_stencil_attachment = null,
-        .preserve_attachment_count = 0,
-        .p_preserve_attachments = undefined,
-    };
-
-    return try gc.vkd.createRenderPass(gc.dev, &vk.RenderPassCreateInfo{
-        .flags = .{},
-        .attachment_count = 1,
-        .p_attachments = @ptrCast(&color_attachment),
-        .subpass_count = 1,
-        .p_subpasses = @ptrCast(&subpass),
-        .dependency_count = 0,
-        .p_dependencies = undefined,
-    }, null);
-}
