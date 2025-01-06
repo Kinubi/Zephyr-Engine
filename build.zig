@@ -86,22 +86,16 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default, which is "install".
 
     // Compile the vertex shader at build time so that it can be imported with '@embedFile'.
-    const compile_vert_shader = b.addSystemCommand(&.{"glslc"});
-    compile_vert_shader.addFileArg(b.path("shaders/simple.vert"));
-    compile_vert_shader.addArgs(&.{ "--target-env=vulkan1.1", "-o" });
-    const triangle_vert_spv = compile_vert_shader.addOutputFileArg("simple.vert.spv");
-    exe.root_module.addAnonymousImport("simple_vert", .{
-        .root_source_file = triangle_vert_spv,
-    });
+    const vert_cmd = b.addSystemCommand(&.{ "glslc", "-o" });
+    const vert_spv = vert_cmd.addOutputFileArg("vert.spv");
+    vert_cmd.addFileArg(b.path("shaders/simple.vert"));
+    exe.root_module.addAnonymousImport("simple_vert", .{ .root_source_file = vert_spv });
 
-    // Ditto for the fragment shader.
-    const compile_frag_shader = b.addSystemCommand(&.{"glslc"});
-    compile_frag_shader.addFileArg(b.path("shaders/simple.frag"));
-    compile_frag_shader.addArgs(&.{ "--target-env=vulkan1.1", "-o" });
-    const triangle_frag_spv = compile_frag_shader.addOutputFileArg("simple.frag.spv");
-    exe.root_module.addAnonymousImport("simple_frag", .{
-        .root_source_file = triangle_frag_spv,
-    });
+    const frag_cmd = b.addSystemCommand(&.{ "glslc", "-o" });
+    const frag_spv = frag_cmd.addOutputFileArg("frag.spv");
+    frag_cmd.addFileArg(b.path("shaders/simple.frag"));
+    exe.root_module.addAnonymousImport("simple_frag", .{ .root_source_file = frag_spv });
+
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 

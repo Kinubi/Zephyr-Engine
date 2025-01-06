@@ -11,23 +11,9 @@ pub const WindowProps = struct {
     vsync: bool = false,
 };
 
-const apis: []const vk.ApiInfo = &.{
-    // Or you can add entire feature sets or extensions
-    .{
-        .base_commands = .{
-            .createInstance = true,
-            .enumerateInstanceExtensionProperties = true,
-        },
-        .instance_commands = .{
-            .createDevice = true,
-        },
-    },
-};
-const BaseDispatch = vk.BaseWrapper(apis);
-
 pub const Window = struct {
     window: ?glfw.Window = null,
-    gc: GraphicsContext = undefined,
+    window_props: WindowProps = undefined,
 
     fn errorCallback(error_code: glfw.ErrorCode, description: [:0]const u8) void {
         std.log.err("glfw: {}: {s}\n", .{ error_code, description });
@@ -57,12 +43,7 @@ pub const Window = struct {
             return error.GlfwWindowCreationFailed;
         };
 
-        std.debug.print("Vulkan supported {}", .{glfw.vulkanSupported()});
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
-        const gc = try GraphicsContext.init(allocator, windowProps.title, window);
-        return Window{ .window = window, .gc = gc };
+        return Window{ .window = window, .window_props = windowProps };
     }
 
     pub fn deinit(self: Window) void {

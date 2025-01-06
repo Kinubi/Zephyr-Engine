@@ -4,7 +4,9 @@ const App = @import("app.zig").App;
 
 pub fn main() !void {
     var app = App{};
-    try app.init();
+    const allocator = std.heap.page_allocator;
+
+    try app.init(allocator);
     defer app.deinit();
     while (app.onUpdate()) {}
 }

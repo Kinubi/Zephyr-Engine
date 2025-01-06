@@ -2,6 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GC = @import("graphics_context.zig").GraphicsContext;
 const Vertex = @import("renderer.zig").Vertex;
+const ShaderLibrary = @import("shader.zig").ShaderLibrary;
 
 pub const Pipeline = struct {
     gc: GC,
@@ -11,40 +12,21 @@ pub const Pipeline = struct {
     pub fn init(
         gc: GC,
         render_pass: vk.RenderPass,
-        vert_shader: []u8,
-        frag_shader: []u8,
-        layout: vk.PipelineLayout,
-    ) Pipeline {
-        const vert = try gc.vkd.createShaderModule(gc.dev, &vk.ShaderModuleCreateInfo{
-            .flags = .{},
-            .code_size = vert_shader.len,
-            .p_code = @ptrCast(@alignCast(vert_shader)),
-        }, null);
-        defer gc.vkd.destroyShaderModule(gc.dev, vert, null);
-
-        const frag = try gc.vkd.createShaderModule(gc.dev, &vk.ShaderModuleCreateInfo{
-            .flags = .{},
-            .code_size = frag_shader.len,
-            .p_code = @ptrCast(@alignCast(frag_shader)),
-        }, null);
-        defer gc.vkd.destroyShaderModule(gc.dev, frag, null);
-
-        const pssci = [_]vk.PipelineShaderStageCreateInfo{
-            .{
+        shader_library: ShaderLibrary,
+        gpci: vk.GraphicsPipelineCreateInfo,
+        alloc: std.mem.Allocator,
+    ) !Pipeline {
+        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(alloc);
+        for (shader_library.shaders.items) |shader| {
+            std.debug.print("shader: {any}\n", .{shader.shader_type});
+            try pssci.append(vk.PipelineShaderStageCreateInfo{
                 .flags = .{},
-                .stage = .{ .vertex_bit = true },
-                .module = vert,
+                .stage = shader.shader_type,
+                .module = shader.module,
                 .p_name = "main",
                 .p_specialization_info = null,
-            },
-            .{
-                .flags = .{},
-                .stage = .{ .fragment_bit = true },
-                .module = frag,
-                .p_name = "main",
-                .p_specialization_info = null,
-            },
-        };
+            });
+        }
 
         const pvisci = vk.PipelineVertexInputStateCreateInfo{
             .flags = .{},
@@ -53,6 +35,50 @@ pub const Pipeline = struct {
             .vertex_attribute_description_count = Vertex.attribute_description.len,
             .p_vertex_attribute_descriptions = &Vertex.attribute_description,
         };
+
+        var gpci_var = gpci;
+
+        gpci_var.render_pass = render_pass;
+        gpci_var.stage_count = @intCast(pssci.items.len);
+        gpci_var.p_stages = pssci.items.ptr;
+        gpci_var.p_vertex_input_state = &pvisci;
+
+        //std.debug.print("gpci: {any}\n", .{gpci_var.p_stages});
+
+        var pipeline: vk.Pipeline = undefined;
+        _ = try gc.vkd.createGraphicsPipelines(
+            gc.dev,
+            .null_handle,
+            1,
+            @as([*]const vk.GraphicsPipelineCreateInfo, @ptrCast(&gpci_var)),
+            null,
+            @as([*]vk.Pipeline, @ptrCast(&pipeline)),
+        );
+
+        return Pipeline{
+            .gc = gc,
+            .pipeline = pipeline,
+            .render_pass = render_pass,
+        };
+    }
+
+    pub fn deinit(self: *Pipeline) void {
+        _ = self;
+        //self.gc.vkd.DestroyPipeline(self.pipeline, null);
+    }
+
+    pub fn defaultLayout(gc: GC) !vk.GraphicsPipelineCreateInfo {
+        const layout = try gc.vkd.createPipelineLayout(
+            gc.dev,
+            &vk.PipelineLayoutCreateInfo{
+                .flags = .{},
+                .set_layout_count = 0,
+                .p_set_layouts = null,
+                .push_constant_range_count = 0,
+                .p_push_constant_ranges = null,
+            },
+            null,
+        );
 
         const piasci = vk.PipelineInputAssemblyStateCreateInfo{
             .flags = .{},
@@ -121,9 +147,6 @@ pub const Pipeline = struct {
 
         const gpci = vk.GraphicsPipelineCreateInfo{
             .flags = .{},
-            .stage_count = 2,
-            .p_stages = &pssci,
-            .p_vertex_input_state = &pvisci,
             .p_input_assembly_state = &piasci,
             .p_tessellation_state = null,
             .p_viewport_state = &pvsci,
@@ -133,45 +156,10 @@ pub const Pipeline = struct {
             .p_color_blend_state = &pcbsci,
             .p_dynamic_state = &pdsci,
             .layout = layout,
-            .render_pass = render_pass,
             .subpass = 0,
             .base_pipeline_handle = .null_handle,
             .base_pipeline_index = -1,
         };
-
-        var pipeline: vk.Pipeline = undefined;
-        _ = try gc.vkd.createGraphicsPipelines(
-            gc.dev,
-            .null_handle,
-            1,
-            @as([*]const vk.GraphicsPipelineCreateInfo, @ptrCast(&gpci)),
-            null,
-            @as([*]vk.Pipeline, @ptrCast(&pipeline)),
-        );
-
-        return Pipeline{
-            .gc = gc,
-            .pipeline = pipeline,
-            .render_pass = render_pass,
-        };
-    }
-
-    pub fn deinit(self: *Pipeline) void {
-        vk.DestroyPipeline(self.device, self.pipeline, null);
-    }
-
-    pub fn defaultLayout(gc: GC) vk.PipelineLayout {
-        const layout = try gc.vkd.createPipelineLayout(
-            gc.dev,
-            &vk.PipelineLayoutCreateInfo{
-                .flags = .{},
-                .set_layout_count = 0,
-                .p_set_layouts = null,
-                .push_constant_range_count = 0,
-                .p_push_constant_ranges = null,
-            },
-            null,
-        );
-        return layout;
+        return gpci;
     }
 };

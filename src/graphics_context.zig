@@ -6,14 +6,14 @@ const Allocator = std.mem.Allocator;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
-    vk.extensions.khr_portability_subset.name,
+    //vk.extensions.khr_portability_subset.name,
 };
 
 const optional_device_extensions = [_][*:0]const u8{};
 
 const optional_instance_extensions = [_][*:0]const u8{
     vk.extensions.khr_get_physical_device_properties_2.name,
-    vk.extensions.khr_portability_enumeration.name,
+    //vk.extensions.khr_portability_enumeration.name,
 };
 const apis: []const vk.ApiInfo = &.{
     // You can either add invidiual functions by manually creating an 'api'
@@ -23,6 +23,9 @@ const apis: []const vk.ApiInfo = &.{
         },
         .instance_commands = .{
             .createDevice = true,
+        },
+        .device_commands = .{
+            .createShaderModule = true,
         },
     },
     // Or you can add entire feature sets or extensions
@@ -83,6 +86,28 @@ pub const GraphicsContext = struct {
                 }
             }
         }
+        const instance_layers = &[_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
+
+        var layer_count: u32 = 0;
+        _ = try self.vkb.enumerateInstanceLayerProperties(&layer_count, null);
+
+        const available_layers = try allocator.alloc(vk.LayerProperties, layer_count);
+        defer allocator.free(available_layers);
+        _ = try self.vkb.enumerateInstanceLayerProperties(&count, available_layers.ptr);
+
+        var layers = std.BoundedArray([*:0]const u8, instance_layers.len){};
+        for (instance_layers) |optional| {
+            for (available_layers) |available| {
+                if (std.mem.eql(
+                    u8,
+                    std.mem.sliceTo(optional, 0),
+                    std.mem.sliceTo(&available.layer_name, 0),
+                )) {
+                    layers.appendAssumeCapacity(optional);
+                    break;
+                }
+            }
+        }
 
         const app_info = vk.ApplicationInfo{
             .p_application_name = app_name,
@@ -97,8 +122,8 @@ pub const GraphicsContext = struct {
                 .enumerate_portability_bit_khr = true,
             } else .{},
             .p_application_info = &app_info,
-            .enabled_layer_count = 0,
-            .pp_enabled_layer_names = undefined,
+            .enabled_layer_count = @intCast(layers.len),
+            .pp_enabled_layer_names = layers.slice().ptr,
             .enabled_extension_count = @intCast(instance_extensions.items.len),
             .pp_enabled_extension_names = @ptrCast(instance_extensions.items),
         }, null);

@@ -2,13 +2,13 @@ const std = @import("std");
 const vk = @import("vulkan");
 
 pub const Vertex = struct {
-    const binding_description = vk.VertexInputBindingDescription{
+    pub const binding_description = vk.VertexInputBindingDescription{
         .binding = 0,
         .stride = @sizeOf(Vertex),
         .input_rate = .vertex,
     };
 
-    const attribute_description = [_]vk.VertexInputAttributeDescription{
+    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
         .{
             .binding = 0,
             .location = 0,
