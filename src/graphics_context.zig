@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const glfw = @import("mach-glfw");
 const vk = @import("vulkan");
 const Allocator = std.mem.Allocator;
+const Mesh = @import("renderer.zig").Mesh;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
@@ -49,7 +50,6 @@ pub const GraphicsContext = struct {
     pdev: vk.PhysicalDevice,
     props: vk.PhysicalDeviceProperties,
     mem_props: vk.PhysicalDeviceMemoryProperties,
-    window: glfw.Window,
 
     dev: vk.Device,
     graphics_queue: Queue,
@@ -147,16 +147,15 @@ pub const GraphicsContext = struct {
         self.present_queue = Queue.init(self.vkd, self.dev, candidate.queues.present_family);
 
         self.mem_props = self.vki.getPhysicalDeviceMemoryProperties(self.pdev);
-        self.window = window;
 
         return self;
     }
 
     pub fn deinit(self: GraphicsContext) void {
+        self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
         self.vkd.destroyDevice(self.dev, null);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
         self.vki.destroyInstance(self.instance, null);
-        self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
     }
 
     pub fn deviceName(self: GraphicsContext) []const u8 {
@@ -188,7 +187,7 @@ pub const GraphicsContext = struct {
         }, null);
     }
 
-    pub fn createBuffer(self: *@This(), size: u64, usage: vk.BufferUsageFlags, flags: vk.MemoryPropertyFlags) !vk.Buffer {
+    pub fn createBuffer(self: *@This(), size: u64, usage: vk.BufferUsageFlags) !vk.Buffer {
         const buffer = try self.vkd.createBuffer(self.dev, &.{
             .flags = .{},
             .size = size,
@@ -197,11 +196,6 @@ pub const GraphicsContext = struct {
             .queue_family_index_count = 0,
             .p_queue_family_indices = null,
         }, null);
-
-        const requirements = self.vkd.getBufferMemoryRequirements(self.dev, buffer);
-        const memory = try self.allocate(requirements, flags);
-
-        _ = try self.vkd.bindBufferMemory(self.dev, buffer, memory, 0);
 
         return buffer;
     }
@@ -241,7 +235,16 @@ pub const GraphicsContext = struct {
         try self.vkd.queueWaitIdle(self.graphics_queue.handle);
     }
 
-    pub fn createCommandBuffers(self: @This(), framebuffers: []vk.Framebuffer, allocator: std.mem.Allocator) ![]vk.CommandBuffer {
+    pub fn createCommandBuffers(
+        self: *@This(),
+        allocator: Allocator,
+        //buffer: vk.Buffer,
+        //extent: vk.Extent2D,
+        //render_pass: vk.RenderPass,
+        //pipeline: vk.Pipeline,
+        framebuffers: []vk.Framebuffer,
+        //mesh: Mesh,
+    ) ![]vk.CommandBuffer {
         const cmdbufs = try allocator.alloc(vk.CommandBuffer, framebuffers.len);
         errdefer allocator.free(cmdbufs);
 
@@ -252,55 +255,57 @@ pub const GraphicsContext = struct {
         }, cmdbufs.ptr);
         errdefer self.vkd.freeCommandBuffers(self.dev, self.command_pool, @truncate(cmdbufs.len), cmdbufs.ptr);
 
+        // const clear = vk.ClearValue{
+        //     .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
+        // };
+
+        // const viewport = vk.Viewport{
+        //     .x = 0,
+        //     .y = 0,
+        //     .width = @as(f32, @floatFromInt(extent.width)),
+        //     .height = @as(f32, @floatFromInt(extent.height)),
+        //     .min_depth = 0,
+        //     .max_depth = 1,
+        // };
+
+        // const scissor = vk.Rect2D{
+        //     .offset = .{ .x = 0, .y = 0 },
+        //     .extent = extent,
+        // };
+
+        // for (cmdbufs, 0..) |cmdbuf, i| {
+        //     try self.vkd.beginCommandBuffer(cmdbuf, &.{
+        //         .flags = .{},
+        //         .p_inheritance_info = null,
+        //     });
+
+        //     self.vkd.cmdSetViewport(cmdbuf, 0, 1, @as([*]const vk.Viewport, @ptrCast(&viewport)));
+        //     self.vkd.cmdSetScissor(cmdbuf, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
+
+        //     // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
+        //     const render_area = vk.Rect2D{
+        //         .offset = .{ .x = 0, .y = 0 },
+        //         .extent = extent,
+        //     };
+
+        //     self.vkd.cmdBeginRenderPass(cmdbuf, &.{
+        //         .render_pass = render_pass,
+        //         .framebuffer = framebuffers[i],
+        //         .render_area = render_area,
+        //         .clear_value_count = 1,
+        //         .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
+        //     }, .@"inline");
+
+        //     self.vkd.cmdBindPipeline(cmdbuf, .graphics, pipeline);
+        //     const offset = [_]vk.DeviceSize{0};
+        //     self.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buffer)), &offset);
+        //     self.vkd.cmdDraw(cmdbuf, @intCast(mesh.vertices.items.len), 1, 0, 0);
+
+        //     self.vkd.cmdEndRenderPass(cmdbuf);
+        //     try self.vkd.endCommandBuffer(cmdbuf);
+        // }
+
         return cmdbufs;
-    }
-
-    pub fn freeCommandBuffer(self: @This(), cmdbuf: vk.CommandBuffer) void {
-        self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&cmdbuf));
-    }
-
-    pub fn beginSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer, framebuffer: vk.Framebuffer, render_pass: vk.RenderPass, extent: vk.Extent2D) !void {
-        const clear = vk.ClearValue{
-            .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
-        };
-
-        const viewport = vk.Viewport{
-            .x = 0,
-            .y = 0,
-            .width = @as(f32, @floatFromInt(self.window.getSize().width)),
-            .height = @as(f32, @floatFromInt(self.window.getSize().height)),
-            .min_depth = 0,
-            .max_depth = 1,
-        };
-
-        const scissor = vk.Rect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = .{ .width = self.window.getSize().width, .height = self.window.getSize().height },
-        };
-
-        self.vkd.cmdSetViewport(cmdbuf, 0, 1, @as([*]const vk.Viewport, @ptrCast(&viewport)));
-        self.vkd.cmdSetScissor(cmdbuf, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
-
-        const render_area = vk.Rect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
-        };
-        self.vkd.cmdBeginRenderPass(
-            cmdbuf,
-            &.{
-                .render_pass = render_pass,
-                .framebuffer = framebuffer,
-                .render_area = render_area,
-                .clear_value_count = 1,
-                .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
-            },
-            .@"inline",
-        );
-    }
-
-    pub fn endSwapChainRenderPass(self: @This(), cmdbuf: vk.CommandBuffer) !void {
-        self.vkd.cmdEndRenderPass(cmdbuf);
-        try self.vkd.endCommandBuffer(cmdbuf);
     }
 
     pub fn destroyCommandBuffers(self: @This(), cmdbufs: []vk.CommandBuffer, allocator: std.mem.Allocator) void {

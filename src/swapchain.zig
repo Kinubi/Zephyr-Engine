@@ -24,10 +24,10 @@ pub const Swapchain = struct {
     next_image_acquired: vk.Semaphore,
 
     pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
-        return try initRecycle(gc, allocator, extent, .null_handle);
+        return try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
     }
 
-    pub fn initRecycle(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR) !Swapchain {
+    pub fn initRecycle(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR, old_render_pass: vk.RenderPass) !Swapchain {
         const caps = try gc.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(gc.pdev, gc.surface);
         const actual_extent = findActualExtent(caps, extent);
         if (actual_extent.width == 0 or actual_extent.height == 0) {
@@ -92,34 +92,36 @@ pub const Swapchain = struct {
             .present_mode = present_mode,
             .extent = actual_extent,
             .handle = handle,
+            .render_pass = old_render_pass,
             .swap_images = swap_images,
             .image_index = result.image_index,
             .next_image_acquired = next_image_acquired,
         };
     }
 
-    fn deinitExceptSwapchain(self: Swapchain) void {
+    fn deinitExceptSwapchain(self: *Swapchain) void {
         for (self.swap_images) |si| si.deinit(self.gc);
         self.gc.vkd.destroySemaphore(self.gc.dev, self.next_image_acquired, null);
+        self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
+        self.destroyFramebuffers();
     }
 
     pub fn waitForAllFences(self: Swapchain) !void {
         for (self.swap_images) |si| si.waitForFence(self.gc) catch {};
     }
 
-    pub fn deinit(self: Swapchain) void {
+    pub fn deinit(self: *Swapchain) void {
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
-        self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
-        for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
     }
 
     pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D) !void {
         const gc = self.gc;
         const allocator = self.allocator;
         const old_handle = self.handle;
+        const old_render_pass = self.render_pass;
         self.deinitExceptSwapchain();
-        self.* = try initRecycle(gc, allocator, new_extent, old_handle);
+        self.* = try initRecycle(gc, allocator, new_extent, old_handle, old_render_pass);
     }
 
     pub fn currentImage(self: Swapchain) vk.Image {
@@ -130,7 +132,7 @@ pub const Swapchain = struct {
         return &self.swap_images[self.image_index];
     }
 
-    pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer) !PresentState {
+    pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer) !void {
         // Simple method:
         // 1) Acquire next image
         // 2) Wait for and reset fence of the acquired image
@@ -174,26 +176,6 @@ pub const Swapchain = struct {
             .p_image_indices = @ptrCast(&self.image_index),
             .p_results = null,
         });
-
-        // Step 4: Acquire next frame
-        const result = try self.gc.vkd.acquireNextImageKHR(
-            self.gc.dev,
-            self.handle,
-            std.math.maxInt(u64),
-            self.next_image_acquired,
-            .null_handle,
-        );
-
-        std.mem.swap(vk.Semaphore, &self.swap_images[result.image_index].image_acquired, &self.next_image_acquired);
-        self.image_index = result.image_index;
-
-        std.debug.print("I'm not feeling well {}\n", .{result.result});
-
-        return switch (result.result) {
-            .success => .optimal,
-            .suboptimal_khr => .suboptimal,
-            else => unreachable,
-        };
     }
 
     pub fn createRenderPass(self: *@This()) !void {
@@ -260,11 +242,108 @@ pub const Swapchain = struct {
 
         self.framebuffers = framebuffers;
     }
-
     pub fn destroyFramebuffers(self: *@This()) void {
         std.debug.print("Frame Buffers are dead\n", .{});
         for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
         self.allocator.free(self.framebuffers);
+    }
+
+    pub fn beginSwapChainRenderPass(self: *@This(), cmdbuf: vk.CommandBuffer, extent: vk.Extent2D) void {
+        const clear_color = vk.ClearValue{
+            .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
+        };
+
+        const scissor = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = extent,
+        };
+        const viewport = vk.Viewport{
+            .x = 0,
+            .y = 0,
+            .width = @as(f32, @floatFromInt(extent.width)),
+            .height = @as(f32, @floatFromInt(extent.height)),
+            .min_depth = 0,
+            .max_depth = 1,
+        };
+
+        self.gc.vkd.cmdSetViewport(cmdbuf, 0, 1, @as([*]const vk.Viewport, @ptrCast(&viewport)));
+        self.gc.vkd.cmdSetScissor(cmdbuf, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
+
+        const render_area = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = extent,
+        };
+
+        const render_pass_info = vk.RenderPassBeginInfo{
+            .render_pass = self.render_pass,
+            .framebuffer = self.framebuffers[self.image_index],
+            .render_area = render_area,
+            .clear_value_count = 1,
+            .p_clear_values = @ptrCast(&clear_color),
+        };
+
+        self.gc.vkd.cmdBeginRenderPass(cmdbuf, &render_pass_info, .@"inline");
+    }
+
+    pub fn endSwapChainRenderPass(self: *@This(), cmdbuf: vk.CommandBuffer) void {
+        self.gc.vkd.cmdEndRenderPass(cmdbuf);
+    }
+
+    pub fn acquireNextImage(
+        self: *Swapchain,
+    ) !PresentState {
+        // Step 4: Acquire next frame
+        const result = try self.gc.vkd.acquireNextImageKHR(
+            self.gc.dev,
+            self.handle,
+            std.math.maxInt(u64),
+            self.next_image_acquired,
+            .null_handle,
+        );
+
+        std.mem.swap(vk.Semaphore, &self.swap_images[result.image_index].image_acquired, &self.next_image_acquired);
+        self.image_index = result.image_index;
+
+        return switch (result.result) {
+            .success => .optimal,
+            .suboptimal_khr => .suboptimal,
+            else => unreachable,
+        };
+    }
+
+    pub fn beginFrame(self: *@This(), cmdbuf: vk.CommandBuffer, extent: vk.Extent2D) !void {
+        const result = self.acquireNextImage() catch |err| switch (err) {
+            error.OutOfDateKHR => Swapchain.PresentState.suboptimal,
+            else => |narrow| return narrow,
+        };
+
+        if (result == .suboptimal) {
+            self.recreate(extent) catch |err| {
+                std.debug.print("Error recreating swapchain: {any}\n", .{err});
+            };
+            try self.createFramebuffers();
+        }
+        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.swap_images[self.image_index].frame_fence));
+        try self.gc.vkd.resetCommandBuffer(cmdbuf, .{});
+        std.debug.print("Begin frame\n", .{});
+        const begin_info = vk.CommandBufferBeginInfo{};
+        //try self.gc.vkd.resetCommandPool(self.gc.dev, self.gc.command_pool, .{});
+        try self.gc.vkd.beginCommandBuffer(cmdbuf, &begin_info);
+    }
+
+    pub fn endFrame(self: *@This(), cmdbuf: vk.CommandBuffer) void {
+        std.debug.print("End frame\n", .{});
+
+        self.gc.vkd.endCommandBuffer(cmdbuf) catch |err| {
+            std.debug.print("Error ending command buffer: {any}\n", .{err});
+        };
+        std.debug.print("Command buffer ended\n", .{});
+
+        self.present(cmdbuf) catch |err| {
+            std.debug.print("Error presenting frame: {any}\n", .{err});
+        };
+
+        self.image_index = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 };
 
