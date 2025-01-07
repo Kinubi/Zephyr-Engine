@@ -182,7 +182,7 @@ pub const GraphicsContext = struct {
 
     pub fn createCommandPool(self: *@This()) !void {
         self.command_pool = try self.vkd.createCommandPool(self.dev, &.{
-            .flags = .{},
+            .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = self.graphics_queue.family,
         }, null);
     }

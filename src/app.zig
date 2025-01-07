@@ -16,6 +16,7 @@ pub const App = struct {
 
     gc: GraphicsContext = undefined,
     allocator: std.mem.Allocator = undefined,
+    var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var simple_pipeline: ?Pipeline = undefined;
     var buffer: vk.Buffer = undefined;
@@ -59,25 +60,19 @@ pub const App = struct {
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
-            // buffer,
-            // swapchain.extent,
-            // swapchain.render_pass,
-            // simple_pipeline.?.pipeline,
             swapchain.framebuffers,
-            //mesh,
         );
     }
 
     pub fn onUpdate(self: *@This()) !bool {
-        std.debug.print("Presenting\n", .{});
-        const cmdbuf = cmdbufs[swapchain.image_index];
-        try swapchain.beginFrame(cmdbuf, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height });
-        swapchain.beginSwapChainRenderPass(cmdbuf, .{ .height = swapchain.extent.height, .width = swapchain.extent.width });
+        const cmdbuf = cmdbufs[current_frame];
+        try swapchain.beginFrame(cmdbufs, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height }, current_frame);
+        swapchain.beginSwapChainRenderPass(cmdbufs, .{ .height = swapchain.extent.height, .width = swapchain.extent.width }, current_frame);
         self.gc.vkd.cmdBindPipeline(cmdbuf, .graphics, simple_pipeline.?.pipeline);
         mesh.draw(self.gc, cmdbuf, buffer);
 
         swapchain.endSwapChainRenderPass(cmdbuf);
-        swapchain.endFrame(cmdbuf);
+        swapchain.endFrame(cmdbuf, &current_frame);
 
         return self.window.isRunning();
     }
