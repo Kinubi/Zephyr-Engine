@@ -47,16 +47,23 @@ pub const App = struct {
 
         try shader_library.add(&.{ &simple_frag, &simple_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
 
-        //simple_pipeline = try Pipeline.init(self.gc, swapchain.render_pass, shader_library, try Pipeline.defaultLayout(self.gc), self.allocator);
-
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
 
         var mesh = Mesh.init(self.allocator);
+        // try mesh.vertices.appendSlice(&.{
+        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 1, 0, 0 } },
+        //     Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
+        //     Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+        // });
+
         try mesh.vertices.appendSlice(&.{
-            Vertex{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
-            Vertex{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
-            Vertex{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
+            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
+            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
+            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
+            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
+            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
         });
 
         try mesh.createVertexBuffers(&self.gc);
@@ -66,13 +73,12 @@ pub const App = struct {
         var scene = Scene.init();
 
         const object = try scene.addObject(model);
-        std.debug.print("Object transform: {any}", .{object.transform.local2world.v});
-        object.transform.translate(Math.Vec3.init(3.0, 2.0, 0.0));
-        std.debug.print("Object transform: {any}", .{object.transform.local2world.v});
+        _ = object;
+        // object.*.transform.translate(Math.Vec3.init(0.0, 0.0, 0.5));
+        // object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
-            swapchain.framebuffers,
         );
 
         simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator);
@@ -88,14 +94,16 @@ pub const App = struct {
         try simple_renderer.render(cmdbuf, dt);
 
         swapchain.endSwapChainRenderPass(cmdbuf);
-        swapchain.endFrame(cmdbuf, &current_frame, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height });
+        try swapchain.endFrame(cmdbuf, &current_frame, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height });
         last_frame_time = current_time;
+
         return self.window.isRunning();
     }
 
     pub fn deinit(self: @This()) void {
         try swapchain.waitForAllFences();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
+        simple_renderer.deinit();
 
         swapchain.deinit();
         self.gc.deinit();

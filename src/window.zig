@@ -21,7 +21,7 @@ pub const Window = struct {
 
     pub fn init(windowProps: WindowProps) !Window {
         glfw.setErrorCallback(errorCallback);
-        if (!glfw.init(.{})) {
+        if (!glfw.init(.{ .platform = .wayland })) {
             return error.GlfwInitFailed;
         }
 

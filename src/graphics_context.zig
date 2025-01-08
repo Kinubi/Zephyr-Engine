@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const glfw = @import("mach-glfw");
 const vk = @import("vulkan");
 const Allocator = std.mem.Allocator;
+const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
@@ -237,14 +238,8 @@ pub const GraphicsContext = struct {
     pub fn createCommandBuffers(
         self: *@This(),
         allocator: Allocator,
-        //buffer: vk.Buffer,
-        //extent: vk.Extent2D,
-        //render_pass: vk.RenderPass,
-        //pipeline: vk.Pipeline,
-        framebuffers: []vk.Framebuffer,
-        //mesh: Mesh,
     ) ![]vk.CommandBuffer {
-        const cmdbufs = try allocator.alloc(vk.CommandBuffer, framebuffers.len);
+        const cmdbufs = try allocator.alloc(vk.CommandBuffer, MAX_FRAMES_IN_FLIGHT);
         errdefer allocator.free(cmdbufs);
 
         try self.vkd.allocateCommandBuffers(self.dev, &vk.CommandBufferAllocateInfo{

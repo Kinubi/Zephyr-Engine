@@ -16,6 +16,10 @@ const Shader = struct {
         }, null);
         return Shader{ .module = module, .shader_type = shader_type };
     }
+
+    pub fn deinit(self: Shader, gc: GC) void {
+        gc.vkd.destroyShaderModule(gc.dev, self.module, null);
+    }
 };
 
 pub const ShaderLibrary = struct {
@@ -41,6 +45,5 @@ pub const ShaderLibrary = struct {
         for (self.shaders.items) |shader| {
             self.gc.vkd.destroyShaderModule(self.gc.dev, shader.module, null);
         }
-        self.shaders.deinit();
     }
 };

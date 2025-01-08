@@ -25,7 +25,7 @@ pub const Vertex = struct {
         },
     };
 
-    pos: [2]f32,
+    pos: [3]f32,
     color: [3]f32,
 };
 
@@ -107,6 +107,14 @@ pub const Model = struct {
             }) catch unreachable,
         };
     }
+
+    pub fn deinit(self: Model, gc: GraphicsContext) void {
+        for (self.primitives.constSlice()) |primitive| {
+            if (primitive.mesh) |mesh| {
+                mesh.deinit(gc);
+            }
+        }
+    }
 };
 
 pub const Primitive = struct {
@@ -115,7 +123,6 @@ pub const Primitive = struct {
 
 pub const Transform = struct {
     local2world: Math.Mat4x4 = Math.Mat4x4.ident,
-    offset: Math.Vec2 = Math.Vec2.init(0, 0),
 
     pub fn translate(self: *Transform, vec: Math.Vec3) void {
         self.local2world = self.local2world.transpose().mul(&Math.Mat4x4.translate(vec)).transpose();

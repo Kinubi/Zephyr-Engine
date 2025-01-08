@@ -26,6 +26,7 @@ pub const Pipeline = struct {
                 .p_specialization_info = null,
             });
         }
+        errdefer shader_library.deinit();
 
         const pvisci = vk.PipelineVertexInputStateCreateInfo{
             .flags = .{},
@@ -83,7 +84,7 @@ pub const Pipeline = struct {
             .depth_clamp_enable = vk.FALSE,
             .rasterizer_discard_enable = vk.FALSE,
             .polygon_mode = .fill,
-            .cull_mode = .{ .back_bit = true },
+            .cull_mode = .{},
             .front_face = .clockwise,
             .depth_bias_enable = vk.FALSE,
             .depth_bias_constant_factor = 0,
@@ -100,6 +101,19 @@ pub const Pipeline = struct {
             .p_sample_mask = null,
             .alpha_to_coverage_enable = vk.FALSE,
             .alpha_to_one_enable = vk.FALSE,
+        };
+
+        const pdssci = vk.PipelineDepthStencilStateCreateInfo{
+            .flags = .{},
+            .depth_test_enable = vk.TRUE,
+            .depth_write_enable = vk.TRUE,
+            .depth_compare_op = vk.CompareOp.less_or_equal,
+            .depth_bounds_test_enable = vk.FALSE,
+            .stencil_test_enable = vk.FALSE,
+            .front = undefined,
+            .back = undefined,
+            .min_depth_bounds = 0,
+            .max_depth_bounds = 1,
         };
 
         const pcbas = vk.PipelineColorBlendAttachmentState{
@@ -136,7 +150,7 @@ pub const Pipeline = struct {
             .p_viewport_state = &pvsci,
             .p_rasterization_state = &prsci,
             .p_multisample_state = &pmsci,
-            .p_depth_stencil_state = null,
+            .p_depth_stencil_state = &pdssci,
             .p_color_blend_state = &pcbsci,
             .p_dynamic_state = &pdsci,
             .layout = layout,

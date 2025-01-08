@@ -5,11 +5,11 @@ const Scene = @import("scene.zig").Scene;
 const Pipeline = @import("pipeline.zig").Pipeline;
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
 const Math = @import("mach").math;
+const glfw = @import("mach-glfw");
 
-const SimplePushConstantData = struct {
-    transform: Math.Mat2x2 = Math.Mat2x2.ident,
-    offset: Math.Vec2 = Math.Vec2.init(0.0, 0.0),
-    color: Math.Vec3 align(@alignOf(f16)) = Math.Vec3.init(0.0, 0.0, 0.0),
+const SimplePushConstantData = extern struct {
+    transform: Math.Mat4x4 = Math.Mat4x4.ident,
+    color: Math.Vec3 = Math.Vec3.init(0.0, 0.0, 0.0),
 };
 
 pub const SimpleRenderer = struct {
@@ -36,13 +36,23 @@ pub const SimpleRenderer = struct {
         return SimpleRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout };
     }
 
+    pub fn deinit(self: *SimpleRenderer) void {
+        self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
+        self.scene.deinit(self.gc.*);
+        self.pipeline.deinit();
+    }
+
     pub fn render(self: *@This(), cmdbuf: vk.CommandBuffer, dt: f64) !void {
         self.gc.*.vkd.cmdBindPipeline(cmdbuf, .graphics, self.pipeline.pipeline);
         for (self.scene.objects.slice()) |*object| {
-            const offset_mult = Math.Vec2.init(0.1, 0.1).mulScalar(@floatCast(dt));
-            object.transform.offset = object.transform.offset.add(&offset_mult);
 
-            const push = SimplePushConstantData{ .offset = object.transform.offset, .color = Math.Vec3.init(0.3, 0.2, 0.5) };
+            // const offset_mult = Math.Vec3.init(0.001, 0.001, 0.001).mulScalar(Math.degreesToRadians(Math.sin(@as(f32, @floatCast(glfw.getTime())))));
+            // object.transform.translate(offset_mult);
+            _ = dt;
+            object.transform.rotate(Math.Quat.fromEuler(Math.degreesToRadians(Math.cos(@as(f32, @floatCast(glfw.getTime())))), Math.degreesToRadians(0), Math.degreesToRadians(Math.cos(@as(f32, @floatCast(glfw.getTime()))))));
+            //const color = Math.Vec3.init(Math.sin(@as(f32, @floatCast(glfw.getTime()))), Math.cos(@as(f32, @floatCast(glfw.getTime()))), Math.sin(@as(f32, @floatCast(glfw.getTime())) + @as(f32, 1.0)));
+            std.debug.print("Object transform: {any}\n", .{object.transform.local2world.v});
+            const push = SimplePushConstantData{ .transform = object.transform.local2world };
 
             self.gc.*.vkd.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(SimplePushConstantData), @ptrCast(&push));
         }

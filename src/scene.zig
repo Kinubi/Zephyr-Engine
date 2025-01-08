@@ -16,9 +16,10 @@ pub const Scene = struct {
         };
     }
 
-    pub fn deinit(self: *Scene) void {
-        _ = self; // autofix
-        // TODO
+    pub fn deinit(self: *Scene, gc: GraphicsContext) void {
+        for (self.objects.constSlice()) |object| {
+            object.deinit(gc);
+        }
     }
 
     pub fn addEmpty(self: *Scene) !*GameObject {
