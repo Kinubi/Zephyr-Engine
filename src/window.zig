@@ -38,7 +38,7 @@ pub const Window = struct {
             windowProps.title,
             if (windowProps.fullscreen) monitor else null,
             null,
-            .{ .client_api = .no_api },
+            .{ .client_api = .no_api, .context_creation_api = .native_context_api },
         ) orelse {
             return error.GlfwWindowCreationFailed;
         };

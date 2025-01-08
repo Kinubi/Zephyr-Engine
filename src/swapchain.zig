@@ -122,7 +122,6 @@ pub const Swapchain = struct {
         const gc = self.gc;
         const allocator = self.allocator;
         const old_handle = self.handle;
-        //const old_render_pass = self.render_pass;
         self.deinitExceptSwapchain();
         self.* = try initRecycle(gc, allocator, new_extent, old_handle, .null_handle);
         try self.createRenderPass();
@@ -136,7 +135,7 @@ pub const Swapchain = struct {
         return &self.swap_images[self.image_index];
     }
 
-    pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer, current_frame: u32) !void {
+    pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer, current_frame: u32, extent: vk.Extent2D) !void {
         // Simple method:
         // 1) Acquire next image
         // 2) Wait for and reset fence of the acquired image
@@ -182,7 +181,8 @@ pub const Swapchain = struct {
             else => return err,
         };
         if (present_result == .error_out_of_date_khr or present_result == .suboptimal_khr) {
-            self.recreate(self.extent) catch |err| {
+            self.extent = extent;
+            self.recreate(extent) catch |err| {
                 std.debug.print("Error recreating swapchain: {any}\n", .{err});
             };
             try self.createFramebuffers();
@@ -260,14 +260,14 @@ pub const Swapchain = struct {
         self.allocator.free(self.framebuffers);
     }
 
-    pub fn beginSwapChainRenderPass(self: *@This(), cmdbufs: []vk.CommandBuffer, extent: vk.Extent2D, current_frame: u32) void {
+    pub fn beginSwapChainRenderPass(self: *@This(), cmdbufs: []vk.CommandBuffer, current_frame: u32) void {
         const clear_color = vk.ClearValue{
             .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
         };
 
         const scissor = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
+            .extent = self.extent,
         };
 
         const render_pass_info = vk.RenderPassBeginInfo{
@@ -282,8 +282,8 @@ pub const Swapchain = struct {
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
-            .width = @as(f32, @floatFromInt(extent.width)),
-            .height = @as(f32, @floatFromInt(extent.height)),
+            .width = @as(f32, @floatFromInt(self.extent.width)),
+            .height = @as(f32, @floatFromInt(self.extent.height)),
             .min_depth = 0,
             .max_depth = 1,
         };
@@ -327,6 +327,7 @@ pub const Swapchain = struct {
         };
 
         if (result == .suboptimal) {
+            self.extent = extent;
             self.recreate(extent) catch |err| {
                 std.debug.print("Error recreating swapchain: {any}\n", .{err});
             };
@@ -339,16 +340,14 @@ pub const Swapchain = struct {
         const begin_info = vk.CommandBufferBeginInfo{};
 
         try self.gc.vkd.beginCommandBuffer(cmdbufs[current_frame], &begin_info);
-
-        self.extent = extent;
     }
 
-    pub fn endFrame(self: *@This(), cmdbuf: vk.CommandBuffer, current_frame: *u32) void {
+    pub fn endFrame(self: *@This(), cmdbuf: vk.CommandBuffer, current_frame: *u32, extent: vk.Extent2D) void {
         self.gc.vkd.endCommandBuffer(cmdbuf) catch |err| {
             std.debug.print("Error ending command buffer: {any}\n", .{err});
         };
 
-        self.present(cmdbuf, current_frame.*) catch |err| {
+        self.present(cmdbuf, current_frame.*, extent) catch |err| {
             std.debug.print("Error presenting frame: {any}\n", .{err});
         };
 
@@ -434,8 +433,10 @@ fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, f
 
 fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.SurfaceFormatKHR {
     const preferred = vk.SurfaceFormatKHR{
-        .format = .b8g8r8a8_srgb,
-        .color_space = .srgb_nonlinear_khr,
+        // .format = .b8g8r8a8_srgb,
+        // .color_space = .srgb_nonlinear_khr,
+        .format = .a2b10g10r10_unorm_pack32,
+        .color_space = .hdr10_hlg_ext,
     };
 
     var count: u32 = undefined;
@@ -460,10 +461,7 @@ fn findPresentMode(gc: *const GraphicsContext, allocator: Allocator) !vk.Present
     defer allocator.free(present_modes);
     _ = try gc.vki.getPhysicalDeviceSurfacePresentModesKHR(gc.pdev, gc.surface, &count, present_modes.ptr);
 
-    const preferred = [_]vk.PresentModeKHR{
-        .mailbox_khr,
-        .immediate_khr,
-    };
+    const preferred = [_]vk.PresentModeKHR{ .mailbox_khr, .immediate_khr };
 
     for (preferred) |mode| {
         if (std.mem.indexOfScalar(vk.PresentModeKHR, present_modes, mode) != null) {

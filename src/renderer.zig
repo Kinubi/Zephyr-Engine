@@ -1,79 +1,51 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const Scene = @import("scene.zig").Scene;
+const Pipeline = @import("pipeline.zig").Pipeline;
+const ShaderLibrary = @import("shader.zig").ShaderLibrary;
+const Math = @import("mach").math;
 
-pub const Vertex = struct {
-    pub const binding_description = vk.VertexInputBindingDescription{
-        .binding = 0,
-        .stride = @sizeOf(Vertex),
-        .input_rate = .vertex,
-    };
-
-    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
-        .{
-            .binding = 0,
-            .location = 0,
-            .format = .r32g32_sfloat,
-            .offset = @offsetOf(Vertex, "pos"),
-        },
-        .{
-            .binding = 0,
-            .location = 1,
-            .format = .r32g32b32_sfloat,
-            .offset = @offsetOf(Vertex, "color"),
-        },
-    };
-
-    pos: [2]f32,
-    color: [3]f32,
+const SimplePushConstantData = struct {
+    transform: Math.Mat2x2 = Math.Mat2x2.ident,
+    offset: Math.Vec2 = Math.Vec2.init(0.0, 0.0),
+    color: Math.Vec3 align(@alignOf(f16)) = Math.Vec3.init(0.0, 0.0, 0.0),
 };
 
-pub const Mesh = struct {
-    vertices: std.ArrayList(Vertex),
-    indices: std.ArrayList(u32),
+pub const SimpleRenderer = struct {
+    scene: Scene = undefined,
+    pipeline: Pipeline = undefined,
+    gc: *GraphicsContext = undefined,
+    pipeline_layout: vk.PipelineLayout = undefined,
 
-    vao: c_uint = undefined,
-    vbo: c_uint = undefined,
-    ibo: c_uint = undefined,
+    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator) !SimpleRenderer {
+        const pcr = [1]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(SimplePushConstantData) }};
+        const layout = try gc.*.vkd.createPipelineLayout(
+            gc.*.dev,
+            &vk.PipelineLayoutCreateInfo{
+                .flags = .{},
+                .set_layout_count = 0,
+                .p_set_layouts = null,
+                .push_constant_range_count = 1,
+                .p_push_constant_ranges = &pcr,
+            },
+            null,
+        );
 
-    pub fn init(allocator: std.mem.Allocator) Mesh {
-        return .{
-            .vertices = std.ArrayList(Vertex).init(allocator),
-            .indices = std.ArrayList(u32).init(allocator),
-        };
+        const pipeline = try Pipeline.init(gc.*, render_pass, shader_library, try Pipeline.defaultLayout(layout), alloc);
+        return SimpleRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout };
     }
 
-    pub fn uploadVertices(self: @This(), gc: *const GraphicsContext, buffer: vk.Buffer) !void {
-        const staging_buffer = try gc.vkd.createBuffer(gc.dev, &.{
-            .flags = .{},
-            .size = @sizeOf(Vertex) * self.vertices.items.len,
-            .usage = .{ .transfer_src_bit = true },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
-        }, null);
-        defer gc.vkd.destroyBuffer(gc.dev, staging_buffer, null);
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, staging_buffer);
-        const staging_memory = try gc.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true });
-        defer gc.vkd.freeMemory(gc.dev, staging_memory, null);
-        try gc.vkd.bindBufferMemory(gc.dev, staging_buffer, staging_memory, 0);
+    pub fn render(self: *@This(), cmdbuf: vk.CommandBuffer, dt: f64) !void {
+        self.gc.*.vkd.cmdBindPipeline(cmdbuf, .graphics, self.pipeline.pipeline);
+        for (self.scene.objects.slice()) |*object| {
+            const offset_mult = Math.Vec2.init(0.1, 0.1).mulScalar(@floatCast(dt));
+            object.transform.offset = object.transform.offset.add(&offset_mult);
 
-        {
-            const data = try gc.vkd.mapMemory(gc.dev, staging_memory, 0, vk.WHOLE_SIZE, .{});
-            defer gc.vkd.unmapMemory(gc.dev, staging_memory);
+            const push = SimplePushConstantData{ .offset = object.transform.offset, .color = Math.Vec3.init(0.3, 0.2, 0.5) };
 
-            const gpu_vertices: [*]Vertex = @ptrCast(@alignCast(data));
-            for (self.vertices.items, 0..) |vertex, i| {
-                gpu_vertices[i] = vertex;
-            }
+            self.gc.*.vkd.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(SimplePushConstantData), @ptrCast(&push));
         }
-
-        try gc.copyBuffer(buffer, staging_buffer, @sizeOf(Vertex) * self.vertices.items.len);
-    }
-
-    pub fn draw(self: @This(), gc: GraphicsContext, cmdbuf: vk.CommandBuffer, buffer: vk.Buffer) void {
-        const offset = [_]vk.DeviceSize{0};
-        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buffer)), &offset);
-        gc.vkd.cmdDraw(cmdbuf, @intCast(self.vertices.items.len), 1, 0, 0);
+        try self.scene.render(self.gc.*, cmdbuf);
     }
 };

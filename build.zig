@@ -64,6 +64,14 @@ pub fn build(b: *std.Build) void {
     }).module("vulkan-zig");
     exe.root_module.addImport("vulkan", vulkan);
 
+    // Add Mach to our library and executable
+    const mach_dep = b.dependency("mach", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("mach", mach_dep.module("mach"));
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.

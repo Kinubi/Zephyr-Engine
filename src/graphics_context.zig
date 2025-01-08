@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const glfw = @import("mach-glfw");
 const vk = @import("vulkan");
 const Allocator = std.mem.Allocator;
-const Mesh = @import("renderer.zig").Mesh;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
@@ -254,56 +253,6 @@ pub const GraphicsContext = struct {
             .command_buffer_count = @truncate(cmdbufs.len),
         }, cmdbufs.ptr);
         errdefer self.vkd.freeCommandBuffers(self.dev, self.command_pool, @truncate(cmdbufs.len), cmdbufs.ptr);
-
-        // const clear = vk.ClearValue{
-        //     .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
-        // };
-
-        // const viewport = vk.Viewport{
-        //     .x = 0,
-        //     .y = 0,
-        //     .width = @as(f32, @floatFromInt(extent.width)),
-        //     .height = @as(f32, @floatFromInt(extent.height)),
-        //     .min_depth = 0,
-        //     .max_depth = 1,
-        // };
-
-        // const scissor = vk.Rect2D{
-        //     .offset = .{ .x = 0, .y = 0 },
-        //     .extent = extent,
-        // };
-
-        // for (cmdbufs, 0..) |cmdbuf, i| {
-        //     try self.vkd.beginCommandBuffer(cmdbuf, &.{
-        //         .flags = .{},
-        //         .p_inheritance_info = null,
-        //     });
-
-        //     self.vkd.cmdSetViewport(cmdbuf, 0, 1, @as([*]const vk.Viewport, @ptrCast(&viewport)));
-        //     self.vkd.cmdSetScissor(cmdbuf, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
-
-        //     // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
-        //     const render_area = vk.Rect2D{
-        //         .offset = .{ .x = 0, .y = 0 },
-        //         .extent = extent,
-        //     };
-
-        //     self.vkd.cmdBeginRenderPass(cmdbuf, &.{
-        //         .render_pass = render_pass,
-        //         .framebuffer = framebuffers[i],
-        //         .render_area = render_area,
-        //         .clear_value_count = 1,
-        //         .p_clear_values = @as([*]const vk.ClearValue, @ptrCast(&clear)),
-        //     }, .@"inline");
-
-        //     self.vkd.cmdBindPipeline(cmdbuf, .graphics, pipeline);
-        //     const offset = [_]vk.DeviceSize{0};
-        //     self.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buffer)), &offset);
-        //     self.vkd.cmdDraw(cmdbuf, @intCast(mesh.vertices.items.len), 1, 0, 0);
-
-        //     self.vkd.cmdEndRenderPass(cmdbuf);
-        //     try self.vkd.endCommandBuffer(cmdbuf);
-        // }
 
         return cmdbufs;
     }

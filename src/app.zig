@@ -8,8 +8,12 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Swapchain = @import("swapchain.zig").Swapchain;
 const vk = @import("vulkan");
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
-const Vertex = @import("renderer.zig").Vertex;
-const Mesh = @import("renderer.zig").Mesh;
+const Vertex = @import("mesh.zig").Vertex;
+const Mesh = @import("mesh.zig").Mesh;
+const Model = @import("mesh.zig").Model;
+const Scene = @import("scene.zig").Scene;
+const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
+const Math = @import("mach").math;
 
 pub const App = struct {
     window: Window = undefined,
@@ -21,8 +25,12 @@ pub const App = struct {
     var simple_pipeline: ?Pipeline = undefined;
     var buffer: vk.Buffer = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
-    var mesh: Mesh = undefined;
+    //var mesh: Mesh = undefined;
     var memory: vk.DeviceMemory = undefined;
+    var simple_renderer: SimpleRenderer = undefined;
+    var last_frame_time: f64 = undefined;
+
+    //var model: Model = undefined;
 
     pub fn init(self: *@This()) !void {
         self.window = try Window.init(.{});
@@ -39,50 +47,56 @@ pub const App = struct {
 
         try shader_library.add(&.{ &simple_frag, &simple_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
 
-        simple_pipeline = try Pipeline.init(self.gc, swapchain.render_pass, shader_library, try Pipeline.defaultLayout(self.gc), self.allocator);
+        //simple_pipeline = try Pipeline.init(self.gc, swapchain.render_pass, shader_library, try Pipeline.defaultLayout(self.gc), self.allocator);
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
 
-        mesh = Mesh.init(self.allocator);
+        var mesh = Mesh.init(self.allocator);
         try mesh.vertices.appendSlice(&.{
             Vertex{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
             Vertex{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
             Vertex{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
         });
 
-        buffer = try self.gc.createBuffer(@sizeOf(Vertex) * mesh.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true });
-        const mem_reqs = self.gc.vkd.getBufferMemoryRequirements(self.gc.dev, buffer);
-        memory = try self.gc.allocate(mem_reqs, .{ .device_local_bit = true });
-        try self.gc.vkd.bindBufferMemory(self.gc.dev, buffer, memory, 0);
+        try mesh.createVertexBuffers(&self.gc);
 
-        try mesh.uploadVertices(&self.gc, buffer);
+        const model = Model.init(mesh);
+
+        var scene = Scene.init();
+
+        const object = try scene.addObject(model);
+        std.debug.print("Object transform: {any}", .{object.transform.local2world.v});
+        object.transform.translate(Math.Vec3.init(3.0, 2.0, 0.0));
+        std.debug.print("Object transform: {any}", .{object.transform.local2world.v});
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
             swapchain.framebuffers,
         );
+
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator);
+        last_frame_time = glfw.getTime();
     }
 
     pub fn onUpdate(self: *@This()) !bool {
+        const current_time = glfw.getTime();
+        const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
         try swapchain.beginFrame(cmdbufs, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height }, current_frame);
-        swapchain.beginSwapChainRenderPass(cmdbufs, .{ .height = swapchain.extent.height, .width = swapchain.extent.width }, current_frame);
-        self.gc.vkd.cmdBindPipeline(cmdbuf, .graphics, simple_pipeline.?.pipeline);
-        mesh.draw(self.gc, cmdbuf, buffer);
+        swapchain.beginSwapChainRenderPass(cmdbufs, current_frame);
+        try simple_renderer.render(cmdbuf, dt);
 
         swapchain.endSwapChainRenderPass(cmdbuf);
-        swapchain.endFrame(cmdbuf, &current_frame);
-
+        swapchain.endFrame(cmdbuf, &current_frame, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height });
+        last_frame_time = current_time;
         return self.window.isRunning();
     }
 
     pub fn deinit(self: @This()) void {
         try swapchain.waitForAllFences();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
-        self.gc.vkd.freeMemory(self.gc.dev, memory, null);
-        self.gc.vkd.destroyBuffer(self.gc.dev, buffer, null);
-        simple_pipeline.?.deinit();
+
         swapchain.deinit();
         self.gc.deinit();
         self.window.deinit();

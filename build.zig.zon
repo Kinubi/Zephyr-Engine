@@ -64,6 +64,10 @@
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.3.300.tar.gz",
             .hash = "1220baf3b47dcd52522e25f15090fd0ca5860716c7f88a339f8ef34b6c9a49548951",
         },
+        .mach = .{
+            .url = "https://pkg.machengine.org/mach/1d01c915368b0c128ad1fce6123e55c6cc6ded9e.tar.gz",
+            .hash = "122090ee3b387a3906b462314c9c576af2a2bc7b9e15ee81d6556690a46127a1a8e5",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.

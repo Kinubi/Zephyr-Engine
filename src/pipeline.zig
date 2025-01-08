@@ -1,7 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GC = @import("graphics_context.zig").GraphicsContext;
-const Vertex = @import("renderer.zig").Vertex;
+const Vertex = @import("mesh.zig").Vertex;
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
 
 pub const Pipeline = struct {
@@ -60,23 +60,10 @@ pub const Pipeline = struct {
     }
 
     pub fn deinit(self: *Pipeline) void {
-        _ = self;
-        //self.gc.vkd.DestroyPipeline(self.pipeline, null);
+        self.gc.vkd.destroyPipeline(self.gc.dev, self.pipeline, null);
     }
 
-    pub fn defaultLayout(gc: GC) !vk.GraphicsPipelineCreateInfo {
-        const layout = try gc.vkd.createPipelineLayout(
-            gc.dev,
-            &vk.PipelineLayoutCreateInfo{
-                .flags = .{},
-                .set_layout_count = 0,
-                .p_set_layouts = null,
-                .push_constant_range_count = 0,
-                .p_push_constant_ranges = null,
-            },
-            null,
-        );
-
+    pub fn defaultLayout(layout: vk.PipelineLayout) !vk.GraphicsPipelineCreateInfo {
         const piasci = vk.PipelineInputAssemblyStateCreateInfo{
             .flags = .{},
             .topology = .triangle_list,
