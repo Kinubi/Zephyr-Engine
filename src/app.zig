@@ -154,6 +154,7 @@ pub const App = struct {
         try mesh3.createIndexBuffers(&self.gc);
         const model = Model.init(mesh2);
         const model2 = Model.init(mesh3);
+
         var scene = Scene.init();
 
         const object = try scene.addObject(model);

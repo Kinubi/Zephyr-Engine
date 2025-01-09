@@ -47,10 +47,10 @@ pub const Vertex = struct {
 pub const Mesh = struct {
     vertices: std.ArrayList(Vertex),
     indices: std.ArrayList(u32),
-    var vertex_buffer: vk.Buffer = undefined;
-    var index_buffer: vk.Buffer = undefined;
-    var index_buffer_memory: vk.DeviceMemory = undefined;
-    var vertex_buffer_memory: vk.DeviceMemory = undefined;
+    vertex_buffer: vk.Buffer = undefined,
+    index_buffer: vk.Buffer = undefined,
+    index_buffer_memory: vk.DeviceMemory = undefined,
+    vertex_buffer_memory: vk.DeviceMemory = undefined,
 
     pub fn init(allocator: std.mem.Allocator) Mesh {
         return .{
@@ -59,11 +59,11 @@ pub const Mesh = struct {
         };
     }
 
-    pub fn createVertexBuffers(self: @This(), gc: *GraphicsContext) !void {
-        vertex_buffer = try gc.createBuffer(@sizeOf(Vertex) * self.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true });
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, vertex_buffer);
-        vertex_buffer_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
-        try gc.vkd.bindBufferMemory(gc.dev, vertex_buffer, vertex_buffer_memory, 0);
+    pub fn createVertexBuffers(self: *@This(), gc: *GraphicsContext) !void {
+        self.vertex_buffer = try gc.createBuffer(@sizeOf(Vertex) * self.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true });
+        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, self.vertex_buffer);
+        self.vertex_buffer_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
+        try gc.vkd.bindBufferMemory(gc.dev, self.vertex_buffer, self.vertex_buffer_memory, 0);
         try self.uploadVertices(gc);
     }
 
@@ -92,17 +92,17 @@ pub const Mesh = struct {
             }
         }
 
-        try gc.copyBuffer(vertex_buffer, staging_buffer, @sizeOf(Vertex) * self.vertices.items.len);
+        try gc.copyBuffer(self.vertex_buffer, staging_buffer, @sizeOf(Vertex) * self.vertices.items.len);
     }
 
-    pub fn createIndexBuffers(self: @This(), gc: *GraphicsContext) !void {
+    pub fn createIndexBuffers(self: *@This(), gc: *GraphicsContext) !void {
         if (self.indices.items.len == 0) {
             return;
         }
-        index_buffer = try gc.createBuffer(@sizeOf(u32) * self.indices.items.len, .{ .transfer_dst_bit = true, .index_buffer_bit = true });
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, index_buffer);
-        index_buffer_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
-        try gc.vkd.bindBufferMemory(gc.dev, index_buffer, index_buffer_memory, 0);
+        self.index_buffer = try gc.createBuffer(@sizeOf(u32) * self.indices.items.len, .{ .transfer_dst_bit = true, .index_buffer_bit = true });
+        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, self.index_buffer);
+        self.index_buffer_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
+        try gc.vkd.bindBufferMemory(gc.dev, self.index_buffer, self.index_buffer_memory, 0);
         try self.uploadIndices(gc);
     }
 
@@ -131,24 +131,24 @@ pub const Mesh = struct {
             }
         }
 
-        try gc.copyBuffer(index_buffer, staging_buffer, @sizeOf(u32) * self.indices.items.len);
+        try gc.copyBuffer(self.index_buffer, staging_buffer, @sizeOf(u32) * self.indices.items.len);
     }
 
     pub fn deinit(self: @This(), gc: GraphicsContext) void {
         self.vertices.deinit();
         self.indices.deinit();
-        gc.vkd.freeMemory(gc.dev, vertex_buffer_memory, null);
-        gc.vkd.destroyBuffer(gc.dev, vertex_buffer, null);
-        gc.vkd.freeMemory(gc.dev, index_buffer_memory, null);
-        gc.vkd.destroyBuffer(gc.dev, index_buffer, null);
+        gc.vkd.freeMemory(gc.dev, self.vertex_buffer_memory, null);
+        gc.vkd.destroyBuffer(gc.dev, self.vertex_buffer, null);
+        gc.vkd.freeMemory(gc.dev, self.index_buffer_memory, null);
+        gc.vkd.destroyBuffer(gc.dev, self.index_buffer, null);
     }
 
     pub fn draw(self: @This(), gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
         const offset = [_]vk.DeviceSize{0};
-        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&vertex_buffer)), &offset);
+        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&self.vertex_buffer)), &offset);
 
         if (self.indices.items.len > 0) {
-            gc.vkd.cmdBindIndexBuffer(cmdbuf, index_buffer, 0, vk.IndexType.uint32);
+            gc.vkd.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, vk.IndexType.uint32);
             gc.vkd.cmdDrawIndexed(cmdbuf, @intCast(self.indices.items.len), 1, 0, 0, 0);
         } else {
             gc.vkd.cmdDraw(cmdbuf, @intCast(self.vertices.items.len), 1, 0, 0);
@@ -157,7 +157,7 @@ pub const Mesh = struct {
 
     pub fn loadFromObj(self: *@This(), allocator: std.mem.Allocator, data: []const u8) !void {
         const model = try Obj.parseObj(allocator, data);
-        std.debug.print("Loadin model with {any} meshes and {any} vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
+        std.debug.print("Loadin model with {any} meshes and {any} distinct vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
         try self.vertices.ensureTotalCapacity(model.vertices.len);
         try self.indices.ensureTotalCapacity(model.meshes[0].indices.len);
 
