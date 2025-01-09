@@ -14,6 +14,7 @@ const Model = @import("mesh.zig").Model;
 const Scene = @import("scene.zig").Scene;
 const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
 const Math = @import("mach").math;
+const Camera = @import("camera.zig").Camera;
 
 pub const App = struct {
     window: Window = undefined,
@@ -22,18 +23,15 @@ pub const App = struct {
     allocator: std.mem.Allocator = undefined,
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
-    var simple_pipeline: ?Pipeline = undefined;
-    var buffer: vk.Buffer = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
-    //var mesh: Mesh = undefined;
-    var memory: vk.DeviceMemory = undefined;
     var simple_renderer: SimpleRenderer = undefined;
     var last_frame_time: f64 = undefined;
+    var camera: Camera = undefined;
 
     //var model: Model = undefined;
 
     pub fn init(self: *@This()) !void {
-        self.window = try Window.init(.{});
+        self.window = try Window.init(.{ .width = 1280, .height = 720 });
 
         self.allocator = std.heap.page_allocator;
 
@@ -51,19 +49,52 @@ pub const App = struct {
         try self.gc.createCommandPool();
 
         var mesh = Mesh.init(self.allocator);
-        // try mesh.vertices.appendSlice(&.{
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 1, 0, 0 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
-        // });
-
         try mesh.vertices.appendSlice(&.{
+            // Back Face
+            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+            // Front Face
+            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
+            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
+            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
+            // Left Face
             Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
             Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
             Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
             Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
             Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
             Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
+
+            // Right face (yellow)
+            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
+
+            // Top face (orange, remember y axis points down)
+            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
+            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
+            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
+            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
+            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
+            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
+
+            // Bottom face (red)
+            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
+            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
+            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
+            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
         });
 
         try mesh.createVertexBuffers(&self.gc);
@@ -73,15 +104,19 @@ pub const App = struct {
         var scene = Scene.init();
 
         const object = try scene.addObject(model);
-        _ = object;
-        // object.*.transform.translate(Math.Vec3.init(0.0, 0.0, 0.5));
-        // object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-
+        object.*.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+        object.*.transform.translate(Math.Vec3.init(0, 0, 2));
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
 
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator);
+        camera = Camera{ .fov = 75.0, .window = self.window };
+        std.debug.print("Camera projection transform: {any}\n", .{camera.projectionMatrix.v});
+
+        camera.setOrthographicProjection(-1, 1, -1, 1, -1, 1);
+
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera));
+
         last_frame_time = glfw.getTime();
     }
 

@@ -14,7 +14,7 @@ pub const Vertex = struct {
         .{
             .binding = 0,
             .location = 0,
-            .format = .r32g32_sfloat,
+            .format = .r32g32b32_sfloat,
             .offset = @offsetOf(Vertex, "pos"),
         },
         .{
@@ -125,7 +125,7 @@ pub const Transform = struct {
     local2world: Math.Mat4x4 = Math.Mat4x4.ident,
 
     pub fn translate(self: *Transform, vec: Math.Vec3) void {
-        self.local2world = self.local2world.transpose().mul(&Math.Mat4x4.translate(vec)).transpose();
+        self.local2world = self.local2world.mul(&Math.Mat4x4.translate(vec));
     }
 
     pub fn rotate(self: *Transform, quat: Math.Quat) void {
