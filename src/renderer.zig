@@ -9,9 +9,8 @@ const glfw = @import("mach-glfw");
 const Camera = @import("camera.zig").Camera;
 
 const SimplePushConstantData = extern struct {
+    projectionView: Math.Mat4x4 = Math.Mat4x4.ident,
     transform: Math.Mat4x4 = Math.Mat4x4.ident,
-    projection: Math.Mat4x4 = Math.Mat4x4.ident,
-    view: Math.Mat4x4 = Math.Mat4x4.ident,
     color: Math.Vec3 = Math.Vec3.init(0.0, 0.0, 0.0),
 };
 
@@ -47,16 +46,16 @@ pub const SimpleRenderer = struct {
 
     pub fn render(self: *@This(), cmdbuf: vk.CommandBuffer, dt: f64) !void {
         self.gc.*.vkd.cmdBindPipeline(cmdbuf, .graphics, self.pipeline.pipeline);
+
+        const projectionView = Math.Mat4x4.mul(&self.camera.projectionMatrix, &self.camera.viewMatrix);
         for (self.scene.objects.slice()) |*object| {
-
-            // const offset_mult = Math.Vec3.init(0.001, 0.001, 0.001).mulScalar(Math.degreesToRadians(Math.sin(@as(f32, @floatCast(glfw.getTime())))));
-            // object.transform.translate(offset_mult);
-
-            object.transform.rotate(Math.Quat.fromEuler(Math.degreesToRadians(0), @as(f32, @floatCast(dt)), 0.5 * @as(f32, @floatCast(dt))));
+            if (object.model == null) {
+                continue;
+            }
+            // object.transform.rotate(Math.Quat.fromEuler(Math.degreesToRadians(0), @as(f32, @floatCast(dt)), 0.5 * @as(f32, @floatCast(dt))));
             //const color = Math.Vec3.init(Math.sin(@as(f32, @floatCast(glfw.getTime()))), Math.cos(@as(f32, @floatCast(glfw.getTime()))), Math.sin(@as(f32, @floatCast(glfw.getTime())) + @as(f32, 1.0)));
-            //std.debug.print("Object transform: {any}\n", .{object.transform.local2world.v});
-            self.camera.updateProjectionMatrix();
-            const push = SimplePushConstantData{ .transform = object.transform.local2world, .projection = self.camera.projectionMatrix, .view = self.camera.viewMatrix };
+            _ = dt;
+            const push = SimplePushConstantData{ .projectionView = projectionView, .transform = object.transform.local2world };
 
             self.gc.*.vkd.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(SimplePushConstantData), @ptrCast(&push));
         }

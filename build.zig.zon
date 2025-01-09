@@ -68,6 +68,11 @@
             .url = "https://pkg.machengine.org/mach/1d01c915368b0c128ad1fce6123e55c6cc6ded9e.tar.gz",
             .hash = "122090ee3b387a3906b462314c9c576af2a2bc7b9e15ee81d6556690a46127a1a8e5",
         },
+
+        .@"zig-obj" = .{
+            .url = "git+https://github.com/chip2n/zig-obj.git#619027e58a6ce30b5d9a362c76dc2c6c2ce51ee9",
+            .hash = "12203513bf3fa5045a984aba014afaf152df4b618742bcd37768d3075dafe715a1e1",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.
@@ -82,6 +87,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "shaders",
+        "models/smooth_vase.obj",
         // For example...
         //"LICENSE",
         //"README.md",

@@ -72,6 +72,10 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("mach", mach_dep.module("mach"));
 
+    // Add zig-obj to our library and executable
+    const obj_mod = b.dependency("zig-obj", .{ .target = target, .optimize = optimize });
+    exe.root_module.addImport("zig-obj", obj_mod.module("obj"));
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
@@ -103,6 +107,8 @@ pub fn build(b: *std.Build) void {
     const frag_spv = frag_cmd.addOutputFileArg("frag.spv");
     frag_cmd.addFileArg(b.path("shaders/simple.frag"));
     exe.root_module.addAnonymousImport("simple_frag", .{ .root_source_file = frag_spv });
+
+    exe.root_module.addAnonymousImport("cube", .{ .root_source_file = b.path("models/cube.obj") });
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);

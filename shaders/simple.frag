@@ -4,9 +4,8 @@ layout (location = 0) out vec4 outColor;
 layout(location = 1) in vec3 color;
 
 layout(push_constant) uniform Push {
+    mat4 projectionView;
     mat4 transform;
-    mat4 projection;
-    mat4 view;
     vec3 color;
 } push;
 
