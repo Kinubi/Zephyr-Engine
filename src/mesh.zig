@@ -24,10 +24,24 @@ pub const Vertex = struct {
             .format = .r32g32b32_sfloat,
             .offset = @offsetOf(Vertex, "color"),
         },
+        .{
+            .binding = 0,
+            .location = 2,
+            .format = .r32g32b32_sfloat,
+            .offset = @offsetOf(Vertex, "normal"),
+        },
+        .{
+            .binding = 0,
+            .location = 3,
+            .format = .r32g32_sfloat,
+            .offset = @offsetOf(Vertex, "uv"),
+        },
     };
 
     pos: [3]f32,
     color: [3]f32,
+    normal: [3]f32 = .{ 0.0, 0.0, 0.0 },
+    uv: [2]f32 = .{ 0.0, 0.0 },
 };
 
 pub const Mesh = struct {
@@ -143,25 +157,46 @@ pub const Mesh = struct {
 
     pub fn loadFromObj(self: *@This(), allocator: std.mem.Allocator, data: []const u8) !void {
         const model = try Obj.parseObj(allocator, data);
-        std.debug.print("Loaded model {any} with {any} indices and {any} vertices\n", .{ model.vertices.len, model.meshes[0].indices.len, model.meshes[0].num_vertices.len });
+        std.debug.print("Loadin model with {any} meshes and {any} vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
         try self.vertices.ensureTotalCapacity(model.vertices.len);
         try self.indices.ensureTotalCapacity(model.meshes[0].indices.len);
 
         for (model.meshes) |mesh| {
             var i: u32 = 0;
-            while (i < mesh.indices.len) : (i += 1) {
-                std.debug.print("start: {any}, middle: {},  end: {any}\n", .{ model.vertices[@as(usize, @intCast(mesh.indices[i].vertex.?))], model.vertices[@as(usize, @intCast(mesh.indices[i].vertex.? + 1))], model.vertices[@as(usize, @intCast(mesh.indices[i].vertex.? + 2))] });
-                // std.debug.print("Index: {any}, {any}, {any}\n", .{ mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2] });
-                const vertices = .{ model.vertices[@intCast(mesh.indices[i].vertex.?)], model.vertices[@intCast(mesh.indices[i].vertex.? + 1)], model.vertices[@intCast(mesh.indices[i].vertex.? + 2)] };
-                try self.vertices.appendSlice(&.{Vertex{ .pos = .{ vertices[0], vertices[1], vertices[2] }, .color = .{ 1.0, 1.0, 1.0 } }});
-
-                try self.indices.append(@intCast(mesh.indices[i].vertex.?));
+            for (mesh.num_vertices) |face| {
+                for (0..face) |vertex| {
+                    const index = mesh.indices[face * i + vertex];
+                    const new_vertex = Vertex{
+                        .pos = .{ model.vertices[3 * index.vertex.?], model.vertices[3 * index.vertex.? + 1], model.vertices[3 * index.vertex.? + 2] },
+                        .color = .{ 1.0, 1.0, 1.0 },
+                        .normal = .{ model.normals[3 * index.normal.?], model.normals[3 * index.normal.? + 1], model.normals[3 * index.normal.? + 2] },
+                        .uv = .{ model.tex_coords[2 * index.tex_coord.?], model.tex_coords[2 * index.tex_coord.? + 1] },
+                    };
+                    const vertex_index = vertex_list_contains(self.vertices, new_vertex);
+                    if (vertex_index == -1) {
+                        try self.vertices.append(new_vertex);
+                        try self.indices.append(@as(u32, @intCast(self.vertices.items.len - 1)));
+                    } else {
+                        try self.indices.append(@as(u32, @intCast(vertex_index)));
+                    }
+                }
+                i += 1;
             }
         }
 
-        std.debug.print("Vertices: {any}, Indices: {any}\n", .{ self.vertices.items, self.indices.items });
+        std.debug.print("Vertices: {any}, Indices: {any}\n", .{ self.vertices.items.len, self.indices.items.len });
     }
 };
+
+fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
+    for (haystack.items, 0..haystack.items.len) |element, i|
+        if (std.mem.eql(f32, &@as([3]f32, element.color), &@as([3]f32, needle.color)) and
+            std.mem.eql(f32, &@as([3]f32, element.pos), &@as([3]f32, needle.pos)) and
+            std.mem.eql(f32, &@as([3]f32, element.normal), &@as([3]f32, needle.normal)) and
+            std.mem.eql(f32, &@as([2]f32, element.uv), &@as([2]f32, needle.uv)))
+            return @as(i32, @intCast(i));
+    return -1;
+}
 
 pub const Model = struct {
     primitives: PrimitivesArray = .{},

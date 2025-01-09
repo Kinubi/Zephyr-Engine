@@ -53,6 +53,7 @@ pub const App = struct {
         try self.gc.createCommandPool();
 
         var mesh2 = Mesh.init(self.allocator);
+        var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
         // try mesh.vertices.appendSlice(&.{
         //     // Back Face
@@ -145,16 +146,23 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        try mesh2.loadFromObj(self.allocator, @embedFile("cube"));
+        try mesh2.loadFromObj(self.allocator, @embedFile("smooth_vase"));
         try mesh2.createVertexBuffers(&self.gc);
         try mesh2.createIndexBuffers(&self.gc);
+        try mesh3.loadFromObj(self.allocator, @embedFile("cube"));
+        try mesh3.createVertexBuffers(&self.gc);
+        try mesh3.createIndexBuffers(&self.gc);
         const model = Model.init(mesh2);
-
+        const model2 = Model.init(mesh3);
         var scene = Scene.init();
 
         const object = try scene.addObject(model);
         object.*.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
         object.*.transform.translate(Math.Vec3.init(0, 0, 0.5));
+        const object2 = try scene.addObject(model2);
+        object2.*.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+        object2.*.transform.translate(Math.Vec3.init(0, -0.5, 0.5));
+
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
         );

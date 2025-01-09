@@ -108,6 +108,7 @@ pub fn build(b: *std.Build) void {
     frag_cmd.addFileArg(b.path("shaders/simple.frag"));
     exe.root_module.addAnonymousImport("simple_frag", .{ .root_source_file = frag_spv });
 
+    exe.root_module.addAnonymousImport("smooth_vase", .{ .root_source_file = b.path("models/smooth_vase.obj") });
     exe.root_module.addAnonymousImport("cube", .{ .root_source_file = b.path("models/cube.obj") });
 
     const run_step = b.step("run", "Run the app");
