@@ -27,7 +27,9 @@ const Buffer = @import("buffer.zig").Buffer;
 const GlobalUbo = struct {
     view: Math.Mat4x4 = Math.Mat4x4.ident,
     projection: Math.Mat4x4 = Math.Mat4x4.ident,
-    light_direction: Math.Vec3 = Math.Vec3.normalize(&Math.Vec3.init(1, 3, 1), 0),
+    ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
+    light_position: Math.Vec3 = Math.Vec3.init(-1, -1, -1),
+    light_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 1),
 };
 
 pub const App = struct {
@@ -176,13 +178,13 @@ pub const App = struct {
         var scene: Scene = Scene.init();
 
         const object = try scene.addObject(model);
+        object.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
         object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-        object.transform.translate(Math.Vec3.init(0, -2, 0.5));
 
         const object2 = try scene.addObject(model2);
 
-        object2.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-        object2.transform.translate(Math.Vec3.init(0, 4, 0.5));
+        object2.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
+        object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
@@ -277,7 +279,10 @@ pub const App = struct {
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
-        const ubo = GlobalUbo{ .view = camera.viewMatrix, .projection = camera.projectionMatrix, .light_direction = Math.Vec3.normalize(&Math.Vec3.init(1, 3, 1), 0) };
+        const ubo = GlobalUbo{
+            .view = camera.viewMatrix,
+            .projection = camera.projectionMatrix,
+        };
         global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
         try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
 
