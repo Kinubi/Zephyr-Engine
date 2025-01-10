@@ -10,7 +10,7 @@ const Camera = @import("camera.zig").Camera;
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
 
 const SimplePushConstantData = extern struct {
-    projection_view: Math.Mat4x4 = Math.Mat4x4.ident,
+    transform: Math.Mat4x4 = Math.Mat4x4.ident,
     normal_matrix: Math.Mat4x4 = Math.Mat4x4.ident,
 };
 
@@ -21,14 +21,15 @@ pub const SimpleRenderer = struct {
     pipeline_layout: vk.PipelineLayout = undefined,
     camera: *Camera = undefined,
 
-    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera) !SimpleRenderer {
-        const pcr = [1]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(SimplePushConstantData) }};
+    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !SimpleRenderer {
+        const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(SimplePushConstantData) }};
+        const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
         const layout = try gc.*.vkd.createPipelineLayout(
             gc.*.dev,
             &vk.PipelineLayoutCreateInfo{
                 .flags = .{},
-                .set_layout_count = 0,
-                .p_set_layouts = null,
+                .set_layout_count = dsl.len,
+                .p_set_layouts = &dsl,
                 .push_constant_range_count = 1,
                 .p_push_constant_ranges = &pcr,
             },
@@ -47,15 +48,13 @@ pub const SimpleRenderer = struct {
     pub fn render(self: *@This(), frame_info: FrameInfo) !void {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
 
-        const projection_view = Math.Mat4x4.mul(&self.camera.projectionMatrix, &self.camera.viewMatrix);
+        self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
         for (self.scene.objects.slice()) |*object| {
             if (object.model == null) {
                 continue;
             }
-            // object.transform.rotate(Math.Quat.fromEuler(Math.degreesToRadians(0), @as(f32, @floatCast(dt)), 0.5 * @as(f32, @floatCast(dt))));
-            //const color = Math.Vec3.init(Math.sin(@as(f32, @floatCast(glfw.getTime()))), Math.cos(@as(f32, @floatCast(glfw.getTime()))), Math.sin(@as(f32, @floatCast(glfw.getTime())) + @as(f32, 1.0)));
 
-            const push = SimplePushConstantData{ .projection_view = projection_view.mul(&object.transform.local2world), .normal_matrix = object.transform.normal2world };
+            const push = SimplePushConstantData{ .transform = object.transform.local2world, .normal_matrix = object.transform.normal2world };
 
             self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(SimplePushConstantData), @ptrCast(&push));
             try object.render(self.gc.*, frame_info.command_buffer);

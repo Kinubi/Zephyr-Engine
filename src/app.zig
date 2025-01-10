@@ -19,6 +19,10 @@ const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
+const DescriptorSetLayout = @import("descriptors.zig").DescriptorSetLayout;
+const DescriptorPool = @import("descriptors.zig").DescriptorPool;
+const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
+const Buffer = @import("buffer.zig").Buffer;
 
 const GlobalUbo = struct {
     view: Math.Mat4x4 = Math.Mat4x4.ident,
@@ -39,9 +43,12 @@ pub const App = struct {
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
     var camera_controller: KeyboardMovementController = undefined;
-    var global_UBO_buffers: ?[]vk.Buffer = undefined;
-    var global_UBO_memories: ?[]vk.DeviceMemory = undefined;
+    var global_UBO_buffers: ?[]Buffer = undefined;
+
     var frame_info: FrameInfo = FrameInfo{};
+    var global_pool: *DescriptorPool = undefined;
+    var global_set_layout: *DescriptorSetLayout = undefined;
+    var global_descriptor_sets: ?[]vk.DescriptorSet = undefined;
 
     //var model: Model = undefined;
 
@@ -190,18 +197,70 @@ pub const App = struct {
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), @constCast(&Math.Vec3.init(0, 0, 0)), Math.Vec3.init(0, 1, 0));
 
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera));
+        global_UBO_buffers = try self.allocator.alloc(Buffer, MAX_FRAMES_IN_FLIGHT);
 
-        const buffer_size: vk.DeviceSize = @sizeOf(GlobalUbo);
+        const lcm = (self.gc.props.limits.min_uniform_buffer_offset_alignment * self.gc.props.limits.non_coherent_atom_size) / std.math.gcd(self.gc.props.limits.min_uniform_buffer_offset_alignment, self.gc.props.limits.non_coherent_atom_size);
 
-        global_UBO_buffers = try self.allocator.alloc(vk.Buffer, MAX_FRAMES_IN_FLIGHT);
-        global_UBO_memories = try self.allocator.alloc(vk.DeviceMemory, MAX_FRAMES_IN_FLIGHT);
-
-        var i: usize = 0;
-        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
-            try self.gc.createBuffer(buffer_size, .{ .uniform_buffer_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &global_UBO_buffers.?[i], &global_UBO_memories.?[i]);
+        for (0..global_UBO_buffers.?.len) |i| {
+            global_UBO_buffers.?[i] = try Buffer.init(
+                &self.gc,
+                @sizeOf(GlobalUbo),
+                1,
+                .{ .uniform_buffer_bit = true },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                lcm,
+            );
+            try global_UBO_buffers.?[i].map(vk.WHOLE_SIZE, 0);
         }
+
         frame_info.camera = &camera;
+        var descriptor_pool_builder = DescriptorPool.Builder{ .gc = &self.gc, .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(self.allocator), .poolFlags = .{}, .maxSets = 0 };
+        global_pool = @constCast(&try descriptor_pool_builder.setMaxSets(MAX_FRAMES_IN_FLIGHT).addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1).build());
+        var descriptor_set_layout_builder = DescriptorSetLayout.Builder{ .gc = &self.gc, .bindings = std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding).init(self.allocator) };
+        global_set_layout = @constCast(&try descriptor_set_layout_builder.addBinding(0, .uniform_buffer, .{ .vertex_bit = true, .fragment_bit = true }, 1).build());
+        global_descriptor_sets = try self.allocator.alloc(vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT);
+        // var descriptor_set_writer = DescriptorSetWriter.init(self.gc, global_set_layout, global_pool);
+
+        // for (global_descriptor_sets.?, 0..global_descriptor_sets.?.len) |descriptor_set, i| {
+        //     const buffer_info = global_UBO_buffers.?[i].getdescriptorInfo();
+
+        //     descriptor_set_writer = descriptor_set_writer.writeBuffer(0, @constCast(&buffer_info), @constCast(&descriptor_set)).*;
+        // }
+        // std.debug.print("Buffer Info: {any} \n", .{global_descriptor_sets});
+        // _ = try descriptor_set_writer.build(global_descriptor_sets.?);
+
+        const layouts = [_]vk.DescriptorSetLayout{ global_set_layout.*.descriptor_set_layout, global_set_layout.*.descriptor_set_layout, global_set_layout.*.descriptor_set_layout };
+        const alloc_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = global_pool.descriptorPool,
+            .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
+            .p_set_layouts = &layouts,
+        };
+
+        try self.gc.vkd.allocateDescriptorSets(self.gc.dev, &alloc_info, global_descriptor_sets.?.ptr);
+
+        for (global_descriptor_sets.?, 0..global_descriptor_sets.?.len) |descriptor_set, i| {
+            const buffer_info = [_]vk.DescriptorBufferInfo{.{
+                .buffer = global_UBO_buffers.?[i].buffer,
+                .offset = 0,
+                .range = @sizeOf(GlobalUbo),
+            }};
+
+            const descriptor_write = [_]vk.WriteDescriptorSet{.{
+                .dst_set = descriptor_set,
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_type = .uniform_buffer,
+                .descriptor_count = 1,
+                .p_buffer_info = &buffer_info,
+                .p_image_info = undefined,
+                .p_texel_buffer_view = undefined,
+            }};
+
+            self.gc.vkd.updateDescriptorSets(self.gc.dev, descriptor_write.len, &descriptor_write, 0, undefined);
+        }
+
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
+
         last_frame_time = glfw.getTime();
     }
 
@@ -213,14 +272,15 @@ pub const App = struct {
         frame_info.dt = @floatCast(dt);
         frame_info.current_frame = current_frame;
         frame_info.extent = .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height };
+        frame_info.global_descriptor_set = global_descriptor_sets.?[current_frame];
         try swapchain.beginFrame(frame_info);
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         const ubo = GlobalUbo{ .view = camera.viewMatrix, .projection = camera.projectionMatrix, .light_direction = Math.Vec3.normalize(&Math.Vec3.init(1, 3, 1), 0) };
-        const data = try self.gc.vkd.mapMemory(self.gc.dev, global_UBO_memories.?[current_frame], 0, @sizeOf(GlobalUbo), .{});
-        std.mem.copyForwards(u8, @as([*]u8, @ptrCast(data.?))[0..@sizeOf(GlobalUbo)], std.mem.asBytes(&ubo));
-        self.gc.vkd.unmapMemory(self.gc.dev, global_UBO_memories.?[current_frame]);
+        global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
+        try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
+
         try simple_renderer.render(frame_info);
 
         swapchain.endSwapChainRenderPass(frame_info);
@@ -231,6 +291,9 @@ pub const App = struct {
     }
 
     pub fn deinit(self: @This()) void {
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            global_UBO_buffers.?[i].deinit();
+        }
         try swapchain.waitForAllFences();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         simple_renderer.deinit();

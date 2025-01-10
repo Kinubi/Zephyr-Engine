@@ -11,8 +11,9 @@ pub const Buffer = struct {
     alignment_size: vk.DeviceSize,
     buffer_size: vk.DeviceSize,
     buffer: vk.Buffer = undefined,
-    memory: vk.DeviceMemory,
-    mapped: ?*u8,
+    memory: vk.DeviceMemory = undefined,
+    mapped: ?*anyopaque = undefined,
+    descriptor_info: vk.DescriptorBufferInfo = undefined,
 
     pub fn init(
         gc: *GraphicsContext,
@@ -21,16 +22,19 @@ pub const Buffer = struct {
         usage_flags: vk.BufferUsageFlags,
         memory_property_flags: vk.MemoryPropertyFlags,
         min_offset_alignment: vk.DeviceSize,
-    ) Buffer {
-        const self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = Buffer.getAlignment(instance_size, min_offset_alignment), .buffer_size = instance_count };
-        gc.dev.createBuffer(self.buffer_size, usage_flags, memory_property_flags, &self.buffer, &self.memory);
+    ) !Buffer {
+        const alignment_size: vk.DeviceSize = Buffer.getAlignment(instance_size, min_offset_alignment);
+        const buffer_size = instance_count * alignment_size;
+        var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size };
+        try gc.createBuffer(self.buffer_size, usage_flags, memory_property_flags, @constCast(&self.buffer), @constCast(&self.memory));
+        self.descriptor_info = .{ .buffer = self.buffer, .offset = 0, .range = vk.WHOLE_SIZE };
         return self;
     }
 
     pub fn deinit(self: *Buffer) void {
         self.unmap();
-        vk.DestroyBuffer(self.gc.dev, self.buffer, null);
-        vk.FreeMemory(self.gc.dev, self.memory, null);
+        self.gc.vkd.destroyBuffer(self.gc.dev, self.buffer, null);
+        self.gc.vkd.freeMemory(self.gc.dev, self.memory, null);
     }
 
     pub fn getAlignment(instance_size: vk.DeviceSize, min_offset_alignment: vk.DeviceSize) vk.DeviceSize {
@@ -40,34 +44,34 @@ pub const Buffer = struct {
         return instance_size;
     }
 
-    pub fn map(self: *Buffer, size: vk.DeviceSize, offset: vk.DeviceSize) vk.Result {
-        return vk.MapMemory(self.gc.dev, self.memory, offset, size, 0, &self.mapped);
+    pub fn map(self: *Buffer, size: vk.DeviceSize, offset: vk.DeviceSize) !void {
+        self.mapped = try self.gc.vkd.mapMemory(self.gc.dev, self.memory, offset, size, .{});
     }
 
     pub fn unmap(self: *Buffer) void {
         if (self.mapped) |mapped| {
-            vk.UnmapMemory(self.gc.dev, self.memory);
-            mapped = null;
+            _ = mapped;
+            self.gc.vkd.unmapMemory(self.gc.dev, self.memory);
+            self.mapped = null;
         }
     }
 
     pub fn writeToBuffer(self: *Buffer, data: []const u8, size: vk.DeviceSize, offset: vk.DeviceSize) void {
         if (size == vk.WHOLE_SIZE) {
-            std.mem.copy(u8, self.mapped[0..self.buffer_size], data);
+            std.mem.copyForwards(u8, @as([*]u8, @ptrCast(self.mapped.?))[0..self.buffer_size], data);
         } else {
-            std.mem.copy(u8, self.mapped[offset .. offset + size], data);
+            std.mem.copyForwards(u8, @as([*]u8, @ptrCast(self.mapped.?))[offset .. offset + size], data);
         }
     }
 
-    pub fn flush(self: *Buffer, size: vk.DeviceSize, offset: vk.DeviceSize) vk.Result {
-        var mapped_range = vk.MappedMemoryRange{
-            .sType = vk.STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-            .pNext = null,
+    pub fn flush(self: *Buffer, size: vk.DeviceSize, offset: vk.DeviceSize) !void {
+        const mapped_range = vk.MappedMemoryRange{
+            .p_next = null,
             .memory = self.memory,
             .offset = offset,
             .size = size,
         };
-        return vk.FlushMappedMemoryRanges(self.gc.dev, 1, &mapped_range);
+        return try self.gc.vkd.flushMappedMemoryRanges(self.gc.dev, 1, @constCast(@ptrCast(&mapped_range)));
     }
 
     pub fn invalidate(self: *Buffer, size: vk.DeviceSize, offset: vk.DeviceSize) vk.Result {
@@ -81,12 +85,8 @@ pub const Buffer = struct {
         return vk.InvalidateMappedMemoryRanges(self.gc.dev, 1, &mapped_range);
     }
 
-    pub fn descriptorInfo(self: *Buffer, size: vk.DeviceSize, offset: vk.DeviceSize) vk.DescriptorBufferInfo {
-        return vk.DescriptorBufferInfo{
-            .buffer = self.buffer,
-            .offset = offset,
-            .range = size,
-        };
+    pub fn getdescriptorInfo(self: Buffer) vk.DescriptorBufferInfo {
+        return self.descriptor_info;
     }
 
     pub fn writeToIndex(self: *Buffer, data: []const u8, index: usize) void {
