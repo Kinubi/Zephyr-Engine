@@ -60,10 +60,7 @@ pub const Mesh = struct {
     }
 
     pub fn createVertexBuffers(self: *@This(), gc: *GraphicsContext) !void {
-        self.vertex_buffer = try gc.createBuffer(@sizeOf(Vertex) * self.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true });
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, self.vertex_buffer);
-        self.vertex_buffer_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
-        try gc.vkd.bindBufferMemory(gc.dev, self.vertex_buffer, self.vertex_buffer_memory, 0);
+        try gc.createBuffer(@sizeOf(Vertex) * self.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true }, .{ .device_local_bit = true }, &self.vertex_buffer, &self.vertex_buffer_memory);
         try self.uploadVertices(gc);
     }
 
@@ -99,10 +96,9 @@ pub const Mesh = struct {
         if (self.indices.items.len == 0) {
             return;
         }
-        self.index_buffer = try gc.createBuffer(@sizeOf(u32) * self.indices.items.len, .{ .transfer_dst_bit = true, .index_buffer_bit = true });
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, self.index_buffer);
-        self.index_buffer_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
-        try gc.vkd.bindBufferMemory(gc.dev, self.index_buffer, self.index_buffer_memory, 0);
+
+        try gc.createBuffer(@sizeOf(u32) * self.indices.items.len, .{ .transfer_dst_bit = true, .index_buffer_bit = true }, .{ .device_local_bit = true }, &self.index_buffer, &self.index_buffer_memory);
+
         try self.uploadIndices(gc);
     }
 
@@ -228,8 +224,7 @@ pub const Primitive = struct {
 
 pub const Transform = struct {
     local2world: Math.Mat4x4 = Math.Mat4x4.ident,
-    rotation: Math.Vec3 = Math.Vec3.init(0.0, 0.0, 0.0),
-    position: Math.Vec3 = Math.Vec3.init(0.0, 0.0, 0.0),
+    normal2world: Math.Mat4x4 = Math.Mat4x4.ident,
 
     pub fn translate(self: *Transform, vec: Math.Vec3) void {
         self.local2world = self.local2world.mul(&Math.Mat4x4.translate(vec));
@@ -271,5 +266,6 @@ pub const Transform = struct {
 
     pub fn scale(self: *Transform, vec: Math.Vec3) void {
         self.local2world = self.local2world.mul(&Math.Mat4x4.scale(vec));
+        self.normal2world = self.normal2world.mul(&Math.Mat4x4.scale(Math.Vec3.init(1.0 / vec.x(), 1.0 / vec.y(), 1.0 / vec.z())));
     }
 };

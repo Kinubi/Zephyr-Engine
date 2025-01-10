@@ -187,19 +187,6 @@ pub const GraphicsContext = struct {
         }, null);
     }
 
-    pub fn createBuffer(self: *@This(), size: u64, usage: vk.BufferUsageFlags) !vk.Buffer {
-        const buffer = try self.vkd.createBuffer(self.dev, &.{
-            .flags = .{},
-            .size = size,
-            .usage = usage,
-            .sharing_mode = vk.SharingMode.exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = null,
-        }, null);
-
-        return buffer;
-    }
-
     pub fn copyBuffer(self: @This(), dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
         var cmdbuf: vk.CommandBuffer = undefined;
         try self.vkd.allocateCommandBuffers(self.dev, &.{
@@ -255,6 +242,35 @@ pub const GraphicsContext = struct {
     pub fn destroyCommandBuffers(self: @This(), cmdbufs: []vk.CommandBuffer, allocator: std.mem.Allocator) void {
         self.vkd.freeCommandBuffers(self.dev, self.command_pool, @truncate(cmdbufs.len), cmdbufs.ptr);
         allocator.free(cmdbufs);
+    }
+
+    pub fn createBuffer(
+        self: *@This(),
+        size: u64,
+        usage: vk.BufferUsageFlags,
+        memory_properties: vk.MemoryPropertyFlags,
+        buffer: *vk.Buffer,
+        memory: *vk.DeviceMemory,
+    ) !void {
+        // Create the buffer
+        buffer.* = try self.vkd.createBuffer(self.dev, &.{
+            .flags = .{},
+            .size = size,
+            .usage = usage,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        }, null);
+
+        // Get memory requirements
+
+        const mem_reqs = self.vkd.getBufferMemoryRequirements(self.dev, buffer.*);
+
+        // Allocate memory
+        memory.* = try self.allocate(mem_reqs, memory_properties);
+
+        // Bind buffer memory
+        try self.vkd.bindBufferMemory(self.dev, buffer.*, memory.*, 0);
     }
 };
 

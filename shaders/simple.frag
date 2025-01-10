@@ -8,10 +8,9 @@ layout(location = 3) in vec2 uv;
 
 layout(push_constant) uniform Push {
     mat4 projectionView;
-    mat4 transform;
-    vec3 color;
+    mat4 normalMatrix;
 } push;
 
 void main() {
-    outColor = vec4(normal, 1.0);
+    outColor = vec4(color, 1.0);
 }

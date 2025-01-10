@@ -6,6 +6,7 @@ const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Swapchain = @import("swapchain.zig").Swapchain;
+const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const vk = @import("vulkan");
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
 const Vertex = @import("mesh.zig").Vertex;
@@ -17,6 +18,13 @@ const Math = @import("mach").math;
 const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
+const FrameInfo = @import("frameinfo.zig").FrameInfo;
+
+const GlobalUbo = struct {
+    view: Math.Mat4x4 = Math.Mat4x4.ident,
+    projection: Math.Mat4x4 = Math.Mat4x4.ident,
+    light_direction: Math.Vec3 = Math.Vec3.normalize(&Math.Vec3.init(1, 3, 1), 0),
+};
 
 pub const App = struct {
     window: Window = undefined,
@@ -31,6 +39,9 @@ pub const App = struct {
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
     var camera_controller: KeyboardMovementController = undefined;
+    var global_UBO_buffers: ?[]vk.Buffer = undefined;
+    var global_UBO_memories: ?[]vk.DeviceMemory = undefined;
+    var frame_info: FrameInfo = FrameInfo{};
 
     //var model: Model = undefined;
 
@@ -155,14 +166,16 @@ pub const App = struct {
         const model = Model.init(mesh2);
         const model2 = Model.init(mesh3);
 
-        var scene = Scene.init();
+        var scene: Scene = Scene.init();
 
         const object = try scene.addObject(model);
-        object.*.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-        object.*.transform.translate(Math.Vec3.init(0, 0, 0.5));
+        object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+        object.transform.translate(Math.Vec3.init(0, -2, 0.5));
+
         const object2 = try scene.addObject(model2);
-        object2.*.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-        object2.*.transform.translate(Math.Vec3.init(0, -0.5, 0.5));
+
+        object2.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+        object2.transform.translate(Math.Vec3.init(0, 4, 0.5));
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
@@ -179,6 +192,16 @@ pub const App = struct {
 
         simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera));
 
+        const buffer_size: vk.DeviceSize = @sizeOf(GlobalUbo);
+
+        global_UBO_buffers = try self.allocator.alloc(vk.Buffer, MAX_FRAMES_IN_FLIGHT);
+        global_UBO_memories = try self.allocator.alloc(vk.DeviceMemory, MAX_FRAMES_IN_FLIGHT);
+
+        var i: usize = 0;
+        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
+            try self.gc.createBuffer(buffer_size, .{ .uniform_buffer_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &global_UBO_buffers.?[i], &global_UBO_memories.?[i]);
+        }
+        frame_info.camera = &camera;
         last_frame_time = glfw.getTime();
     }
 
@@ -186,15 +209,22 @@ pub const App = struct {
         const current_time = glfw.getTime();
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
-        try swapchain.beginFrame(cmdbufs, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height }, current_frame);
-        swapchain.beginSwapChainRenderPass(cmdbufs, current_frame);
+        frame_info.command_buffer = cmdbuf;
+        frame_info.dt = @floatCast(dt);
+        frame_info.current_frame = current_frame;
+        frame_info.extent = .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height };
+        try swapchain.beginFrame(frame_info);
+        swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
-        //camera.setViewYXZ(viewer_object.transform.position, viewer_object.transform.rotation);
-        camera.viewMatrix = viewer_object.transform.local2world;
-        try simple_renderer.render(cmdbuf, dt);
+        frame_info.camera.viewMatrix = viewer_object.transform.local2world;
+        const ubo = GlobalUbo{ .view = camera.viewMatrix, .projection = camera.projectionMatrix, .light_direction = Math.Vec3.normalize(&Math.Vec3.init(1, 3, 1), 0) };
+        const data = try self.gc.vkd.mapMemory(self.gc.dev, global_UBO_memories.?[current_frame], 0, @sizeOf(GlobalUbo), .{});
+        std.mem.copyForwards(u8, @as([*]u8, @ptrCast(data.?))[0..@sizeOf(GlobalUbo)], std.mem.asBytes(&ubo));
+        self.gc.vkd.unmapMemory(self.gc.dev, global_UBO_memories.?[current_frame]);
+        try simple_renderer.render(frame_info);
 
-        swapchain.endSwapChainRenderPass(cmdbuf);
-        try swapchain.endFrame(cmdbuf, &current_frame, .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height });
+        swapchain.endSwapChainRenderPass(frame_info);
+        try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
 
         return self.window.isRunning();
