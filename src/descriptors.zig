@@ -82,21 +82,24 @@ pub const DescriptorPool = struct {
         self.gc.vkd.destroyDescriptorPool(self.gc.dev, self.descriptorPool, null);
     }
 
-    pub fn allocateDescriptor(self: *DescriptorPool, descriptorSetLayout: vk.DescriptorSetLayout, descriptor_sets: []vk.DescriptorSet) !void {
-        var layouts = std.ArrayList(vk.DescriptorSetLayout).init(std.heap.page_allocator);
-        std.debug.print("Allocating descriptor sets with layout: {}\n", .{descriptorSetLayout});
-        for (descriptor_sets) |descriptor_set| {
-            _ = descriptor_set;
-            layouts.append(descriptorSetLayout) catch unreachable;
-        }
-        std.debug.print("Allocating descriptor sets with layout: {}\n", .{layouts});
+    pub fn allocateDescriptor(self: *DescriptorPool, descriptorSetLayout: vk.DescriptorSetLayout, descriptor_set: *vk.DescriptorSet) !void {
+        // var layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
+
+        // for (0..descriptor_sets.len) |i| {
+        //     layouts[i] = descriptorSetLayout;
+        // }
+        std.debug.print("Allocating descriptor sets with layout: {any}\n", .{descriptorSetLayout});
+        const layouts = [_]vk.DescriptorSetLayout{descriptorSetLayout};
         var allocInfo = vk.DescriptorSetAllocateInfo{
             .descriptor_pool = self.descriptorPool,
-            .p_set_layouts = @ptrCast(&layouts),
-            .descriptor_set_count = @as(u32, @intCast(descriptor_sets.len)),
+            .p_set_layouts = &layouts,
+            .descriptor_set_count = layouts.len,
         };
 
-        self.gc.vkd.allocateDescriptorSets(self.gc.dev, &allocInfo, descriptor_sets.ptr) catch unreachable;
+        self.gc.vkd.allocateDescriptorSets(self.gc.dev, &allocInfo, @ptrCast(descriptor_set)) catch |err| {
+            std.debug.print("Failed to allocate descriptor set: {any}\n", .{err});
+            return err;
+        };
     }
 
     pub fn freeDescriptors(self: *DescriptorPool, descriptors: []vk.DescriptorSet) void {
@@ -153,14 +156,14 @@ pub const DescriptorWriter = struct {
         self.writes.deinit();
     }
 
-    pub fn writeBuffer(self: *DescriptorWriter, binding: u32, bufferInfo: *vk.DescriptorBufferInfo, descriptor_set: *vk.DescriptorSet) *DescriptorWriter {
+    pub fn writeBuffer(self: *DescriptorWriter, binding: u32, bufferInfo: *vk.DescriptorBufferInfo) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
             .dst_binding = binding,
             .p_buffer_info = @ptrCast(bufferInfo),
             .descriptor_count = 1,
-            .dst_set = descriptor_set.*,
+            .dst_set = undefined,
             .dst_array_element = 0,
             .p_image_info = undefined,
             .p_texel_buffer_view = undefined,
@@ -170,17 +173,16 @@ pub const DescriptorWriter = struct {
         return self;
     }
 
-    pub fn writeImage(self: *DescriptorWriter, binding: u32, imageInfo: *vk.DescriptorImageInfo, descriptor_set: vk.DescriptorSet) *DescriptorWriter {
+    pub fn writeImage(self: *DescriptorWriter, binding: u32, imageInfo: *vk.DescriptorImageInfo) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
 
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
             .dst_binding = binding,
-            .p_buffer_info = @ptrCast(imageInfo),
             .descriptor_count = 1,
-            .dst_set = descriptor_set,
             .dst_array_element = 0,
-            .p_image_info = undefined,
+            .dst_set = undefined,
+            .p_image_info = @ptrCast(imageInfo),
             .p_texel_buffer_view = undefined,
         };
 
@@ -188,10 +190,11 @@ pub const DescriptorWriter = struct {
         return self;
     }
 
-    pub fn build(self: *DescriptorWriter, sets: []vk.DescriptorSet) !bool {
-        self.pool.allocateDescriptor(self.setLayout.descriptor_set_layout, sets) catch unreachable;
-        self.gc.vkd.updateDescriptorSets(self.gc.dev, 1, @ptrCast(&self.writes.items), 0, null);
-
-        return true;
+    pub fn build(self: *DescriptorWriter, set: *vk.DescriptorSet) !void {
+        self.pool.allocateDescriptor(self.setLayout.descriptor_set_layout, set) catch unreachable;
+        for (0..self.writes.items.len) |i| {
+            self.writes.items[i].dst_set = set.*;
+        }
+        self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
     }
 };

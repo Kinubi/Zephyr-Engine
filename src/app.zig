@@ -29,7 +29,7 @@ const GlobalUbo = struct {
     projection: Math.Mat4x4 = Math.Mat4x4.ident,
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
     light_position: Math.Vec3 = Math.Vec3.init(-1, -1, -1),
-    light_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 1),
+    light_color: Math.Vec4 = Math.Vec4.init(0.5, 0.9, 0.1, 1),
 };
 
 pub const App = struct {
@@ -50,9 +50,7 @@ pub const App = struct {
     var frame_info: FrameInfo = FrameInfo{};
     var global_pool: *DescriptorPool = undefined;
     var global_set_layout: *DescriptorSetLayout = undefined;
-    var global_descriptor_sets: ?[]vk.DescriptorSet = undefined;
-
-    //var model: Model = undefined;
+    var global_descriptor_set: vk.DescriptorSet = undefined;
 
     pub fn init(self: *@This()) !void {
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
@@ -75,53 +73,6 @@ pub const App = struct {
         var mesh2 = Mesh.init(self.allocator);
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
-        // try mesh.vertices.appendSlice(&.{
-        //     // Back Face
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        //     // Front Face
-        //     Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-        //     // Left Face
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-
-        //     // Right face (yellow)
-        //     Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-
-        //     // Top face (orange, remember y axis points down)
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-        //     Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-
-        //     // Bottom face (red)
-        //     Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-        //     Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-        //     Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-        // });
 
         try mesh.vertices.appendSlice(&.{
             // Left Face
@@ -201,8 +152,6 @@ pub const App = struct {
 
         global_UBO_buffers = try self.allocator.alloc(Buffer, MAX_FRAMES_IN_FLIGHT);
 
-        const lcm = (self.gc.props.limits.min_uniform_buffer_offset_alignment * self.gc.props.limits.non_coherent_atom_size) / std.math.gcd(self.gc.props.limits.min_uniform_buffer_offset_alignment, self.gc.props.limits.non_coherent_atom_size);
-
         for (0..global_UBO_buffers.?.len) |i| {
             global_UBO_buffers.?[i] = try Buffer.init(
                 &self.gc,
@@ -210,7 +159,6 @@ pub const App = struct {
                 1,
                 .{ .uniform_buffer_bit = true },
                 .{ .host_visible_bit = true, .host_coherent_bit = true },
-                lcm,
             );
             try global_UBO_buffers.?[i].map(vk.WHOLE_SIZE, 0);
         }
@@ -220,50 +168,17 @@ pub const App = struct {
         global_pool = @constCast(&try descriptor_pool_builder.setMaxSets(MAX_FRAMES_IN_FLIGHT).addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1).build());
         var descriptor_set_layout_builder = DescriptorSetLayout.Builder{ .gc = &self.gc, .bindings = std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding).init(self.allocator) };
         global_set_layout = @constCast(&try descriptor_set_layout_builder.addBinding(0, .uniform_buffer, .{ .vertex_bit = true, .fragment_bit = true }, 1).build());
-        global_descriptor_sets = try self.allocator.alloc(vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT);
-        // var descriptor_set_writer = DescriptorSetWriter.init(self.gc, global_set_layout, global_pool);
 
-        // for (global_descriptor_sets.?, 0..global_descriptor_sets.?.len) |descriptor_set, i| {
-        //     const buffer_info = global_UBO_buffers.?[i].getdescriptorInfo();
-
-        //     descriptor_set_writer = descriptor_set_writer.writeBuffer(0, @constCast(&buffer_info), @constCast(&descriptor_set)).*;
-        // }
-        // std.debug.print("Buffer Info: {any} \n", .{global_descriptor_sets});
-        // _ = try descriptor_set_writer.build(global_descriptor_sets.?);
-
-        const layouts = [_]vk.DescriptorSetLayout{ global_set_layout.*.descriptor_set_layout, global_set_layout.*.descriptor_set_layout, global_set_layout.*.descriptor_set_layout };
-        const alloc_info = vk.DescriptorSetAllocateInfo{
-            .descriptor_pool = global_pool.descriptorPool,
-            .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
-            .p_set_layouts = &layouts,
-        };
-
-        try self.gc.vkd.allocateDescriptorSets(self.gc.dev, &alloc_info, global_descriptor_sets.?.ptr);
-
-        for (global_descriptor_sets.?, 0..global_descriptor_sets.?.len) |descriptor_set, i| {
-            const buffer_info = [_]vk.DescriptorBufferInfo{.{
-                .buffer = global_UBO_buffers.?[i].buffer,
-                .offset = 0,
-                .range = @sizeOf(GlobalUbo),
-            }};
-
-            const descriptor_write = [_]vk.WriteDescriptorSet{.{
-                .dst_set = descriptor_set,
-                .dst_binding = 0,
-                .dst_array_element = 0,
-                .descriptor_type = .uniform_buffer,
-                .descriptor_count = 1,
-                .p_buffer_info = &buffer_info,
-                .p_image_info = undefined,
-                .p_texel_buffer_view = undefined,
-            }};
-
-            self.gc.vkd.updateDescriptorSets(self.gc.dev, descriptor_write.len, &descriptor_write, 0, undefined);
+        var descriptor_set_writer = DescriptorSetWriter.init(self.gc, global_set_layout, global_pool);
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
+            try descriptor_set_writer.writeBuffer(0, @constCast(&bufferInfo)).build(&global_descriptor_set);
         }
 
         simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
 
         last_frame_time = glfw.getTime();
+        frame_info.global_descriptor_set = global_descriptor_set;
     }
 
     pub fn onUpdate(self: *@This()) !bool {
@@ -274,7 +189,7 @@ pub const App = struct {
         frame_info.dt = @floatCast(dt);
         frame_info.current_frame = current_frame;
         frame_info.extent = .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height };
-        frame_info.global_descriptor_set = global_descriptor_sets.?[current_frame];
+
         try swapchain.beginFrame(frame_info);
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);

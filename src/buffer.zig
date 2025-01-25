@@ -15,15 +15,10 @@ pub const Buffer = struct {
     mapped: ?*anyopaque = undefined,
     descriptor_info: vk.DescriptorBufferInfo = undefined,
 
-    pub fn init(
-        gc: *GraphicsContext,
-        instance_size: vk.DeviceSize,
-        instance_count: u32,
-        usage_flags: vk.BufferUsageFlags,
-        memory_property_flags: vk.MemoryPropertyFlags,
-        min_offset_alignment: vk.DeviceSize,
-    ) !Buffer {
-        const alignment_size: vk.DeviceSize = Buffer.getAlignment(instance_size, min_offset_alignment);
+    pub fn init(gc: *GraphicsContext, instance_size: vk.DeviceSize, instance_count: u32, usage_flags: vk.BufferUsageFlags, memory_property_flags: vk.MemoryPropertyFlags) !Buffer {
+        const lcm = (gc.props.limits.min_uniform_buffer_offset_alignment * gc.props.limits.non_coherent_atom_size) / std.math.gcd(gc.props.limits.min_uniform_buffer_offset_alignment, gc.props.limits.non_coherent_atom_size);
+
+        const alignment_size: vk.DeviceSize = Buffer.getAlignment(instance_size, lcm);
         const buffer_size = instance_count * alignment_size;
         var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size };
         try gc.createBuffer(self.buffer_size, usage_flags, memory_property_flags, @constCast(&self.buffer), @constCast(&self.memory));
