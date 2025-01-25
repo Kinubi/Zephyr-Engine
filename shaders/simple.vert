@@ -26,7 +26,7 @@ layout(push_constant) uniform Push {
 
 void main() {
     vec4 positionWorld = push.transform * vec4(position, 1.0);
-    gl_Position = ubo.view * ubo.projection * positionWorld;
+    gl_Position = ubo.projection * ubo.view * positionWorld;
 
     v_color = color;
     v_uv = uv;

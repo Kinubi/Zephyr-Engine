@@ -69,8 +69,8 @@ pub const PointLightRenderer = struct {
     pipeline_layout: vk.PipelineLayout = undefined,
     camera: *Camera = undefined,
 
-    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !SimpleRenderer {
-        const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(SimplePushConstantData) }};
+    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !PointLightRenderer {
+        const pcr = [_]vk.PushConstantRange{};
         const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
         const layout = try gc.*.vkd.createPipelineLayout(
             gc.*.dev,
@@ -78,16 +78,16 @@ pub const PointLightRenderer = struct {
                 .flags = .{},
                 .set_layout_count = dsl.len,
                 .p_set_layouts = &dsl,
-                .push_constant_range_count = 1,
+                .push_constant_range_count = pcr.len,
                 .p_push_constant_ranges = &pcr,
             },
             null,
         );
         const pipeline = try Pipeline.init(gc.*, render_pass, shader_library, try Pipeline.defaultLayout(layout), alloc);
-        return SimpleRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout, .camera = camera };
+        return PointLightRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout, .camera = camera };
     }
 
-    pub fn deinit(self: *SimpleRenderer) void {
+    pub fn deinit(self: *@This()) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
         self.scene.deinit(self.gc.*);
         self.pipeline.deinit();
@@ -97,15 +97,6 @@ pub const PointLightRenderer = struct {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
 
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
-        for (self.scene.objects.slice()) |*object| {
-            if (object.model == null) {
-                continue;
-            }
-
-            const push = SimplePushConstantData{ .transform = object.transform.local2world, .normal_matrix = object.transform.normal2world };
-
-            self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(SimplePushConstantData), @ptrCast(&push));
-            try object.render(self.gc.*, frame_info.command_buffer);
-        }
+        self.gc.vkd.cmdDraw(frame_info.command_buffer, 6, 1, 0, 0);
     }
 };

@@ -4,6 +4,8 @@ const glfw = @import("mach-glfw");
 const Pipeline = @import("pipeline.zig").Pipeline;
 const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
+const point_light_vert align(@alignOf(u32)) = @embedFile("point_light_vert").*;
+const point_light_frag align(@alignOf(u32)) = @embedFile("point_light_frag").*;
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Swapchain = @import("swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -14,6 +16,7 @@ const Mesh = @import("mesh.zig").Mesh;
 const Model = @import("mesh.zig").Model;
 const Scene = @import("scene.zig").Scene;
 const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
+const PointLightRenderer = @import("renderer.zig").PointLightRenderer;
 const Math = @import("mach").math;
 const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
@@ -25,8 +28,8 @@ const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
 const Buffer = @import("buffer.zig").Buffer;
 
 const GlobalUbo = struct {
-    view: Math.Mat4x4 = Math.Mat4x4.ident,
     projection: Math.Mat4x4 = Math.Mat4x4.ident,
+    view: Math.Mat4x4 = Math.Mat4x4.ident,
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
     light_position: Math.Vec3 = Math.Vec3.init(-1, -1, -1),
     light_color: Math.Vec4 = Math.Vec4.init(0.5, 0.9, 0.1, 1),
@@ -41,6 +44,7 @@ pub const App = struct {
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
     var simple_renderer: SimpleRenderer = undefined;
+    var point_light_renderer: PointLightRenderer = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -62,10 +66,6 @@ pub const App = struct {
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
 
         try swapchain.createRenderPass();
-
-        var shader_library = ShaderLibrary.init(self.gc, self.allocator);
-
-        try shader_library.add(&.{ &simple_frag, &simple_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
@@ -175,7 +175,17 @@ pub const App = struct {
             try descriptor_set_writer.writeBuffer(0, @constCast(&bufferInfo)).build(&global_descriptor_set);
         }
 
+        var shader_library = ShaderLibrary.init(self.gc, self.allocator);
+
+        try shader_library.add(&.{ &simple_frag, &simple_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
+
         simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
+
+        var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
+
+        try shader_library_point_light.add(&.{ &point_light_frag, &point_light_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
+
+        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library_point_light, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
 
         last_frame_time = glfw.getTime();
         frame_info.global_descriptor_set = global_descriptor_set;
@@ -195,13 +205,14 @@ pub const App = struct {
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         const ubo = GlobalUbo{
-            .view = camera.viewMatrix,
-            .projection = camera.projectionMatrix,
+            .view = frame_info.camera.viewMatrix,
+            .projection = frame_info.camera.projectionMatrix,
         };
         global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
         try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
 
         try simple_renderer.render(frame_info);
+        try point_light_renderer.render(frame_info);
 
         swapchain.endSwapChainRenderPass(frame_info);
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
@@ -211,11 +222,12 @@ pub const App = struct {
     }
 
     pub fn deinit(self: @This()) void {
+        try swapchain.waitForAllFences();
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
             global_UBO_buffers.?[i].deinit();
         }
-        try swapchain.waitForAllFences();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
+        point_light_renderer.deinit();
         simple_renderer.deinit();
 
         swapchain.deinit();
