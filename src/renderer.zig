@@ -96,16 +96,19 @@ pub const PointLightRenderer = struct {
 
     pub fn update_point_lights(self: *@This(), frame_info: *FrameInfo, global_ubo: *GlobalUbo) !void {
         _ = frame_info;
-        for (self.scene.objects.slice(), 0..self.scene.objects.len) |*object, i| {
+        var num_lights: u32 = 0;
+        for (self.scene.objects.slice()) |*object| {
             if (object.point_light == null) {
                 continue;
             }
 
-            global_ubo.point_lights[i].color = Math.Vec4.init(object.point_light.?.color.x(), object.point_light.?.color.y(), object.point_light.?.color.z(), object.point_light.?.intensity);
-            global_ubo.point_lights[i].position = Math.Vec4.init(object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), 1);
+            global_ubo.point_lights[num_lights].color = Math.Vec4.init(object.point_light.?.color.x(), object.point_light.?.color.y(), object.point_light.?.color.z(), object.point_light.?.intensity);
+
+            global_ubo.point_lights[num_lights].position = Math.Vec4.init(object.transform.local2world.v[3].x(), object.transform.local2world.v[3].y(), object.transform.local2world.v[3].z(), object.transform.local2world.v[3].w());
+            num_lights += 1;
         }
 
-        global_ubo.num_point_lights = @intCast(self.scene.objects.len);
+        global_ubo.num_point_lights = num_lights;
     }
 
     pub fn deinit(self: *@This()) void {
@@ -122,7 +125,7 @@ pub const PointLightRenderer = struct {
             if (object.point_light == null) {
                 continue;
             }
-            const push = PointLightPushConstant{ .position = Math.Vec4.init(object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), 1), .color = Math.Vec4.init(object.point_light.?.color.x(), object.point_light.?.color.y(), object.point_light.?.color.z(), object.point_light.?.intensity), .radius = object.transform.object_scale.x() };
+            const push = PointLightPushConstant{ .position = Math.Vec4.init(object.transform.local2world.v[3].x(), object.transform.local2world.v[3].y(), object.transform.local2world.v[3].z(), object.transform.local2world.v[3].w()), .color = Math.Vec4.init(object.point_light.?.color.x(), object.point_light.?.color.y(), object.point_light.?.color.z(), object.point_light.?.intensity), .radius = object.transform.object_scale.x() };
 
             self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PointLightPushConstant), @ptrCast(&push));
             self.gc.vkd.cmdDraw(frame_info.command_buffer, 6, 1, 0, 0);

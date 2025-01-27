@@ -131,8 +131,12 @@ pub const App = struct {
         object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
 
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
-        object3.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
+        object3.transform.translate(Math.Vec3.init(0, -1, 1.5));
         object3.transform.scale(Math.Vec3.init(0.05, 0, 0));
+
+        const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
+        object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
+        object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
@@ -205,7 +209,9 @@ pub const App = struct {
             .view = frame_info.camera.viewMatrix,
             .projection = frame_info.camera.projectionMatrix,
         };
+
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
+
         global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
         try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
 
