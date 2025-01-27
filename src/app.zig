@@ -26,14 +26,7 @@ const DescriptorSetLayout = @import("descriptors.zig").DescriptorSetLayout;
 const DescriptorPool = @import("descriptors.zig").DescriptorPool;
 const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
 const Buffer = @import("buffer.zig").Buffer;
-
-const GlobalUbo = struct {
-    projection: Math.Mat4x4 = Math.Mat4x4.ident,
-    view: Math.Mat4x4 = Math.Mat4x4.ident,
-    ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
-    light_position: Math.Vec3 = Math.Vec3.init(-1, -1, -1),
-    light_color: Math.Vec4 = Math.Vec4.init(0.5, 0.9, 0.1, 1),
-};
+const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
 
 pub const App = struct {
     window: Window = undefined,
@@ -128,14 +121,18 @@ pub const App = struct {
 
         var scene: Scene = Scene.init();
 
-        const object = try scene.addObject(model);
+        const object = try scene.addObject(model, null);
         object.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
         object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
-        const object2 = try scene.addObject(model2);
+        const object2 = try scene.addObject(model2, null);
 
         object2.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
         object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
+
+        const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
+        object3.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
+        object3.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
@@ -204,10 +201,11 @@ pub const App = struct {
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
-        const ubo = GlobalUbo{
+        var ubo = GlobalUbo{
             .view = frame_info.camera.viewMatrix,
             .projection = frame_info.camera.projectionMatrix,
         };
+        try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
         try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
 

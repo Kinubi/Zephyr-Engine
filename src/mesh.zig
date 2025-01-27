@@ -225,6 +225,7 @@ pub const Primitive = struct {
 pub const Transform = struct {
     local2world: Math.Mat4x4 = Math.Mat4x4.ident,
     normal2world: Math.Mat4x4 = Math.Mat4x4.ident,
+    object_scale: Math.Vec3 = Math.Vec3.init(1.0, 1.0, 1.0),
 
     pub fn translate(self: *Transform, vec: Math.Vec3) void {
         self.local2world = self.local2world.mul(&Math.Mat4x4.translate(vec));
@@ -267,5 +268,6 @@ pub const Transform = struct {
     pub fn scale(self: *Transform, vec: Math.Vec3) void {
         self.local2world = self.local2world.mul(&Math.Mat4x4.scale(vec));
         self.normal2world = self.normal2world.mul(&Math.Mat4x4.scale(Math.Vec3.init(1.0 / vec.x(), 1.0 / vec.y(), 1.0 / vec.z())));
+        self.object_scale = vec;
     }
 };

@@ -8,10 +8,17 @@ const Math = @import("mach").math;
 const glfw = @import("mach-glfw");
 const Camera = @import("camera.zig").Camera;
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
+const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
 
 const SimplePushConstantData = extern struct {
     transform: Math.Mat4x4 = Math.Mat4x4.ident,
     normal_matrix: Math.Mat4x4 = Math.Mat4x4.ident,
+};
+
+const PointLightPushConstant = struct {
+    position: Math.Vec4 = Math.Vec4.init(0, 0, 0, 1),
+    color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 1),
+    radius: f32 = 1.0,
 };
 
 pub const SimpleRenderer = struct {
@@ -70,7 +77,7 @@ pub const PointLightRenderer = struct {
     camera: *Camera = undefined,
 
     pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !PointLightRenderer {
-        const pcr = [_]vk.PushConstantRange{};
+        const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(PointLightPushConstant) }};
         const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
         const layout = try gc.*.vkd.createPipelineLayout(
             gc.*.dev,
@@ -87,6 +94,20 @@ pub const PointLightRenderer = struct {
         return PointLightRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout, .camera = camera };
     }
 
+    pub fn update_point_lights(self: *@This(), frame_info: *FrameInfo, global_ubo: *GlobalUbo) !void {
+        _ = frame_info;
+        for (self.scene.objects.slice(), 0..self.scene.objects.len) |*object, i| {
+            if (object.point_light == null) {
+                continue;
+            }
+
+            global_ubo.point_lights[i].color = Math.Vec4.init(object.point_light.?.color.x(), object.point_light.?.color.y(), object.point_light.?.color.z(), object.point_light.?.intensity);
+            global_ubo.point_lights[i].position = Math.Vec4.init(object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), 1);
+        }
+
+        global_ubo.num_point_lights = @intCast(self.scene.objects.len);
+    }
+
     pub fn deinit(self: *@This()) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
         self.scene.deinit(self.gc.*);
@@ -97,6 +118,14 @@ pub const PointLightRenderer = struct {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
 
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
-        self.gc.vkd.cmdDraw(frame_info.command_buffer, 6, 1, 0, 0);
+        for (self.scene.objects.slice()) |*object| {
+            if (object.point_light == null) {
+                continue;
+            }
+            const push = PointLightPushConstant{ .position = Math.Vec4.init(object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), object.transform.local2world.v[3].x(), 1), .color = Math.Vec4.init(object.point_light.?.color.x(), object.point_light.?.color.y(), object.point_light.?.color.z(), object.point_light.?.intensity), .radius = object.transform.object_scale.x() };
+
+            self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PointLightPushConstant), @ptrCast(&push));
+            self.gc.vkd.cmdDraw(frame_info.command_buffer, 6, 1, 0, 0);
+        }
     }
 };

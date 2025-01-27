@@ -11,12 +11,17 @@ layout(location = 2) out vec2 v_uv;
 layout(location = 3) out vec3 v_normal;
 layout(location = 4) out vec3 v_pos;
 
+struct PointLight {
+    vec4 position;
+    vec4 color;
+};
+
 layout(set = 0, binding = 0) uniform GlobalUbo {
     mat4 projection;
     mat4 view;
     vec4 ambientColor;
-    vec3 lightPosition;
-    vec4 lightColor;
+    PointLight pointLights[16];
+    int numPointLights;
 } ubo;
 
 layout(push_constant) uniform Push {

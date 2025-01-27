@@ -6,10 +6,12 @@ const Vertex = @import("mesh.zig").Vertex;
 const Model = @import("mesh.zig").Model;
 const Transform = @import("mesh.zig").Transform;
 const Math = @import("mach").math;
+const PointLightComponent = @import("components.zig").PointLightComponent;
 
 pub const GameObject = struct {
     transform: Transform = .{},
     model: ?Model = null,
+    point_light: ?PointLightComponent = null,
 
     pub fn render(self: GameObject, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
         if (self.model) |model| {

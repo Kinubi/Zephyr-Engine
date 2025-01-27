@@ -6,6 +6,7 @@ const Vertex = @import("mesh.zig").Vertex;
 const GameObject = @import("game_object.zig").GameObject;
 const Model = @import("mesh.zig").Model;
 const Math = @import("mach").math;
+const PointLightComponent = @import("components.zig").PointLightComponent;
 
 pub const Scene = struct {
     objects: std.BoundedArray(GameObject, 1024),
@@ -28,9 +29,9 @@ pub const Scene = struct {
         return object;
     }
 
-    pub fn addObject(self: *Scene, model: Model) !*GameObject {
+    pub fn addObject(self: *Scene, model: ?Model, point_light: ?PointLightComponent) !*GameObject {
         const object = try self.objects.addOne();
-        object.* = .{ .model = model };
+        object.* = .{ .model = model, .point_light = point_light };
         return object;
     }
 
