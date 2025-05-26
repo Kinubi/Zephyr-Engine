@@ -3,7 +3,7 @@ const std = @import("std");
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -92,6 +92,32 @@ pub fn build(b: *std.Build) void {
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build run`
     // This will evaluate the `run` step rather than the default, which is "install".
+
+    // Shader compilation step: compile all .hlsl files in src/shaders/ to .spv
+    const shader_dir = "shaders";
+    var dir = try std.fs.cwd().openDir(shader_dir, .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".hlsl") and !std.mem.eql(u8, entry.name, "NRI.hlsl")) {
+            const hlsl_path = std.fs.path.join(b.allocator, &[_][]const u8{ shader_dir, entry.name }) catch unreachable;
+            const spv_name = b.allocator.alloc(u8, entry.name.len + 4) catch unreachable;
+            std.mem.copyForwards(u8, spv_name[0..entry.name.len], entry.name);
+            std.mem.copyForwards(u8, spv_name[entry.name.len..], ".spv");
+            const spv_path = std.fs.path.join(b.allocator, &[_][]const u8{ shader_dir, spv_name }) catch unreachable;
+            exe.step.dependOn(&b.addSystemCommand(&[_][]const u8{
+                "dxc",
+                "-Ivendor/NRIFramework/External/NRI/Include",
+                "-fspv-target-env=vulkan1.2",
+                "-T",
+                "lib_6_3",
+                "-spirv",
+                "-Fo",
+                spv_path,
+                hlsl_path,
+            }).step);
+        }
+    }
 
     // Compile the vertex shader at build time so that it can be imported with '@embedFile'.
     const vert_cmd = b.addSystemCommand(&.{ "glslc", "-o" });

@@ -7,6 +7,9 @@ const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
+    vk.extensions.khr_acceleration_structure.name,
+    vk.extensions.khr_ray_tracing_pipeline.name,
+    vk.extensions.khr_ray_query.name,
         //vk.extensions.khr_portability_subset.name,
 };
 
@@ -33,6 +36,7 @@ const apis: []const vk.ApiInfo = &.{
     vk.features.version_1_0,
     vk.extensions.khr_surface,
     vk.extensions.khr_swapchain,
+    vk.extensions.khr_ray_query,
 };
 
 /// Next, pass the `apis` to the wrappers to create dispatch tables.
@@ -278,6 +282,12 @@ pub const GraphicsContext = struct {
         // Bind buffer memory
         try self.vkd.bindBufferMemory(self.dev, buffer.*, memory.*, 0);
     }
+
+    pub fn assertRaytracingResourcesValid(self: *GraphicsContext, tlas: vk.AccelerationStructureKHR, output_image_view: vk.ImageView) void {
+        _ = self;
+        std.debug.assert(tlas != vk.NULL_HANDLE);
+        std.debug.assert(output_image_view != vk.NULL_HANDLE);
+    }
 };
 
 pub const Queue = struct {
@@ -348,8 +358,7 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
             }
         }
     }
-
-    return try vki.createDevice(candidate.pdev, &.{
+    var create_info = vk.DeviceCreateInfo{
         .flags = .{},
         .queue_create_info_count = queue_count,
         .p_queue_create_infos = &qci,
@@ -358,7 +367,17 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .enabled_extension_count = @as(u32, @intCast(device_extensions.items.len)),
         .pp_enabled_extension_names = @as([*]const [*:0]const u8, @ptrCast(device_extensions.items)),
         .p_enabled_features = null,
-    }, null);
+    };
+    var ray_query_create = vk.PhysicalDeviceRayQueryFeaturesKHR{
+        .ray_query = 1,
+    };
+    var ray_tracing_create = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{
+        .ray_tracing_pipeline = 1,
+    };
+    ray_query_create.p_next = &ray_tracing_create;
+
+    create_info.p_next = &ray_query_create;
+    return try vki.createDevice(candidate.pdev, &create_info, null);
 }
 
 const DeviceCandidate = struct {

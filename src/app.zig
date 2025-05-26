@@ -10,6 +10,7 @@ const Swapchain = @import("swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const vk = @import("vulkan");
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
+const entry_point_definition = @import("shader.zig").entry_point_definition;
 const Vertex = @import("mesh.zig").Vertex;
 const Mesh = @import("mesh.zig").Mesh;
 const Model = @import("mesh.zig").Model;
@@ -26,6 +27,7 @@ const DescriptorPool = @import("descriptors.zig").DescriptorPool;
 const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
 const Buffer = @import("buffer.zig").Buffer;
 const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
+const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -40,16 +42,17 @@ pub const App = struct {
     var cmdbufs: []vk.CommandBuffer = undefined;
     var simple_renderer: SimpleRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
+    var raytracing_system: RaytracingSystem = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
     var camera_controller: KeyboardMovementController = undefined;
     var global_UBO_buffers: ?[]Buffer = undefined;
-
     var frame_info: FrameInfo = FrameInfo{};
     var global_pool: *DescriptorPool = undefined;
     var global_set_layout: *DescriptorSetLayout = undefined;
     var global_descriptor_set: vk.DescriptorSet = undefined;
+    // Raytracing system field
 
     pub fn init(self: *@This()) !void {
         std.debug.print("Initializing application...\n", .{});
@@ -57,11 +60,11 @@ pub const App = struct {
         std.debug.print("Window created with title: {s}\n", .{self.window.window_props.title});
 
         self.allocator = std.heap.page_allocator;
-
+        std.debug.print("Updating frame {any}\n", .{"ehho"});
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
         std.log.debug("Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
-
+        std.debug.print("Updating frame {any}\n", .{"ehho"});
         try swapchain.createRenderPass();
 
         try swapchain.createFramebuffers();
@@ -181,20 +184,124 @@ pub const App = struct {
             try descriptor_set_writer.writeBuffer(0, @constCast(&bufferInfo)).build(&global_descriptor_set);
         }
 
+        // --- Raytracing output image creation ---
+        const output_resources = try RaytracingSystem.createOutputImage(
+            &self.gc,
+            self.window.window_props.width,
+            self.window.window_props.height,
+        );
+
+        // --- Raytracing descriptor pool and set layout setup ---
+        var raytracing_pool_builder = DescriptorPool.Builder{
+            .gc = &self.gc,
+            .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(self.allocator),
+            .poolFlags = .{},
+            .maxSets = 0,
+        };
+        const raytracing_pool = try raytracing_pool_builder
+            .setMaxSets(8)
+            .addPoolSize(.storage_image, 8)
+            .addPoolSize(.acceleration_structure_khr, 8)
+            .build();
+
+        var raytracing_set_layout_builder = DescriptorSetLayout.Builder{
+            .gc = &self.gc,
+            .bindings = std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding).init(self.allocator),
+        };
+        const raytracing_set_layout = try raytracing_set_layout_builder
+            .addBinding(0, .storage_image, .{ .raygen_bit_khr = true }, 1)
+            .addBinding(1, .acceleration_structure_khr, .{ .raygen_bit_khr = true }, 1)
+            .build();
+
+        // --- Raytracing output image creation ---
+        // Ensure the raytracing output image is created before descriptor writing
+
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
 
-        try shader_library.add(&.{ &simple_frag, &simple_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
+        try shader_library.add(&.{
+            &simple_frag,
+            &simple_vert,
+        }, &.{
+            vk.ShaderStageFlags{ .fragment_bit = true },
+            vk.ShaderStageFlags{ .vertex_bit = true },
+        }, &.{
+            entry_point_definition{},
+            entry_point_definition{},
+        });
 
         simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
-        try shader_library_point_light.add(&.{ &point_light_frag, &point_light_vert }, &.{ vk.ShaderStageFlags{ .fragment_bit = true }, vk.ShaderStageFlags{ .vertex_bit = true } });
+        try shader_library_point_light.add(&.{
+            &point_light_frag,
+            &point_light_vert,
+        }, &.{
+            vk.ShaderStageFlags{ .fragment_bit = true },
+            vk.ShaderStageFlags{ .vertex_bit = true },
+        }, &.{
+            entry_point_definition{},
+            entry_point_definition{},
+        });
 
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library_point_light, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
 
+        var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
+        // Read raytracing SPV files at runtime instead of @embedFile
+        const rgen_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rgen.hlsl.spv", 10 * 1024 * 1024);
+        const rmiss_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rmiss.hlsl.spv", 10 * 1024 * 1024);
+        const rchit_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rchit.hlsl.spv", 10 * 1024 * 1024);
+        try shader_library_raytracing.add(
+            &.{ rgen_code, rmiss_code, rchit_code },
+            &.{
+                vk.ShaderStageFlags{ .raygen_bit_khr = true },
+                vk.ShaderStageFlags{ .miss_bit_khr = true },
+                vk.ShaderStageFlags{ .closest_hit_bit_khr = true },
+            },
+            &.{
+                entry_point_definition{ .name = "raygen" },
+                entry_point_definition{ .name = "miss" },
+                entry_point_definition{ .name = "closest_hit" },
+            },
+        );
+
+        // --- Raytracing pipeline setup ---
+        // Use the same global descriptor set and layout as the renderer
+
+        // Initialize RaytracingSystem with the created resources
+        raytracing_system = try RaytracingSystem.init(
+            &self.gc,
+            swapchain.render_pass,
+            shader_library_raytracing,
+            self.allocator,
+            raytracing_set_layout.descriptor_set_layout,
+            output_resources.image,
+            output_resources.image_view,
+            output_resources.memory,
+        );
+
+        // --- Raytracing descriptor set creation and writing ---
+        var raytracing_descriptor_set: vk.DescriptorSet = undefined;
+        {
+            var set_writer = DescriptorSetWriter.init(self.gc, @constCast(&raytracing_set_layout), @constCast(&raytracing_pool));
+            // Acceleration structure binding (dummy for now, will update after TLAS creation)
+            const output_image_info = try raytracing_system.getOutputImageDescriptorInfo();
+            try set_writer.writeImage(0, @constCast(&output_image_info)).build(&raytracing_descriptor_set);
+            const dummy_as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
+            try set_writer.writeAccelerationStructure(1, @constCast(&dummy_as_info)).build(&raytracing_descriptor_set); // Storage image binding
+        }
+
+        // Build BLAS and TLAS for the current scene
+        try raytracing_system.createBLAS(&scene);
+        try raytracing_system.createTLAS(&scene);
+        // Create the SBT (assume 3 groups for now, or pass actual group count)
+        try raytracing_system.createShaderBindingTable(3);
+        // Set up descriptors (if needed for additional raytracing resources)
+        // try self.raytracing_system.?.setupDescriptors();
+
         last_frame_time = c.glfwGetTime();
         frame_info.global_descriptor_set = global_descriptor_set;
+        frame_info.ray_tracing_descriptor_set = raytracing_descriptor_set;
     }
 
     pub fn onUpdate(self: *@This()) !bool {
@@ -228,6 +335,10 @@ pub const App = struct {
         try simple_renderer.render(frame_info);
         try point_light_renderer.render(frame_info);
 
+        // --- Raytracing command buffer recording ---
+
+        try raytracing_system.recordCommandBuffer(frame_info, 3);
+
         swapchain.endSwapChainRenderPass(frame_info);
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
@@ -243,6 +354,9 @@ pub const App = struct {
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
         simple_renderer.deinit();
+
+        // Clean up the raytracing system
+        raytracing_system.deinit();
 
         swapchain.deinit();
         self.gc.deinit();

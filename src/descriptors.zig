@@ -184,8 +184,27 @@ pub const DescriptorWriter = struct {
             .dst_set = undefined,
             .p_image_info = @ptrCast(imageInfo),
             .p_texel_buffer_view = undefined,
+            .p_buffer_info = undefined,
         };
 
+        self.writes.append(write) catch unreachable;
+        return self;
+    }
+
+    pub fn writeAccelerationStructure(self: *DescriptorWriter, binding: u32, accel_info: *vk.WriteDescriptorSetAccelerationStructureKHR) *DescriptorWriter {
+        const bindingDescription = self.setLayout.bindings.get(binding).?;
+        const write = vk.WriteDescriptorSet{
+            .s_type = vk.StructureType.write_descriptor_set,
+            .p_next = accel_info,
+            .dst_set = undefined,
+            .dst_binding = binding,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = bindingDescription.descriptor_type,
+            .p_image_info = undefined,
+            .p_buffer_info = undefined,
+            .p_texel_buffer_view = undefined,
+        };
         self.writes.append(write) catch unreachable;
         return self;
     }

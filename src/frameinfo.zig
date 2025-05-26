@@ -25,4 +25,5 @@ pub const FrameInfo = struct {
     current_frame: u32 = 0,
     extent: vk.Extent2D = .{ .width = 1280, .height = 720 },
     global_descriptor_set: vk.DescriptorSet = undefined,
+    ray_tracing_descriptor_set: vk.DescriptorSet = undefined,
 };

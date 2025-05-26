@@ -52,18 +52,18 @@
         //    // actually used.
         //    .lazy = false,
         //},
-        .vulkan_zig = .{
-            .url = "https://github.com/Snektron/vulkan-zig/archive/9b4090c852760ce3210562f62ffaf301479c38ba.tar.gz",
-            .hash = "1220e1a14bee22a962a8f51bc836598b46e5fc2408c2ca54a47b3f945fcba6df6d93",
-        },
+
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.315.tar.gz",
-            .hash = "12205154020684c67b722b397becb92d97e7d8a7cee4eda388718729936fdc3e9143",
+            .hash = "N-V-__8AAPJS7wFRVAIGhMZ7cis5e-y5LZfn2KfO5O2jiHGH",
         },
-
         .@"zig-obj" = .{
             .url = "git+https://github.com/chip2n/zig-obj.git#619027e58a6ce30b5d9a362c76dc2c6c2ce51ee9",
             .hash = "12203513bf3fa5045a984aba014afaf152df4b618742bcd37768d3075dafe715a1e1",
+        },
+        .vulkan_zig = .{
+            .url = "https://github.com/Snektron/vulkan-zig/archive/9b4090c852760ce3210562f62ffaf301479c38ba.tar.gz",
+            .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
         },
     },
 
