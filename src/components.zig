@@ -5,7 +5,7 @@ const Mesh = @import("mesh.zig").Mesh;
 const Vertex = @import("mesh.zig").Vertex;
 const Model = @import("mesh.zig").Model;
 const Transform = @import("mesh.zig").Transform;
-const Math = @import("mach").math;
+const Math = @import("utils/math.zig");
 
 pub const PointLightComponent = struct {
     color: Math.Vec3 = Math.Vec3.init(1.0, 1.0, 1.0),

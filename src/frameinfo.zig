@@ -1,7 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const Camera = @import("camera.zig").Camera;
-const Math = @import("mach").math;
+const Math = @import("utils/math.zig");
 
 const MAX_LIGHTS: usize = 16;
 
@@ -11,8 +11,8 @@ const PointLight = struct {
 };
 
 pub const GlobalUbo = struct {
-    projection: Math.Mat4x4 = Math.Mat4x4.ident,
-    view: Math.Mat4x4 = Math.Mat4x4.ident,
+    projection: Math.Mat4x4 = Math.Mat4x4.identity(),
+    view: Math.Mat4x4 = Math.Mat4x4.identity(),
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
     point_lights: [MAX_LIGHTS]PointLight = undefined,
     num_point_lights: u32 = 6,

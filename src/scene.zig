@@ -5,7 +5,7 @@ const Mesh = @import("mesh.zig").Mesh;
 const Vertex = @import("mesh.zig").Vertex;
 const GameObject = @import("game_object.zig").GameObject;
 const Model = @import("mesh.zig").Model;
-const Math = @import("mach").math;
+const Math = @import("utils/math.zig");
 const PointLightComponent = @import("components.zig").PointLightComponent;
 
 pub const Scene = struct {

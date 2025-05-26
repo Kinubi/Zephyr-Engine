@@ -1,155 +1,147 @@
 const std = @import("std");
+const c = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
-const Math = @import("mach").math;
+const Math = @import("utils/math.zig");
 const Window = @import("window.zig").Window;
 
 pub const Camera = struct {
-    projectionMatrix: Math.Mat4x4 = Math.Mat4x4.ident,
-    viewMatrix: Math.Mat4x4 = Math.Mat4x4.ident,
+    projectionMatrix: Math.Mat4x4 = Math.Mat4x4.identity(),
+    viewMatrix: Math.Mat4x4 = Math.Mat4x4.identity(),
+    inverseViewMatrix: Math.Mat4x4 = Math.Mat4x4.identity(),
 
-    nearPlane: f32 = -1 + 0.1,
-    farPlane: f32 = 1,
-    fov: f32 = 5,
+    nearPlane: f32 = 0.1,
+    farPlane: f32 = 100.0,
+    fov: f32 = 45.0, // degrees, will convert to radians
     aspectRatio: f32 = 16.0 / 9.0,
     window: Window = undefined,
 
-    fn perspectiveLH_ZO(
-        // More doc string
-        /// The field of view angle in the y direction, in radians.
-        fovy: f32,
-        /// The aspect ratio of the viewport's width to its height.
-        aspect: f32,
-        /// The depth (z coordinate) of the near clipping plane.
-        near: f32,
-        /// The depth (z coordinate) of the far clipping plane.
-        far: f32,
-    ) Math.Mat4x4 {
-        const tanHalfFovy: f32 = @tan(fovy / 2.0);
-
-        const r00: f32 = 1.0 / (aspect * tanHalfFovy);
-        const r11: f32 = 1.0 / (tanHalfFovy);
-        const r22: f32 = far / (far - near);
-        const r23: f32 = 1;
-        const r32: f32 = -(far * near) / (far - near);
-
-        const proj = Math.Mat4x4.init(
-            &Math.Vec4.init(r00, 0, 0, 0),
-            &Math.Vec4.init(0, r11, 0, 0),
-            &Math.Vec4.init(0, 0, r22, r32),
-            &Math.Vec4.init(0, 0, r23, 1),
-        );
-
-        return proj;
-    }
-
-    pub inline fn setOrthographicProjection(
-        self: *@This(),
+    pub fn setOrthographicProjection(
+        self: *Camera,
         left: f32,
         right: f32,
-        bottom: f32,
         top: f32,
+        bottom: f32,
         near: f32,
         far: f32,
     ) void {
-        const r00: f32 = 2.0 / (right - left);
-        const r11: f32 = 2.0 / (top - bottom);
-        const r22: f32 = -2.0 / (far - near);
-        const r30: f32 = -(right + left) / (right - left);
-        const r31: f32 = -(top + bottom) / (bottom - top);
-        const r32: f32 = -(near) / (far - near);
+        // glm-style, Vulkan Z [0,1]
+        self.projectionMatrix = Math.Mat4x4.identity();
+        self.projectionMatrix.get(0, 0).* = 2.0 / (right - left);
+        self.projectionMatrix.get(1, 1).* = 2.0 / (bottom - top);
+        self.projectionMatrix.get(2, 2).* = 1.0 / (far - near);
+        self.projectionMatrix.get(3, 0).* = -(right + left) / (right - left);
+        self.projectionMatrix.get(3, 1).* = -(bottom + top) / (bottom - top);
+        self.projectionMatrix.get(3, 2).* = -near / (far - near);
+    }
 
-        self.projectionMatrix = Math.Mat4x4.init(
-            &Math.Vec4.init(r00, 0, 0, r30),
-            &Math.Vec4.init(0, r11, 0, r31),
-            &Math.Vec4.init(0, 0, r22, r32),
-            &Math.Vec4.init(0, 0, 0, 1),
-        );
+    pub fn setPerspectiveProjection(
+        self: *Camera,
+        fovy: f32, // in radians
+        aspect: f32,
+        near: f32,
+        far: f32,
+    ) void {
+        // glm-style, Vulkan Z [0,1]
+        const tanHalfFovy = @tan(fovy / 2.0);
+        self.projectionMatrix = Math.Mat4x4.zero();
+        self.projectionMatrix.get(0, 0).* = 1.0 / (aspect * tanHalfFovy);
+        self.projectionMatrix.get(1, 1).* = 1.0 / (tanHalfFovy);
+        self.projectionMatrix.get(2, 2).* = far / (far - near);
+        self.projectionMatrix.get(2, 3).* = 1.0;
+        self.projectionMatrix.get(3, 2).* = -(far * near) / (far - near);
     }
 
     pub fn updateProjectionMatrix(self: *Camera) void {
-        const size = self.window.window.?.getSize();
-        self.aspectRatio = @as(f32, @floatFromInt(size.width)) / @as(f32, @floatFromInt(size.height));
-
-        self.projectionMatrix = perspectiveLH_ZO(
-            Math.degreesToRadians(self.fov),
+        var width: c_int = 0;
+        var height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(self.window.window), &width, &height);
+        self.aspectRatio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+        self.setPerspectiveProjection(
+            Math.radians(self.fov),
             self.aspectRatio,
             self.nearPlane,
             self.farPlane,
         );
     }
 
-    pub fn setViewDirection(self: *Camera, position: Math.Vec3, direction: *Math.Vec3, up: Math.Vec3) void {
-        direction.v[0] = -direction.x();
-        const w = Math.Vec3.normalize(&direction.*, 0);
-        const u = Math.Vec3.normalize(&Math.Vec3.cross(&up, &w), 0);
-        const v = Math.Vec3.cross(&w, &u);
+    pub fn setViewDirection(self: *Camera, position: Math.Vec3, direction: Math.Vec3, up: Math.Vec3) void {
+        const w = Math.Vec3.normalize(direction);
+        const u = Math.Vec3.normalize(Math.Vec3.cross(w, up));
+        const v = Math.Vec3.cross(w, u);
 
-        const r00: f32 = u.x();
-        const r10: f32 = u.y();
-        const r20: f32 = u.z();
-        const r30: f32 = -Math.Vec3.dot(&u, &position);
-        const r01: f32 = v.x();
-        const r11: f32 = v.y();
-        const r21: f32 = v.z();
-        const r31: f32 = -Math.Vec3.dot(&v, &position);
+        self.viewMatrix = Math.Mat4x4.identity();
+        self.viewMatrix.get(0, 0).* = u.x;
+        self.viewMatrix.get(1, 0).* = u.y;
+        self.viewMatrix.get(2, 0).* = u.z;
+        self.viewMatrix.get(0, 1).* = v.x;
+        self.viewMatrix.get(1, 1).* = v.y;
+        self.viewMatrix.get(2, 1).* = v.z;
+        self.viewMatrix.get(0, 2).* = w.x;
+        self.viewMatrix.get(1, 2).* = w.y;
+        self.viewMatrix.get(2, 2).* = w.z;
+        self.viewMatrix.get(3, 0).* = -Math.Vec3.dot(u, position);
+        self.viewMatrix.get(3, 1).* = -Math.Vec3.dot(v, position);
+        self.viewMatrix.get(3, 2).* = -Math.Vec3.dot(w, position);
 
-        const r02: f32 = w.x();
-        const r12: f32 = w.y();
-        const r22: f32 = w.z();
-        const r32: f32 = -Math.Vec3.dot(&w, &position);
-
-        self.viewMatrix = Math.Mat4x4.init(
-            &Math.Vec4.init(r00, r01, r02, 0),
-            &Math.Vec4.init(r10, r11, r12, 0),
-            &Math.Vec4.init(r20, r21, r22, 0),
-            &Math.Vec4.init(r30, r31, r32, 1),
-        );
+        self.inverseViewMatrix = Math.Mat4x4.identity();
+        self.inverseViewMatrix.get(0, 0).* = u.x;
+        self.inverseViewMatrix.get(0, 1).* = u.y;
+        self.inverseViewMatrix.get(0, 2).* = u.z;
+        self.inverseViewMatrix.get(1, 0).* = v.x;
+        self.inverseViewMatrix.get(1, 1).* = v.y;
+        self.inverseViewMatrix.get(1, 2).* = v.z;
+        self.inverseViewMatrix.get(2, 0).* = w.x;
+        self.inverseViewMatrix.get(2, 1).* = w.y;
+        self.inverseViewMatrix.get(2, 2).* = w.z;
+        self.inverseViewMatrix.get(3, 0).* = position.x;
+        self.inverseViewMatrix.get(3, 1).* = position.y;
+        self.inverseViewMatrix.get(3, 2).* = position.z;
     }
 
-    pub fn setViewTarget(self: *Camera, position: Math.Vec3, target: Math.Vec3, up: Math.Vec3.init(0, -1, 0)) void {
-        const direction = Math.Vec3.sub(target, position);
-        self.setViewDirection(position, direction, up);
+    pub fn setViewTarget(self: *Camera, position: Math.Vec3, target: Math.Vec3, up: Math.Vec3) void {
+        self.setViewDirection(position, Math.Vec3.sub(target, position), up);
     }
 
     pub fn setViewYXZ(self: *Camera, position: Math.Vec3, rotation: Math.Vec3) void {
-        const cosX = Math.cos(rotation.x());
-        const sinX = Math.sin(rotation.x());
-        const cosY = Math.cos(rotation.y());
-        const sinY = Math.sin(rotation.y());
-        const cosZ = Math.cos(rotation.z());
-        const sinZ = Math.sin(rotation.z());
+        const c3 = Math.cos(rotation.z);
+        const s3 = Math.sin(rotation.z);
+        const c2 = Math.cos(rotation.x);
+        const s2 = Math.sin(rotation.x);
+        const c1 = Math.cos(rotation.y);
+        const s1 = Math.sin(rotation.y);
+        const u = Math.Vec3.init(c1 * c3 + s1 * s2 * s3, c2 * s3, c1 * s2 * s3 - c3 * s1);
+        const v = Math.Vec3.init(c3 * s1 * s2 - c1 * s3, c2 * c3, c1 * c3 * s2 + s1 * s3);
+        const w = Math.Vec3.init(c2 * s1, -s2, c1 * c2);
 
-        const rotX = Math.Mat4x4.init(
-            &Math.Vec4.init(1, 0, 0, 0),
-            &Math.Vec4.init(0, cosX, -sinX, 0),
-            &Math.Vec4.init(0, sinX, cosX, 0),
-            &Math.Vec4.init(0, 0, 0, 1),
-        );
+        self.viewMatrix = Math.Mat4x4.identity();
+        self.viewMatrix.get(0, 0).* = u.x;
+        self.viewMatrix.get(1, 0).* = u.y;
+        self.viewMatrix.get(2, 0).* = u.z;
+        self.viewMatrix.get(0, 1).* = v.x;
+        self.viewMatrix.get(1, 1).* = v.y;
+        self.viewMatrix.get(2, 1).* = v.z;
+        self.viewMatrix.get(0, 2).* = w.x;
+        self.viewMatrix.get(1, 2).* = w.y;
+        self.viewMatrix.get(2, 2).* = w.z;
+        self.viewMatrix.get(3, 0).* = -Math.Vec3.dot(u, position);
+        self.viewMatrix.get(3, 1).* = -Math.Vec3.dot(v, position);
+        self.viewMatrix.get(3, 2).* = -Math.Vec3.dot(w, position);
 
-        const rotY = Math.Mat4x4.init(
-            &Math.Vec4.init(cosY, 0, sinY, 0),
-            &Math.Vec4.init(0, 1, 0, 0),
-            &Math.Vec4.init(-sinY, 0, cosY, 0),
-            &Math.Vec4.init(0, 0, 0, 1),
-        );
-
-        const rotZ = Math.Mat4x4.init(
-            &Math.Vec4.init(cosZ, -sinZ, 0, 0),
-            &Math.Vec4.init(sinZ, cosZ, 0, 0),
-            &Math.Vec4.init(0, 0, 1, 0),
-            &Math.Vec4.init(0, 0, 0, 1),
-        );
-
-        const rotationMatrix = Math.Mat4x4.mul(&rotZ, &Math.Mat4x4.mul(&rotY, &rotX));
-
-        const translationMatrix = Math.Mat4x4.init(
-            &Math.Vec4.init(1, 0, 0, -position.x()),
-            &Math.Vec4.init(0, 1, 0, -position.y()),
-            &Math.Vec4.init(0, 0, 1, -position.z()),
-            &Math.Vec4.init(0, 0, 0, 1),
-        );
-
-        self.viewMatrix = Math.Mat4x4.mul(&rotationMatrix, &translationMatrix);
+        self.inverseViewMatrix = Math.Mat4x4.identity();
+        self.inverseViewMatrix.get(0, 0).* = u.x;
+        self.inverseViewMatrix.get(0, 1).* = u.y;
+        self.inverseViewMatrix.get(0, 2).* = u.z;
+        self.inverseViewMatrix.get(1, 0).* = v.x;
+        self.inverseViewMatrix.get(1, 1).* = v.y;
+        self.inverseViewMatrix.get(1, 2).* = v.z;
+        self.inverseViewMatrix.get(2, 0).* = w.x;
+        self.inverseViewMatrix.get(2, 1).* = w.y;
+        self.inverseViewMatrix.get(2, 2).* = w.z;
+        self.inverseViewMatrix.get(3, 0).* = position.x;
+        self.inverseViewMatrix.get(3, 1).* = position.y;
+        self.inverseViewMatrix.get(3, 2).* = position.z;
     }
 };

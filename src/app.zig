@@ -1,6 +1,5 @@
 const std = @import("std");
 const Window = @import("window.zig").Window;
-const glfw = @import("mach-glfw");
 const Pipeline = @import("pipeline.zig").Pipeline;
 const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
@@ -17,7 +16,7 @@ const Model = @import("mesh.zig").Model;
 const Scene = @import("scene.zig").Scene;
 const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
 const PointLightRenderer = @import("renderer.zig").PointLightRenderer;
-const Math = @import("mach").math;
+const Math = @import("utils/math.zig");
 const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
@@ -27,6 +26,9 @@ const DescriptorPool = @import("descriptors.zig").DescriptorPool;
 const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
 const Buffer = @import("buffer.zig").Buffer;
 const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
+const c = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
 
 pub const App = struct {
     window: Window = undefined,
@@ -50,11 +52,13 @@ pub const App = struct {
     var global_descriptor_set: vk.DescriptorSet = undefined;
 
     pub fn init(self: *@This()) !void {
+        std.debug.print("Initializing application...\n", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
+        std.debug.print("Window created with title: {s}\n", .{self.window.window_props.title});
 
         self.allocator = std.heap.page_allocator;
 
-        self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, self.window.window.?);
+        self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
         std.log.debug("Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
 
@@ -62,6 +66,8 @@ pub const App = struct {
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
+
+        std.debug.print("Creating command buffers\n", .{});
 
         var mesh2 = Mesh.init(self.allocator);
         var mesh3 = Mesh.init(self.allocator);
@@ -146,10 +152,9 @@ pub const App = struct {
         camera_controller = KeyboardMovementController.init();
 
         camera = Camera{ .fov = 75.0, .window = self.window };
-
-        camera.setOrthographicProjection(-camera.aspectRatio, camera.aspectRatio, -1, 1, -1, 1);
+        // Set up perspective projection using Vulkan conventions
         camera.updateProjectionMatrix();
-        camera.setViewDirection(Math.Vec3.init(0, 0, 0), @constCast(&Math.Vec3.init(0, 0, 0)), Math.Vec3.init(0, 1, 0));
+        camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
         global_UBO_buffers = try self.allocator.alloc(Buffer, MAX_FRAMES_IN_FLIGHT);
 
@@ -188,18 +193,23 @@ pub const App = struct {
 
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library_point_light, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
 
-        last_frame_time = glfw.getTime();
+        last_frame_time = c.glfwGetTime();
         frame_info.global_descriptor_set = global_descriptor_set;
     }
 
     pub fn onUpdate(self: *@This()) !bool {
-        const current_time = glfw.getTime();
+        std.debug.print("Updating frame {d}\n", .{current_frame});
+        const current_time = c.glfwGetTime();
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
         frame_info.command_buffer = cmdbuf;
         frame_info.dt = @floatCast(dt);
         frame_info.current_frame = current_frame;
-        frame_info.extent = .{ .width = self.window.window.?.getSize().width, .height = self.window.window.?.getSize().height };
+
+        var width: c_int = 0;
+        var height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
+        frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
         try swapchain.beginFrame(frame_info);
         swapchain.beginSwapChainRenderPass(frame_info);

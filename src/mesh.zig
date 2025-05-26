@@ -1,7 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
-const Math = @import("mach").math;
+const Math = @import("utils/math.zig");
 const Obj = @import("zig-obj");
 
 pub const Vertex = struct {
@@ -223,51 +223,48 @@ pub const Primitive = struct {
 };
 
 pub const Transform = struct {
-    local2world: Math.Mat4x4 = Math.Mat4x4.ident,
-    normal2world: Math.Mat4x4 = Math.Mat4x4.ident,
+    local2world: Math.Mat4x4 = Math.Mat4x4.identity(),
+    normal2world: Math.Mat4x4 = Math.Mat4x4.identity(),
     object_scale: Math.Vec3 = Math.Vec3.init(1.0, 1.0, 1.0),
 
     pub fn translate(self: *Transform, vec: Math.Vec3) void {
-        self.local2world = self.local2world.mul(&Math.Mat4x4.translate(vec));
+        self.local2world = self.local2world.mul(Math.Mat4x4.translation(vec));
     }
 
     pub fn rotate(self: *Transform, quat: Math.Quat) void {
-        const qx = quat.v.v[0]; // -
-        const qy = quat.v.v[1];
-        const qz = quat.v.v[2];
-        const qw = quat.v.v[3];
+        const qx = quat.x;
+        const qy = quat.y;
+        const qz = quat.z;
+        const qw = quat.w;
 
-        // From glm: https://github.com/g-truc/glm/blob/33b4a621a697a305bc3a7610d290677b96beb181/glm/gtc/quaternion.inl#L47
-        const rotMat = Math.Mat4x4{
-            .v = [4]Math.Vec4{
-                Math.vec4(
-                    1 - 2 * (qy * qy + qz * qz),
-                    2 * (qx * qy + qz * qw),
-                    2 * (qx * qz - qy * qw),
-                    0,
-                ),
-                Math.vec4(
-                    2 * (qx * qy - qz * qw),
-                    1 - 2 * (qx * qx + qz * qz),
-                    2 * (qy * qz + qx * qw),
-                    0,
-                ),
-                Math.vec4(
-                    2 * (qx * qz + qy * qw),
-                    2 * (qy * qz - qx * qw),
-                    1 - 2 * (qx * qx + qy * qy),
-                    0,
-                ),
-                Math.vec4(0.0, 0.0, 0.0, 1.0),
-            },
-        };
+        const rotMat = Math.Mat4x4.init(
+            &Math.Vec4.init(
+                1 - 2 * (qy * qy + qz * qz),
+                2 * (qx * qy + qz * qw),
+                2 * (qx * qz - qy * qw),
+                0,
+            ),
+            &Math.Vec4.init(
+                2 * (qx * qy - qz * qw),
+                1 - 2 * (qx * qx + qz * qz),
+                2 * (qy * qz + qx * qw),
+                0,
+            ),
+            &Math.Vec4.init(
+                2 * (qx * qz + qy * qw),
+                2 * (qy * qz - qx * qw),
+                1 - 2 * (qx * qx + qy * qy),
+                0,
+            ),
+            &Math.Vec4.init(0.0, 0.0, 0.0, 1.0),
+        );
 
-        self.local2world = self.local2world.mul(&rotMat);
+        self.local2world = self.local2world.mul(rotMat);
     }
 
     pub fn scale(self: *Transform, vec: Math.Vec3) void {
-        self.local2world = self.local2world.mul(&Math.Mat4x4.scale(vec));
-        self.normal2world = self.normal2world.mul(&Math.Mat4x4.scale(Math.Vec3.init(1.0 / vec.x(), 1.0 / vec.y(), 1.0 / vec.z())));
+        self.local2world = self.local2world.mul(Math.Mat4x4.scale(vec));
+        self.normal2world = self.normal2world.mul(Math.Mat4x4.scale(Math.Vec3.init(1.0 / vec.x, 1.0 / vec.y, 1.0 / vec.z)));
         self.object_scale = vec;
     }
 };

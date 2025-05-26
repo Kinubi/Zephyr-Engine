@@ -1,5 +1,7 @@
 const std = @import("std");
-const glfw = @import("mach-glfw");
+const c = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 
@@ -12,47 +14,60 @@ pub const WindowProps = struct {
 };
 
 pub const Window = struct {
-    window: ?glfw.Window = null,
+    window: ?*c.GLFWwindow = null,
     window_props: WindowProps = undefined,
 
-    fn errorCallback(error_code: glfw.ErrorCode, description: [:0]const u8) void {
+    fn errorCallback(error_code: c_int, description: [*c]const u8) callconv(.C) void {
         std.log.err("glfw: {}: {s}\n", .{ error_code, description });
     }
 
     pub fn init(windowProps: WindowProps) !Window {
-        glfw.setErrorCallback(errorCallback);
-        if (!glfw.init(.{ .platform = .wayland })) {
+        std.debug.print("Initializing GLFW...\n", .{});
+        _ = c.glfwSetErrorCallback(errorCallback);
+        if (c.glfwInit() != c.GLFW_TRUE) {
             return error.GlfwInitFailed;
         }
 
-        var monitor = glfw.Monitor.getPrimary().?;
-        const mode = monitor.getVideoMode().?;
+        std.debug.print("GLFW initialized successfully.\n", .{});
 
-        const width = if (windowProps.fullscreen) mode.getWidth() else windowProps.width;
-        const height = if (windowProps.fullscreen) mode.getHeight() else windowProps.height;
+        var monitor: ?*c.GLFWmonitor = null;
+        var mode: ?*const c.GLFWvidmode = null;
+        if (windowProps.fullscreen) {
+            monitor = c.glfwGetPrimaryMonitor();
+            if (monitor == null) return error.GlfwMonitorNotFound;
+            mode = c.glfwGetVideoMode(monitor);
+            if (mode == null) return error.GlfwVideoModeNotFound;
+        }
 
-        // Create our window
-        const window = glfw.Window.create(
+        const width: c_int = if (windowProps.fullscreen) mode.?.width else @intCast(windowProps.width);
+        const height: c_int = if (windowProps.fullscreen) mode.?.height else @intCast(windowProps.height);
+
+        // Set window hints for Vulkan
+        c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+
+        const window = c.glfwCreateWindow(
             width,
             height,
-            windowProps.title,
+            windowProps.title.ptr,
             if (windowProps.fullscreen) monitor else null,
             null,
-            .{ .client_api = .no_api, .context_creation_api = .native_context_api },
-        ) orelse {
+        );
+        if (window == null) {
+            c.glfwTerminate();
             return error.GlfwWindowCreationFailed;
-        };
+        }
 
         return Window{ .window = window, .window_props = windowProps };
     }
 
     pub fn deinit(self: Window) void {
-        self.window.?.destroy();
-        glfw.terminate();
+        if (self.window) |win| {
+            c.glfwDestroyWindow(win);
+        }
+        c.glfwTerminate();
     }
     pub fn isRunning(self: @This()) bool {
-        glfw.pollEvents();
-
-        return !self.window.?.shouldClose();
+        c.glfwPollEvents();
+        return self.window != null and c.glfwWindowShouldClose(self.window) == 0;
     }
 };

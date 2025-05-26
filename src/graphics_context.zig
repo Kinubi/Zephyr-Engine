@@ -1,20 +1,20 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const glfw = @import("mach-glfw");
 const vk = @import("vulkan");
+const c = @import("c.zig");
 const Allocator = std.mem.Allocator;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
-    //vk.extensions.khr_portability_subset.name,
+        //vk.extensions.khr_portability_subset.name,
 };
 
 const optional_device_extensions = [_][*:0]const u8{};
 
 const optional_instance_extensions = [_][*:0]const u8{
     vk.extensions.khr_get_physical_device_properties_2.name,
-    //vk.extensions.khr_portability_enumeration.name,
+        //vk.extensions.khr_portability_enumeration.name,
 };
 const apis: []const vk.ApiInfo = &.{
     // You can either add invidiual functions by manually creating an 'api'
@@ -36,14 +36,14 @@ const apis: []const vk.ApiInfo = &.{
 };
 
 /// Next, pass the `apis` to the wrappers to create dispatch tables.
-const BaseDispatch = vk.BaseWrapper(apis);
-const InstanceDispatch = vk.InstanceWrapper(apis);
-const DeviceDispatch = vk.DeviceWrapper(apis);
+const BaseWrapper = vk.BaseWrapper;
+const InstanceWrapper = vk.InstanceWrapper;
+const DeviceWrapper = vk.DeviceWrapper;
 
 pub const GraphicsContext = struct {
-    vkb: BaseDispatch,
-    vki: InstanceDispatch,
-    vkd: DeviceDispatch,
+    vkb: BaseWrapper,
+    vki: InstanceWrapper,
+    vkd: DeviceWrapper,
 
     instance: vk.Instance,
     surface: vk.SurfaceKHR,
@@ -56,15 +56,21 @@ pub const GraphicsContext = struct {
     present_queue: Queue,
     command_pool: vk.CommandPool,
 
-    pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: glfw.Window) !GraphicsContext {
+    pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: *c.GLFWwindow) !GraphicsContext {
         var self: GraphicsContext = undefined;
-        self.vkb = try BaseDispatch.load(@as(vk.PfnGetInstanceProcAddr, @ptrCast(&glfw.getInstanceProcAddress)));
+        self.vkb = BaseWrapper.load(@as(vk.PfnGetInstanceProcAddr, @ptrCast(&c.glfwGetInstanceProcAddress)));
 
-        const glfw_exts = glfw.getRequiredInstanceExtensions() orelse return blk: {
-            const err = glfw.mustGetError();
-            std.log.err("failed to get required vulkan instance extensions: error={s}", .{err.description});
-            break :blk error.code;
-        };
+        var glfw_ext_count: u32 = 0;
+        const glfw_exts_ptr = c.glfwGetRequiredInstanceExtensions(&glfw_ext_count);
+        if (glfw_exts_ptr == null) {
+            std.log.err("failed to get required vulkan instance extensions", .{});
+            return error.code;
+        }
+        // Convert [*c][*c]const u8 to []const [*:0]const u8 safely
+        var glfw_exts = try allocator.alloc([*:0]const u8, glfw_ext_count);
+        for (0..glfw_ext_count) |i| {
+            glfw_exts[i] = glfw_exts_ptr[i];
+        }
 
         var instance_extensions = try std.ArrayList([*:0]const u8).initCapacity(allocator, glfw_exts.len + 1);
         defer instance_extensions.deinit();
@@ -113,10 +119,10 @@ pub const GraphicsContext = struct {
 
         const app_info = vk.ApplicationInfo{
             .p_application_name = app_name,
-            .application_version = vk.makeApiVersion(0, 0, 0, 0),
+            .application_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
             .p_engine_name = app_name,
-            .engine_version = vk.makeApiVersion(0, 0, 0, 0),
-            .api_version = vk.makeApiVersion(0, 1, 1, 0),
+            .engine_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
+            .api_version = @bitCast(vk.API_VERSION_1_2),
         };
 
         self.instance = try self.vkb.createInstance(&vk.InstanceCreateInfo{
@@ -130,7 +136,7 @@ pub const GraphicsContext = struct {
             .pp_enabled_extension_names = @ptrCast(instance_extensions.items),
         }, null);
 
-        self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
+        self.vki = InstanceWrapper.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr.?);
         errdefer self.vki.destroyInstance(self.instance, null);
 
         self.surface = try createSurface(self.instance, window);
@@ -140,7 +146,7 @@ pub const GraphicsContext = struct {
         self.pdev = candidate.pdev;
         self.props = candidate.props;
         self.dev = try initializeCandidate(allocator, self.vki, candidate);
-        self.vkd = try DeviceDispatch.load(self.dev, self.vki.dispatch.vkGetDeviceProcAddr);
+        self.vkd = DeviceWrapper.load(self.dev, self.vki.dispatch.vkGetDeviceProcAddr.?);
         errdefer self.vkd.destroyDevice(self.dev, null);
 
         self.graphics_queue = Queue.init(self.vkd, self.dev, candidate.queues.graphics_family);
@@ -278,7 +284,7 @@ pub const Queue = struct {
     handle: vk.Queue,
     family: u32,
 
-    fn init(vkd: DeviceDispatch, dev: vk.Device, family: u32) Queue {
+    fn init(vkd: DeviceWrapper, dev: vk.Device, family: u32) Queue {
         return .{
             .handle = vkd.getDeviceQueue(dev, family, 0),
             .family = family,
@@ -286,16 +292,16 @@ pub const Queue = struct {
     }
 };
 
-fn createSurface(instance: vk.Instance, window: glfw.Window) !vk.SurfaceKHR {
+fn createSurface(instance: vk.Instance, window: *c.GLFWwindow) !vk.SurfaceKHR {
     var surface: vk.SurfaceKHR = undefined;
-    if ((glfw.createWindowSurface(instance, window, null, &surface)) != @intFromEnum(vk.Result.success)) {
+    if (c.glfwCreateWindowSurface(instance, window, null, &surface) != vk.Result.success) {
         return error.SurfaceInitFailed;
     }
 
     return surface;
 }
 
-fn initializeCandidate(allocator: Allocator, vki: InstanceDispatch, candidate: DeviceCandidate) !vk.Device {
+fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: DeviceCandidate) !vk.Device {
     const priority = [_]f32{1};
     const qci = [_]vk.DeviceQueueCreateInfo{
         .{
@@ -367,7 +373,7 @@ const QueueAllocation = struct {
 };
 
 fn pickPhysicalDevice(
-    vki: InstanceDispatch,
+    vki: InstanceWrapper,
     instance: vk.Instance,
     allocator: Allocator,
     surface: vk.SurfaceKHR,
@@ -390,7 +396,7 @@ fn pickPhysicalDevice(
 }
 
 fn checkSuitable(
-    vki: InstanceDispatch,
+    vki: InstanceWrapper,
     pdev: vk.PhysicalDevice,
     allocator: Allocator,
     surface: vk.SurfaceKHR,
@@ -416,7 +422,7 @@ fn checkSuitable(
     return null;
 }
 
-fn allocateQueues(vki: InstanceDispatch, pdev: vk.PhysicalDevice, allocator: Allocator, surface: vk.SurfaceKHR) !?QueueAllocation {
+fn allocateQueues(vki: InstanceWrapper, pdev: vk.PhysicalDevice, allocator: Allocator, surface: vk.SurfaceKHR) !?QueueAllocation {
     var family_count: u32 = undefined;
     vki.getPhysicalDeviceQueueFamilyProperties(pdev, &family_count, null);
 
@@ -449,7 +455,7 @@ fn allocateQueues(vki: InstanceDispatch, pdev: vk.PhysicalDevice, allocator: All
     return null;
 }
 
-fn checkSurfaceSupport(vki: InstanceDispatch, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
+fn checkSurfaceSupport(vki: InstanceWrapper, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
     var format_count: u32 = undefined;
     _ = try vki.getPhysicalDeviceSurfaceFormatsKHR(pdev, surface, &format_count, null);
 
@@ -460,7 +466,7 @@ fn checkSurfaceSupport(vki: InstanceDispatch, pdev: vk.PhysicalDevice, surface: 
 }
 
 fn checkExtensionSupport(
-    vki: InstanceDispatch,
+    vki: InstanceWrapper,
     pdev: vk.PhysicalDevice,
     allocator: Allocator,
 ) !bool {

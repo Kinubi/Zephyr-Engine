@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
@@ -46,31 +47,26 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    exe.linkSystemLibrary("glfw");
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
-
-    // Use mach-glfw
-    const glfw_dep = b.dependency("mach-glfw", .{
-        .target = target,
-        .optimize = optimize,
+    // Get the (lazy) path to vk.xml:
+    const registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml");
+    // Get generator executable reference
+    const vk_gen = b.dependency("vulkan_zig", .{}).artifact("vulkan-zig-generator");
+    // Set up a run step to generate the bindings
+    const vk_generate_cmd = b.addRunArtifact(vk_gen);
+    // Pass the registry to the generator
+    vk_generate_cmd.addFileArg(registry);
+    // Create a module from the generator's output...
+    const vulkan_zig = b.addModule("vulkan-zig", .{
+        .root_source_file = vk_generate_cmd.addOutputFileArg("vk.zig"),
     });
-    exe.root_module.addImport("mach-glfw", glfw_dep.module("mach-glfw"));
-
-    // Use vulkan-zig
-    const vulkan = b.dependency("vulkan_zig", .{
-        .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
-    }).module("vulkan-zig");
-    exe.root_module.addImport("vulkan", vulkan);
-
-    // Add Mach to our library and executable
-    const mach_dep = b.dependency("mach", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    exe.root_module.addImport("mach", mach_dep.module("mach"));
+    // ... and pass it as a module to your executable's build command
+    exe.root_module.addImport("vulkan", vulkan_zig);
 
     // Add zig-obj to our library and executable
     const obj_mod = b.dependency("zig-obj", .{ .target = target, .optimize = optimize });
