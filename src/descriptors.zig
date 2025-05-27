@@ -106,8 +106,8 @@ pub const DescriptorPool = struct {
         self.gc.vkd.freeDescriptorSets(self.gc.dev, self.descriptorPool, @as(u32, @intCast(descriptors.len)), descriptors.ptr);
     }
 
-    pub fn resetPool(self: *DescriptorPool) void {
-        self.gc.vkd.resetDescriptorPool(self.gc.dev, self.descriptorPool, 0);
+    pub fn resetPool(self: *DescriptorPool) !void {
+        try self.gc.vkd.resetDescriptorPool(self.gc.dev, self.descriptorPool, .{});
     }
 
     pub const Builder = struct {

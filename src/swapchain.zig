@@ -227,18 +227,20 @@ pub const Swapchain = struct {
             .layout = .depth_stencil_attachment_optimal,
         };
 
-        const subpass = [_]vk.SubpassDescription{.{
-            .flags = .{},
-            .pipeline_bind_point = .graphics,
-            .input_attachment_count = 0,
-            .p_input_attachments = undefined,
-            .color_attachment_count = color_attachment_ref.len,
-            .p_color_attachments = &color_attachment_ref,
-            .p_resolve_attachments = null,
-            .p_depth_stencil_attachment = &depth_attachment_ref,
-            .preserve_attachment_count = 0,
-            .p_preserve_attachments = undefined,
-        }};
+        const subpass = [_]vk.SubpassDescription{
+            .{
+                .flags = .{},
+                .pipeline_bind_point = .graphics,
+                .input_attachment_count = 0,
+                .p_input_attachments = undefined,
+                .color_attachment_count = color_attachment_ref.len,
+                .p_color_attachments = &color_attachment_ref,
+                .p_resolve_attachments = null,
+                .p_depth_stencil_attachment = &depth_attachment_ref,
+                .preserve_attachment_count = 0,
+                .p_preserve_attachments = undefined,
+            },
+        };
 
         const dependencies = [_]vk.SubpassDependency{.{
             .src_subpass = vk.SUBPASS_EXTERNAL,
@@ -448,7 +450,7 @@ const SwapImage = struct {
         }, null);
 
         const mem_reqs = gc.vkd.getImageMemoryRequirements(gc.dev, depth_image);
-        const depth_image_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
+        const depth_image_memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true }, vk.MemoryAllocateFlags{ .device_address_bit = false });
 
         try gc.vkd.bindImageMemory(gc.dev, depth_image, depth_image_memory, 0);
 

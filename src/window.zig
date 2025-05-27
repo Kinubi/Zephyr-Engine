@@ -1,5 +1,7 @@
 const std = @import("std");
 const c = @cImport({
+    @cDefine("_GLFW_X11", "1");
+    @cDefine("GLFW_PLATFORM_WAYLAND", "0");
     @cInclude("GLFW/glfw3.h");
 });
 const vk = @import("vulkan");

@@ -3,6 +3,7 @@ const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Math = @import("utils/math.zig");
 const Obj = @import("zig-obj");
+const Buffer = @import("buffer.zig").Buffer;
 
 pub const Vertex = struct {
     pub const binding_description = vk.VertexInputBindingDescription{
@@ -60,46 +61,77 @@ pub const Mesh = struct {
     }
 
     pub fn createVertexBuffers(self: *@This(), gc: *GraphicsContext) !void {
-        try gc.createBuffer(@sizeOf(Vertex) * self.vertices.items.len, .{ .transfer_dst_bit = true, .vertex_buffer_bit = true }, .{ .device_local_bit = true }, &self.vertex_buffer, &self.vertex_buffer_memory);
-        try self.uploadVertices(gc);
-    }
-
-    fn uploadVertices(self: @This(), gc: *const GraphicsContext) !void {
-        const staging_buffer = try gc.vkd.createBuffer(gc.dev, &.{
-            .flags = .{},
-            .size = @sizeOf(Vertex) * self.vertices.items.len,
-            .usage = .{ .transfer_src_bit = true },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
-        }, null);
-        defer gc.vkd.destroyBuffer(gc.dev, staging_buffer, null);
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, staging_buffer);
-        const staging_memory = try gc.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true });
-        defer gc.vkd.freeMemory(gc.dev, staging_memory, null);
-        try gc.vkd.bindBufferMemory(gc.dev, staging_buffer, staging_memory, 0);
-
-        {
-            const data = try gc.vkd.mapMemory(gc.dev, staging_memory, 0, vk.WHOLE_SIZE, .{});
-            defer gc.vkd.unmapMemory(gc.dev, staging_memory);
-
-            const gpu_vertices: [*]Vertex = @ptrCast(@alignCast(data));
-            for (self.vertices.items, 0..) |vertex, i| {
-                gpu_vertices[i] = vertex;
-            }
+        if (self.vertices.items.len < 3) {
+            return error.VertexCountTooLow;
         }
+        const vertex_count: u32 = @intCast(self.vertices.items.len);
+        const buffer_size: usize = @sizeOf(Vertex) * vertex_count;
 
-        try gc.copyBuffer(self.vertex_buffer, staging_buffer, @sizeOf(Vertex) * self.vertices.items.len);
+        // Create staging buffer using Buffer abstraction
+        var staging_buffer = try Buffer.init(
+            gc,
+            @sizeOf(Vertex),
+            vertex_count,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.vertices.items), buffer_size, 0);
+
+        // Create device-local vertex buffer using Buffer abstraction
+        const device_buffer = try Buffer.init(
+            gc,
+            @sizeOf(Vertex),
+            vertex_count,
+            .{ .vertex_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
+            .{
+                .device_local_bit = true,
+            },
+        );
+        // Copy from staging to device-local
+        try gc.copyBuffer(device_buffer.buffer, staging_buffer.buffer, buffer_size);
+
+        // Store handles
+        self.vertex_buffer = device_buffer.buffer;
+        self.vertex_buffer_memory = device_buffer.memory;
+        // Don't deinit device_buffer, as we take ownership of its memory
     }
 
     pub fn createIndexBuffers(self: *@This(), gc: *GraphicsContext) !void {
         if (self.indices.items.len == 0) {
             return;
         }
+        const index_count: u32 = @intCast(self.indices.items.len);
+        const buffer_size: usize = @sizeOf(u32) * index_count;
 
-        try gc.createBuffer(@sizeOf(u32) * self.indices.items.len, .{ .transfer_dst_bit = true, .index_buffer_bit = true }, .{ .device_local_bit = true }, &self.index_buffer, &self.index_buffer_memory);
+        // Create staging buffer using Buffer abstraction
+        var staging_buffer = try Buffer.init(
+            gc,
+            @sizeOf(u32),
+            index_count,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
 
-        try self.uploadIndices(gc);
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.indices.items), buffer_size, 0);
+
+        // Create device-local index buffer using Buffer abstraction
+        const device_buffer = try Buffer.init(
+            gc,
+            @sizeOf(u32),
+            index_count,
+            .{ .index_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
+            .{ .device_local_bit = true },
+        );
+        // Copy from staging to device-local
+        try gc.copyBuffer(device_buffer.buffer, staging_buffer.buffer, buffer_size);
+
+        // Store handles
+        self.index_buffer = device_buffer.buffer;
+        self.index_buffer_memory = device_buffer.memory;
+        // Don't deinit device_buffer, as we take ownership of its memory
     }
 
     fn uploadIndices(self: @This(), gc: *const GraphicsContext) !void {
@@ -113,7 +145,7 @@ pub const Mesh = struct {
         }, null);
         defer gc.vkd.destroyBuffer(gc.dev, staging_buffer, null);
         const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, staging_buffer);
-        const staging_memory = try gc.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true });
+        const staging_memory = try gc.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true }, .{ .device_address_bit = true });
         defer gc.vkd.freeMemory(gc.dev, staging_memory, null);
         try gc.vkd.bindBufferMemory(gc.dev, staging_buffer, staging_memory, 0);
 

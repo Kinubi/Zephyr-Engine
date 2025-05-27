@@ -10,6 +10,8 @@ const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_acceleration_structure.name,
     vk.extensions.khr_ray_tracing_pipeline.name,
     vk.extensions.khr_ray_query.name,
+    vk.extensions.khr_deferred_host_operations.name,
+        //vk.extensions.khr_maintenance_8.name,
         //vk.extensions.khr_portability_subset.name,
 };
 
@@ -33,10 +35,10 @@ const apis: []const vk.ApiInfo = &.{
         },
     },
     // Or you can add entire feature sets or extensions
-    vk.features.version_1_0,
-    vk.extensions.khr_surface,
+    vk.features.version_1_4,
     vk.extensions.khr_swapchain,
     vk.extensions.khr_ray_query,
+    vk.extensions.khr_acceleration_structure,
 };
 
 /// Next, pass the `apis` to the wrappers to create dispatch tables.
@@ -67,7 +69,7 @@ pub const GraphicsContext = struct {
         var glfw_ext_count: u32 = 0;
         const glfw_exts_ptr = c.glfwGetRequiredInstanceExtensions(&glfw_ext_count);
         if (glfw_exts_ptr == null) {
-            std.log.err("failed to get required vulkan instance extensions", .{});
+            std.log.err("failed to get required vulkan instance extensions, {}", .{glfw_ext_count});
             return error.code;
         }
         // Convert [*c][*c]const u8 to []const [*:0]const u8 safely
@@ -183,10 +185,14 @@ pub const GraphicsContext = struct {
         return error.NoSuitableMemoryType;
     }
 
-    pub fn allocate(self: GraphicsContext, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
+    pub fn allocate(self: GraphicsContext, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, allocate_flags: vk.MemoryAllocateFlags) !vk.DeviceMemory {
         return try self.vkd.allocateMemory(self.dev, &.{
             .allocation_size = requirements.size,
             .memory_type_index = try self.findMemoryTypeIndex(requirements.memory_type_bits, flags),
+            .p_next = &vk.MemoryAllocateFlagsInfo{
+                .flags = allocate_flags,
+                .device_mask = 0,
+            },
         }, null);
     }
 
@@ -277,7 +283,7 @@ pub const GraphicsContext = struct {
         const mem_reqs = self.vkd.getBufferMemoryRequirements(self.dev, buffer.*);
 
         // Allocate memory
-        memory.* = try self.allocate(mem_reqs, memory_properties);
+        memory.* = try self.allocate(mem_reqs, memory_properties, .{ .device_address_bit = true });
 
         // Bind buffer memory
         try self.vkd.bindBufferMemory(self.dev, buffer.*, memory.*, 0);
@@ -371,10 +377,28 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
     var ray_query_create = vk.PhysicalDeviceRayQueryFeaturesKHR{
         .ray_query = 1,
     };
+
     var ray_tracing_create = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{
         .ray_tracing_pipeline = 1,
     };
     ray_query_create.p_next = &ray_tracing_create;
+
+    var bda_create = vk.PhysicalDeviceBufferDeviceAddressFeatures{
+        .buffer_device_address = 1,
+    };
+    ray_tracing_create.p_next = &bda_create;
+
+    var accel_create = vk.PhysicalDeviceAccelerationStructureFeaturesKHR{
+        .acceleration_structure = 1,
+    };
+    bda_create.p_next = &accel_create;
+
+    var dev_address_features = vk.PhysicalDeviceBufferDeviceAddressFeaturesKHR{
+        .buffer_device_address = 1,
+        .buffer_device_address_capture_replay = 1,
+        .buffer_device_address_multi_device = 1,
+    };
+    accel_create.p_next = &dev_address_features;
 
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);
@@ -500,6 +524,7 @@ fn checkExtensionSupport(
     for (required_device_extensions) |ext| {
         for (propsv) |props| {
             const len = std.mem.indexOfScalar(u8, &props.extension_name, 0).?;
+            std.debug.print("Device has extentions {s}\n", .{props.extension_name});
             const prop_ext_name = props.extension_name[0..len];
             if (std.mem.eql(u8, std.mem.span(ext), prop_ext_name)) {
                 break;
