@@ -292,21 +292,6 @@ pub const App = struct {
         try raytracing_system.createTLAS(&scene);
         // Create the SBT (assume 3 groups for now, or pass actual group count)
         try raytracing_system.createShaderBindingTable(3);
-        // Set up descriptors (if needed for additional raytracing resources)
-        // try self.raytracing_system.?.setupDescriptors();
-        // var raytracing_descriptor_set: vk.DescriptorSet = undefined;
-        // {
-        //     var set_writer = DescriptorSetWriter.init(self.gc, @constCast(&raytracing_set_layout), @constCast(&raytracing_pool));
-        //     // Acceleration structure binding (dummy for now, will update after TLAS creation)
-        //     const dummy_as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
-        //     try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&raytracing_descriptor_set); // Storage image binding
-        //     const output_image_info = try raytracing_system.getOutputImageDescriptorInfo();
-        //     try set_writer.writeImage(1, @constCast(&output_image_info)).build(&raytracing_descriptor_set);
-        //     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        //         const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
-        //         try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
-        //     }
-        // }
 
         last_frame_time = c.glfwGetTime();
         frame_info.global_descriptor_set = global_descriptor_set;
@@ -342,8 +327,8 @@ pub const App = struct {
         global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
         try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
 
-        // try simple_renderer.render(frame_info);
-        // try point_light_renderer.render(frame_info);
+        try simple_renderer.render(frame_info);
+        try point_light_renderer.render(frame_info);
 
         // --- Raytracing command buffer recording ---
 
@@ -352,15 +337,11 @@ pub const App = struct {
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
 
-        // if (current_frame == 1) {
-        //     std.process.exit(0);
-        // }
-
         return self.window.isRunning();
     }
 
     pub fn deinit(self: @This()) void {
-        try swapchain.waitForAllFences();
+        swapchain.waitForAllFences() catch unreachable;
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
             global_UBO_buffers.?[i].deinit();
         }

@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const glfw = @import("glfw");
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
 
-pub const MAX_FRAMES_IN_FLIGHT = 3;
+pub const MAX_FRAMES_IN_FLIGHT = 4;
 
 pub const Swapchain = struct {
     pub const PresentState = enum {
@@ -22,12 +22,32 @@ pub const Swapchain = struct {
     handle: vk.SwapchainKHR,
     render_pass: vk.RenderPass = undefined,
     framebuffers: []vk.Framebuffer = undefined,
+    image_acquired: []vk.Semaphore = undefined,
+    render_finished: []vk.Semaphore = undefined,
+    frame_fence: []vk.Fence = undefined,
 
     swap_images: []SwapImage,
     image_index: u32 = 0,
 
     pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
-        return try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
+        var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
+        var image_acquired = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
+        var render_finished = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
+        var frame_fence = try allocator.alloc(vk.Fence, MAX_FRAMES_IN_FLIGHT);
+        var i: usize = 0;
+        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
+            image_acquired[i] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
+            errdefer gc.vkd.destroySemaphore(gc.dev, image_acquired[i], null);
+            render_finished[i] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
+            errdefer gc.vkd.destroySemaphore(gc.dev, render_finished[i], null);
+            frame_fence[i] = try gc.vkd.createFence(gc.dev, &.{ .flags = .{ .signaled_bit = true } }, null);
+            errdefer gc.vkd.destroyFence(gc.dev, frame_fence[i], null);
+        }
+
+        swapchain.image_acquired = image_acquired;
+        swapchain.render_finished = render_finished;
+        swapchain.frame_fence = frame_fence;
+        return swapchain;
     }
 
     pub fn initRecycle(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR, old_render_pass: vk.RenderPass) !Swapchain {
@@ -106,13 +126,22 @@ pub const Swapchain = struct {
         self.destroyFramebuffers();
     }
 
-    pub fn waitForAllFences(self: Swapchain) !void {
-        for (self.swap_images) |si| si.waitForFence(self.gc) catch {};
+    pub fn waitForAllFences(self: *Swapchain) !void {
+        var i: usize = 0;
+        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[i]), vk.TRUE, std.math.maxInt(u64));
+        }
     }
 
     pub fn deinit(self: *Swapchain) void {
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
+        var i: usize = 0;
+        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
+            self.gc.vkd.destroySemaphore(self.gc.dev, self.image_acquired[i], null);
+            self.gc.vkd.destroySemaphore(self.gc.dev, self.render_finished[i], null);
+            self.gc.vkd.destroyFence(self.gc.dev, self.frame_fence[i], null);
+        }
     }
 
     pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D) !void {
@@ -153,25 +182,23 @@ pub const Swapchain = struct {
         // so we keep an extra auxilery semaphore that is swapped around
 
         // Step 1: Make sure the current frame has finished rendering
-        const current = self.swap_images[current_frame];
-        // const current = self.currentSwapImage();
-        // _ = current_frame;
+
         // Step 2: Submit the command buffer
         const wait_stage = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
         try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
             .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&current.image_acquired),
+            .p_wait_semaphores = @ptrCast(&self.image_acquired[current_frame]),
             .p_wait_dst_stage_mask = &wait_stage,
             .command_buffer_count = 1,
             .p_command_buffers = @ptrCast(&cmdbuf),
             .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(&current.render_finished),
-        }}, current.frame_fence);
+            .p_signal_semaphores = @ptrCast(&self.render_finished[current_frame]),
+        }}, self.frame_fence[current_frame]);
 
         // Step 3: Present the current frame
         const present_result = self.gc.vkd.queuePresentKHR(self.gc.present_queue.handle, &vk.PresentInfoKHR{
             .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&current.render_finished),
+            .p_wait_semaphores = @ptrCast(&self.render_finished[current_frame]),
             .swapchain_count = 1,
             .p_swapchains = @ptrCast(&self.handle),
             .p_image_indices = @ptrCast(&self.image_index),
@@ -305,7 +332,7 @@ pub const Swapchain = struct {
 
         const render_pass_info = vk.RenderPassBeginInfo{
             .render_pass = self.render_pass,
-            .framebuffer = self.framebuffers[frame_info.current_frame],
+            .framebuffer = self.framebuffers[self.image_index],
             .render_area = scissor,
             .clear_value_count = clear_values.len,
             .p_clear_values = &clear_values,
@@ -338,7 +365,7 @@ pub const Swapchain = struct {
             self.gc.dev,
             self.handle,
             std.math.maxInt(u64),
-            self.swap_images[current_frame].image_acquired,
+            self.image_acquired[current_frame],
             .null_handle,
         );
 
@@ -352,8 +379,8 @@ pub const Swapchain = struct {
     }
 
     pub fn beginFrame(self: *@This(), frame_info: FrameInfo) !void {
-        if (self.swap_images[frame_info.current_frame].image_acquired != .null_handle) {
-            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.swap_images[frame_info.current_frame].frame_fence), vk.TRUE, std.math.maxInt(u64));
+        if (self.image_acquired[frame_info.current_frame] != .null_handle) {
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
         }
 
         if (frame_info.extent.width != self.extent.width or frame_info.extent.height != self.extent.height) {
@@ -377,7 +404,7 @@ pub const Swapchain = struct {
             try self.createFramebuffers();
         }
 
-        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.swap_images[frame_info.current_frame].frame_fence));
+        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]));
 
         try self.gc.vkd.resetCommandBuffer(frame_info.command_buffer, .{});
 
@@ -402,9 +429,6 @@ pub const Swapchain = struct {
 const SwapImage = struct {
     image: vk.Image,
     view: vk.ImageView,
-    image_acquired: vk.Semaphore,
-    render_finished: vk.Semaphore,
-    frame_fence: vk.Fence,
     depth_image: vk.Image,
     depth_image_view: vk.ImageView,
     depth_image_memory: vk.DeviceMemory,
@@ -425,15 +449,6 @@ const SwapImage = struct {
             },
         }, null);
         errdefer gc.vkd.destroyImageView(gc.dev, view, null);
-
-        const image_acquired = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
-        errdefer gc.vkd.destroySemaphore(gc.dev, image_acquired, null);
-
-        const render_finished = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
-        errdefer gc.vkd.destroySemaphore(gc.dev, render_finished, null);
-
-        const frame_fence = try gc.vkd.createFence(gc.dev, &.{ .flags = .{ .signaled_bit = true } }, null);
-        errdefer gc.vkd.destroyFence(gc.dev, frame_fence, null);
 
         const depth_image = try gc.vkd.createImage(gc.dev, &.{
             .image_type = .@"2d",
@@ -473,9 +488,6 @@ const SwapImage = struct {
         return SwapImage{
             .image = image,
             .view = view,
-            .image_acquired = image_acquired,
-            .render_finished = render_finished,
-            .frame_fence = frame_fence,
             .depth_image = depth_image,
             .depth_image_view = depth_image_view,
             .depth_image_memory = depth_image_memory,
@@ -483,18 +495,10 @@ const SwapImage = struct {
     }
 
     fn deinit(self: SwapImage, gc: *const GraphicsContext) void {
-        self.waitForFence(gc) catch return;
         gc.vkd.destroyImageView(gc.dev, self.depth_image_view, null);
         gc.vkd.freeMemory(gc.dev, self.depth_image_memory, null);
         gc.vkd.destroyImage(gc.dev, self.depth_image, null);
         gc.vkd.destroyImageView(gc.dev, self.view, null);
-        gc.vkd.destroySemaphore(gc.dev, self.image_acquired, null);
-        gc.vkd.destroySemaphore(gc.dev, self.render_finished, null);
-        gc.vkd.destroyFence(gc.dev, self.frame_fence, null);
-    }
-
-    fn waitForFence(self: SwapImage, gc: *const GraphicsContext) !void {
-        _ = try gc.vkd.waitForFences(gc.dev, 1, @ptrCast(&self.frame_fence), vk.TRUE, std.math.maxInt(u64));
     }
 };
 

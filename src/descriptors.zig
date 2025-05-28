@@ -83,12 +83,6 @@ pub const DescriptorPool = struct {
     }
 
     pub fn allocateDescriptor(self: *DescriptorPool, descriptorSetLayout: vk.DescriptorSetLayout, descriptor_set: *vk.DescriptorSet) !void {
-        // var layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
-
-        // for (0..descriptor_sets.len) |i| {
-        //     layouts[i] = descriptorSetLayout;
-        // }
-        std.debug.print("Allocating descriptor sets with layout: {any}\n", .{descriptorSetLayout});
         const layouts = [_]vk.DescriptorSetLayout{descriptorSetLayout};
         var allocInfo = vk.DescriptorSetAllocateInfo{
             .descriptor_pool = self.descriptorPool,
@@ -175,7 +169,6 @@ pub const DescriptorWriter = struct {
 
     pub fn writeImage(self: *DescriptorWriter, binding: u32, imageInfo: *vk.DescriptorImageInfo) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
-        std.debug.print("Writing image to binding {d} with descriptor type {any}\n", .{ binding, bindingDescription.descriptor_type });
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
             .dst_binding = binding,

@@ -581,7 +581,7 @@ pub const RaytracingSystem = struct {
             .new_layout = vk.ImageLayout.transfer_dst_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = swapchain.swap_images[frame_info.current_frame].image, // <-- pass this in FrameInfo
+            .image = swapchain.swap_images[swapchain.image_index].image, // <-- pass this in FrameInfo
             .subresource_range = .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
                 .base_mip_level = 0,
@@ -611,7 +611,7 @@ pub const RaytracingSystem = struct {
             .dst_offset = vk.Offset3D{ .x = 0, .y = 0, .z = 0 },
         };
 
-        gc.vkd.cmdCopyImage(frame_info.command_buffer, self.output_image, vk.ImageLayout.transfer_src_optimal, swapchain.swap_images[frame_info.current_frame].image, vk.ImageLayout.transfer_dst_optimal, 1, @ptrCast(&copy_info));
+        gc.vkd.cmdCopyImage(frame_info.command_buffer, self.output_image, vk.ImageLayout.transfer_src_optimal, swapchain.swap_images[swapchain.image_index].image, vk.ImageLayout.transfer_dst_optimal, 1, @ptrCast(&copy_info));
         // --- Image layout transitions after ray tracing, before copy ---
         var output_to_copy_barrier = vk.ImageMemoryBarrier{
             .s_type = vk.StructureType.image_memory_barrier,
@@ -652,7 +652,7 @@ pub const RaytracingSystem = struct {
             .new_layout = vk.ImageLayout.present_src_khr,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = swapchain.swap_images[frame_info.current_frame].image, // <-- pass this in FrameInfo
+            .image = swapchain.swap_images[swapchain.image_index].image, // <-- pass this in FrameInfo
             .subresource_range = .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
                 .base_mip_level = 0,
@@ -673,7 +673,7 @@ pub const RaytracingSystem = struct {
             1,
             @ptrCast(&swapchain_to_present_barrier),
         );
-        std.debug.print("Output image created with handle: {any}, and swapchain image: {any}\n", .{ self.output_image, swapchain.swap_images[frame_info.current_frame].image });
+
         return;
     }
 
