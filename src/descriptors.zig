@@ -175,7 +175,7 @@ pub const DescriptorWriter = struct {
 
     pub fn writeImage(self: *DescriptorWriter, binding: u32, imageInfo: *vk.DescriptorImageInfo) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
-
+        std.debug.print("Writing image to binding {d} with descriptor type {any}\n", .{ binding, bindingDescription.descriptor_type });
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
             .dst_binding = binding,
@@ -194,8 +194,7 @@ pub const DescriptorWriter = struct {
     pub fn writeAccelerationStructure(self: *DescriptorWriter, binding: u32, accel_info: *vk.WriteDescriptorSetAccelerationStructureKHR) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
         const write = vk.WriteDescriptorSet{
-            .s_type = vk.StructureType.write_descriptor_set,
-            .p_next = accel_info,
+            .p_next = @ptrCast(accel_info),
             .dst_set = undefined,
             .dst_binding = binding,
             .dst_array_element = 0,

@@ -385,6 +385,8 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
 
     var bda_create = vk.PhysicalDeviceBufferDeviceAddressFeatures{
         .buffer_device_address = 1,
+        .buffer_device_address_capture_replay = 1,
+        .buffer_device_address_multi_device = 1,
     };
     ray_tracing_create.p_next = &bda_create;
 
@@ -392,13 +394,6 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .acceleration_structure = 1,
     };
     bda_create.p_next = &accel_create;
-
-    var dev_address_features = vk.PhysicalDeviceBufferDeviceAddressFeaturesKHR{
-        .buffer_device_address = 1,
-        .buffer_device_address_capture_replay = 1,
-        .buffer_device_address_multi_device = 1,
-    };
-    accel_create.p_next = &dev_address_features;
 
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);

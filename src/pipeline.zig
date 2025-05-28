@@ -204,30 +204,46 @@ pub const Pipeline = struct {
         rpcik_var.p_stages = pssci.items.ptr;
 
         // --- Begin group array setup ---
-        // Use shader_library.shaders.items for group info (revert to previous logic)
+        // Explicitly set up raygen, miss, and hit groups in order
         const group_count = shader_library.shaders.items.len;
-        const group_array = try alloc.alloc(vk.RayTracingShaderGroupCreateInfoKHR, group_count);
-        for (group_array) |*dst_group| {
-            dst_group.* = vk.RayTracingShaderGroupCreateInfoKHR{
-                .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
-                .p_next = null,
-                .type = undefined, // Set below
-                .general_shader = vk.SHADER_UNUSED_KHR,
-                .closest_hit_shader = vk.SHADER_UNUSED_KHR,
-                .any_hit_shader = vk.SHADER_UNUSED_KHR,
-                .intersection_shader = vk.SHADER_UNUSED_KHR,
-                .p_shader_group_capture_replay_handle = null,
-            };
-            // Set type based on general_shader/intersection_shader as before
-            if (dst_group.intersection_shader != vk.SHADER_UNUSED_KHR) {
-                dst_group.type = vk.RayTracingShaderGroupTypeKHR.procedural_hit_group_khr;
-            } else if (dst_group.general_shader != vk.SHADER_UNUSED_KHR) {
-                dst_group.type = vk.RayTracingShaderGroupTypeKHR.general_khr;
-            } else {
-                dst_group.type = vk.RayTracingShaderGroupTypeKHR.triangles_hit_group_khr;
-            }
+        if (group_count != 3) {
+            return error.InvalidRayTracingShaderGroupCount;
         }
-        rpcik_var.group_count = @intCast(group_count);
+        const group_array = try alloc.alloc(vk.RayTracingShaderGroupCreateInfoKHR, 3);
+        // Raygen group (index 0)
+        group_array[0] = vk.RayTracingShaderGroupCreateInfoKHR{
+            .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
+            .p_next = null,
+            .type = vk.RayTracingShaderGroupTypeKHR.general_khr,
+            .general_shader = 0,
+            .closest_hit_shader = vk.SHADER_UNUSED_KHR,
+            .any_hit_shader = vk.SHADER_UNUSED_KHR,
+            .intersection_shader = vk.SHADER_UNUSED_KHR,
+            .p_shader_group_capture_replay_handle = null,
+        };
+        // Miss group (index 1)
+        group_array[1] = vk.RayTracingShaderGroupCreateInfoKHR{
+            .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
+            .p_next = null,
+            .type = vk.RayTracingShaderGroupTypeKHR.general_khr,
+            .general_shader = 1,
+            .closest_hit_shader = vk.SHADER_UNUSED_KHR,
+            .any_hit_shader = vk.SHADER_UNUSED_KHR,
+            .intersection_shader = vk.SHADER_UNUSED_KHR,
+            .p_shader_group_capture_replay_handle = null,
+        };
+        // Closest hit group (index 2)
+        group_array[2] = vk.RayTracingShaderGroupCreateInfoKHR{
+            .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
+            .p_next = null,
+            .type = vk.RayTracingShaderGroupTypeKHR.triangles_hit_group_khr,
+            .general_shader = vk.SHADER_UNUSED_KHR,
+            .closest_hit_shader = 2,
+            .any_hit_shader = vk.SHADER_UNUSED_KHR,
+            .intersection_shader = vk.SHADER_UNUSED_KHR,
+            .p_shader_group_capture_replay_handle = null,
+        };
+        rpcik_var.group_count = 3;
         rpcik_var.p_groups = group_array.ptr;
         // --- End group array setup ---
 

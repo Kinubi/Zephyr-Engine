@@ -294,23 +294,23 @@ pub const App = struct {
         try raytracing_system.createShaderBindingTable(3);
         // Set up descriptors (if needed for additional raytracing resources)
         // try self.raytracing_system.?.setupDescriptors();
-        var raytracing_descriptor_set: vk.DescriptorSet = undefined;
-        {
-            var set_writer = DescriptorSetWriter.init(self.gc, @constCast(&raytracing_set_layout), @constCast(&raytracing_pool));
-            // Acceleration structure binding (dummy for now, will update after TLAS creation)
-            const dummy_as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
-            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&raytracing_descriptor_set); // Storage image binding
-            const output_image_info = try raytracing_system.getOutputImageDescriptorInfo();
-            try set_writer.writeImage(1, @constCast(&output_image_info)).build(&raytracing_descriptor_set);
-            for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-                const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
-                try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
-            }
-        }
+        // var raytracing_descriptor_set: vk.DescriptorSet = undefined;
+        // {
+        //     var set_writer = DescriptorSetWriter.init(self.gc, @constCast(&raytracing_set_layout), @constCast(&raytracing_pool));
+        //     // Acceleration structure binding (dummy for now, will update after TLAS creation)
+        //     const dummy_as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
+        //     try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&raytracing_descriptor_set); // Storage image binding
+        //     const output_image_info = try raytracing_system.getOutputImageDescriptorInfo();
+        //     try set_writer.writeImage(1, @constCast(&output_image_info)).build(&raytracing_descriptor_set);
+        //     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        //         const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
+        //         try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
+        //     }
+        // }
 
         last_frame_time = c.glfwGetTime();
         frame_info.global_descriptor_set = global_descriptor_set;
-        raytracing_system.descriptor_set = raytracing_descriptor_set;
+        //raytracing_system.descriptor_set = raytracing_descriptor_set;
     }
 
     pub fn onUpdate(self: *@This()) !bool {
@@ -328,6 +328,7 @@ pub const App = struct {
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
         try swapchain.beginFrame(frame_info);
+
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
@@ -347,9 +348,13 @@ pub const App = struct {
         // --- Raytracing command buffer recording ---
 
         swapchain.endSwapChainRenderPass(frame_info);
-        try raytracing_system.recordCommandBuffer(frame_info, swapchain, 3);
+        try raytracing_system.recordCommandBuffer(frame_info, &swapchain, 3, global_UBO_buffers.?[frame_info.current_frame].descriptor_info);
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
+
+        // if (current_frame == 1) {
+        //     std.process.exit(0);
+        // }
 
         return self.window.isRunning();
     }

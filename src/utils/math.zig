@@ -177,6 +177,17 @@ pub const Mat4 = struct {
     pub fn get(self: *Mat4, row: usize, col: usize) *f32 {
         return &self.data[row * 4 + col];
     }
+    pub fn to_3x4(self: Mat4) [3][4]f32 {
+        // Vulkan expects row-major [3][4] (upper 3 rows, all 4 columns)
+        var out: [3][4]f32 = undefined;
+        for (0..3) |row| {
+            for (0..4) |col| {
+                out[row][col] = self.data[row * 4 + col];
+            }
+        }
+
+        return out;
+    }
 };
 
 pub const Quat = struct {

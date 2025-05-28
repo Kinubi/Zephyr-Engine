@@ -125,7 +125,7 @@ pub const RaytracingSystem = struct {
                     .transform_data = .{ .device_address = 0 },
                 },
             },
-            .flags = vk.GeometryFlagsKHR{},
+            .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
         };
         var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
             .primitive_count = @intCast(index_count / 3),
@@ -237,7 +237,7 @@ pub const RaytracingSystem = struct {
         if (object_count == 0) {
             return error.NoMeshes;
         }
-        //const mesh = &scene.objects.slice()[0].model.?.primitives.slice()[0].mesh.?; // Assume first object has a mesh
+        const mesh = &scene.objects.slice()[0]; // Assume first object has a mesh
         // Only the mesh is used for instance reference, not for geometry data
 
         // 1. Create instance buffer for TLAS
@@ -252,11 +252,7 @@ pub const RaytracingSystem = struct {
         // Create instance struct (identity transform, instance 0)
         var instance = vk.AccelerationStructureInstanceKHR{
             .transform = .{
-                .matrix = [3][4]f32{
-                    [4]f32{ 1, 0, 0, 0 },
-                    [4]f32{ 0, 1, 0, 0 },
-                    [4]f32{ 0, 0, 1, 0 },
-                },
+                .matrix = mesh.transform.local2world.to_3x4(), // Use mesh transform
             },
             .instance_custom_index_and_mask = .{ .instance_custom_index = 0, .mask = 0xFF },
             .instance_shader_binding_table_record_offset_and_flags = .{ .instance_shader_binding_table_record_offset = 0, .flags = 0 },
@@ -469,20 +465,21 @@ pub const RaytracingSystem = struct {
     }
 
     /// Record the ray tracing command buffer for a frame (multi-mesh/instance)
-    pub fn recordCommandBuffer(self: *RaytracingSystem, frame_info: FrameInfo, swapchain: Swapchain, group_count: u32) !void {
+    pub fn recordCommandBuffer(self: *RaytracingSystem, frame_info: FrameInfo, swapchain: *Swapchain, group_count: u32, global_ubo_buffer_info: vk.DescriptorBufferInfo) !void {
         const gc = self.gc;
-        // try self.descriptor_pool.resetPool();
-        // var ray_tracing_descriptor_set: vk.DescriptorSet = undefined;
-        // var set_writer = DescriptorWriter.init(gc.*, &self.descriptor_set_layout, &self.descriptor_pool);
-        // const output_image_info = try self.getOutputImageDescriptorInfo();
-        // try set_writer.writeImage(0, @constCast(&output_image_info)).build(&self.descriptor_set);
-        // const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
-        // try set_writer.writeAccelerationStructure(1, @constCast(&dummy_as_info)).build(&ray_tracing_descriptor_set); // Storage image binding
-        // const bufferInfo = ubo.descriptor_info;
-        // try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&ray_tracing_descriptor_set);
+        _ = group_count;
+        try self.descriptor_pool.resetPool();
+        var set_writer = DescriptorWriter.init(gc.*, &self.descriptor_set_layout, &self.descriptor_pool);
+        const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
+        try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set); // Storage image binding
+        const output_image_info = try self.getOutputImageDescriptorInfo();
+        try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);
+        try set_writer.writeBuffer(2, @constCast(&global_ubo_buffer_info)).build(&self.descriptor_set);
         // --- existing code for binding pipeline, descriptor sets, SBT, etc...
+
         gc.vkd.cmdBindPipeline(frame_info.command_buffer, vk.PipelineBindPoint.ray_tracing_khr, self.pipeline.pipeline);
         gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, vk.PipelineBindPoint.ray_tracing_khr, self.pipeline_layout, 0, 1, @ptrCast(&self.descriptor_set), 0, null);
+
         // SBT region setup
         var rt_props = vk.PhysicalDeviceRayTracingPipelinePropertiesKHR{
             .s_type = vk.StructureType.physical_device_ray_tracing_pipeline_properties_khr,
@@ -525,7 +522,7 @@ pub const RaytracingSystem = struct {
         var hit_region = vk.StridedDeviceAddressRegionKHR{
             .device_address = sbt_addr + sbt_stride * 2,
             .stride = sbt_stride,
-            .size = sbt_stride * (group_count - 2),
+            .size = sbt_stride,
         };
         var callable_region = vk.StridedDeviceAddressRegionKHR{
             .device_address = 0,
@@ -536,11 +533,20 @@ pub const RaytracingSystem = struct {
 
         // --- Image layout transitions before ray tracing ---
         // 1. Transition output image to GENERAL for storage write (ray tracing)
+        var old_layout = vk.ImageLayout.undefined; // Use general layout for ray tracing
+        var old_access_mask = vk.AccessFlags{};
+        if (frame_info.current_frame == 0) {
+            old_layout = vk.ImageLayout.undefined;
+        } else {
+            old_layout = vk.ImageLayout.general;
+            old_access_mask = vk.AccessFlags.fromInt(0);
+            // If reusing swapchain image, use present layout
+        }
         var output_barrier = vk.ImageMemoryBarrier{
             .s_type = vk.StructureType.image_memory_barrier,
-            .src_access_mask = .{},
+            .src_access_mask = old_access_mask,
             .dst_access_mask = vk.AccessFlags{ .transfer_read_bit = true },
-            .old_layout = vk.ImageLayout.general,
+            .old_layout = old_layout,
             .new_layout = vk.ImageLayout.transfer_src_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -565,20 +571,13 @@ pub const RaytracingSystem = struct {
             1,
             @ptrCast(&output_barrier),
         );
-        var old_layout = vk.ImageLayout.undefined; // Use general layout for ray tracing
-        var old_access_mask = vk.AccessFlags{};
-        if (frame_info.current_frame == 0) {
-            old_layout = vk.ImageLayout.undefined;
-        } else {
-            old_layout = vk.ImageLayout.present_src_khr;
-            old_access_mask = vk.AccessFlags.fromInt(0); // If reusing swapchain image, use present layout
-        }
+
         // 2. Transition swapchain image to TRANSFER_DST for copy
         var swapchain_barrier = vk.ImageMemoryBarrier{
             .s_type = vk.StructureType.image_memory_barrier,
-            .src_access_mask = old_access_mask,
+            .src_access_mask = vk.AccessFlags.fromInt(0),
             .dst_access_mask = .{ .transfer_write_bit = true },
-            .old_layout = old_layout, // or .present_src_khr if reused
+            .old_layout = vk.ImageLayout.present_src_khr, // or .present_src_khr if reused
             .new_layout = vk.ImageLayout.transfer_dst_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -611,6 +610,7 @@ pub const RaytracingSystem = struct {
             .extent = vk.Extent3D{ .width = swapchain.extent.width, .height = swapchain.extent.height, .depth = 1 },
             .dst_offset = vk.Offset3D{ .x = 0, .y = 0, .z = 0 },
         };
+
         gc.vkd.cmdCopyImage(frame_info.command_buffer, self.output_image, vk.ImageLayout.transfer_src_optimal, swapchain.swap_images[frame_info.current_frame].image, vk.ImageLayout.transfer_dst_optimal, 1, @ptrCast(&copy_info));
         // --- Image layout transitions after ray tracing, before copy ---
         var output_to_copy_barrier = vk.ImageMemoryBarrier{
@@ -673,6 +673,7 @@ pub const RaytracingSystem = struct {
             1,
             @ptrCast(&swapchain_to_present_barrier),
         );
+        std.debug.print("Output image created with handle: {any}, and swapchain image: {any}\n", .{ self.output_image, swapchain.swap_images[frame_info.current_frame].image });
         return;
     }
 
@@ -699,7 +700,6 @@ pub const RaytracingSystem = struct {
             .tiling = vk.ImageTiling.optimal,
             .usage = vk.ImageUsageFlags{
                 .storage_bit = true,
-                .sampled_bit = true,
                 .transfer_src_bit = true,
             },
             .sharing_mode = vk.SharingMode.exclusive,
@@ -708,6 +708,7 @@ pub const RaytracingSystem = struct {
             .initial_layout = vk.ImageLayout.undefined,
         };
         const image = try vkd.createImage(dev, &image_ci, null);
+
         // Allocate memory
         const mem_reqs = vkd.getImageMemoryRequirements(dev, image);
         const memory = try gc.allocate(mem_reqs, .{}, .{});
@@ -730,6 +731,63 @@ pub const RaytracingSystem = struct {
             },
         };
         const image_view = try vkd.createImageView(dev, &view_ci, null);
+
+        // Use a one-time command buffer for Image transition build
+        var cmdbuf: vk.CommandBuffer = undefined;
+        try gc.vkd.allocateCommandBuffers(gc.dev, &.{
+            .command_pool = gc.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&cmdbuf));
+
+        try gc.vkd.beginCommandBuffer(cmdbuf, &.{
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        });
+
+        var output_to_copy_barrier = vk.ImageMemoryBarrier{
+            .s_type = vk.StructureType.image_memory_barrier,
+            .src_access_mask = vk.AccessFlags{},
+            .dst_access_mask = vk.AccessFlags{},
+            .old_layout = vk.ImageLayout.undefined,
+            .new_layout = vk.ImageLayout.general,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresource_range = .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        };
+
+        gc.vkd.cmdPipelineBarrier(
+            cmdbuf,
+            vk.PipelineStageFlags{ .all_commands_bit = true },
+            vk.PipelineStageFlags{ .all_commands_bit = true },
+            undefined,
+            0,
+            null,
+            0,
+            null,
+            1,
+            @ptrCast(&output_to_copy_barrier),
+        );
+
+        try gc.vkd.endCommandBuffer(cmdbuf);
+        const si = vk.SubmitInfo{
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = undefined,
+            .p_wait_dst_stage_mask = undefined,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cmdbuf),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = undefined,
+        };
+        try gc.vkd.queueSubmit(gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
+        try gc.vkd.queueWaitIdle(gc.graphics_queue.handle);
 
         return .{ .image = image, .image_view = image_view, .memory = memory };
     }

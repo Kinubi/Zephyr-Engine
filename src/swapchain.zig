@@ -154,7 +154,8 @@ pub const Swapchain = struct {
 
         // Step 1: Make sure the current frame has finished rendering
         const current = self.swap_images[current_frame];
-
+        // const current = self.currentSwapImage();
+        // _ = current_frame;
         // Step 2: Submit the command buffer
         const wait_stage = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
         try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
@@ -304,7 +305,7 @@ pub const Swapchain = struct {
 
         const render_pass_info = vk.RenderPassBeginInfo{
             .render_pass = self.render_pass,
-            .framebuffer = self.framebuffers[self.image_index],
+            .framebuffer = self.framebuffers[frame_info.current_frame],
             .render_area = scissor,
             .clear_value_count = clear_values.len,
             .p_clear_values = &clear_values,
@@ -351,8 +352,8 @@ pub const Swapchain = struct {
     }
 
     pub fn beginFrame(self: *@This(), frame_info: FrameInfo) !void {
-        if (self.swap_images[self.image_index].image_acquired != .null_handle) {
-            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.swap_images[self.image_index].frame_fence), vk.TRUE, std.math.maxInt(u64));
+        if (self.swap_images[frame_info.current_frame].image_acquired != .null_handle) {
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.swap_images[frame_info.current_frame].frame_fence), vk.TRUE, std.math.maxInt(u64));
         }
 
         if (frame_info.extent.width != self.extent.width or frame_info.extent.height != self.extent.height) {
