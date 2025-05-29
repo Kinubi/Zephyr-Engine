@@ -205,6 +205,7 @@ pub const App = struct {
             .addPoolSize(.storage_image, 1000)
             .addPoolSize(.acceleration_structure_khr, 1000)
             .addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1)
+            .addPoolSize(.storage_buffer, 1000)
             .build();
 
         var raytracing_set_layout_builder = DescriptorSetLayout.Builder{
@@ -215,6 +216,8 @@ pub const App = struct {
             .addBinding(0, .acceleration_structure_khr, .{ .raygen_bit_khr = true }, 1)
             .addBinding(1, .storage_image, .{ .raygen_bit_khr = true }, 1)
             .addBinding(2, .uniform_buffer, .{ .raygen_bit_khr = true }, 1)
+            .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 1)
+            .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 1)
             .build();
 
         // --- Raytracing output image creation ---
@@ -283,6 +286,8 @@ pub const App = struct {
             output_resources.image,
             output_resources.image_view,
             output_resources.memory,
+            self.window.window_props.width,
+            self.window.window_props.height,
         );
 
         // --- Raytracing descriptor set creation and writing ---
@@ -293,13 +298,31 @@ pub const App = struct {
         // Create the SBT (assume 3 groups for now, or pass actual group count)
         try raytracing_system.createShaderBindingTable(3);
 
+        var raytracing_descriptor_set: vk.DescriptorSet = undefined;
+        {
+            var set_writer = DescriptorSetWriter.init(self.gc, @constCast(&raytracing_set_layout), @constCast(&raytracing_pool));
+            // Acceleration structure binding (dummy for now, will update after TLAS creation)
+            const dummy_as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
+            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&raytracing_descriptor_set); // Storage image binding
+            const output_image_info = try raytracing_system.getOutputImageDescriptorInfo();
+            try set_writer.writeImage(1, @constCast(&output_image_info)).build(&raytracing_descriptor_set);
+            for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+                const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
+                try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
+            }
+            const storage_buffer_info = mesh2.vertex_buffer_descriptor;
+            try set_writer.writeBuffer(3, @constCast(&storage_buffer_info)).build(&raytracing_descriptor_set);
+            const storage_buffer_info_2 = mesh2.index_buffer_descriptor;
+            try set_writer.writeBuffer(4, @constCast(&storage_buffer_info_2)).build(&raytracing_descriptor_set);
+        }
+
         last_frame_time = c.glfwGetTime();
         frame_info.global_descriptor_set = global_descriptor_set;
-        //raytracing_system.descriptor_set = raytracing_descriptor_set;
+        raytracing_system.descriptor_set = raytracing_descriptor_set;
     }
 
     pub fn onUpdate(self: *@This()) !bool {
-        std.debug.print("Updating frame {d}\n", .{current_frame});
+        //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
@@ -317,6 +340,7 @@ pub const App = struct {
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
+        frame_info.camera.updateProjectionMatrix();
         var ubo = GlobalUbo{
             .view = frame_info.camera.viewMatrix,
             .projection = frame_info.camera.projectionMatrix,

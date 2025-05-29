@@ -52,6 +52,8 @@ pub const Mesh = struct {
     index_buffer: vk.Buffer = undefined,
     index_buffer_memory: vk.DeviceMemory = undefined,
     vertex_buffer_memory: vk.DeviceMemory = undefined,
+    vertex_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
+    index_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
 
     pub fn init(allocator: std.mem.Allocator) Mesh {
         return .{
@@ -94,6 +96,7 @@ pub const Mesh = struct {
 
         // Store handles
         self.vertex_buffer = device_buffer.buffer;
+        self.vertex_buffer_descriptor = device_buffer.descriptor_info;
         self.vertex_buffer_memory = device_buffer.memory;
         // Don't deinit device_buffer, as we take ownership of its memory
     }
@@ -131,6 +134,7 @@ pub const Mesh = struct {
         // Store handles
         self.index_buffer = device_buffer.buffer;
         self.index_buffer_memory = device_buffer.memory;
+        self.index_buffer_descriptor = device_buffer.descriptor_info;
         // Don't deinit device_buffer, as we take ownership of its memory
     }
 

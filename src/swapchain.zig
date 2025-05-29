@@ -151,7 +151,13 @@ pub const Swapchain = struct {
         const old_handle = self.handle;
         self.deinitExceptSwapchain();
         std.debug.print("Extent: {d} {d}\n", .{ new_extent.width, new_extent.height });
+        const old_acquire = self.image_acquired;
+        const old_finished = self.render_finished;
+        const old_fence = self.frame_fence;
         self.* = try initRecycle(gc, allocator, new_extent, old_handle, .null_handle);
+        self.*.frame_fence = old_fence;
+        self.*.image_acquired = old_acquire;
+        self.*.render_finished = old_finished;
         try self.createRenderPass();
     }
 

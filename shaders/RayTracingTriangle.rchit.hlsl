@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 
+#define HitTriangleVertexPositionsKHR 5335
+#define RayTracingPositionFetchKHR 5336
+
 struct Attributes
 {
     float2 bary;
@@ -24,10 +27,23 @@ struct Payload
 {
     [[vk::location(0)]] float3 hitValue;
 };
+struct Vertex
+{
+  float3 pos;
+  float3 color;
+  float3 normal;
+  float2 uv;
+};
+
+StructuredBuffer<Vertex> vertex_buffer : register(t3);
+StructuredBuffer<uint> index_buffer : register(t4);
 
 [shader("closesthit")]
 void main(inout Payload p, in Attributes attribs)
 {
-    const float3 barycentricCoords = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
-    p.hitValue = barycentricCoords;
+    Vertex vertex_1 = vertex_buffer[index_buffer[3*PrimitiveIndex()]];
+    // const float3 barycentricCoords = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
+    // p.hitValue = barycentricCoords;
+
+    p.hitValue = float3(vertex_1.color.x, vertex_1.color.y, vertex_1.color.z);
 }

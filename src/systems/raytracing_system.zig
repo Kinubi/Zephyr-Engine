@@ -37,6 +37,8 @@ pub const RaytracingSystem = struct {
     descriptor_set_layout: DescriptorSetLayout = undefined,
     descriptor_pool: DescriptorPool = undefined,
     tlas_instance_buffer: Buffer = undefined,
+    width: u32 = 1280,
+    height: u32 = 720,
 
     /// Idiomatic init, matching renderer.SimpleRenderer
     pub fn init(
@@ -49,6 +51,8 @@ pub const RaytracingSystem = struct {
         output_image: vk.Image,
         output_image_view: vk.ImageView,
         output_memory: vk.DeviceMemory,
+        width: u32,
+        height: u32,
     ) !RaytracingSystem {
         const dsl = [_]vk.DescriptorSetLayout{descriptor_set_layout.descriptor_set_layout};
         const layout = try gc.*.vkd.createPipelineLayout(
@@ -72,6 +76,8 @@ pub const RaytracingSystem = struct {
             .output_memory = output_memory,
             .descriptor_set_layout = descriptor_set_layout,
             .descriptor_pool = descriptor_pool,
+            .width = width,
+            .height = height,
             // ...other fields left at default/undefined...
         };
     }
@@ -468,13 +474,25 @@ pub const RaytracingSystem = struct {
     pub fn recordCommandBuffer(self: *RaytracingSystem, frame_info: FrameInfo, swapchain: *Swapchain, group_count: u32, global_ubo_buffer_info: vk.DescriptorBufferInfo) !void {
         const gc = self.gc;
         _ = group_count;
-        try self.descriptor_pool.resetPool();
-        var set_writer = DescriptorWriter.init(gc.*, &self.descriptor_set_layout, &self.descriptor_pool);
-        const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
-        try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set); // Storage image binding
-        const output_image_info = try self.getOutputImageDescriptorInfo();
-        try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);
-        try set_writer.writeBuffer(2, @constCast(&global_ubo_buffer_info)).build(&self.descriptor_set);
+        if (swapchain.extent.width != self.width or swapchain.extent.height != self.height) {
+            self.width = swapchain.extent.width;
+            self.height = swapchain.extent.height;
+            const output_resources = RaytracingSystem.createOutputImage(gc, self.width, self.height) catch |err| {
+                std.debug.print("Failed to create output image: {}\n", .{err});
+                return err;
+            };
+            self.output_image = output_resources.image;
+            self.output_memory = output_resources.memory;
+            self.output_image_view = output_resources.image_view;
+            const output_image_info = try self.getOutputImageDescriptorInfo();
+            try self.descriptor_pool.resetPool();
+            var set_writer = DescriptorWriter.init(gc.*, &self.descriptor_set_layout, &self.descriptor_pool);
+            const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
+            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set); // Storage image binding
+            try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);
+            try set_writer.writeBuffer(2, @constCast(&global_ubo_buffer_info)).build(&self.descriptor_set);
+        }
+
         // --- existing code for binding pipeline, descriptor sets, SBT, etc...
 
         gc.vkd.cmdBindPipeline(frame_info.command_buffer, vk.PipelineBindPoint.ray_tracing_khr, self.pipeline.pipeline);
@@ -529,7 +547,7 @@ pub const RaytracingSystem = struct {
             .stride = 0,
             .size = 0,
         };
-        gc.vkd.cmdTraceRaysKHR(frame_info.command_buffer, &raygen_region, &miss_region, &hit_region, &callable_region, 1280, 720, 1);
+        gc.vkd.cmdTraceRaysKHR(frame_info.command_buffer, &raygen_region, &miss_region, &hit_region, &callable_region, self.width, self.height, 1);
 
         // --- Image layout transitions before ray tracing ---
         // 1. Transition output image to GENERAL for storage write (ray tracing)
