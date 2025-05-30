@@ -87,7 +87,7 @@ pub const Mesh = struct {
             gc,
             @sizeOf(Vertex),
             vertex_count,
-            .{ .vertex_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
+            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
             .{
                 .device_local_bit = true,
             },
@@ -126,7 +126,7 @@ pub const Mesh = struct {
             gc,
             @sizeOf(u32),
             index_count,
-            .{ .index_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
+            .{ .storage_buffer_bit = true, .index_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
             .{ .device_local_bit = true },
         );
         // Copy from staging to device-local

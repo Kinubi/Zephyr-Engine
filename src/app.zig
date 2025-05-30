@@ -200,7 +200,7 @@ pub const App = struct {
             .poolFlags = .{},
             .maxSets = 0,
         };
-        const raytracing_pool = try raytracing_pool_builder
+        var raytracing_pool = try raytracing_pool_builder
             .setMaxSets(1000)
             .addPoolSize(.storage_image, 1000)
             .addPoolSize(.acceleration_structure_khr, 1000)
@@ -282,7 +282,7 @@ pub const App = struct {
             shader_library_raytracing,
             self.allocator,
             raytracing_set_layout,
-            raytracing_pool,
+            &raytracing_pool,
             &swapchain,
             self.window.window_props.width,
             self.window.window_props.height,
@@ -292,7 +292,7 @@ pub const App = struct {
 
         // Build BLAS and TLAS for the current scene
         try raytracing_system.createBLAS(&scene);
-        try raytracing_system.createTLAS(&scene);
+        try raytracing_system.createTLAS(&scene, self.allocator);
         // Create the SBT (assume 3 groups for now, or pass actual group count)
         try raytracing_system.createShaderBindingTable(3);
 
@@ -308,10 +308,21 @@ pub const App = struct {
                 const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
                 try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
             }
-            const storage_buffer_info = model.primitives.slice()[0].mesh.?.vertex_buffer_descriptor;
-            try set_writer.writeBuffer(3, @constCast(&storage_buffer_info)).build(&raytracing_descriptor_set);
-            const storage_buffer_info_2 = model.primitives.slice()[0].mesh.?.index_buffer_descriptor;
-            try set_writer.writeBuffer(4, @constCast(&storage_buffer_info_2)).build(&raytracing_descriptor_set);
+            // Collect all vertex and index buffer descriptors for all meshes in the scene
+
+            for (scene.objects.slice()) |*obj| {
+                if (obj.model) |mdl| {
+                    for (mdl.primitives.slice()) |*primitive| {
+                        if (primitive.mesh) |msh| {
+                            try set_writer.writeBuffer(3, @constCast(&msh.vertex_buffer_descriptor)).build(&raytracing_descriptor_set);
+
+                            try set_writer.writeBuffer(4, @constCast(&msh.index_buffer_descriptor)).build(&raytracing_descriptor_set);
+                        }
+                    }
+                }
+            }
+            // Write arrays to descriptor set (bindings 3 and 4)
+
         }
 
         last_frame_time = c.glfwGetTime();

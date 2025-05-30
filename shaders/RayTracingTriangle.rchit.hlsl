@@ -38,12 +38,16 @@ struct Vertex
 StructuredBuffer<Vertex> vertex_buffer : register(t3);
 StructuredBuffer<uint> index_buffer : register(t4);
 
+
+
+
 [shader("closesthit")]
 void main(inout Payload p, in Attributes attribs)
 {
-    Vertex vertex_1 = vertex_buffer[index_buffer[3*PrimitiveIndex()]];
+    Vertex vertex_1 = vertex_buffer[index_buffer[PrimitiveIndex() * 3]];
     // const float3 barycentricCoords = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
     // p.hitValue = barycentricCoords;
 
-    p.hitValue = float3(vertex_1.color.x, vertex_1.color.y, vertex_1.color.z);
+    //p.hitValue = float3(vertex_1.pos.x, vertex_1.pos.y, vertex_1.pos.z);
+    p.hitValue = float3(vertex_buffer[index_buffer[PrimitiveIndex() * 3]].normal.x, vertex_buffer[index_buffer[PrimitiveIndex() * 3]].normal.y, vertex_buffer[index_buffer[PrimitiveIndex() * 3]].normal.z)/2 + 0.5;
 }

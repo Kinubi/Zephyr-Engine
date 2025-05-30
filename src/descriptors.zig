@@ -162,7 +162,6 @@ pub const DescriptorWriter = struct {
             .p_image_info = undefined,
             .p_texel_buffer_view = undefined,
         };
-
         self.writes.append(write) catch unreachable;
         return self;
     }
