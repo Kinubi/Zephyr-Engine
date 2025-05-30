@@ -74,7 +74,7 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        var mesh2 = Mesh.init(self.allocator);
+        // var mesh2 = Mesh.init(self.allocator);
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
 
@@ -121,13 +121,14 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        try mesh2.loadFromObj(self.allocator, @embedFile("smooth_vase"));
-        try mesh2.createVertexBuffers(&self.gc);
-        try mesh2.createIndexBuffers(&self.gc);
+        // try mesh2.loadFromObj(self.allocator, @embedFile("smooth_vase"));
+        // try mesh2.createVertexBuffers(&self.gc);
+        // try mesh2.createIndexBuffers(&self.gc);
         try mesh3.loadFromObj(self.allocator, @embedFile("cube"));
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
-        const model = Model.init(mesh2);
+        var model = try Model.loadFromObj(self.allocator, @embedFile("smooth_vase"));
+        try model.createBuffers(&self.gc);
         const model2 = Model.init(mesh3);
 
         //var scene: Scene = Scene.init();
@@ -185,13 +186,6 @@ pub const App = struct {
             const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
             try descriptor_set_writer.writeBuffer(0, @constCast(&bufferInfo)).build(&global_descriptor_set);
         }
-
-        // --- Raytracing output image creation ---
-        const output_resources = try RaytracingSystem.createOutputImage(
-            &self.gc,
-            self.window.window_props.width,
-            self.window.window_props.height,
-        );
 
         // --- Raytracing descriptor pool and set layout setup ---
         var raytracing_pool_builder = DescriptorPool.Builder{
@@ -283,9 +277,7 @@ pub const App = struct {
             self.allocator,
             raytracing_set_layout,
             raytracing_pool,
-            output_resources.image,
-            output_resources.image_view,
-            output_resources.memory,
+            &swapchain,
             self.window.window_props.width,
             self.window.window_props.height,
         );
@@ -310,9 +302,9 @@ pub const App = struct {
                 const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
                 try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
             }
-            const storage_buffer_info = mesh2.vertex_buffer_descriptor;
+            const storage_buffer_info = model.primitives.slice()[0].mesh.?.vertex_buffer_descriptor;
             try set_writer.writeBuffer(3, @constCast(&storage_buffer_info)).build(&raytracing_descriptor_set);
-            const storage_buffer_info_2 = mesh2.index_buffer_descriptor;
+            const storage_buffer_info_2 = model.primitives.slice()[0].mesh.?.index_buffer_descriptor;
             try set_writer.writeBuffer(4, @constCast(&storage_buffer_info_2)).build(&raytracing_descriptor_set);
         }
 

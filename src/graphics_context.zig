@@ -294,6 +294,159 @@ pub const GraphicsContext = struct {
         std.debug.assert(tlas != vk.NULL_HANDLE);
         std.debug.assert(output_image_view != vk.NULL_HANDLE);
     }
+
+    pub fn getAccessFlags(layout: vk.ImageLayout) vk.AccessFlags {
+        // Maps VkImageLayout to VkAccessFlags for pipeline barriers
+        return switch (layout) {
+            .undefined => vk.AccessFlags{},
+            .general => vk.AccessFlags{ .shader_write_bit = true, .shader_read_bit = true },
+            .color_attachment_optimal => vk.AccessFlags{ .color_attachment_write_bit = true, .color_attachment_read_bit = true },
+            .depth_stencil_attachment_optimal => vk.AccessFlags{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true },
+            .transfer_src_optimal => vk.AccessFlags{ .transfer_read_bit = true },
+            .transfer_dst_optimal => vk.AccessFlags{ .transfer_write_bit = true },
+            .shader_read_only_optimal => vk.AccessFlags{ .shader_read_bit = true },
+            .present_src_khr => vk.AccessFlags{},
+            else => vk.AccessFlags{},
+        };
+    }
+
+    pub fn getPipelineStageFlags(layout: vk.ImageLayout) vk.PipelineStageFlags {
+        // Maps VkImageLayout to VkPipelineStageFlags for pipeline barriers
+        return switch (layout) {
+            .undefined => vk.PipelineStageFlags{ .top_of_pipe_bit = true },
+            .general => vk.PipelineStageFlags{ .all_commands_bit = true },
+            .color_attachment_optimal => vk.PipelineStageFlags{ .color_attachment_output_bit = true },
+            .depth_stencil_attachment_optimal => vk.PipelineStageFlags{ .early_fragment_tests_bit = true },
+            .transfer_src_optimal, .transfer_dst_optimal => vk.PipelineStageFlags{ .transfer_bit = true },
+            .shader_read_only_optimal => vk.PipelineStageFlags{ .fragment_shader_bit = true },
+            .present_src_khr => vk.PipelineStageFlags{ .bottom_of_pipe_bit = true },
+            else => vk.PipelineStageFlags{ .all_commands_bit = true },
+        };
+    }
+
+    pub fn transitionImageLayout(
+        self: *GraphicsContext,
+        command_buffer: vk.CommandBuffer,
+        image: vk.Image,
+        old_layout: vk.ImageLayout,
+        new_layout: vk.ImageLayout,
+        subresource_range: vk.ImageSubresourceRange,
+    ) void {
+        const src_access_mask = GraphicsContext.getAccessFlags(old_layout);
+        const dst_access_mask = GraphicsContext.getAccessFlags(new_layout);
+        const src_stage = GraphicsContext.getPipelineStageFlags(old_layout);
+        const dst_stage = GraphicsContext.getPipelineStageFlags(new_layout);
+        var barrier = vk.ImageMemoryBarrier{
+            .s_type = vk.StructureType.image_memory_barrier,
+            .src_access_mask = src_access_mask,
+            .dst_access_mask = dst_access_mask,
+            .old_layout = old_layout,
+            .new_layout = new_layout,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresource_range = subresource_range,
+        };
+        self.vkd.cmdPipelineBarrier(
+            command_buffer,
+            src_stage,
+            dst_stage,
+            .{},
+            0,
+            null,
+            0,
+            null,
+            1,
+            @ptrCast(&barrier),
+        );
+    }
+
+    pub fn createImageWithInfo(
+        self: *GraphicsContext,
+        image_info: vk.ImageCreateInfo,
+        memory_properties: vk.MemoryPropertyFlags,
+        image: *vk.Image,
+        memory: *vk.DeviceMemory,
+    ) !void {
+        image.* = try self.vkd.createImage(self.dev, &image_info, null);
+        const mem_reqs = self.vkd.getImageMemoryRequirements(self.dev, image.*);
+        memory.* = try self.allocate(mem_reqs, memory_properties, .{});
+        try self.vkd.bindImageMemory(self.dev, image.*, memory.*, 0);
+    }
+
+    pub fn beginSingleTimeCommands(self: *GraphicsContext) !vk.CommandBuffer {
+        var alloc_info = vk.CommandBufferAllocateInfo{
+            .s_type = vk.StructureType.command_buffer_allocate_info,
+            .command_pool = self.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        };
+        var command_buffer: vk.CommandBuffer = undefined;
+        try self.vkd.allocateCommandBuffers(self.dev, &alloc_info, @ptrCast(&command_buffer));
+        var begin_info = vk.CommandBufferBeginInfo{
+            .s_type = vk.StructureType.command_buffer_begin_info,
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        };
+        try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+        return command_buffer;
+    }
+
+    pub fn endSingleTimeCommands(self: *GraphicsContext, command_buffer: vk.CommandBuffer) !void {
+        try self.vkd.endCommandBuffer(command_buffer);
+        var submit_info = vk.SubmitInfo{
+            .s_type = vk.StructureType.submit_info,
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = null,
+            .p_wait_dst_stage_mask = null,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = null,
+        };
+        try self.vkd.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
+        try self.vkd.queueWaitIdle(self.graphics_queue.handle);
+        self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&command_buffer));
+    }
+
+    pub fn transitionImageLayoutSingleTime(
+        self: *GraphicsContext,
+        image: vk.Image,
+        old_layout: vk.ImageLayout,
+        new_layout: vk.ImageLayout,
+        subresource_range: vk.ImageSubresourceRange,
+    ) !void {
+        // Allocate a single-use command buffer
+        var command_buffer: vk.CommandBuffer = undefined;
+        try self.vkd.allocateCommandBuffers(self.dev, &vk.CommandBufferAllocateInfo{
+            .command_pool = self.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&command_buffer));
+
+        try self.vkd.beginCommandBuffer(command_buffer, &vk.CommandBufferBeginInfo{
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        });
+
+        self.transitionImageLayout(command_buffer, image, old_layout, new_layout, subresource_range);
+
+        try self.vkd.endCommandBuffer(command_buffer);
+
+        const submit_info = vk.SubmitInfo{
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = null,
+            .p_wait_dst_stage_mask = null,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = null,
+        };
+        try self.vkd.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
+        try self.vkd.queueWaitIdle(self.graphics_queue.handle);
+
+        self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&command_buffer));
+    }
 };
 
 pub const Queue = struct {

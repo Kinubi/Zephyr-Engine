@@ -233,7 +233,55 @@ fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
 pub const Model = struct {
     primitives: PrimitivesArray = .{},
 
-    const PrimitivesArray = std.BoundedArray(Primitive, 8);
+    const PrimitivesArray = std.BoundedArray(Primitive, 32);
+
+    pub fn loadFromObj(allocator: std.mem.Allocator, data: []const u8) !Model {
+        const obj = try Obj.parseObj(allocator, data);
+        var arr = PrimitivesArray{};
+        for (obj.meshes) |obj_mesh| {
+            var mesh = Mesh.init(allocator);
+            try mesh.vertices.ensureTotalCapacity(obj.vertices.len);
+            try mesh.indices.ensureTotalCapacity(obj_mesh.indices.len);
+            for (obj_mesh.num_vertices, 0..) |face_vertex_count, face_idx| {
+                for (0..face_vertex_count) |vtx_in_face| {
+                    const idx = obj_mesh.indices[face_idx * face_vertex_count + vtx_in_face];
+                    const pos_idx = idx.vertex.?;
+                    const pos = .{
+                        obj.vertices[pos_idx * 3],
+                        obj.vertices[pos_idx * 3 + 1],
+                        obj.vertices[pos_idx * 3 + 2],
+                    };
+                    const normal = if (idx.normal) |nidx| .{
+                        obj.normals[nidx * 3],
+                        obj.normals[nidx * 3 + 1],
+                        obj.normals[nidx * 3 + 2],
+                    } else .{ 0.0, 0.0, 0.0 };
+                    const uv = if (idx.tex_coord) |tidx| .{
+                        obj.tex_coords[tidx * 2],
+                        obj.tex_coords[tidx * 2 + 1],
+                    } else .{ 0.0, 0.0 };
+                    const vertex = Vertex{
+                        .pos = pos,
+                        .color = .{ 1.0, 1.0, 1.0 },
+                        .normal = normal,
+                        .uv = uv,
+                    };
+                    const vertex_index = vertex_list_contains(mesh.vertices, vertex);
+                    if (vertex_index == -1) {
+                        try mesh.vertices.append(vertex);
+                        try mesh.indices.append(@as(u32, @intCast(mesh.vertices.items.len - 1)));
+                    } else {
+                        try mesh.indices.append(@as(u32, @intCast(vertex_index)));
+                    }
+                }
+            }
+
+            arr.append(.{ .mesh = mesh }) catch unreachable;
+        }
+        return Model{
+            .primitives = arr,
+        };
+    }
 
     pub fn init(mesh: Mesh) Model {
         return Model{
@@ -249,6 +297,15 @@ pub const Model = struct {
         for (self.primitives.constSlice()) |primitive| {
             if (primitive.mesh) |mesh| {
                 mesh.deinit(gc);
+            }
+        }
+    }
+
+    pub fn createBuffers(self: *Model, gc: *GraphicsContext) !void {
+        for (self.primitives.slice()) |*primitive| {
+            if (primitive.mesh) |*mesh| {
+                try mesh.createVertexBuffers(gc);
+                try mesh.createIndexBuffers(gc);
             }
         }
     }

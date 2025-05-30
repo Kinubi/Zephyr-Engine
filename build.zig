@@ -72,6 +72,9 @@ pub fn build(b: *std.Build) !void {
     const obj_mod = b.dependency("zig-obj", .{ .target = target, .optimize = optimize });
     exe.root_module.addImport("zig-obj", obj_mod.module("obj"));
 
+    const zstbi = b.dependency("zstbi", .{});
+    exe.root_module.addImport("zstbi", zstbi.module("root"));
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
