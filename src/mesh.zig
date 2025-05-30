@@ -4,6 +4,7 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Math = @import("utils/math.zig");
 const Obj = @import("zig-obj");
 const Buffer = @import("buffer.zig").Buffer;
+const Texture = @import("texture.zig").Texture;
 
 pub const Vertex = struct {
     pub const binding_description = vk.VertexInputBindingDescription{
@@ -233,11 +234,12 @@ fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
 pub const Model = struct {
     primitives: PrimitivesArray = .{},
 
-    const PrimitivesArray = std.BoundedArray(Primitive, 32);
+    const PrimitivesArray = std.BoundedArray(Primitive, 5);
 
     pub fn loadFromObj(allocator: std.mem.Allocator, data: []const u8) !Model {
         const obj = try Obj.parseObj(allocator, data);
         var arr = PrimitivesArray{};
+
         for (obj.meshes) |obj_mesh| {
             var mesh = Mesh.init(allocator);
             try mesh.vertices.ensureTotalCapacity(obj.vertices.len);
@@ -275,8 +277,12 @@ pub const Model = struct {
                     }
                 }
             }
-
-            arr.append(.{ .mesh = mesh }) catch unreachable;
+            const primitive = try arr.addOne();
+            std.debug.print("Loading model with {any} meshes and {any} vertices and {any} indices\n", .{ obj.meshes.len, obj.vertices.len, obj.meshes[0].indices.len });
+            primitive.* = .{
+                .mesh = mesh,
+            };
+            //try arr.append(.{ .mesh = mesh, .transform = .{} });
         }
         return Model{
             .primitives = arr,
@@ -309,10 +315,28 @@ pub const Model = struct {
             }
         }
     }
+
+    pub fn addTexture(self: *Model, texture: Texture) void {
+        for (self.primitives.slice()) |*primitive| {
+            primitive.texture = texture;
+        }
+    }
+
+    pub fn addTextures(self: *Model, textures: []Texture) void {
+        if (self.primitives.len != textures.len) {
+            std.debug.print("Error: Model has {any} primitives, but {any} textures were provided.\n", .{ self.primitives.len, textures.len });
+            return;
+        }
+        for (0..self.primitives.len) |i| {
+            self.primitives[i].texture = textures[i];
+        }
+    }
 };
 
 pub const Primitive = struct {
     mesh: ?Mesh = null,
+    transfrom: Transform = .{},
+    texture: Texture = undefined,
 };
 
 pub const Transform = struct {

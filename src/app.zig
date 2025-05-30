@@ -22,6 +22,7 @@ const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
+const Texture = @import("texture.zig").Texture;
 const DescriptorSetLayout = @import("descriptors.zig").DescriptorSetLayout;
 const DescriptorPool = @import("descriptors.zig").DescriptorPool;
 const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
@@ -128,6 +129,11 @@ pub const App = struct {
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
         var model = try Model.loadFromObj(self.allocator, @embedFile("smooth_vase"));
+        model.addTexture(try Texture.initFromFile(
+            &self.gc,
+            "textures/missing.png",
+            Texture.ImageFormat.rgba8,
+        ));
         try model.createBuffers(&self.gc);
         const model2 = Model.init(mesh3);
 

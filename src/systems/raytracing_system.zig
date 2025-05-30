@@ -105,6 +105,7 @@ pub const RaytracingSystem = struct {
         if (object_count == 0) {
             return error.NoMeshes;
         }
+        std.debug.print("Number of meshes in scene: {any}\n", .{scene.objects.slice()[0].model.?.primitives});
         const mesh = &scene.objects.slice()[0].model.?.primitives.slice()[0].mesh.?; // Assume first object has a mesh
         const vertex_count = mesh.vertices.items.len;
         const index_count = mesh.indices.items.len;

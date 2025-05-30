@@ -416,36 +416,183 @@ pub const GraphicsContext = struct {
         new_layout: vk.ImageLayout,
         subresource_range: vk.ImageSubresourceRange,
     ) !void {
-        // Allocate a single-use command buffer
-        var command_buffer: vk.CommandBuffer = undefined;
-        try self.vkd.allocateCommandBuffers(self.dev, &vk.CommandBufferAllocateInfo{
-            .command_pool = self.command_pool,
-            .level = .primary,
-            .command_buffer_count = 1,
-        }, @ptrCast(&command_buffer));
-
-        try self.vkd.beginCommandBuffer(command_buffer, &vk.CommandBufferBeginInfo{
-            .flags = .{ .one_time_submit_bit = true },
-            .p_inheritance_info = null,
-        });
-
+        const command_buffer = try self.beginSingleTimeCommands();
+        defer self.endSingleTimeCommands(command_buffer) catch unreachable;
         self.transitionImageLayout(command_buffer, image, old_layout, new_layout, subresource_range);
+        // endSingleTimeCommands will submit and free the command buffer
+    }
 
-        try self.vkd.endCommandBuffer(command_buffer);
-
-        const submit_info = vk.SubmitInfo{
-            .wait_semaphore_count = 0,
-            .p_wait_semaphores = null,
-            .p_wait_dst_stage_mask = null,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&command_buffer),
-            .signal_semaphore_count = 0,
-            .p_signal_semaphores = null,
+    pub fn copyBufferToImageSingleTime(
+        self: *GraphicsContext,
+        buffer: vk.Buffer,
+        image: vk.Image,
+        width: u32,
+        height: u32,
+    ) !void {
+        const command_buffer = try self.beginSingleTimeCommands();
+        defer self.endSingleTimeCommands(command_buffer) catch unreachable;
+        const region = vk.BufferImageCopy{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_subresource = .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .mip_level = 0,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+            .image_extent = .{ .width = width, .height = height, .depth = 1 },
         };
-        try self.vkd.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
-        try self.vkd.queueWaitIdle(self.graphics_queue.handle);
+        self.vkd.cmdCopyBufferToImage(
+            command_buffer,
+            buffer,
+            image,
+            vk.ImageLayout.transfer_dst_optimal,
+            1,
+            @ptrCast(&region),
+        );
+    }
 
-        self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&command_buffer));
+    pub fn generateMipmapsSingleTime(
+        self: *GraphicsContext,
+        image: vk.Image,
+        width: u32,
+        height: u32,
+        mip_levels: u32,
+    ) !void {
+        const command_buffer = try self.beginSingleTimeCommands();
+        defer self.endSingleTimeCommands(command_buffer) catch unreachable;
+
+        var mip_width: i32 = @intCast(width);
+        var mip_height: i32 = @intCast(height);
+        for (1..mip_levels) |i| {
+            const src_mip: u32 = @intCast(i - 1);
+            const dst_mip: u32 = @intCast(i);
+            const barrier = vk.ImageMemoryBarrier{
+                .s_type = vk.StructureType.image_memory_barrier,
+                .src_access_mask = vk.AccessFlags{ .transfer_write_bit = true },
+                .dst_access_mask = vk.AccessFlags{ .transfer_read_bit = true },
+                .old_layout = vk.ImageLayout.transfer_dst_optimal,
+                .new_layout = vk.ImageLayout.transfer_src_optimal,
+                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresource_range = .{
+                    .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                    .base_mip_level = src_mip,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+            self.vkd.cmdPipelineBarrier(
+                command_buffer,
+                vk.PipelineStageFlags{ .transfer_bit = true },
+                vk.PipelineStageFlags{ .transfer_bit = true },
+                .{},
+                0,
+                null,
+                0,
+                null,
+                1,
+                @ptrCast(&barrier),
+            );
+            const blit = vk.ImageBlit{
+                .src_subresource = .{
+                    .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                    .mip_level = src_mip,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+                .src_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = mip_width, .y = mip_height, .z = 1 },
+                },
+                .dst_subresource = .{
+                    .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                    .mip_level = dst_mip,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+                .dst_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = @max(1, @divTrunc(mip_width, 2)), .y = @max(1, @divTrunc(mip_height, 2)), .z = 1 },
+                },
+            };
+            self.vkd.cmdBlitImage(
+                command_buffer,
+                image,
+                vk.ImageLayout.transfer_src_optimal,
+                image,
+                vk.ImageLayout.transfer_dst_optimal,
+                1,
+                @ptrCast(&blit),
+                vk.Filter.linear,
+            );
+            // Transition previous mip to SHADER_READ_ONLY_OPTIMAL
+            const barrier2 = vk.ImageMemoryBarrier{
+                .s_type = vk.StructureType.image_memory_barrier,
+                .src_access_mask = vk.AccessFlags{ .transfer_read_bit = true },
+                .dst_access_mask = vk.AccessFlags{ .shader_read_bit = true },
+                .old_layout = vk.ImageLayout.transfer_src_optimal,
+                .new_layout = vk.ImageLayout.shader_read_only_optimal,
+                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresource_range = .{
+                    .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                    .base_mip_level = src_mip,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+            self.vkd.cmdPipelineBarrier(
+                command_buffer,
+                vk.PipelineStageFlags{ .transfer_bit = true },
+                vk.PipelineStageFlags{ .fragment_shader_bit = true },
+                .{},
+                0,
+                null,
+                0,
+                null,
+                1,
+                @ptrCast(&barrier2),
+            );
+            mip_width = @max(1, @divTrunc(mip_width, 2));
+            mip_height = @max(1, @divTrunc(mip_height, 2));
+        }
+        // Final mip level to SHADER_READ_ONLY_OPTIMAL
+        const final_barrier = vk.ImageMemoryBarrier{
+            .s_type = vk.StructureType.image_memory_barrier,
+            .src_access_mask = vk.AccessFlags{ .transfer_write_bit = true },
+            .dst_access_mask = vk.AccessFlags{ .shader_read_bit = true },
+            .old_layout = vk.ImageLayout.transfer_dst_optimal,
+            .new_layout = vk.ImageLayout.shader_read_only_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresource_range = .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = mip_levels - 1,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        };
+        self.vkd.cmdPipelineBarrier(
+            command_buffer,
+            vk.PipelineStageFlags{ .transfer_bit = true },
+            vk.PipelineStageFlags{ .fragment_shader_bit = true },
+            .{},
+            0,
+            null,
+            0,
+            null,
+            1,
+            @ptrCast(&final_barrier),
+        );
     }
 };
 
