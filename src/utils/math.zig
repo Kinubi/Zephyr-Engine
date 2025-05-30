@@ -180,13 +180,24 @@ pub const Mat4 = struct {
     pub fn to_3x4(self: Mat4) [3][4]f32 {
         // Vulkan expects row-major [3][4] (upper 3 rows, all 4 columns)
         var out: [3][4]f32 = undefined;
+        const mat = self.transpose().data;
         for (0..3) |row| {
             for (0..4) |col| {
-                out[row][col] = self.data[row * 4 + col];
+                out[row][col] = mat[row * 4 + col];
             }
         }
 
         return out;
+    }
+
+    pub fn transpose(self: Mat4) Mat4 {
+        var result: [16]f32 = undefined;
+        for (0..4) |row| {
+            for (0..4) |col| {
+                result[row * 4 + col] = self.data[col * 4 + row];
+            }
+        }
+        return Mat4{ .data = result };
     }
 };
 

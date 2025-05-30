@@ -44,10 +44,20 @@ StructuredBuffer<uint> index_buffer : register(t4);
 [shader("closesthit")]
 void main(inout Payload p, in Attributes attribs)
 {
-    Vertex vertex_1 = vertex_buffer[index_buffer[PrimitiveIndex() * 3]];
-    // const float3 barycentricCoords = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
-    // p.hitValue = barycentricCoords;
+    uint i0 = index_buffer[PrimitiveIndex() * 3 + 0];
+    uint i1 = index_buffer[PrimitiveIndex() * 3 + 1];
+    uint i2 = index_buffer[PrimitiveIndex() * 3 + 2];
 
-    //p.hitValue = float3(vertex_1.pos.x, vertex_1.pos.y, vertex_1.pos.z);
-    p.hitValue = float3(vertex_buffer[index_buffer[PrimitiveIndex() * 3]].normal.x, vertex_buffer[index_buffer[PrimitiveIndex() * 3]].normal.y, vertex_buffer[index_buffer[PrimitiveIndex() * 3]].normal.z)/2 + 0.5;
+    Vertex v0 = vertex_buffer[i0];
+    Vertex v1 = vertex_buffer[i1];
+    Vertex v2 = vertex_buffer[i2];
+
+    float3 bary = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
+    float3 normal = normalize(
+        v0.normal * bary.x +
+        v1.normal * bary.y +
+        v2.normal * bary.z
+    );
+
+    p.hitValue = normal * 0.5 + 0.5; 
 }

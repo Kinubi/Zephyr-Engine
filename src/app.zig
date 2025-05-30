@@ -136,6 +136,7 @@ pub const App = struct {
         ));
         try model.createBuffers(&self.gc);
         const model2 = Model.init(mesh3);
+        const model3 = Model.init(mesh);
 
         //var scene: Scene = Scene.init();
 
@@ -144,13 +145,16 @@ pub const App = struct {
         object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
         const object2 = try scene.addObject(model2, null);
-
         object2.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
         object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
 
+        const object5 = try scene.addObject(model3, null);
+        object5.transform.translate(Math.Vec3.init(0, -0.5, 0.5));
+        object5.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
-        object3.transform.translate(Math.Vec3.init(0, -1, 1.5));
-        object3.transform.scale(Math.Vec3.init(0.05, 0, 0));
+        object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
+        object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
         const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
         object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
@@ -201,11 +205,11 @@ pub const App = struct {
             .maxSets = 0,
         };
         var raytracing_pool = try raytracing_pool_builder
-            .setMaxSets(1000)
+            .setMaxSets(10000)
             .addPoolSize(.storage_image, 1000)
             .addPoolSize(.acceleration_structure_khr, 1000)
             .addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1)
-            .addPoolSize(.storage_buffer, 1000)
+            .addPoolSize(.storage_buffer, 10000)
             .build();
 
         var raytracing_set_layout_builder = DescriptorSetLayout.Builder{
@@ -216,8 +220,8 @@ pub const App = struct {
             .addBinding(0, .acceleration_structure_khr, .{ .raygen_bit_khr = true }, 1)
             .addBinding(1, .storage_image, .{ .raygen_bit_khr = true }, 1)
             .addBinding(2, .uniform_buffer, .{ .raygen_bit_khr = true }, 1)
-            .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 1)
-            .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 1)
+            .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 3)
+            .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 3)
             .build();
 
         // --- Raytracing output image creation ---
@@ -308,21 +312,26 @@ pub const App = struct {
                 const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
                 try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
             }
-            // Collect all vertex and index buffer descriptors for all meshes in the scene
 
+            // Collect all index buffer descriptors for all meshes in the scene
+            var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
+            var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
+            defer index_buffer_infos.deinit();
+            defer vertex_buffer_infos.deinit();
             for (scene.objects.slice()) |*obj| {
                 if (obj.model) |mdl| {
                     for (mdl.primitives.slice()) |*primitive| {
                         if (primitive.mesh) |msh| {
-                            try set_writer.writeBuffer(3, @constCast(&msh.vertex_buffer_descriptor)).build(&raytracing_descriptor_set);
-
-                            try set_writer.writeBuffer(4, @constCast(&msh.index_buffer_descriptor)).build(&raytracing_descriptor_set);
+                            try index_buffer_infos.append(msh.index_buffer_descriptor);
+                            try vertex_buffer_infos.append(msh.vertex_buffer_descriptor);
                         }
                     }
                 }
             }
-            // Write arrays to descriptor set (bindings 3 and 4)
-
+            if (index_buffer_infos.items.len > 0) {
+                try set_writer.writeBufferArray(3, vertex_buffer_infos.items).build(&raytracing_descriptor_set);
+                try set_writer.writeBufferArray(4, index_buffer_infos.items).build(&raytracing_descriptor_set);
+            }
         }
 
         last_frame_time = c.glfwGetTime();
@@ -360,8 +369,8 @@ pub const App = struct {
         global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
         try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
 
-        try simple_renderer.render(frame_info);
-        try point_light_renderer.render(frame_info);
+        //try simple_renderer.render(frame_info);
+        //try point_light_renderer.render(frame_info);
 
         // --- Raytracing command buffer recording ---
 

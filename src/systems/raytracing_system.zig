@@ -132,7 +132,7 @@ pub const RaytracingSystem = struct {
                                     .vertex_format = vk.Format.r32g32b32_sfloat,
                                     .vertex_data = .{ .device_address = vertex_device_address },
                                     .vertex_stride = vertex_size,
-                                    .max_vertex = @intCast(vertex_count - 1),
+                                    .max_vertex = @intCast(vertex_count),
                                     .index_type = vk.IndexType.uint32,
                                     .index_data = .{ .device_address = index_device_address },
                                     .transform_data = .{ .device_address = 0 },
@@ -291,7 +291,7 @@ pub const RaytracingSystem = struct {
                     .data = .{ .device_address = instance_device_address },
                 },
             },
-            .flags = vk.GeometryFlagsKHR{},
+            .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
         };
         var tlas_range_info = vk.AccelerationStructureBuildRangeInfoKHR{
             .primitive_count = @intCast(instances.items.len), // Number of instances
@@ -302,7 +302,7 @@ pub const RaytracingSystem = struct {
         var tlas_build_info = vk.AccelerationStructureBuildGeometryInfoKHR{
             .s_type = vk.StructureType.acceleration_structure_build_geometry_info_khr,
             .type = vk.AccelerationStructureTypeKHR.top_level_khr,
-            .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_build_bit_khr = true },
+            .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_trace_bit_khr = true },
             .mode = vk.BuildAccelerationStructureModeKHR.build_khr,
             .geometry_count = 1,
             .p_geometries = @ptrCast(&tlas_geometry),

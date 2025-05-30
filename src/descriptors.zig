@@ -200,6 +200,22 @@ pub const DescriptorWriter = struct {
         return self;
     }
 
+    pub fn writeBufferArray(self: *DescriptorWriter, binding: u32, bufferInfos: []const vk.DescriptorBufferInfo) *DescriptorWriter {
+        const bindingDescription = self.setLayout.bindings.get(binding).?;
+        const write = vk.WriteDescriptorSet{
+            .descriptor_type = bindingDescription.descriptor_type,
+            .dst_binding = binding,
+            .p_buffer_info = @ptrCast(bufferInfos.ptr),
+            .descriptor_count = @as(u32, @intCast(bufferInfos.len)),
+            .dst_set = undefined,
+            .dst_array_element = 0,
+            .p_image_info = undefined,
+            .p_texel_buffer_view = undefined,
+        };
+        self.writes.append(write) catch unreachable;
+        return self;
+    }
+
     pub fn build(self: *DescriptorWriter, set: *vk.DescriptorSet) !void {
         self.pool.allocateDescriptor(self.setLayout.descriptor_set_layout, set) catch unreachable;
         for (0..self.writes.items.len) |i| {
