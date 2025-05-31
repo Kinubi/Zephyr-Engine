@@ -2,12 +2,11 @@ const std = @import("std");
 const vk = @import("vulkan");
 const Buffer = @import("buffer.zig").Buffer;
 const Texture = @import("texture.zig").Texture;
+const Mesh = @import("mesh.zig").Mesh;
 
 pub const Geometry = struct {
     name: []const u8,
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
-    index_count: u32,
+    mesh: Mesh = undefined,
     material: ?*Material = null,
     // Optional: BLAS for raytracing
     blas: ?*anyopaque = null, // Replace with actual BLAS type if available
@@ -15,8 +14,8 @@ pub const Geometry = struct {
     // ...
 
     pub fn deinit(self: *Geometry, allocator: std.mem.Allocator) void {
-        self.vertex_buffer.deinit();
-        self.index_buffer.deinit();
+        self.mesh.deinit();
+
         if (self.material) |mat| mat.deinit(allocator);
         // TODO: deinit BLAS if used
     }

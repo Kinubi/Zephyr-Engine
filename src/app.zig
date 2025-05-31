@@ -77,7 +77,6 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        // var mesh2 = Mesh.init(self.allocator);
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
 
@@ -124,39 +123,29 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        // try mesh2.loadFromObj(self.allocator, @embedFile("smooth_vase"));
-        // try mesh2.createVertexBuffers(&self.gc);
-        // try mesh2.createIndexBuffers(&self.gc);
         try mesh3.loadFromObj(self.allocator, @embedFile("cube"));
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
         const model = try Model.loadFromObj(self.allocator, &self.gc, @embedFile("smooth_vase"), "smooth_vase");
-        // model.addTexture(@constCast(&(try Texture.initFromFile(
-        //     &self.gc,
-        //     "textures/missing.png",
-        //     Texture.ImageFormat.rgba8,
-        // ))));
 
         // --- Debug: Print mesh info for each model ---
         std.debug.print("[DEBUG] model.meshes.items.len = {}\n", .{model.meshes.items.len});
         for (model.meshes.items, 0..) |mm, i| {
-            const vertex_count = mm.geometry.vertex_buffer.buffer_size / @sizeOf(Vertex);
-            std.debug.print("[DEBUG] model.mesh[{}] geometry: vertex_buffer.size={} ({} verts), index_buffer.size={}, index_count={}\n", .{ i, mm.geometry.vertex_buffer.buffer_size, vertex_count, mm.geometry.index_buffer.buffer_size, mm.geometry.index_count });
+            const vertex_count = mm.geometry.mesh.vertices.items.len;
+            std.debug.print("[DEBUG] model.mesh[{}] geometry: vertex_buffer.size={} ({} verts), index_buffer.size={}, index_count={}\n", .{ i, vertex_count * @sizeOf(Vertex), vertex_count, mm.geometry.mesh.indices.items.len * @sizeOf(u32), mm.geometry.mesh.indices.items.len });
         }
-
-        // Use new user-friendly helpers for model/object creation
-        const object2 = try scene.addModelFromMesh(self.allocator, &mesh3, &self.gc, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
-        std.debug.print("[DEBUG] Added object2 with model: {} meshes\n", .{if (object2.model) |m| m.meshes.items.len else 0});
-        object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
-
-        const object5 = try scene.addModelFromMesh(self.allocator, &mesh, &self.gc, "mesh", null);
-        std.debug.print("[DEBUG] Added object5 with model: {} meshes\n", .{if (object5.model) |m| m.meshes.items.len else 0});
-
-        // Add model loaded from OBJ (no manual heap allocation needed)
         const object = try scene.addModel(self.allocator, model, null);
         std.debug.print("[DEBUG] Added object with model: {} meshes\n", .{if (object.model) |m| m.meshes.items.len else 0});
         object.transform.translate(Math.Vec3.init(0, -1.5, 0.5));
         object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+
+        // Use new user-friendly helpers for model/object creation
+        const object2 = try scene.addModelFromMesh(self.allocator, mesh3, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
+        std.debug.print("[DEBUG] Added object2 with model: {} meshes\n", .{if (object2.model) |m| m.meshes.items.len else 0});
+        object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
+
+        const object5 = try scene.addModelFromMesh(self.allocator, mesh, "mesh", null);
+        std.debug.print("[DEBUG] Added object5 with model: {} meshes\n", .{if (object5.model) |m| m.meshes.items.len else 0});
 
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
         object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
@@ -211,11 +200,11 @@ pub const App = struct {
             .maxSets = 0,
         };
         var raytracing_pool = try raytracing_pool_builder
-            .setMaxSets(10000)
+            .setMaxSets(100000)
             .addPoolSize(.storage_image, 1000)
             .addPoolSize(.acceleration_structure_khr, 1000)
             .addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1)
-            .addPoolSize(.storage_buffer, 10000)
+            .addPoolSize(.storage_buffer, 100000)
             .build();
 
         var raytracing_set_layout_builder = DescriptorSetLayout.Builder{
@@ -325,10 +314,10 @@ pub const App = struct {
             for (scene.objects.slice()) |*obj| {
                 if (obj.model) |mdl| {
                     for (mdl.meshes.items) |model_mesh| {
-                        std.debug.print("[DEBUG] model_mesh.geometry.index_buffer.descriptor_info: {any}\n", .{model_mesh.geometry.index_buffer.descriptor_info});
+                        std.debug.print("[DEBUG] model_mesh.geometry.index_buffer.descriptor_info: {any}\n", .{model_mesh.geometry.mesh.index_buffer_descriptor});
                         const geometry = model_mesh.geometry;
-                        try index_buffer_infos.append(geometry.index_buffer.descriptor_info);
-                        try vertex_buffer_infos.append(geometry.vertex_buffer.descriptor_info);
+                        try vertex_buffer_infos.append(geometry.mesh.vertex_buffer_descriptor);
+                        try index_buffer_infos.append(geometry.mesh.index_buffer_descriptor);
                     }
                 }
             }
@@ -392,8 +381,8 @@ pub const App = struct {
             global_UBO_buffers.?[i].deinit();
         }
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
-        point_light_renderer.deinit(self.allocator);
-        simple_renderer.deinit(self.allocator);
+        point_light_renderer.deinit();
+        simple_renderer.deinit();
 
         // Clean up the raytracing system
         raytracing_system.deinit();

@@ -25,9 +25,9 @@ pub const GameObject = struct {
         }
     }
 
-    pub fn deinit(self: GameObject, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: GameObject, gc: GraphicsContext) void {
         if (self.model) |model| {
-            model.deinit(allocator);
+            model.deinit(gc);
         }
     }
 };

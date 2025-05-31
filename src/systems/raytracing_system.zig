@@ -112,18 +112,18 @@ pub const RaytracingSystem = struct {
                 for (model.meshes.items) |*model_mesh| {
                     const geometry = model_mesh.geometry;
                     mesh_count += 1;
-                    const vertex_buffer = geometry.vertex_buffer;
-                    const index_buffer = geometry.index_buffer;
-                    const vertex_count = vertex_buffer.buffer_size / @sizeOf(Vertex);
-                    const index_count = geometry.index_count;
+                    const vertex_buffer = geometry.mesh.vertex_buffer;
+                    const index_buffer = geometry.mesh.index_buffer;
+                    const vertex_count = geometry.mesh.vertices.items.len;
+                    const index_count = geometry.mesh.indices.items.len;
                     const vertex_size = @sizeOf(Vertex);
                     var vertex_address_info = vk.BufferDeviceAddressInfo{
                         .s_type = vk.StructureType.buffer_device_address_info,
-                        .buffer = vertex_buffer.buffer,
+                        .buffer = vertex_buffer,
                     };
                     var index_address_info = vk.BufferDeviceAddressInfo{
                         .s_type = vk.StructureType.buffer_device_address_info,
-                        .buffer = index_buffer.buffer,
+                        .buffer = index_buffer,
                     };
                     const vertex_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &vertex_address_info);
                     const index_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &index_address_info);

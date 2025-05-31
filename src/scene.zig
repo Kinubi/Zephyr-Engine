@@ -17,10 +17,10 @@ pub const Scene = struct {
         };
     }
 
-    pub fn deinit(self: *Scene, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Scene, gc: GraphicsContext) void {
         std.debug.print("Deinitializing Scene with {any} objects\n", .{self.objects.constSlice().len});
         for (self.objects.constSlice()) |object| {
-            object.deinit(allocator);
+            object.deinit(gc);
         }
     }
 
@@ -39,8 +39,8 @@ pub const Scene = struct {
         return object;
     }
 
-    pub fn addModelFromMesh(self: *Scene, allocator: std.mem.Allocator, mesh: *Mesh, gc: *GraphicsContext, name: []const u8, transform: ?Math.Vec3) !*GameObject {
-        const model = try fromMesh(allocator, mesh, gc, name);
+    pub fn addModelFromMesh(self: *Scene, allocator: std.mem.Allocator, mesh: Mesh, name: []const u8, transform: ?Math.Vec3) !*GameObject {
+        const model = try fromMesh(allocator, mesh, name);
         const object = try self.addObject(model, null);
         if (transform) |t| {
             object.transform.translate(t);

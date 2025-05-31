@@ -193,22 +193,6 @@ pub const Mesh = struct {
 
         std.debug.print("Vertices: {any}, Indices: {any}\n", .{ self.vertices.items.len, self.indices.items.len });
     }
-
-    pub fn toGeometry(self: *Mesh, allocator: std.mem.Allocator, gc: *GraphicsContext, name: []const u8) !*Geometry {
-        // Create buffers and fill Geometry
-        try self.createVertexBuffers(gc);
-        try self.createIndexBuffers(gc);
-        const geometry = try allocator.create(Geometry);
-        geometry.* = Geometry{
-            .name = name,
-            .vertex_buffer = Buffer.fromVkBuffer(gc, self.vertex_buffer, self.vertex_buffer_memory, self.vertex_buffer_descriptor, @sizeOf(Vertex) * self.vertices.items.len),
-            .index_buffer = Buffer.fromVkBuffer(gc, self.index_buffer, self.index_buffer_memory, self.index_buffer_descriptor, @sizeOf(u32) * self.indices.items.len),
-            .index_count = @intCast(self.indices.items.len),
-            .material = null,
-            .blas = null,
-        };
-        return geometry;
-    }
 };
 
 fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
@@ -222,7 +206,7 @@ fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
 }
 
 pub const ModelMesh = struct {
-    geometry: *Geometry,
+    geometry: Geometry,
     local_transform: Transform = .{}, // relative to model root or parent
 };
 
@@ -232,7 +216,7 @@ pub const Model = struct {
     pub fn loadFromObj(allocator: std.mem.Allocator, gc: *GraphicsContext, data: []const u8, name: []const u8) !Model {
         const obj = try Obj.parseObj(allocator, data);
         var meshes = std.ArrayList(ModelMesh).init(allocator);
-        for (obj.meshes, 0..) |obj_mesh, mesh_idx| {
+        for (obj.meshes) |obj_mesh| {
             var mesh = Mesh.init(allocator);
             try mesh.vertices.ensureTotalCapacity(obj.vertices.len);
             try mesh.indices.ensureTotalCapacity(obj_mesh.indices.len);
@@ -309,8 +293,9 @@ pub const Model = struct {
                 }
                 index_offset += face_vertex_count;
             }
-            const geom_name = try std.fmt.allocPrint(allocator, "{s}_mesh_{d}", .{ name, mesh_idx });
-            const geometry = try mesh.toGeometry(allocator, gc, geom_name);
+            try mesh.createIndexBuffers(gc);
+            try mesh.createVertexBuffers(gc);
+            const geometry = Geometry{ .mesh = mesh, .name = name };
             try meshes.append(ModelMesh{
                 .geometry = geometry,
                 .local_transform = Transform{},
@@ -325,9 +310,9 @@ pub const Model = struct {
     //     @compileError("Model.init(mesh) is deprecated. Use Model with meshes array and ModelMesh instead.");
     // }
 
-    pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Model, gc: GraphicsContext) void {
         for (self.meshes.items) |mesh| {
-            mesh.geometry.deinit(allocator);
+            mesh.geometry.mesh.deinit(gc);
         }
         self.meshes.deinit();
     }
@@ -434,8 +419,11 @@ pub fn loadModelWithTransforms(
     };
 }
 
-pub fn fromMesh(allocator: std.mem.Allocator, mesh: *Mesh, gc: *GraphicsContext, name: []const u8) !*Model {
-    const geom = try mesh.toGeometry(allocator, gc, name);
+pub fn fromMesh(allocator: std.mem.Allocator, mesh: Mesh, name: []const u8) !*Model {
+    const geom = Geometry{
+        .mesh = mesh,
+        .name = name,
+    };
     const model = try allocator.create(Model);
     model.* = Model{
         .meshes = blk: {

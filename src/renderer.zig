@@ -47,9 +47,9 @@ pub const SimpleRenderer = struct {
         return SimpleRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout, .camera = camera };
     }
 
-    pub fn deinit(self: *SimpleRenderer, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SimpleRenderer) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
-        self.scene.deinit(allocator);
+        self.scene.deinit(self.gc.*);
         self.pipeline.deinit();
     }
 
@@ -115,9 +115,9 @@ pub const PointLightRenderer = struct {
         global_ubo.num_point_lights = num_lights;
     }
 
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *@This()) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
-        self.scene.deinit(allocator);
+        self.scene.deinit(self.gc.*);
         self.pipeline.deinit();
     }
 
