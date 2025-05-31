@@ -105,128 +105,134 @@ pub const RaytracingSystem = struct {
         self.blas_handles.clearRetainingCapacity();
         self.blas_buffers.clearRetainingCapacity();
         var mesh_count: usize = 0;
-        for (scene.objects.slice()) |*object| {
+        std.debug.print("[RaytracingSystem] Scene has {} objects\n", .{scene.objects.len});
+        for (scene.objects.slice(), 0..) |*object, obj_idx| {
             if (object.model) |model| {
-                for (model.primitives.slice()) |*primitive| {
-                    if (primitive.mesh) |mesh| {
-                        mesh_count += 1;
-                        const vertex_count = mesh.vertices.items.len;
-                        const index_count = mesh.indices.items.len;
-                        const vertex_size = @sizeOf(Vertex);
-                        var vertex_address_info = vk.BufferDeviceAddressInfo{
-                            .s_type = vk.StructureType.buffer_device_address_info,
-                            .buffer = mesh.vertex_buffer,
-                        };
-                        var index_address_info = vk.BufferDeviceAddressInfo{
-                            .s_type = vk.StructureType.buffer_device_address_info,
-                            .buffer = mesh.index_buffer,
-                        };
-                        const vertex_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &vertex_address_info);
-                        const index_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &index_address_info);
-                        var geometry = vk.AccelerationStructureGeometryKHR{
-                            .s_type = vk.StructureType.acceleration_structure_geometry_khr,
-                            .geometry_type = vk.GeometryTypeKHR.triangles_khr,
-                            .geometry = .{
-                                .triangles = vk.AccelerationStructureGeometryTrianglesDataKHR{
-                                    .s_type = vk.StructureType.acceleration_structure_geometry_triangles_data_khr,
-                                    .vertex_format = vk.Format.r32g32b32_sfloat,
-                                    .vertex_data = .{ .device_address = vertex_device_address },
-                                    .vertex_stride = vertex_size,
-                                    .max_vertex = @intCast(vertex_count),
-                                    .index_type = vk.IndexType.uint32,
-                                    .index_data = .{ .device_address = index_device_address },
-                                    .transform_data = .{ .device_address = 0 },
-                                },
+                std.debug.print("[RaytracingSystem] Object {} has model with {} meshes\n", .{ obj_idx, model.meshes.items.len });
+                for (model.meshes.items) |*model_mesh| {
+                    const geometry = model_mesh.geometry;
+                    mesh_count += 1;
+                    const vertex_buffer = geometry.vertex_buffer;
+                    const index_buffer = geometry.index_buffer;
+                    const vertex_count = vertex_buffer.buffer_size / @sizeOf(Vertex);
+                    const index_count = geometry.index_count;
+                    const vertex_size = @sizeOf(Vertex);
+                    var vertex_address_info = vk.BufferDeviceAddressInfo{
+                        .s_type = vk.StructureType.buffer_device_address_info,
+                        .buffer = vertex_buffer.buffer,
+                    };
+                    var index_address_info = vk.BufferDeviceAddressInfo{
+                        .s_type = vk.StructureType.buffer_device_address_info,
+                        .buffer = index_buffer.buffer,
+                    };
+                    const vertex_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &vertex_address_info);
+                    const index_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &index_address_info);
+                    var geometry_vk = vk.AccelerationStructureGeometryKHR{
+                        .s_type = vk.StructureType.acceleration_structure_geometry_khr,
+                        .geometry_type = vk.GeometryTypeKHR.triangles_khr,
+                        .geometry = .{
+                            .triangles = vk.AccelerationStructureGeometryTrianglesDataKHR{
+                                .s_type = vk.StructureType.acceleration_structure_geometry_triangles_data_khr,
+                                .vertex_format = vk.Format.r32g32b32_sfloat,
+                                .vertex_data = .{ .device_address = vertex_device_address },
+                                .vertex_stride = vertex_size,
+                                .max_vertex = @intCast(vertex_count),
+                                .index_type = vk.IndexType.uint32,
+                                .index_data = .{ .device_address = index_device_address },
+                                .transform_data = .{ .device_address = 0 },
                             },
-                            .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
-                        };
-                        var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
-                            .primitive_count = @intCast(index_count / 3),
-                            .primitive_offset = 0,
-                            .first_vertex = 0,
-                            .transform_offset = 0,
-                        };
-                        var build_info = vk.AccelerationStructureBuildGeometryInfoKHR{
-                            .s_type = vk.StructureType.acceleration_structure_build_geometry_info_khr,
-                            .type = vk.AccelerationStructureTypeKHR.bottom_level_khr,
-                            .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_build_bit_khr = true },
-                            .mode = vk.BuildAccelerationStructureModeKHR.build_khr,
-                            .geometry_count = 1,
-                            .p_geometries = @ptrCast(&geometry),
-                            .scratch_data = .{ .device_address = 0 },
-                        };
-                        var size_info = vk.AccelerationStructureBuildSizesInfoKHR{
-                            .s_type = vk.StructureType.acceleration_structure_build_sizes_info_khr,
-                            .build_scratch_size = 0,
-                            .acceleration_structure_size = 0,
-                            .update_scratch_size = 0,
-                        };
-                        var primitive_count: u32 = @intCast(index_count / 3);
-                        self.gc.vkd.getAccelerationStructureBuildSizesKHR(self.gc.*.dev, vk.AccelerationStructureBuildTypeKHR.device_khr, &build_info, @ptrCast(&primitive_count), &size_info);
-                        const blas_buffer = try Buffer.init(
-                            self.gc,
-                            size_info.acceleration_structure_size,
-                            1,
-                            .{ .acceleration_structure_storage_bit_khr = true, .shader_device_address_bit = true },
-                            .{ .device_local_bit = true },
-                        );
-                        var as_create_info = vk.AccelerationStructureCreateInfoKHR{
-                            .s_type = vk.StructureType.acceleration_structure_create_info_khr,
-                            .buffer = blas_buffer.buffer,
-                            .size = size_info.acceleration_structure_size,
-                            .type = vk.AccelerationStructureTypeKHR.bottom_level_khr,
-                            .device_address = 0,
-                            .offset = 0,
-                        };
-                        const blas = try self.gc.vkd.createAccelerationStructureKHR(self.gc.dev, &as_create_info, null);
-                        // Allocate scratch buffer
-                        const scratch_buffer = try Buffer.init(
-                            self.gc,
-                            size_info.build_scratch_size,
-                            1,
-                            .{ .storage_buffer_bit = true, .shader_device_address_bit = true },
-                            .{ .device_local_bit = true },
-                        );
-                        var scratch_address_info = vk.BufferDeviceAddressInfo{
-                            .s_type = vk.StructureType.buffer_device_address_info,
-                            .buffer = scratch_buffer.buffer,
-                        };
-                        const scratch_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &scratch_address_info);
-                        build_info.scratch_data.device_address = scratch_device_address;
-                        build_info.dst_acceleration_structure = blas;
-                        // Record build command
-                        var cmdbuf: vk.CommandBuffer = undefined;
-                        try self.gc.vkd.allocateCommandBuffers(self.gc.dev, &.{
-                            .command_pool = self.gc.command_pool,
-                            .level = .primary,
-                            .command_buffer_count = 1,
-                        }, @ptrCast(&cmdbuf));
-                        try self.gc.vkd.beginCommandBuffer(cmdbuf, &.{
-                            .flags = .{ .one_time_submit_bit = true },
-                            .p_inheritance_info = null,
-                        });
-                        const p_range_info = &range_info;
-                        self.gc.vkd.cmdBuildAccelerationStructuresKHR(cmdbuf, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
-                        try self.gc.vkd.endCommandBuffer(cmdbuf);
-                        const si = vk.SubmitInfo{
-                            .wait_semaphore_count = 0,
-                            .p_wait_semaphores = undefined,
-                            .p_wait_dst_stage_mask = undefined,
-                            .command_buffer_count = 1,
-                            .p_command_buffers = @ptrCast(&cmdbuf),
-                            .signal_semaphore_count = 0,
-                            .p_signal_semaphores = undefined,
-                        };
-                        try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-                        try self.gc.vkd.queueWaitIdle(self.gc.graphics_queue.handle);
-                        try self.blas_handles.append(blas);
-                        try self.blas_buffers.append(blas_buffer);
-                        // Optionally deinit scratch_buffer here
-                    }
+                        },
+                        .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
+                    };
+                    var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
+                        .primitive_count = @intCast(index_count / 3),
+                        .primitive_offset = 0,
+                        .first_vertex = 0,
+                        .transform_offset = 0,
+                    };
+                    var build_info = vk.AccelerationStructureBuildGeometryInfoKHR{
+                        .s_type = vk.StructureType.acceleration_structure_build_geometry_info_khr,
+                        .type = vk.AccelerationStructureTypeKHR.bottom_level_khr,
+                        .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_build_bit_khr = true },
+                        .mode = vk.BuildAccelerationStructureModeKHR.build_khr,
+                        .geometry_count = 1,
+                        .p_geometries = @ptrCast(&geometry_vk),
+                        .scratch_data = .{ .device_address = 0 },
+                    };
+                    var size_info = vk.AccelerationStructureBuildSizesInfoKHR{
+                        .s_type = vk.StructureType.acceleration_structure_build_sizes_info_khr,
+                        .build_scratch_size = 0,
+                        .acceleration_structure_size = 0,
+                        .update_scratch_size = 0,
+                    };
+                    var primitive_count: u32 = @intCast(index_count / 3);
+                    self.gc.vkd.getAccelerationStructureBuildSizesKHR(self.gc.*.dev, vk.AccelerationStructureBuildTypeKHR.device_khr, &build_info, @ptrCast(&primitive_count), &size_info);
+                    const blas_buffer = try Buffer.init(
+                        self.gc,
+                        size_info.acceleration_structure_size,
+                        1,
+                        .{ .acceleration_structure_storage_bit_khr = true, .shader_device_address_bit = true },
+                        .{ .device_local_bit = true },
+                    );
+                    var as_create_info = vk.AccelerationStructureCreateInfoKHR{
+                        .s_type = vk.StructureType.acceleration_structure_create_info_khr,
+                        .buffer = blas_buffer.buffer,
+                        .size = size_info.acceleration_structure_size,
+                        .type = vk.AccelerationStructureTypeKHR.bottom_level_khr,
+                        .device_address = 0,
+                        .offset = 0,
+                    };
+                    const blas = try self.gc.vkd.createAccelerationStructureKHR(self.gc.dev, &as_create_info, null);
+                    // Allocate scratch buffer
+                    const scratch_buffer = try Buffer.init(
+                        self.gc,
+                        size_info.build_scratch_size,
+                        1,
+                        .{ .storage_buffer_bit = true, .shader_device_address_bit = true },
+                        .{ .device_local_bit = true },
+                    );
+                    var scratch_address_info = vk.BufferDeviceAddressInfo{
+                        .s_type = vk.StructureType.buffer_device_address_info,
+                        .buffer = scratch_buffer.buffer,
+                    };
+                    const scratch_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &scratch_address_info);
+                    build_info.scratch_data.device_address = scratch_device_address;
+                    build_info.dst_acceleration_structure = blas;
+                    // Record build command
+                    var cmdbuf: vk.CommandBuffer = undefined;
+                    try self.gc.vkd.allocateCommandBuffers(self.gc.dev, &.{
+                        .command_pool = self.gc.command_pool,
+                        .level = .primary,
+                        .command_buffer_count = 1,
+                    }, @ptrCast(&cmdbuf));
+                    try self.gc.vkd.beginCommandBuffer(cmdbuf, &.{
+                        .flags = .{ .one_time_submit_bit = true },
+                        .p_inheritance_info = null,
+                    });
+                    const p_range_info = &range_info;
+                    self.gc.vkd.cmdBuildAccelerationStructuresKHR(cmdbuf, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
+                    try self.gc.vkd.endCommandBuffer(cmdbuf);
+                    const si = vk.SubmitInfo{
+                        .wait_semaphore_count = 0,
+                        .p_wait_semaphores = undefined,
+                        .p_wait_dst_stage_mask = undefined,
+                        .command_buffer_count = 1,
+                        .p_command_buffers = @ptrCast(&cmdbuf),
+                        .signal_semaphore_count = 0,
+                        .p_signal_semaphores = undefined,
+                    };
+                    try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
+                    try self.gc.vkd.queueWaitIdle(self.gc.graphics_queue.handle);
+                    try self.blas_handles.append(blas);
+                    try self.blas_buffers.append(blas_buffer);
+                    // Optionally deinit scratch_buffer here
                 }
             }
         }
-        if (mesh_count == 0) return error.NoMeshes;
+        if (mesh_count == 0) {
+            std.debug.print("[RaytracingSystem] Warning: No meshes found in scene, skipping BLAS creation.\n", .{});
+            return;
+        }
         std.debug.print("Created {d} BLASes for all meshes in scene\n", .{mesh_count});
     }
 
@@ -237,26 +243,27 @@ pub const RaytracingSystem = struct {
         std.debug.print("Creating TLAS for Scene with {} objects\n", .{scene.objects.len});
         for (scene.objects.slice()) |*object| {
             if (object.model) |model| {
-                std.debug.print("Processing model with {} primitives\n", .{model.primitives.len});
-                for (model.primitives.slice()) |*primitive| {
-                    if (primitive.mesh) |_| {
-                        var blas_addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
-                            .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
-                            .acceleration_structure = self.blas_handles.items[mesh_index],
-                        };
-                        const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_addr_info);
-                        try instances.append(vk.AccelerationStructureInstanceKHR{
-                            .transform = .{ .matrix = object.transform.local2world.to_3x4() },
-                            .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh_index), .mask = 0xFF },
-                            .instance_shader_binding_table_record_offset_and_flags = .{ .instance_shader_binding_table_record_offset = 0, .flags = 0 },
-                            .acceleration_structure_reference = blas_device_address,
-                        });
-                        mesh_index += 1;
-                    }
+                std.debug.print("Processing model with {} meshes\n", .{model.meshes.items.len});
+                for (model.meshes.items) |_| {
+                    var blas_addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
+                        .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
+                        .acceleration_structure = self.blas_handles.items[mesh_index],
+                    };
+                    const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_addr_info);
+                    try instances.append(vk.AccelerationStructureInstanceKHR{
+                        .transform = .{ .matrix = object.transform.local2world.to_3x4() },
+                        .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh_index), .mask = 0xFF },
+                        .instance_shader_binding_table_record_offset_and_flags = .{ .instance_shader_binding_table_record_offset = 0, .flags = 0 },
+                        .acceleration_structure_reference = blas_device_address,
+                    });
+                    mesh_index += 1;
                 }
             }
         }
-        if (instances.items.len == 0) return error.NoMeshes;
+        if (instances.items.len == 0) {
+            std.debug.print("[RaytracingSystem] Warning: No mesh instances found in scene, skipping TLAS creation.\n", .{});
+            return;
+        }
         // --- TLAS instance buffer setup ---
         // Create instance buffer
         var instance_buffer = try Buffer.init(

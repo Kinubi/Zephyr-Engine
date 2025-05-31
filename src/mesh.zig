@@ -5,6 +5,7 @@ const Math = @import("utils/math.zig");
 const Obj = @import("zig-obj");
 const Buffer = @import("buffer.zig").Buffer;
 const Texture = @import("texture.zig").Texture;
+const Geometry = @import("geometry.zig").Geometry;
 
 pub const Vertex = struct {
     pub const binding_description = vk.VertexInputBindingDescription{
@@ -49,11 +50,12 @@ pub const Vertex = struct {
 pub const Mesh = struct {
     vertices: std.ArrayList(Vertex),
     indices: std.ArrayList(u32),
+
     vertex_buffer: vk.Buffer = undefined,
-    index_buffer: vk.Buffer = undefined,
-    index_buffer_memory: vk.DeviceMemory = undefined,
     vertex_buffer_memory: vk.DeviceMemory = undefined,
     vertex_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
+    index_buffer: vk.Buffer = undefined,
+    index_buffer_memory: vk.DeviceMemory = undefined,
     index_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
 
     pub fn init(allocator: std.mem.Allocator) Mesh {
@@ -139,34 +141,6 @@ pub const Mesh = struct {
         // Don't deinit device_buffer, as we take ownership of its memory
     }
 
-    fn uploadIndices(self: @This(), gc: *const GraphicsContext) !void {
-        const staging_buffer = try gc.vkd.createBuffer(gc.dev, &.{
-            .flags = .{},
-            .size = @sizeOf(u32) * self.indices.items.len,
-            .usage = .{ .transfer_src_bit = true },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
-        }, null);
-        defer gc.vkd.destroyBuffer(gc.dev, staging_buffer, null);
-        const mem_reqs = gc.vkd.getBufferMemoryRequirements(gc.dev, staging_buffer);
-        const staging_memory = try gc.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true }, .{ .device_address_bit = true });
-        defer gc.vkd.freeMemory(gc.dev, staging_memory, null);
-        try gc.vkd.bindBufferMemory(gc.dev, staging_buffer, staging_memory, 0);
-
-        {
-            const data = try gc.vkd.mapMemory(gc.dev, staging_memory, 0, vk.WHOLE_SIZE, .{});
-            defer gc.vkd.unmapMemory(gc.dev, staging_memory);
-
-            const gpu_indices: [*]u32 = @ptrCast(@alignCast(data));
-            for (self.indices.items, 0..) |index, i| {
-                gpu_indices[i] = index;
-            }
-        }
-
-        try gc.copyBuffer(self.index_buffer, staging_buffer, @sizeOf(u32) * self.indices.items.len);
-    }
-
     pub fn deinit(self: @This(), gc: GraphicsContext) void {
         self.vertices.deinit();
         self.indices.deinit();
@@ -219,6 +193,22 @@ pub const Mesh = struct {
 
         std.debug.print("Vertices: {any}, Indices: {any}\n", .{ self.vertices.items.len, self.indices.items.len });
     }
+
+    pub fn toGeometry(self: *Mesh, allocator: std.mem.Allocator, gc: *GraphicsContext, name: []const u8) !*Geometry {
+        // Create buffers and fill Geometry
+        try self.createVertexBuffers(gc);
+        try self.createIndexBuffers(gc);
+        const geometry = try allocator.create(Geometry);
+        geometry.* = Geometry{
+            .name = name,
+            .vertex_buffer = Buffer.fromVkBuffer(gc, self.vertex_buffer, self.vertex_buffer_memory, self.vertex_buffer_descriptor, @sizeOf(Vertex) * self.vertices.items.len),
+            .index_buffer = Buffer.fromVkBuffer(gc, self.index_buffer, self.index_buffer_memory, self.index_buffer_descriptor, @sizeOf(u32) * self.indices.items.len),
+            .index_count = @intCast(self.indices.items.len),
+            .material = null,
+            .blas = null,
+        };
+        return geometry;
+    }
 };
 
 fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
@@ -231,22 +221,63 @@ fn vertex_list_contains(haystack: std.ArrayList(Vertex), needle: Vertex) i32 {
     return -1;
 }
 
+pub const ModelMesh = struct {
+    geometry: *Geometry,
+    local_transform: Transform = .{}, // relative to model root or parent
+};
+
 pub const Model = struct {
-    primitives: PrimitivesArray = .{},
+    meshes: std.ArrayList(ModelMesh),
 
-    const PrimitivesArray = std.BoundedArray(Primitive, 5);
-
-    pub fn loadFromObj(allocator: std.mem.Allocator, data: []const u8) !Model {
+    pub fn loadFromObj(allocator: std.mem.Allocator, gc: *GraphicsContext, data: []const u8, name: []const u8) !Model {
         const obj = try Obj.parseObj(allocator, data);
-        var arr = PrimitivesArray{};
-
-        for (obj.meshes) |obj_mesh| {
+        var meshes = std.ArrayList(ModelMesh).init(allocator);
+        for (obj.meshes, 0..) |obj_mesh, mesh_idx| {
             var mesh = Mesh.init(allocator);
             try mesh.vertices.ensureTotalCapacity(obj.vertices.len);
             try mesh.indices.ensureTotalCapacity(obj_mesh.indices.len);
-            for (obj_mesh.num_vertices, 0..) |face_vertex_count, face_idx| {
+            var index_offset: usize = 0;
+            for (obj_mesh.num_vertices) |face_vertex_count| {
+                // Compute face normal if any vertex is missing a normal
+                var face_normal: [3]f32 = .{ 0.0, 0.0, 0.0 };
+                var need_compute_normal = false;
+                var face_positions: [3][3]f32 = undefined;
+                var vtx_count: usize = 0;
                 for (0..face_vertex_count) |vtx_in_face| {
-                    const idx = obj_mesh.indices[face_idx * face_vertex_count + vtx_in_face];
+                    const idx = obj_mesh.indices[index_offset + vtx_in_face];
+                    if (idx.normal == null) need_compute_normal = true;
+                    if (vtx_count < 3) {
+                        const pos_idx = idx.vertex.?;
+                        face_positions[vtx_count] = .{
+                            obj.vertices[pos_idx * 3],
+                            obj.vertices[pos_idx * 3 + 1],
+                            obj.vertices[pos_idx * 3 + 2],
+                        };
+                        vtx_count += 1;
+                    }
+                }
+                if (need_compute_normal and vtx_count == 3) {
+                    // Compute face normal using cross product
+                    const v0 = face_positions[0];
+                    const v1 = face_positions[1];
+                    const v2 = face_positions[2];
+                    const u = .{ v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
+                    const v = .{ v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] };
+                    face_normal = .{
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    };
+                    // Normalize
+                    const len = @sqrt(face_normal[0] * face_normal[0] + face_normal[1] * face_normal[1] + face_normal[2] * face_normal[2]);
+                    if (len > 0.0) {
+                        face_normal[0] /= len;
+                        face_normal[1] /= len;
+                        face_normal[2] /= len;
+                    }
+                }
+                for (0..face_vertex_count) |vtx_in_face| {
+                    const idx = obj_mesh.indices[index_offset + vtx_in_face];
                     const pos_idx = idx.vertex.?;
                     const pos = .{
                         obj.vertices[pos_idx * 3],
@@ -257,7 +288,7 @@ pub const Model = struct {
                         obj.normals[nidx * 3],
                         obj.normals[nidx * 3 + 1],
                         obj.normals[nidx * 3 + 2],
-                    } else .{ 0.0, 0.0, 0.0 };
+                    } else face_normal;
                     const uv = if (idx.tex_coord) |tidx| .{
                         obj.tex_coords[tidx * 2],
                         obj.tex_coords[tidx * 2 + 1],
@@ -276,67 +307,50 @@ pub const Model = struct {
                         try mesh.indices.append(@as(u32, @intCast(vertex_index)));
                     }
                 }
+                index_offset += face_vertex_count;
             }
-            const primitive = try arr.addOne();
-            std.debug.print("Loading model with {any} meshes and {any} vertices and {any} indices\n", .{ obj.meshes.len, obj.vertices.len, obj.meshes[0].indices.len });
-            primitive.* = .{
-                .mesh = mesh,
-            };
-            //try arr.append(.{ .mesh = mesh, .transform = .{} });
+            const geom_name = try std.fmt.allocPrint(allocator, "{s}_mesh_{d}", .{ name, mesh_idx });
+            const geometry = try mesh.toGeometry(allocator, gc, geom_name);
+            try meshes.append(ModelMesh{
+                .geometry = geometry,
+                .local_transform = Transform{},
+            });
         }
         return Model{
-            .primitives = arr,
+            .meshes = meshes,
         };
     }
 
-    pub fn init(mesh: Mesh) Model {
-        return Model{
-            .primitives = PrimitivesArray.fromSlice(&.{
-                .{
-                    .mesh = mesh,
-                },
-            }) catch unreachable,
-        };
+    // pub fn init(mesh: Mesh) Model {
+    //     @compileError("Model.init(mesh) is deprecated. Use Model with meshes array and ModelMesh instead.");
+    // }
+
+    pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
+        for (self.meshes.items) |mesh| {
+            mesh.geometry.deinit(allocator);
+        }
+        self.meshes.deinit();
     }
 
-    pub fn deinit(self: Model, gc: GraphicsContext) void {
-        for (self.primitives.constSlice()) |primitive| {
-            if (primitive.mesh) |mesh| {
-                mesh.deinit(gc);
+    pub fn addTexture(self: *Model, texture: *Texture) void {
+        for (self.meshes.items) |model_mesh| {
+            if (model_mesh.geometry.material) |mat| {
+                mat.base_color_texture = texture;
             }
         }
     }
 
-    pub fn createBuffers(self: *Model, gc: *GraphicsContext) !void {
-        for (self.primitives.slice()) |*primitive| {
-            if (primitive.mesh) |*mesh| {
-                try mesh.createVertexBuffers(gc);
-                try mesh.createIndexBuffers(gc);
-            }
-        }
-    }
-
-    pub fn addTexture(self: *Model, texture: Texture) void {
-        for (self.primitives.slice()) |*primitive| {
-            primitive.texture = texture;
-        }
-    }
-
-    pub fn addTextures(self: *Model, textures: []Texture) void {
-        if (self.primitives.len != textures.len) {
-            std.debug.print("Error: Model has {any} primitives, but {any} textures were provided.\n", .{ self.primitives.len, textures.len });
+    pub fn addTextures(self: *Model, textures: []const *Texture) void {
+        if (self.meshes.items.len != textures.len) {
+            std.debug.print("Error: Model has {any} meshes, but {any} textures were provided.\n", .{ self.meshes.items.len, textures.len });
             return;
         }
-        for (0..self.primitives.len) |i| {
-            self.primitives[i].texture = textures[i];
+        for (self.meshes.items, 0..) |model_mesh, i| {
+            if (model_mesh.geometry.material) |mat| {
+                mat.base_color_texture = textures[i];
+            }
         }
     }
-};
-
-pub const Primitive = struct {
-    mesh: ?Mesh = null,
-    transfrom: Transform = .{},
-    texture: Texture = undefined,
 };
 
 pub const Transform = struct {
@@ -385,3 +399,50 @@ pub const Transform = struct {
         self.object_scale = vec;
     }
 };
+
+// Example loader function for a model with multiple meshes
+pub fn loadModelAsGeometries(allocator: std.mem.Allocator, gc: *GraphicsContext, mesh_datas: []Mesh, name: []const u8) !std.ArrayList(*Geometry) {
+    var geometries = std.ArrayList(*Geometry).init(allocator);
+    for (mesh_datas, 0..) |mesh, i| {
+        const geom_name = try std.fmt.allocPrint(allocator, "{s}_mesh_{d}", .{ name, i });
+        const geometry = try mesh.toGeometry(allocator, gc, geom_name);
+        try geometries.append(geometry);
+    }
+    return geometries;
+}
+
+// Example loader function for a model with multiple meshes and per-mesh transforms
+pub fn loadModelWithTransforms(
+    allocator: std.mem.Allocator,
+    gc: *GraphicsContext,
+    mesh_datas: []Mesh,
+    name: []const u8,
+    transforms: []const Transform,
+) !Model {
+    var meshes = std.ArrayList(ModelMesh).init(allocator);
+    for (mesh_datas, 0..) |mesh, i| {
+        const geom_name = try std.fmt.allocPrint(allocator, "{s}_mesh_{d}", .{ name, i });
+        const geometry = try mesh.toGeometry(allocator, gc, geom_name);
+        const local_transform = if (i < transforms.len) transforms[i] else Transform{};
+        try meshes.append(ModelMesh{
+            .geometry = geometry,
+            .local_transform = local_transform,
+        });
+    }
+    return Model{
+        .meshes = meshes,
+    };
+}
+
+pub fn fromMesh(allocator: std.mem.Allocator, mesh: *Mesh, gc: *GraphicsContext, name: []const u8) !*Model {
+    const geom = try mesh.toGeometry(allocator, gc, name);
+    const model = try allocator.create(Model);
+    model.* = Model{
+        .meshes = blk: {
+            var arr = std.ArrayList(ModelMesh).init(allocator);
+            try arr.append(ModelMesh{ .geometry = geom, .local_transform = .{} });
+            break :blk arr;
+        },
+    };
+    return model;
+}

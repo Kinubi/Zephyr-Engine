@@ -99,4 +99,20 @@ pub const Buffer = struct {
     pub fn invalidateIndex(self: *Buffer, index: usize) vk.Result {
         return self.invalidate(self.alignment_size, index * self.alignment_size);
     }
+
+    pub fn fromVkBuffer(gc: *GraphicsContext, buffer: vk.Buffer, memory: vk.DeviceMemory, descriptor_info: vk.DescriptorBufferInfo, buffer_size: vk.DeviceSize) Buffer {
+        return Buffer{
+            .gc = gc,
+            .instance_size = 0,
+            .instance_count = 0,
+            .usage_flags = .{},
+            .memory_property_flags = .{},
+            .alignment_size = 0,
+            .buffer_size = buffer_size,
+            .buffer = buffer,
+            .memory = memory,
+            .mapped = null,
+            .descriptor_info = descriptor_info,
+        };
+    }
 };

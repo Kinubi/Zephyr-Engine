@@ -14,6 +14,7 @@ const entry_point_definition = @import("shader.zig").entry_point_definition;
 const Vertex = @import("mesh.zig").Vertex;
 const Mesh = @import("mesh.zig").Mesh;
 const Model = @import("mesh.zig").Model;
+const ModelMesh = @import("mesh.zig").ModelMesh;
 const Scene = @import("scene.zig").Scene;
 const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
 const PointLightRenderer = @import("renderer.zig").PointLightRenderer;
@@ -55,6 +56,7 @@ pub const App = struct {
     var global_descriptor_set: vk.DescriptorSet = undefined;
     var frame_index: u32 = 0;
     var scene: Scene = Scene.init();
+
     // Raytracing system field
 
     pub fn init(self: *@This()) !void {
@@ -128,29 +130,33 @@ pub const App = struct {
         try mesh3.loadFromObj(self.allocator, @embedFile("cube"));
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
-        var model = try Model.loadFromObj(self.allocator, @embedFile("smooth_vase"));
-        model.addTexture(try Texture.initFromFile(
-            &self.gc,
-            "textures/missing.png",
-            Texture.ImageFormat.rgba8,
-        ));
-        try model.createBuffers(&self.gc);
-        const model2 = Model.init(mesh3);
-        const model3 = Model.init(mesh);
+        const model = try Model.loadFromObj(self.allocator, &self.gc, @embedFile("smooth_vase"), "smooth_vase");
+        // model.addTexture(@constCast(&(try Texture.initFromFile(
+        //     &self.gc,
+        //     "textures/missing.png",
+        //     Texture.ImageFormat.rgba8,
+        // ))));
 
-        //var scene: Scene = Scene.init();
+        // --- Debug: Print mesh info for each model ---
+        std.debug.print("[DEBUG] model.meshes.items.len = {}\n", .{model.meshes.items.len});
+        for (model.meshes.items, 0..) |mm, i| {
+            const vertex_count = mm.geometry.vertex_buffer.buffer_size / @sizeOf(Vertex);
+            std.debug.print("[DEBUG] model.mesh[{}] geometry: vertex_buffer.size={} ({} verts), index_buffer.size={}, index_count={}\n", .{ i, mm.geometry.vertex_buffer.buffer_size, vertex_count, mm.geometry.index_buffer.buffer_size, mm.geometry.index_count });
+        }
 
-        const object = try scene.addObject(model, null);
-        object.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
-        object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-
-        const object2 = try scene.addObject(model2, null);
-        object2.transform.translate(Math.Vec3.init(0, 0.5, 0.5));
+        // Use new user-friendly helpers for model/object creation
+        const object2 = try scene.addModelFromMesh(self.allocator, &mesh3, &self.gc, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
+        std.debug.print("[DEBUG] Added object2 with model: {} meshes\n", .{if (object2.model) |m| m.meshes.items.len else 0});
         object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
 
-        const object5 = try scene.addObject(model3, null);
-        object5.transform.translate(Math.Vec3.init(0, -0.5, 0.5));
-        object5.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
+        const object5 = try scene.addModelFromMesh(self.allocator, &mesh, &self.gc, "mesh", null);
+        std.debug.print("[DEBUG] Added object5 with model: {} meshes\n", .{if (object5.model) |m| m.meshes.items.len else 0});
+
+        // Add model loaded from OBJ (no manual heap allocation needed)
+        const object = try scene.addModel(self.allocator, model, null);
+        std.debug.print("[DEBUG] Added object with model: {} meshes\n", .{if (object.model) |m| m.meshes.items.len else 0});
+        object.transform.translate(Math.Vec3.init(0, -1.5, 0.5));
+        object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
         object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
@@ -292,8 +298,6 @@ pub const App = struct {
             self.window.window_props.height,
         );
 
-        // --- Raytracing descriptor set creation and writing ---
-
         // Build BLAS and TLAS for the current scene
         try raytracing_system.createBLAS(&scene);
         try raytracing_system.createTLAS(&scene, self.allocator);
@@ -320,11 +324,11 @@ pub const App = struct {
             defer vertex_buffer_infos.deinit();
             for (scene.objects.slice()) |*obj| {
                 if (obj.model) |mdl| {
-                    for (mdl.primitives.slice()) |*primitive| {
-                        if (primitive.mesh) |msh| {
-                            try index_buffer_infos.append(msh.index_buffer_descriptor);
-                            try vertex_buffer_infos.append(msh.vertex_buffer_descriptor);
-                        }
+                    for (mdl.meshes.items) |model_mesh| {
+                        std.debug.print("[DEBUG] model_mesh.geometry.index_buffer.descriptor_info: {any}\n", .{model_mesh.geometry.index_buffer.descriptor_info});
+                        const geometry = model_mesh.geometry;
+                        try index_buffer_infos.append(geometry.index_buffer.descriptor_info);
+                        try vertex_buffer_infos.append(geometry.vertex_buffer.descriptor_info);
                     }
                 }
             }
@@ -388,8 +392,8 @@ pub const App = struct {
             global_UBO_buffers.?[i].deinit();
         }
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
-        point_light_renderer.deinit();
-        simple_renderer.deinit();
+        point_light_renderer.deinit(self.allocator);
+        simple_renderer.deinit(self.allocator);
 
         // Clean up the raytracing system
         raytracing_system.deinit();
@@ -399,3 +403,6 @@ pub const App = struct {
         self.window.deinit();
     }
 };
+
+// --- User-friendly helpers for model/object creation ---
+// (Moved to mesh.zig and scene.zig)
