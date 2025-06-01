@@ -35,6 +35,7 @@ pub const RaytracingSystem = struct {
     descriptor_set_layout: *DescriptorSetLayout = undefined, // pointer, not value
     descriptor_pool: *DescriptorPool = undefined,
     tlas_instance_buffer: Buffer = undefined,
+    tlas_instance_buffer_initialized: bool = false,
     width: u32 = 1280,
     height: u32 = 720,
     blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
@@ -144,6 +145,7 @@ pub const RaytracingSystem = struct {
                         },
                         .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
                     };
+                    std.debug.print("[RaytracingSystem] BLAS mesh {}: index_count = {}, primitive_count = {}\n", .{ mesh_count, index_count, index_count / 3 });
                     var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
                         .primitive_count = @intCast(index_count / 3),
                         .primitive_offset = 0,
@@ -184,7 +186,7 @@ pub const RaytracingSystem = struct {
                     };
                     const blas = try self.gc.vkd.createAccelerationStructureKHR(self.gc.dev, &as_create_info, null);
                     // Allocate scratch buffer
-                    const scratch_buffer = try Buffer.init(
+                    var scratch_buffer = try Buffer.init(
                         self.gc,
                         size_info.build_scratch_size,
                         1,
@@ -199,30 +201,12 @@ pub const RaytracingSystem = struct {
                     build_info.scratch_data.device_address = scratch_device_address;
                     build_info.dst_acceleration_structure = blas;
                     // Record build command
-                    var cmdbuf: vk.CommandBuffer = undefined;
-                    try self.gc.vkd.allocateCommandBuffers(self.gc.dev, &.{
-                        .command_pool = self.gc.command_pool,
-                        .level = .primary,
-                        .command_buffer_count = 1,
-                    }, @ptrCast(&cmdbuf));
-                    try self.gc.vkd.beginCommandBuffer(cmdbuf, &.{
-                        .flags = .{ .one_time_submit_bit = true },
-                        .p_inheritance_info = null,
-                    });
+                    const cmdbuf = try self.gc.beginSingleTimeCommands();
                     const p_range_info = &range_info;
                     self.gc.vkd.cmdBuildAccelerationStructuresKHR(cmdbuf, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
-                    try self.gc.vkd.endCommandBuffer(cmdbuf);
-                    const si = vk.SubmitInfo{
-                        .wait_semaphore_count = 0,
-                        .p_wait_semaphores = undefined,
-                        .p_wait_dst_stage_mask = undefined,
-                        .command_buffer_count = 1,
-                        .p_command_buffers = @ptrCast(&cmdbuf),
-                        .signal_semaphore_count = 0,
-                        .p_signal_semaphores = undefined,
-                    };
-                    try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-                    try self.gc.vkd.queueWaitIdle(self.gc.graphics_queue.handle);
+                    // BLAS build command
+                    try self.gc.endSingleTimeCommands(cmdbuf);
+                    scratch_buffer.deinit();
                     try self.blas_handles.append(blas);
                     try self.blas_buffers.append(blas_buffer);
                     // Optionally deinit scratch_buffer here
@@ -344,7 +328,7 @@ pub const RaytracingSystem = struct {
         const tlas = try self.gc.vkd.createAccelerationStructureKHR(self.gc.dev, &tlas_create_info, null);
         self.tlas = tlas;
         // 4. Allocate scratch buffer
-        const tlas_scratch_buffer = try Buffer.init(
+        var tlas_scratch_buffer = try Buffer.init(
             self.gc,
             tlas_size_info.build_scratch_size,
             1,
@@ -359,36 +343,16 @@ pub const RaytracingSystem = struct {
         tlas_build_info.scratch_data.device_address = tlas_scratch_device_address;
         tlas_build_info.dst_acceleration_structure = tlas;
         // 5. Record build command
-        var cmdbuf: vk.CommandBuffer = undefined;
-        try self.gc.vkd.allocateCommandBuffers(self.gc.dev, &.{
-            .command_pool = self.gc.command_pool,
-            .level = .primary,
-            .command_buffer_count = 1,
-        }, @ptrCast(&cmdbuf));
-        try self.gc.vkd.beginCommandBuffer(cmdbuf, &.{
-            .flags = .{ .one_time_submit_bit = true },
-            .p_inheritance_info = null,
-        });
+        const cmdbuf = try self.gc.beginSingleTimeCommands();
         const tlas_p_range_info = &tlas_range_info;
         self.gc.vkd.cmdBuildAccelerationStructuresKHR(cmdbuf, 1, @ptrCast(&tlas_build_info), @ptrCast(&tlas_p_range_info));
-        try self.gc.vkd.endCommandBuffer(cmdbuf);
-        // 6. The caller (e.g. swapchain or renderer) must now submit and wait for this command buffer
-        // (tlas_buffer should be kept for the lifetime of the TLAS)
-        const si = vk.SubmitInfo{
-            .wait_semaphore_count = 0,
-            .p_wait_semaphores = undefined,
-            .p_wait_dst_stage_mask = undefined,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&cmdbuf),
-            .signal_semaphore_count = 0,
-            .p_signal_semaphores = undefined,
-        };
-        try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-        try self.gc.vkd.queueWaitIdle(self.gc.graphics_queue.handle);
+        // TLAS build command
+        try self.gc.endSingleTimeCommands(cmdbuf);
+        tlas_scratch_buffer.deinit();
         std.debug.print("TLAS created with number of instances: {}\n", .{instances.items.len});
-        //tlas_scratch_buffer.deinit();
         // Store instance buffer for later deinit
         self.tlas_instance_buffer = instance_buffer;
+        self.tlas_instance_buffer_initialized = true;
         return;
     }
 
@@ -460,6 +424,7 @@ pub const RaytracingSystem = struct {
         try gc.copyBuffer(device_sbt_buffer.buffer, upload_buffer.buffer, sbt_size);
 
         // 6. Clean up upload buffer
+        upload_buffer.deinit();
 
         // 7. Store device-local SBT buffer (take ownership, don't deinit)
         self.shader_binding_table = device_sbt_buffer.buffer;
@@ -627,16 +592,21 @@ pub const RaytracingSystem = struct {
     }
 
     pub fn deinit(self: *RaytracingSystem) void {
-        _ = self;
-        // if (self.pipeline != undefined) self.gc.vkd.destroyPipeline(self.gc.dev, self.pipeline, null);
-        // if (self.pipeline_layout != undefined) self.gc.vkd.destroyPipelineLayout(self.gc.dev, self.pipeline_layout, null);
-        // if (self.output_image_view != undefined) self.gc.vkd.destroyImageView(self.gc.dev, self.output_image_view, null);
-        // if (self.output_image != undefined) self.gc.vkd.destroyImage(self.gc.dev, self.output_image, null);
-        // if (self.output_memory != undefined) self.gc.vkd.freeMemory(self.gc.dev, self.output_memory, null);
-        // if (self.shader_binding_table != undefined) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
-        // if (self.shader_binding_table_memory != undefined) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
-        // if (self.blas != undefined) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.blas, null);
-        // if (self.tlas != undefined) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
+        if (self.tlas_instance_buffer_initialized) self.tlas_instance_buffer.deinit();
+        // Deinit all BLAS buffers and destroy BLAS acceleration structures
+        for (self.blas_buffers.items, self.blas_handles.items) |*buf, blas| {
+            buf.deinit();
+            if (blas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas, null);
+        }
+        self.blas_buffers.deinit();
+        self.blas_handles.deinit();
+        // Destroy TLAS acceleration structure and deinit TLAS buffer
+        if (self.tlas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
+        self.tlas_buffer.deinit();
+        // Destroy shader binding table buffer and free its memory
+        if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
+        if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
+        // ...existing code...
     }
 
     pub fn getAccelerationStructureDescriptorInfo(self: *RaytracingSystem) !vk.WriteDescriptorSetAccelerationStructureKHR {

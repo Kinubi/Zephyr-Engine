@@ -180,7 +180,7 @@ pub const App = struct {
             entry_point_definition{},
         });
 
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -195,7 +195,7 @@ pub const App = struct {
             entry_point_definition{},
         });
 
-        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
         // Read raytracing SPV files at runtime instead of @embedFile
@@ -334,12 +334,15 @@ pub const App = struct {
     }
 
     pub fn deinit(self: @This()) void {
+        _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
+
         swapchain.waitForAllFences() catch unreachable;
         global_ubo_set.deinit();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
         simple_renderer.deinit();
         raytracing_system.deinit();
+        scene.deinit(self.gc);
         swapchain.deinit();
         self.gc.deinit();
         self.window.deinit();

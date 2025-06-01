@@ -123,16 +123,12 @@ pub const RaytracingDescriptorSet = struct {
     ) !vk.DescriptorSet {
         var set: vk.DescriptorSet = undefined;
         var writer = DescriptorWriter.init(gc, layout, pool);
-        try writer.writeAccelerationStructure(0, accel_info).build(&set);
-        try writer.writeImage(1, output_image_info).build(&set);
+        try writer.writeAccelerationStructure(0, accel_info).writeImage(1, output_image_info).build(&set);
         for (ubo_infos) |info| {
             try writer.writeBuffer(2, @constCast(&info)).build(&set);
         }
         if (vertex_buffer_infos.len > 0) {
-            try writer.writeBufferArray(3, vertex_buffer_infos).build(&set);
-        }
-        if (index_buffer_infos.len > 0) {
-            try writer.writeBufferArray(4, index_buffer_infos).build(&set);
+            try writer.writeBufferArray(3, vertex_buffer_infos).writeBufferArray(4, index_buffer_infos).build(&set);
         }
         return set;
     }

@@ -12,7 +12,7 @@ pub const Buffer = struct {
     buffer_size: vk.DeviceSize,
     buffer: vk.Buffer = undefined,
     memory: vk.DeviceMemory = undefined,
-    mapped: ?*anyopaque = undefined,
+    mapped: ?*anyopaque = null,
     descriptor_info: vk.DescriptorBufferInfo = undefined,
 
     pub fn init(gc: *GraphicsContext, instance_size: vk.DeviceSize, instance_count: u32, usage_flags: vk.BufferUsageFlags, memory_property_flags: vk.MemoryPropertyFlags) !Buffer {
@@ -20,14 +20,14 @@ pub const Buffer = struct {
 
         const alignment_size: vk.DeviceSize = Buffer.getAlignment(instance_size, lcm);
         const buffer_size = instance_count * alignment_size;
-        var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size };
+        var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size, .mapped = null };
         try gc.createBuffer(self.buffer_size, usage_flags, memory_property_flags, @constCast(&self.buffer), @constCast(&self.memory));
         self.descriptor_info = .{ .buffer = self.buffer, .offset = 0, .range = vk.WHOLE_SIZE };
         return self;
     }
 
     pub fn deinit(self: *Buffer) void {
-        self.unmap();
+        if (self.mapped != null) self.unmap();
         self.gc.vkd.destroyBuffer(self.gc.dev, self.buffer, null);
         self.gc.vkd.freeMemory(self.gc.dev, self.memory, null);
     }

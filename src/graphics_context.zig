@@ -11,8 +11,7 @@ const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_ray_tracing_pipeline.name,
     vk.extensions.khr_ray_query.name,
     vk.extensions.khr_deferred_host_operations.name,
-        //vk.extensions.khr_maintenance_8.name,
-        //vk.extensions.khr_portability_subset.name,
+    vk.extensions.ext_swapchain_maintenance_1.name,
 };
 
 const optional_device_extensions = [_][*:0]const u8{};
@@ -39,6 +38,7 @@ const apis: []const vk.ApiInfo = &.{
     vk.extensions.khr_swapchain,
     vk.extensions.khr_ray_query,
     vk.extensions.khr_acceleration_structure,
+    vk.extensions.ext_swapchain_maintenance_1,
 };
 
 /// Next, pass the `apis` to the wrappers to create dispatch tables.
@@ -203,39 +203,15 @@ pub const GraphicsContext = struct {
         }, null);
     }
 
-    pub fn copyBuffer(self: @This(), dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
-        var cmdbuf: vk.CommandBuffer = undefined;
-        try self.vkd.allocateCommandBuffers(self.dev, &.{
-            .command_pool = self.command_pool,
-            .level = .primary,
-            .command_buffer_count = 1,
-        }, @ptrCast(&cmdbuf));
-
-        try self.vkd.beginCommandBuffer(cmdbuf, &.{
-            .flags = .{ .one_time_submit_bit = true },
-            .p_inheritance_info = null,
-        });
-
+    pub fn copyBuffer(self: *@This(), dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
+        const cmdbuf = try self.beginSingleTimeCommands();
         const region = vk.BufferCopy{
             .src_offset = 0,
             .dst_offset = 0,
             .size = size,
         };
         self.vkd.cmdCopyBuffer(cmdbuf, src, dst, 1, @ptrCast(&region));
-
-        try self.vkd.endCommandBuffer(cmdbuf);
-
-        const si = vk.SubmitInfo{
-            .wait_semaphore_count = 0,
-            .p_wait_semaphores = undefined,
-            .p_wait_dst_stage_mask = undefined,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&cmdbuf),
-            .signal_semaphore_count = 0,
-            .p_signal_semaphores = undefined,
-        };
-        try self.vkd.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-        try self.vkd.queueWaitIdle(self.graphics_queue.handle);
+        try self.endSingleTimeCommands(cmdbuf);
     }
 
     pub fn createCommandBuffers(
