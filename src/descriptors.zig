@@ -135,9 +135,9 @@ pub const DescriptorWriter = struct {
     setLayout: *DescriptorSetLayout,
     pool: *DescriptorPool,
     writes: std.ArrayList(vk.WriteDescriptorSet),
-    gc: GraphicsContext = undefined,
+    gc: *GraphicsContext,
 
-    pub fn init(gc: GraphicsContext, setLayout: *DescriptorSetLayout, pool: *DescriptorPool) DescriptorWriter {
+    pub fn init(gc: *GraphicsContext, setLayout: *DescriptorSetLayout, pool: *DescriptorPool) DescriptorWriter {
         return DescriptorWriter{
             .setLayout = setLayout,
             .pool = pool,

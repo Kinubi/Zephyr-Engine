@@ -32,7 +32,7 @@ pub const RaytracingSystem = struct {
     current_frame_index: usize = 0,
     frame_count: usize = 0,
     descriptor_set: vk.DescriptorSet = undefined,
-    descriptor_set_layout: DescriptorSetLayout = undefined,
+    descriptor_set_layout: *DescriptorSetLayout = undefined, // pointer, not value
     descriptor_pool: *DescriptorPool = undefined,
     tlas_instance_buffer: Buffer = undefined,
     width: u32 = 1280,
@@ -46,7 +46,7 @@ pub const RaytracingSystem = struct {
         render_pass: vk.RenderPass,
         shader_library: ShaderLibrary,
         alloc: std.mem.Allocator,
-        descriptor_set_layout: DescriptorSetLayout,
+        descriptor_set_layout: *DescriptorSetLayout, // now a pointer
         descriptor_pool: *DescriptorPool,
         swapchain: *Swapchain,
         width: u32,
@@ -90,13 +90,13 @@ pub const RaytracingSystem = struct {
             .pipeline = pipeline,
             .pipeline_layout = layout,
             .output_texture = output_texture,
-            .descriptor_set_layout = descriptor_set_layout,
+            .descriptor_set_layout = descriptor_set_layout, // store pointer
             .descriptor_pool = descriptor_pool,
             .width = width,
             .height = height,
             .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(alloc, 8),
             .blas_buffers = try std.ArrayList(Buffer).initCapacity(alloc, 8),
-            // ...other fields left at default/undefined...
+            // ...existing code...
         };
     }
 
@@ -491,7 +491,7 @@ pub const RaytracingSystem = struct {
             self.output_texture = output_texture;
             try self.descriptor_pool.resetPool();
             const output_image_info = self.output_texture.getDescriptorInfo();
-            var set_writer = DescriptorWriter.init(gc.*, &self.descriptor_set_layout, self.descriptor_pool);
+            var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool);
             const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
             try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set); // Storage image binding
             try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);

@@ -35,29 +35,30 @@ struct Vertex
   float2 uv;
 };
 
-StructuredBuffer<Vertex> vertex_buffer : register(t3);
-StructuredBuffer<uint> index_buffer : register(t4);
 
+StructuredBuffer<Vertex> vertex_buffer[] : register(t3);
+StructuredBuffer<uint> index_buffer[]: register(t4);
 
 
 
 [shader("closesthit")]
 void main(inout Payload p, in Attributes attribs)
 {
-    uint i0 = index_buffer[PrimitiveIndex() * 3 + 0];
-    uint i1 = index_buffer[PrimitiveIndex() * 3 + 1];
-    uint i2 = index_buffer[PrimitiveIndex() * 3 + 2];
+    uint i0 = index_buffer[InstanceIndex()][PrimitiveIndex() * 3 + 0];
+    uint i1 = index_buffer[InstanceIndex()][PrimitiveIndex() * 3 + 1];
+    uint i2 = index_buffer[InstanceIndex()][PrimitiveIndex() * 3 + 2];
 
-    Vertex v0 = vertex_buffer[i0];
-    Vertex v1 = vertex_buffer[i1];
-    Vertex v2 = vertex_buffer[i2];
+    Vertex v0 = vertex_buffer[InstanceIndex()][i0];
+    Vertex v1 = vertex_buffer[InstanceIndex()][i1];
+    Vertex v2 = vertex_buffer[InstanceIndex()][i2];
 
     float3 bary = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
     float3 normal = normalize(
-        v0.normal * bary.x +
-        v1.normal * bary.y +
-        v2.normal * bary.z
+        v0.color * bary.x +
+        v1.color * bary.y +
+        v2.color * bary.z
     );
 
     p.hitValue = normal * 0.5 + 0.5; 
+
 }

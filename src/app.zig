@@ -30,6 +30,8 @@ const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
 const Buffer = @import("buffer.zig").Buffer;
 const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
 const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
+const GlobalUboSet = @import("ubo_set.zig").GlobalUboSet;
+const RaytracingDescriptorSet = @import("raytracing_descriptor_set.zig").RaytracingDescriptorSet;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -51,13 +53,13 @@ pub const App = struct {
     var camera_controller: KeyboardMovementController = undefined;
     var global_UBO_buffers: ?[]Buffer = undefined;
     var frame_info: FrameInfo = FrameInfo{};
-    var global_pool: *DescriptorPool = undefined;
-    var global_set_layout: *DescriptorSetLayout = undefined;
-    var global_descriptor_set: vk.DescriptorSet = undefined;
+
     var frame_index: u32 = 0;
     var scene: Scene = Scene.init();
 
     // Raytracing system field
+    var global_ubo_set: GlobalUboSet = undefined;
+    var raytracing_descriptor_set: RaytracingDescriptorSet = undefined;
 
     pub fn init(self: *@This()) !void {
         std.debug.print("Initializing application...\n", .{});
@@ -128,12 +130,6 @@ pub const App = struct {
         try mesh3.createIndexBuffers(&self.gc);
         const model = try Model.loadFromObj(self.allocator, &self.gc, @embedFile("smooth_vase"), "smooth_vase");
 
-        // --- Debug: Print mesh info for each model ---
-        std.debug.print("[DEBUG] model.meshes.items.len = {}\n", .{model.meshes.items.len});
-        for (model.meshes.items, 0..) |mm, i| {
-            const vertex_count = mm.geometry.mesh.vertices.items.len;
-            std.debug.print("[DEBUG] model.mesh[{}] geometry: vertex_buffer.size={} ({} verts), index_buffer.size={}, index_count={}\n", .{ i, vertex_count * @sizeOf(Vertex), vertex_count, mm.geometry.mesh.indices.items.len * @sizeOf(u32), mm.geometry.mesh.indices.items.len });
-        }
         const object = try scene.addModel(self.allocator, model, null);
         std.debug.print("[DEBUG] Added object with model: {} meshes\n", .{if (object.model) |m| m.meshes.items.len else 0});
         object.transform.translate(Math.Vec3.init(0, -1.5, 0.5));
@@ -167,60 +163,9 @@ pub const App = struct {
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
-        global_UBO_buffers = try self.allocator.alloc(Buffer, MAX_FRAMES_IN_FLIGHT);
-
-        for (0..global_UBO_buffers.?.len) |i| {
-            global_UBO_buffers.?[i] = try Buffer.init(
-                &self.gc,
-                @sizeOf(GlobalUbo),
-                1,
-                .{ .uniform_buffer_bit = true },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
-            );
-            try global_UBO_buffers.?[i].map(vk.WHOLE_SIZE, 0);
-        }
-
-        frame_info.camera = &camera;
-        var descriptor_pool_builder = DescriptorPool.Builder{ .gc = &self.gc, .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(self.allocator), .poolFlags = .{}, .maxSets = 0 };
-        global_pool = @constCast(&try descriptor_pool_builder.setMaxSets(MAX_FRAMES_IN_FLIGHT).addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1).build());
-        var descriptor_set_layout_builder = DescriptorSetLayout.Builder{ .gc = &self.gc, .bindings = std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding).init(self.allocator) };
-        global_set_layout = @constCast(&try descriptor_set_layout_builder.addBinding(0, .uniform_buffer, .{ .vertex_bit = true, .fragment_bit = true }, 1).build());
-
-        var descriptor_set_writer = DescriptorSetWriter.init(self.gc, global_set_layout, global_pool);
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
-            try descriptor_set_writer.writeBuffer(0, @constCast(&bufferInfo)).build(&global_descriptor_set);
-        }
-
-        // --- Raytracing descriptor pool and set layout setup ---
-        var raytracing_pool_builder = DescriptorPool.Builder{
-            .gc = &self.gc,
-            .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(self.allocator),
-            .poolFlags = .{},
-            .maxSets = 0,
-        };
-        var raytracing_pool = try raytracing_pool_builder
-            .setMaxSets(100000)
-            .addPoolSize(.storage_image, 1000)
-            .addPoolSize(.acceleration_structure_khr, 1000)
-            .addPoolSize(.uniform_buffer, MAX_FRAMES_IN_FLIGHT + 1)
-            .addPoolSize(.storage_buffer, 100000)
-            .build();
-
-        var raytracing_set_layout_builder = DescriptorSetLayout.Builder{
-            .gc = &self.gc,
-            .bindings = std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding).init(self.allocator),
-        };
-        const raytracing_set_layout = try raytracing_set_layout_builder
-            .addBinding(0, .acceleration_structure_khr, .{ .raygen_bit_khr = true }, 1)
-            .addBinding(1, .storage_image, .{ .raygen_bit_khr = true }, 1)
-            .addBinding(2, .uniform_buffer, .{ .raygen_bit_khr = true }, 1)
-            .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 3)
-            .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, 3)
-            .build();
-
-        // --- Raytracing output image creation ---
-        // Ensure the raytracing output image is created before descriptor writing
+        // --- Use new GlobalUboSet abstraction ---
+        global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
+        frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -235,7 +180,7 @@ pub const App = struct {
             entry_point_definition{},
         });
 
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -250,7 +195,7 @@ pub const App = struct {
             entry_point_definition{},
         });
 
-        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library_point_light, self.allocator, @constCast(&camera), global_set_layout.descriptor_set_layout);
+        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
         // Read raytracing SPV files at runtime instead of @embedFile
@@ -275,64 +220,79 @@ pub const App = struct {
         // Use the same global descriptor set and layout as the renderer
 
         // Initialize RaytracingSystem with the created resources
+        // --- Raytracing pool and layout creation (before RaytracingSystem.init) ---
+        // --- Collect buffer infos for raytracing descriptors before pool/layout creation ---
+        var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
+        var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
+        defer index_buffer_infos.deinit();
+        defer vertex_buffer_infos.deinit();
+        for (scene.objects.slice()) |*obj| {
+            if (obj.model) |mdl| {
+                for (mdl.meshes.items) |model_mesh| {
+                    const geometry = model_mesh.geometry;
+                    try vertex_buffer_infos.append(geometry.mesh.vertex_buffer_descriptor);
+                    try index_buffer_infos.append(geometry.mesh.index_buffer_descriptor);
+                }
+            }
+        }
+        const rt_counts = .{
+            .ubo_count = global_ubo_set.buffers.len,
+            .vertex_buffer_count = vertex_buffer_infos.items.len,
+            .index_buffer_count = index_buffer_infos.items.len,
+        };
+        const rt_pool_layout = try RaytracingDescriptorSet.createPoolAndLayout(
+            &self.gc,
+            self.allocator,
+            rt_counts.ubo_count,
+            rt_counts.vertex_buffer_count,
+            rt_counts.index_buffer_count,
+        );
+
+        // --- RaytracingSystem init with pool/layout ---
         raytracing_system = try RaytracingSystem.init(
             &self.gc,
             swapchain.render_pass,
             shader_library_raytracing,
             self.allocator,
-            raytracing_set_layout,
-            &raytracing_pool,
+            rt_pool_layout.layout,
+            rt_pool_layout.pool,
             &swapchain,
             self.window.window_props.width,
             self.window.window_props.height,
         );
 
-        // Build BLAS and TLAS for the current scene
         try raytracing_system.createBLAS(&scene);
         try raytracing_system.createTLAS(&scene, self.allocator);
-        // Create the SBT (assume 3 groups for now, or pass actual group count)
         try raytracing_system.createShaderBindingTable(3);
-
-        var raytracing_descriptor_set: vk.DescriptorSet = undefined;
-        {
-            var set_writer = DescriptorSetWriter.init(self.gc, @constCast(&raytracing_set_layout), @constCast(&raytracing_pool));
-            // Acceleration structure binding (dummy for now, will update after TLAS creation)
-            const dummy_as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
-            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&raytracing_descriptor_set); // Storage image binding
-            const output_image_info = try raytracing_system.getOutputImageDescriptorInfo();
-            try set_writer.writeImage(1, @constCast(&output_image_info)).build(&raytracing_descriptor_set);
-            for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-                const bufferInfo = global_UBO_buffers.?[i].descriptor_info;
-                try set_writer.writeBuffer(2, @constCast(&bufferInfo)).build(&raytracing_descriptor_set);
-            }
-
-            // Collect all index buffer descriptors for all meshes in the scene
-            var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
-            var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
-            defer index_buffer_infos.deinit();
-            defer vertex_buffer_infos.deinit();
-            for (scene.objects.slice()) |*obj| {
-                if (obj.model) |mdl| {
-                    for (mdl.meshes.items) |model_mesh| {
-                        std.debug.print("[DEBUG] model_mesh.geometry.index_buffer.descriptor_info: {any}\n", .{model_mesh.geometry.mesh.index_buffer_descriptor});
-                        const geometry = model_mesh.geometry;
-                        try vertex_buffer_infos.append(geometry.mesh.vertex_buffer_descriptor);
-                        try index_buffer_infos.append(geometry.mesh.index_buffer_descriptor);
-                    }
-                }
-            }
-            if (index_buffer_infos.items.len > 0) {
-                try set_writer.writeBufferArray(3, vertex_buffer_infos.items).build(&raytracing_descriptor_set);
-                try set_writer.writeBufferArray(4, index_buffer_infos.items).build(&raytracing_descriptor_set);
-            }
+        // --- After RaytracingSystem has valid AS and image, create descriptor set ---
+        const as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
+        const image_info = try raytracing_system.getOutputImageDescriptorInfo();
+        var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
+        defer self.allocator.free(ubo_infos);
+        for (global_ubo_set.buffers, 0..) |buf, i| {
+            ubo_infos[i] = buf.descriptor_info;
         }
-
+        raytracing_descriptor_set.set = try RaytracingDescriptorSet.createDescriptorSet(
+            &self.gc,
+            rt_pool_layout.pool,
+            rt_pool_layout.layout,
+            @constCast(&as_info),
+            @constCast(&image_info),
+            ubo_infos,
+            vertex_buffer_infos.items,
+            index_buffer_infos.items,
+        );
+        raytracing_descriptor_set.pool = rt_pool_layout.pool;
+        raytracing_descriptor_set.layout = rt_pool_layout.layout;
+        raytracing_system.descriptor_set = raytracing_descriptor_set.set;
+        raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
+        raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
         last_frame_time = c.glfwGetTime();
-        frame_info.global_descriptor_set = global_descriptor_set;
-        raytracing_system.descriptor_set = raytracing_descriptor_set;
+        frame_info.camera = &camera;
     }
 
     pub fn onUpdate(self: *@This()) !bool {
+
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
         const dt = current_time - last_frame_time;
@@ -347,7 +307,6 @@ pub const App = struct {
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
         try swapchain.beginFrame(frame_info);
-
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
@@ -359,16 +318,15 @@ pub const App = struct {
 
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
 
-        global_UBO_buffers.?[frame_info.current_frame].writeToBuffer(std.mem.asBytes(&ubo), vk.WHOLE_SIZE, 0);
-        try global_UBO_buffers.?[frame_info.current_frame].flush(vk.WHOLE_SIZE, 0);
+        // Update the global UBO for the current frame
+        global_ubo_set.update(frame_info.current_frame, &ubo);
 
         //try simple_renderer.render(frame_info);
         //try point_light_renderer.render(frame_info);
 
         // --- Raytracing command buffer recording ---
-
         swapchain.endSwapChainRenderPass(frame_info);
-        try raytracing_system.recordCommandBuffer(frame_info, &swapchain, 3, global_UBO_buffers.?[frame_info.current_frame].descriptor_info);
+        try raytracing_system.recordCommandBuffer(frame_info, &swapchain, 3, global_ubo_set.buffers[frame_info.current_frame].descriptor_info);
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
 
@@ -377,16 +335,11 @@ pub const App = struct {
 
     pub fn deinit(self: @This()) void {
         swapchain.waitForAllFences() catch unreachable;
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            global_UBO_buffers.?[i].deinit();
-        }
+        global_ubo_set.deinit();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
         simple_renderer.deinit();
-
-        // Clean up the raytracing system
         raytracing_system.deinit();
-
         swapchain.deinit();
         self.gc.deinit();
         self.window.deinit();
