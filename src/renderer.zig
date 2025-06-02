@@ -32,7 +32,7 @@ pub const SimpleRenderer = struct {
     pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: *Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !SimpleRenderer {
         const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(SimplePushConstantData) }};
         const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
-        const layout = try gc.*.vkd.createPipelineLayout(
+        const layout = try gc.vkd.createPipelineLayout(
             gc.*.dev,
             &vk.PipelineLayoutCreateInfo{
                 .flags = .{},

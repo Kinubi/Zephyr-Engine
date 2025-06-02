@@ -46,7 +46,7 @@ pub const ShaderLibrary = struct {
 
     pub fn deinit(self: @This()) void {
         for (self.shaders.items) |shader| {
-            self.gc.vkd.destroyShaderModule(self.gc.dev, shader.module, null);
+            shader.deinit(self.gc);
         }
     }
 };

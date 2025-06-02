@@ -26,7 +26,7 @@ pub const Pipeline = struct {
                 .p_specialization_info = null,
             });
         }
-        errdefer shader_library.deinit();
+        defer shader_library.deinit();
 
         const pvisci = vk.PipelineVertexInputStateCreateInfo{
             .flags = .{},

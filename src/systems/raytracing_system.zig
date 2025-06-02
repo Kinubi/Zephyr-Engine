@@ -146,6 +146,7 @@ pub const RaytracingSystem = struct {
                         .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
                     };
                     std.debug.print("[RaytracingSystem] BLAS mesh {}: index_count = {}, primitive_count = {}\n", .{ mesh_count, index_count, index_count / 3 });
+                    std.debug.print("[RaytracingSystem] Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}\n", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer, index_buffer });
                     var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
                         .primitive_count = @intCast(index_count / 3),
                         .primitive_offset = 0,
@@ -263,6 +264,11 @@ pub const RaytracingSystem = struct {
         );
         try instance_buffer.map(@sizeOf(vk.AccelerationStructureInstanceKHR) * instances.items.len, 0);
         instance_buffer.writeToBuffer(std.mem.sliceAsBytes(instances.items), @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.items.len, 0);
+        // --- DEBUG: Print TLAS instance buffer contents before upload ---
+        std.debug.print("[RaytracingSystem] TLAS instance buffer contents ({} instances):\n", .{instances.items.len});
+        for (instances.items, 0..) |inst, i| {
+            std.debug.print("  Instance {}: custom_index = {}, mask = {}, sbt_offset = {}, flags = {}, blas_addr = 0x{x}\n", .{ i, inst.instance_custom_index_and_mask.instance_custom_index, inst.instance_custom_index_and_mask.mask, inst.instance_shader_binding_table_record_offset_and_flags.instance_shader_binding_table_record_offset, inst.instance_shader_binding_table_record_offset_and_flags.flags, inst.acceleration_structure_reference });
+        }
         // --- TLAS BUILD SIZES SETUP ---
         // Get device address for TLAS geometry
         var instance_addr_info = vk.BufferDeviceAddressInfo{

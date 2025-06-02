@@ -101,6 +101,7 @@ pub const Mesh = struct {
         self.vertex_buffer = device_buffer.buffer;
         self.vertex_buffer_descriptor = device_buffer.descriptor_info;
         self.vertex_buffer_memory = device_buffer.memory;
+        staging_buffer.deinit();
         // Don't deinit device_buffer, as we take ownership of its memory
     }
 
@@ -138,6 +139,7 @@ pub const Mesh = struct {
         self.index_buffer = device_buffer.buffer;
         self.index_buffer_memory = device_buffer.memory;
         self.index_buffer_descriptor = device_buffer.descriptor_info;
+        staging_buffer.deinit();
         // Don't deinit device_buffer, as we take ownership of its memory
     }
 
@@ -333,6 +335,18 @@ pub const Model = struct {
         for (self.meshes.items, 0..) |model_mesh, i| {
             if (model_mesh.geometry.material) |mat| {
                 mat.base_color_texture = textures[i];
+            }
+        }
+    }
+
+    // Debug print to dump vertex colors for all meshes in the model
+    pub fn dumpVertexColors(self: Model) void {
+        std.debug.print("[Model] Dumping vertex colors for all meshes in model:\n", .{});
+        for (self.meshes.items, 0..) |model_mesh, mesh_idx| {
+            const mesh = &model_mesh.geometry.mesh;
+            std.debug.print("  Mesh {d}:\n", .{mesh_idx});
+            for (mesh.vertices.items, 0..) |v, i| {
+                std.debug.print("    Vertex {d}: color = ({any}, {any}, {any})\n", .{ i, v.color[0], v.color[1], v.color[2] });
             }
         }
     }
