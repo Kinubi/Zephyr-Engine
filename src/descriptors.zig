@@ -200,7 +200,7 @@ pub const DescriptorWriter = struct {
         return self;
     }
 
-    pub fn writeBufferArray(self: *DescriptorWriter, binding: u32, bufferInfos: []const vk.DescriptorBufferInfo) *DescriptorWriter {
+    pub fn writeBuffers(self: *DescriptorWriter, binding: u32, bufferInfos: []const vk.DescriptorBufferInfo) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
@@ -211,6 +211,23 @@ pub const DescriptorWriter = struct {
             .dst_array_element = 0,
             .p_image_info = undefined,
             .p_texel_buffer_view = undefined,
+        };
+        self.writes.append(write) catch unreachable;
+        return self;
+    }
+
+    /// Write an array of sampled images (textures) to the descriptor set at the given binding.
+    pub fn writeImages(self: *DescriptorWriter, binding: u32, image_infos: []const vk.DescriptorImageInfo) *DescriptorWriter {
+        const bindingDescription = self.setLayout.bindings.get(binding).?;
+        const write = vk.WriteDescriptorSet{
+            .descriptor_type = bindingDescription.descriptor_type,
+            .dst_binding = binding,
+            .descriptor_count = @as(u32, @intCast(image_infos.len)),
+            .dst_array_element = 0,
+            .dst_set = undefined,
+            .p_image_info = image_infos.ptr,
+            .p_texel_buffer_view = undefined,
+            .p_buffer_info = undefined,
         };
         self.writes.append(write) catch unreachable;
         return self;

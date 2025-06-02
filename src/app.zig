@@ -35,6 +35,7 @@ const RaytracingDescriptorSet = @import("raytracing_descriptor_set.zig").Raytrac
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
+const Material = @import("scene.zig").Material;
 
 pub const App = struct {
     window: Window = undefined,
@@ -55,7 +56,7 @@ pub const App = struct {
     var frame_info: FrameInfo = FrameInfo{};
 
     var frame_index: u32 = 0;
-    var scene: Scene = Scene.init();
+    var scene: Scene = undefined;
 
     // Raytracing system field
     var global_ubo_set: GlobalUboSet = undefined;
@@ -79,8 +80,24 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
+        scene = Scene.init(self.allocator);
+
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
+
+        // --- Load a texture and add it to the scene ---
+        const cube_texture = try Texture.initFromFile(&self.gc, "textures/missing.png", .rgba8);
+        const cube_texture_id = try scene.addTexture(cube_texture);
+        // --- Create a material for the cube mesh referencing the texture ---
+        const cube_material = Material{
+            .albedo_texture_id = @intCast(cube_texture_id),
+        };
+        const cube_material_id = try scene.addMaterial(cube_material);
+
+        // --- Assign the material to the mesh ---
+        mesh3.material_id = @intCast(cube_material_id);
+
+        // Update material and texture buffers after all materials/textures are added
 
         try mesh.vertices.appendSlice(&.{
             // Left Face
@@ -119,9 +136,7 @@ pub const App = struct {
             Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
             Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
         });
-
         try mesh.indices.appendSlice(&.{ 0, 1, 2, 0, 3, 1, 4, 5, 6, 4, 7, 5, 8, 9, 10, 8, 11, 9, 12, 13, 14, 12, 15, 13, 16, 17, 18, 16, 19, 17, 20, 21, 22, 20, 23, 21 });
-
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
@@ -129,6 +144,20 @@ pub const App = struct {
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
         const model = try Model.loadFromObj(self.allocator, &self.gc, @embedFile("smooth_vase"), "smooth_vase");
+        const granite_texture = try Texture.initFromFile(&self.gc, "textures/granitesmooth1-albedo.png", .rgba8);
+        const granite_texture_texture_id = try scene.addTexture(granite_texture);
+
+        // --- Create a material for the cube mesh referencing the texture ---
+        const granite_material = Material{
+            .albedo_texture_id = @intCast(granite_texture_texture_id),
+        };
+        const vase_material_id = try scene.addMaterial(granite_material);
+        std.debug.print("[DEBUG] Added vase texture with ID: {}\n", .{granite_texture_texture_id});
+        model.meshes.items[0].geometry.mesh.material_id = @intCast(vase_material_id);
+        std.debug.print("[DEBUG] Model loaded with meterial: {}\n", .{vase_material_id});
+
+        try scene.updateMaterialBuffer(&self.gc, self.allocator);
+        try scene.updateTextureImageInfos(self.allocator);
 
         const object = try scene.addModel(self.allocator, model, null);
         std.debug.print("[DEBUG] Added object with model: {} meshes\n", .{if (object.model) |m| m.meshes.items.len else 0});
@@ -246,6 +275,8 @@ pub const App = struct {
             rt_counts.ubo_count,
             rt_counts.vertex_buffer_count,
             rt_counts.index_buffer_count,
+            scene.materials.items.len,
+            scene.textures.items.len,
         );
 
         // --- RaytracingSystem init with pool/layout ---
@@ -272,6 +303,9 @@ pub const App = struct {
         for (global_ubo_set.buffers, 0..) |buf, i| {
             ubo_infos[i] = buf.descriptor_info;
         }
+
+        // Use the texture_image_infos directly from the scene (assume it's []const vk.DescriptorImageInfo)
+        // No need to assign to a local variable if not mutated
         raytracing_descriptor_set.set = try RaytracingDescriptorSet.createDescriptorSet(
             &self.gc,
             rt_pool_layout.pool,
@@ -281,12 +315,15 @@ pub const App = struct {
             ubo_infos,
             vertex_buffer_infos.items,
             index_buffer_infos.items,
+            scene.material_buffer.?.descriptor_info,
+            scene.texture_image_infos,
         );
         raytracing_descriptor_set.pool = rt_pool_layout.pool;
         raytracing_descriptor_set.layout = rt_pool_layout.layout;
         raytracing_system.descriptor_set = raytracing_descriptor_set.set;
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
+
         last_frame_time = c.glfwGetTime();
         frame_info.camera = &camera;
     }
@@ -326,7 +363,14 @@ pub const App = struct {
 
         // --- Raytracing command buffer recording ---
         swapchain.endSwapChainRenderPass(frame_info);
-        try raytracing_system.recordCommandBuffer(frame_info, &swapchain, 3, global_ubo_set.buffers[frame_info.current_frame].descriptor_info);
+        try raytracing_system.recordCommandBuffer(
+            frame_info,
+            &swapchain,
+            3,
+            global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
+            scene.material_buffer.?.descriptor_info,
+            scene.texture_image_infos,
+        );
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
 

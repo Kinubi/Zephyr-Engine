@@ -35,9 +35,19 @@ struct Vertex
   float2 uv;
 };
 
+struct Material {
+    uint albedoTextureIndex;
+};
+
 
 StructuredBuffer<Vertex> vertex_buffer[] : register(t3);
 StructuredBuffer<uint> index_buffer[]: register(t4);
+StructuredBuffer<Material> material_buffer: register(t5);
+Texture2D texture_buffer[] : register(t6);
+SamplerState sampler0 : register(s6);
+
+
+
 
 
 
@@ -49,6 +59,7 @@ void main(
 {
     uint primID = PrimitiveIndex();
     uint instID = InstanceIndex();
+    uint customIndex = InstanceID();
 
 
     uint i0 = index_buffer[instID][primID * 3 + 0];
@@ -66,6 +77,17 @@ void main(
         v2.normal
     );
 
-    p.hitValue = normal * 0.5 + 0.5; 
+    if (customIndex >= 0) {
+        Material mat = material_buffer[customIndex];
+        Texture2D tex = texture_buffer[mat.albedoTextureIndex];
+
+        float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
+   
+        float3 albedo = tex.SampleLevel(sampler0, uv, 0).rgb;
+        p.hitValue = albedo;
+    } else {
+        p.hitValue = normal * 0.5 + 0.5; 
+    }
+    
 
 }

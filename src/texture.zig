@@ -153,6 +153,7 @@ pub const Texture = struct {
             .rgb8 => 3,
             .gray8 => 1,
         });
+        defer zstbi.deinit();
         defer image.deinit();
 
         const mip_levels: u32 = std.math.log2_int(u32, @max(image.width, image.height)) + 1;
@@ -280,7 +281,7 @@ pub const Texture = struct {
             .unnormalized_coordinates = vk.FALSE,
             .compare_enable = vk.FALSE,
             .compare_op = vk.CompareOp.always,
-            .anisotropy_enable = vk.TRUE,
+            .anisotropy_enable = vk.FALSE,
         };
         const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
         return Texture{

@@ -44,7 +44,7 @@ pub const Vertex = struct {
     pos: [3]f32 align(16),
     color: [3]f32 align(16),
     normal: [3]f32 align(16) = .{ 0.0, 0.0, 0.0 },
-    uv: [2]f32 = .{ 0.0, 0.0 },
+    uv: [2]f32 align(16) = .{ 0.0, 0.0 },
 };
 
 pub const Mesh = struct {
@@ -57,6 +57,8 @@ pub const Mesh = struct {
     index_buffer: vk.Buffer = undefined,
     index_buffer_memory: vk.DeviceMemory = undefined,
     index_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
+
+    material_id: u32 = 0, // Index into Scene.materials
 
     pub fn init(allocator: std.mem.Allocator) Mesh {
         return .{

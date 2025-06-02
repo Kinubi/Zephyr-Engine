@@ -77,6 +77,8 @@ pub const RaytracingDescriptorSet = struct {
         ubo_count: usize,
         vertex_buffer_count: usize,
         index_buffer_count: usize,
+        material_count: usize,
+        texture_count: usize,
     ) !struct {
         pool: *DescriptorPool,
         layout: *DescriptorSetLayout,
@@ -94,6 +96,8 @@ pub const RaytracingDescriptorSet = struct {
             .addPoolSize(.acceleration_structure_khr, 1000)
             .addPoolSize(.uniform_buffer, @intCast(ubo_count))
             .addPoolSize(.storage_buffer, @intCast(vertex_buffer_count + index_buffer_count))
+            .addPoolSize(.storage_buffer, @intCast(material_count))
+            .addPoolSize(.combined_image_sampler, @intCast(texture_count))
             .build();
 
         var layout_builder = DescriptorSetLayout.Builder{
@@ -107,6 +111,8 @@ pub const RaytracingDescriptorSet = struct {
             .addBinding(2, .uniform_buffer, .{ .raygen_bit_khr = true }, 1)
             .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, @intCast(vertex_buffer_count))
             .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, @intCast(index_buffer_count))
+            .addBinding(5, .storage_buffer, .{ .closest_hit_bit_khr = true }, 1)
+            .addBinding(6, .combined_image_sampler, .{ .closest_hit_bit_khr = true }, @intCast(texture_count))
             .build();
         return .{ .pool = pool, .layout = layout };
     }
@@ -120,15 +126,28 @@ pub const RaytracingDescriptorSet = struct {
         ubo_infos: []const vk.DescriptorBufferInfo,
         vertex_buffer_infos: []const vk.DescriptorBufferInfo,
         index_buffer_infos: []const vk.DescriptorBufferInfo,
+        material_buffer_info: vk.DescriptorBufferInfo,
+        texture_image_infos: []const vk.DescriptorImageInfo,
     ) !vk.DescriptorSet {
         var set: vk.DescriptorSet = undefined;
         var writer = DescriptorWriter.init(gc, layout, pool);
-        try writer.writeAccelerationStructure(0, accel_info).writeImage(1, output_image_info).build(&set);
+        try writer.writeAccelerationStructure(0, accel_info)
+            .writeImage(1, output_image_info)
+            .build(&set);
         for (ubo_infos) |info| {
             try writer.writeBuffer(2, @constCast(&info)).build(&set);
         }
         if (vertex_buffer_infos.len > 0) {
-            try writer.writeBufferArray(3, vertex_buffer_infos).writeBufferArray(4, index_buffer_infos).build(&set);
+            try writer.writeBuffers(3, vertex_buffer_infos).build(&set);
+        }
+        if (index_buffer_infos.len > 0) {
+            try writer.writeBuffers(4, index_buffer_infos).build(&set);
+        }
+        // Bind material buffer (SSBO or UBO)
+        try writer.writeBuffer(5, @constCast(&material_buffer_info)).build(&set);
+        // Bind texture array (array of combined image samplers)
+        if (texture_image_infos.len > 0) {
+            try writer.writeImages(6, texture_image_infos).build(&set);
         }
         return set;
     }

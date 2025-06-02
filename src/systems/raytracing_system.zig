@@ -228,8 +228,8 @@ pub const RaytracingSystem = struct {
         std.debug.print("Creating TLAS for Scene with {} objects\n", .{scene.objects.len});
         for (scene.objects.slice()) |*object| {
             if (object.model) |model| {
-                std.debug.print("Processing model with {} meshes\n", .{model.meshes.items.len});
-                for (model.meshes.items) |_| {
+                for (model.meshes.items) |mesh| {
+                    std.debug.print("Processing model with {} meshes and texture_id {}\n", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
                     var blas_addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
                         .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
                         .acceleration_structure = self.blas_handles.items[mesh_index],
@@ -237,7 +237,7 @@ pub const RaytracingSystem = struct {
                     const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_addr_info);
                     try instances.append(vk.AccelerationStructureInstanceKHR{
                         .transform = .{ .matrix = object.transform.local2world.to_3x4() },
-                        .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh_index), .mask = 0xFF },
+                        .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh.geometry.mesh.material_id), .mask = 0xFF },
                         .instance_shader_binding_table_record_offset_and_flags = .{ .instance_shader_binding_table_record_offset = 0, .flags = 0 },
                         .acceleration_structure_reference = blas_device_address,
                     });
@@ -440,7 +440,7 @@ pub const RaytracingSystem = struct {
     }
 
     /// Record the ray tracing command buffer for a frame (multi-mesh/instance)
-    pub fn recordCommandBuffer(self: *RaytracingSystem, frame_info: FrameInfo, swapchain: *Swapchain, group_count: u32, global_ubo_buffer_info: vk.DescriptorBufferInfo) !void {
+    pub fn recordCommandBuffer(self: *RaytracingSystem, frame_info: FrameInfo, swapchain: *Swapchain, group_count: u32, global_ubo_buffer_info: vk.DescriptorBufferInfo, material_buffer_info: vk.DescriptorBufferInfo, texture_image_infos: []const vk.DescriptorImageInfo) !void {
         const gc = self.gc;
         _ = group_count;
         if (swapchain.extent.width != self.width or swapchain.extent.height != self.height) {
@@ -458,15 +458,16 @@ pub const RaytracingSystem = struct {
                 },
                 vk.SampleCountFlags{ .@"1_bit" = true },
             );
-
             self.output_texture = output_texture;
             try self.descriptor_pool.resetPool();
             const output_image_info = self.output_texture.getDescriptorInfo();
             var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool);
             const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
-            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set); // Storage image binding
+            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set);
             try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);
             try set_writer.writeBuffer(2, @constCast(&global_ubo_buffer_info)).build(&self.descriptor_set);
+            try set_writer.writeBuffer(3, @constCast(&material_buffer_info)).build(&self.descriptor_set);
+            try set_writer.writeImages(4, texture_image_infos).build(&self.descriptor_set);
         }
 
         // --- existing code for binding pipeline, descriptor sets, SBT, etc...

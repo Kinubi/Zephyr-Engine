@@ -7,13 +7,26 @@ const Math = @import("utils/math.zig");
 const GameObject = @import("game_object.zig").GameObject;
 const PointLightComponent = @import("components.zig").PointLightComponent;
 const fromMesh = @import("mesh.zig").fromMesh;
+const Texture = @import("texture.zig").Texture;
+const Buffer = @import("buffer.zig").Buffer;
+
+pub const Material = struct {
+    albedo_texture_id: u32 = 0, // Index into Scene.textures
+    // Add more texture/material properties as needed
+};
 
 pub const Scene = struct {
     objects: std.BoundedArray(GameObject, 1024),
+    materials: std.ArrayList(Material),
+    textures: std.ArrayList(Texture),
+    material_buffer: ?*Buffer = null, // GPU buffer for materials
+    texture_image_infos: []const vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
 
-    pub fn init() Scene {
+    pub fn init(allocator: std.mem.Allocator) Scene {
         return Scene{
             .objects = .{},
+            .materials = std.ArrayList(Material).init(allocator),
+            .textures = std.ArrayList(Texture).init(allocator),
         };
     }
 
@@ -54,6 +67,56 @@ pub const Scene = struct {
         model_ptr.* = model;
         const object = try self.addObject(model_ptr, point_light);
         return object;
+    }
+
+    pub fn addTexture(self: *Scene, texture: Texture) !usize {
+        try self.textures.append(texture);
+        const index = self.textures.items.len - 1;
+        return index;
+    }
+
+    pub fn addMaterial(self: *Scene, material: Material) !usize {
+        try self.materials.append(material);
+        const index = self.materials.items.len - 1;
+        return index;
+    }
+
+    pub fn updateMaterialBuffer(self: *Scene, gc: *GraphicsContext, allocator: std.mem.Allocator) !void {
+        if (self.materials.items.len == 0) return;
+        if (self.material_buffer) |buf| {
+            buf.deinit();
+        }
+        const buf = try allocator.create(Buffer);
+        buf.* = try Buffer.init(
+            gc,
+            @sizeOf(Material),
+            @as(u32, @intCast(self.materials.items.len)),
+            .{
+                .storage_buffer_bit = true,
+            },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        try buf.map(vk.WHOLE_SIZE, 0);
+        std.debug.print("Updating material buffer with {any} materials\n", .{self.materials.items});
+        buf.writeToBuffer(
+            std.mem.sliceAsBytes(self.materials.items),
+            vk.WHOLE_SIZE,
+            0,
+        );
+
+        self.material_buffer = buf;
+    }
+
+    pub fn updateTextureImageInfos(self: *Scene, allocator: std.mem.Allocator) !void {
+        if (self.textures.items.len == 0) {
+            self.texture_image_infos = &[_]vk.DescriptorImageInfo{};
+            return;
+        }
+        const infos = try allocator.alloc(vk.DescriptorImageInfo, self.textures.items.len);
+        for (self.textures.items, 0..) |tex, i| {
+            infos[i] = tex.descriptor;
+        }
+        self.texture_image_infos = infos;
     }
 
     pub fn render(self: Scene, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
