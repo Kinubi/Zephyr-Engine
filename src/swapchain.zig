@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const glfw = @import("glfw");
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
 
-pub const MAX_FRAMES_IN_FLIGHT = 4;
+pub const MAX_FRAMES_IN_FLIGHT = 3;
 
 pub const Swapchain = struct {
     pub const PresentState = enum {
@@ -32,16 +32,20 @@ pub const Swapchain = struct {
     pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
         var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
         var image_acquired = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
-        var render_finished = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
+        var render_finished = try allocator.alloc(vk.Semaphore, swapchain.swap_images.len);
         var frame_fence = try allocator.alloc(vk.Fence, MAX_FRAMES_IN_FLIGHT);
         var i: usize = 0;
         while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
             image_acquired[i] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
             errdefer gc.vkd.destroySemaphore(gc.dev, image_acquired[i], null);
-            render_finished[i] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
-            errdefer gc.vkd.destroySemaphore(gc.dev, render_finished[i], null);
+
             frame_fence[i] = try gc.vkd.createFence(gc.dev, &.{ .flags = .{ .signaled_bit = true } }, null);
             errdefer gc.vkd.destroyFence(gc.dev, frame_fence[i], null);
+        }
+
+        for (0..swapchain.swap_images.len) |j| {
+            render_finished[j] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
+            errdefer gc.vkd.destroySemaphore(gc.dev, render_finished[j], null);
         }
 
         swapchain.image_acquired = image_acquired;
@@ -198,13 +202,13 @@ pub const Swapchain = struct {
             .command_buffer_count = 1,
             .p_command_buffers = @ptrCast(&cmdbuf),
             .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(&self.render_finished[current_frame]),
+            .p_signal_semaphores = @ptrCast(&self.render_finished[self.image_index]),
         }}, self.frame_fence[current_frame]);
 
         // Step 3: Present the current frame
         const present_result = self.gc.vkd.queuePresentKHR(self.gc.present_queue.handle, &vk.PresentInfoKHR{
             .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&self.render_finished[current_frame]),
+            .p_wait_semaphores = @ptrCast(&self.render_finished[self.image_index]),
             .swapchain_count = 1,
             .p_swapchains = @ptrCast(&self.handle),
             .p_image_indices = @ptrCast(&self.image_index),

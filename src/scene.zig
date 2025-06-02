@@ -10,9 +10,13 @@ const fromMesh = @import("mesh.zig").fromMesh;
 const Texture = @import("texture.zig").Texture;
 const Buffer = @import("buffer.zig").Buffer;
 
-pub const Material = struct {
-    albedo_texture_id: u32 = 0, // Index into Scene.textures
-    // Add more texture/material properties as needed
+pub const Material = extern struct {
+    albedo_texture_id: u32 = 0, // 4 bytes
+    roughness: f32 = 0.5, // 4 bytes
+    metallic: f32 = 1.0, // 4 bytes
+    emissive: f32 = 0.0, // 4 bytes
+    emissive_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 }, // 16 bytes (vec4, even if you only use 3)
+    // 32 bytes total, aligned to 16 bytes
 };
 
 pub const Scene = struct {
@@ -96,11 +100,11 @@ pub const Scene = struct {
             },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
-        try buf.map(vk.WHOLE_SIZE, 0);
+        try buf.map(@sizeOf(Material) * self.materials.items.len, 0);
         std.debug.print("Updating material buffer with {any} materials\n", .{self.materials.items});
         buf.writeToBuffer(
             std.mem.sliceAsBytes(self.materials.items),
-            vk.WHOLE_SIZE,
+            @sizeOf(Material) * self.materials.items.len,
             0,
         );
 

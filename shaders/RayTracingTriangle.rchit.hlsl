@@ -37,6 +37,10 @@ struct Vertex
 
 struct Material {
     uint albedoTextureIndex;
+    float roughness;
+    float metallic;
+    float emissive;
+    float4 emissive_color;
 };
 
 
@@ -84,7 +88,7 @@ void main(
         float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
    
         float3 albedo = tex.SampleLevel(sampler0, uv, 0).rgb;
-        p.hitValue = albedo;
+        p.hitValue = albedo + (mat.emissive_color * mat.emissive);
     } else {
         p.hitValue = normal * 0.5 + 0.5; 
     }
