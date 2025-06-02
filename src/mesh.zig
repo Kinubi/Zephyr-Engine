@@ -41,9 +41,9 @@ pub const Vertex = struct {
         },
     };
 
-    pos: [3]f32,
-    color: [3]f32,
-    normal: [3]f32 = .{ 0.0, 0.0, 0.0 },
+    pos: [3]f32 align(16),
+    color: [3]f32 align(16),
+    normal: [3]f32 align(16) = .{ 0.0, 0.0, 0.0 },
     uv: [2]f32 = .{ 0.0, 0.0 },
 };
 

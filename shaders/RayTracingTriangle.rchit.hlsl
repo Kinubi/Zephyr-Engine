@@ -49,30 +49,23 @@ void main(
 {
     uint primID = PrimitiveIndex();
     uint instID = InstanceIndex();
-    uint customIndex = InstanceID();
-    uint i0 = index_buffer[customIndex][primID * 3 + 0];
-    Vertex v0 = vertex_buffer[customIndex][i0];
-    p.hitValue = float3(
-        v0.color.r, v0.color.g, v0.color.b
+
+
+    uint i0 = index_buffer[instID][primID * 3 + 0];
+    uint i1 = index_buffer[instID][primID * 3 + 1];
+    uint i2 = index_buffer[instID][primID * 3 + 2];
+
+    Vertex v0 = vertex_buffer[instID][i0];
+    Vertex v1 = vertex_buffer[instID][i1];
+    Vertex v2 = vertex_buffer[instID][i2];
+
+    float3 bary = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
+    float3 normal = normalize(
+        v0.normal +
+        v1.normal +
+        v2.normal
     );
 
-    // return;
-
-    // uint i0 = index_buffer[instID][primID * 3 + 0];
-    // uint i1 = index_buffer[instID][primID * 3 + 1];
-    // uint i2 = index_buffer[instID][primID * 3 + 2];
-
-    // Vertex v0 = vertex_buffer[instID][i0];
-    // Vertex v1 = vertex_buffer[instID][i1];
-    // Vertex v2 = vertex_buffer[instID][i2];
-
-    // float3 bary = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
-    // float3 normal = normalize(
-    //     bary.x * v0.normal +
-    //     bary.y * v1.normal +
-    //     bary.z * v2.normal
-    // );
-
-    // p.hitValue = normal * 0.5 + 0.5; 
+    p.hitValue = normal * 0.5 + 0.5; 
 
 }
