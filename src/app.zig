@@ -48,6 +48,7 @@ pub const App = struct {
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
+    var computebufs: []vk.CommandBuffer = undefined;
     var simple_renderer: SimpleRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_system: RaytracingSystem = undefined;
@@ -183,6 +184,10 @@ pub const App = struct {
 
         log(.DEBUG, "renderer", "Creating command buffers", .{});
         cmdbufs = try self.gc.createCommandBuffers(
+            self.allocator,
+        );
+
+        computebufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
 
@@ -339,7 +344,9 @@ pub const App = struct {
         const current_time = c.glfwGetTime();
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
+        const computebuf = computebufs[current_frame];
         frame_info.command_buffer = cmdbuf;
+        frame_info.compute_buffer = computebuf;
         frame_info.dt = @floatCast(dt);
         frame_info.current_frame = current_frame;
 
@@ -372,7 +379,7 @@ pub const App = struct {
             scene.material_buffer.?.descriptor_info,
             scene.texture_image_infos,
         );
-        try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
+        try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
         //log(.TRACE, "app", "Frame end", .{});
         return self.window.isRunning();

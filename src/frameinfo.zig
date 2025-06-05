@@ -20,6 +20,7 @@ pub const GlobalUbo = struct {
 
 pub const FrameInfo = struct {
     command_buffer: vk.CommandBuffer = undefined,
+    compute_buffer: vk.CommandBuffer = undefined,
     camera: *Camera = undefined,
     dt: f32 = 0,
     current_frame: u32 = 0,
