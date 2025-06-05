@@ -36,6 +36,9 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 const Material = @import("scene.zig").Material;
+const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
 
 pub const App = struct {
     window: Window = undefined,
@@ -80,7 +83,7 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        scene = Scene.init(self.allocator);
+        scene = Scene.init(&self.gc, self.allocator);
 
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
@@ -140,38 +143,36 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        try mesh3.loadFromObj(self.allocator, @embedFile("cube"));
+        // --- Load cube mesh from file instead of @embedFile ---
+        log(.DEBUG, "scene", "Loading cube mesh from models/cube.obj", .{});
+        const cube_data = try loadFileAlloc(self.allocator, "models/cube.obj", 10 * 1024 * 1024);
+        defer self.allocator.free(cube_data);
+        try mesh3.loadFromObj(self.allocator, cube_data);
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
-        const model = try Model.loadFromObj(self.allocator, &self.gc, @embedFile("smooth_vase"), "smooth_vase");
-        const granite_texture = try Texture.initFromFile(&self.gc, "textures/granitesmooth1-albedo.png", .rgba8);
-        const granite_texture_texture_id = try scene.addTexture(granite_texture);
+        log(.INFO, "scene", "Loaded cube mesh and created buffers", .{});
 
-        // --- Create a material for the cube mesh referencing the texture ---
-        const granite_material = Material{
-            .albedo_texture_id = @intCast(granite_texture_texture_id),
-        };
-        const vase_material_id = try scene.addMaterial(granite_material);
-        std.debug.print("[DEBUG] Added vase texture with ID: {}\n", .{granite_texture_texture_id});
-        model.meshes.items[0].geometry.mesh.material_id = @intCast(vase_material_id);
-        std.debug.print("[DEBUG] Model loaded with meterial: {}\n", .{vase_material_id});
-
-        try scene.updateMaterialBuffer(&self.gc, self.allocator);
-        try scene.updateTextureImageInfos(self.allocator);
-
-        const object = try scene.addModel(self.allocator, model, null);
-        std.debug.print("[DEBUG] Added object with model: {} meshes\n", .{if (object.model) |m| m.meshes.items.len else 0});
+        // --- User-friendly model+material+texture creation for the vase ---
+        log(.DEBUG, "scene", "Loading vase model and texture", .{});
+        const object = try scene.addModelWithMaterial(
+            "models/smooth_vase.obj",
+            "textures/granitesmooth1-albedo.png",
+        );
+        log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
         object.transform.translate(Math.Vec3.init(0, -1.5, 0.5));
         object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
         // Use new user-friendly helpers for model/object creation
-        const object2 = try scene.addModelFromMesh(self.allocator, mesh3, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
-        std.debug.print("[DEBUG] Added object2 with model: {} meshes\n", .{if (object2.model) |m| m.meshes.items.len else 0});
+        log(.DEBUG, "scene", "Adding mesh3 as object2", .{});
+        const object2 = try scene.addModelFromMesh(mesh3, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
+        log(.INFO, "scene", "Added object2 with model: {d} meshes", .{if (object2.model) |m| m.meshes.items.len else 0});
         object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
 
-        const object5 = try scene.addModelFromMesh(self.allocator, mesh, "mesh", null);
-        std.debug.print("[DEBUG] Added object5 with model: {} meshes\n", .{if (object5.model) |m| m.meshes.items.len else 0});
+        log(.DEBUG, "scene", "Adding mesh as object5", .{});
+        const object5 = try scene.addModelFromMesh(mesh, "mesh", null);
+        log(.INFO, "scene", "Added object5 with model: {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
 
+        log(.DEBUG, "scene", "Adding point light objects", .{});
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
         object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
         object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
@@ -180,19 +181,21 @@ pub const App = struct {
         object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
         object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
+        log(.DEBUG, "renderer", "Creating command buffers", .{});
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
 
+        log(.DEBUG, "scene", "Adding viewer object and camera controller", .{});
         viewer_object = try scene.addEmpty();
         camera_controller = KeyboardMovementController.init();
 
         camera = Camera{ .fov = 75.0, .window = self.window };
-        // Set up perspective projection using Vulkan conventions
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
         // --- Use new GlobalUboSet abstraction ---
+        log(.DEBUG, "renderer", "Initializing GlobalUboSet", .{});
         global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
@@ -208,7 +211,7 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-
+        log(.DEBUG, "renderer", "Initializing simple renderer", .{});
         simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
@@ -223,7 +226,7 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-
+        log(.DEBUG, "renderer", "Initializing point light renderer", .{});
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
@@ -292,10 +295,14 @@ pub const App = struct {
             self.window.window_props.height,
         );
 
+        log(.DEBUG, "raytracing", "Creating BLAS", .{});
         try raytracing_system.createBLAS(&scene);
+        log(.DEBUG, "raytracing", "Creating TLAS", .{});
         try raytracing_system.createTLAS(&scene, self.allocator);
+        log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
         try raytracing_system.createShaderBindingTable(3);
         // --- After RaytracingSystem has valid AS and image, create descriptor set ---
+        log(.DEBUG, "raytracing", "Creating raytracing descriptor set", .{});
         const as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
         const image_info = try raytracing_system.getOutputImageDescriptorInfo();
         var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
@@ -303,9 +310,6 @@ pub const App = struct {
         for (global_ubo_set.buffers, 0..) |buf, i| {
             ubo_infos[i] = buf.descriptor_info;
         }
-
-        // Use the texture_image_infos directly from the scene (assume it's []const vk.DescriptorImageInfo)
-        // No need to assign to a local variable if not mutated
         raytracing_descriptor_set.set = try RaytracingDescriptorSet.createDescriptorSet(
             &self.gc,
             rt_pool_layout.pool,
@@ -323,6 +327,7 @@ pub const App = struct {
         raytracing_system.descriptor_set = raytracing_descriptor_set.set;
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
+        log(.INFO, "raytracing", "Raytracing system fully initialized", .{});
 
         last_frame_time = c.glfwGetTime();
         frame_info.camera = &camera;
@@ -343,6 +348,7 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
+        //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
         swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
@@ -354,14 +360,9 @@ pub const App = struct {
         };
 
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
-
-        // Update the global UBO for the current frame
         global_ubo_set.update(frame_info.current_frame, &ubo);
-
         //try simple_renderer.render(frame_info);
         //try point_light_renderer.render(frame_info);
-
-        // --- Raytracing command buffer recording ---
         swapchain.endSwapChainRenderPass(frame_info);
         try raytracing_system.recordCommandBuffer(
             frame_info,
@@ -373,7 +374,7 @@ pub const App = struct {
         );
         try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
         last_frame_time = current_time;
-
+        //log(.TRACE, "app", "Frame end", .{});
         return self.window.isRunning();
     }
 

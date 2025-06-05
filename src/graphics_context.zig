@@ -393,9 +393,15 @@ pub const GraphicsContext = struct {
         subresource_range: vk.ImageSubresourceRange,
     ) !void {
         const command_buffer = try self.beginSingleTimeCommands();
-        defer self.endSingleTimeCommands(command_buffer) catch unreachable;
+        var defer_err: ?anyerror = null;
+        defer {
+            self.endSingleTimeCommands(command_buffer) catch |err| {
+                std.log.err("endSingleTimeCommands failed: {any}", .{err});
+                defer_err = err;
+            };
+        }
         self.transitionImageLayout(command_buffer, image, old_layout, new_layout, subresource_range);
-        // endSingleTimeCommands will submit and free the command buffer
+        if (defer_err) |err| return err;
     }
 
     pub fn copyBufferToImageSingleTime(
@@ -406,7 +412,13 @@ pub const GraphicsContext = struct {
         height: u32,
     ) !void {
         const command_buffer = try self.beginSingleTimeCommands();
-        defer self.endSingleTimeCommands(command_buffer) catch unreachable;
+        var defer_err: ?anyerror = null;
+        defer {
+            self.endSingleTimeCommands(command_buffer) catch |err| {
+                std.log.err("endSingleTimeCommands failed: {any}", .{err});
+                defer_err = err;
+            };
+        }
         const region = vk.BufferImageCopy{
             .buffer_offset = 0,
             .buffer_row_length = 0,
@@ -428,6 +440,7 @@ pub const GraphicsContext = struct {
             1,
             @ptrCast(&region),
         );
+        if (defer_err) |err| return err;
     }
 
     pub fn generateMipmapsSingleTime(
@@ -438,8 +451,13 @@ pub const GraphicsContext = struct {
         mip_levels: u32,
     ) !void {
         const command_buffer = try self.beginSingleTimeCommands();
-        defer self.endSingleTimeCommands(command_buffer) catch unreachable;
-
+        var defer_err: ?anyerror = null;
+        defer {
+            self.endSingleTimeCommands(command_buffer) catch |err| {
+                std.log.err("endSingleTimeCommands failed: {any}", .{err});
+                defer_err = err;
+            };
+        }
         var mip_width: i32 = @intCast(width);
         var mip_height: i32 = @intCast(height);
         for (1..mip_levels) |i| {

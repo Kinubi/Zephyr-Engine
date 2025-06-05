@@ -13,6 +13,7 @@ const DescriptorSetLayout = @import("../descriptors.zig").DescriptorSetLayout;
 const DescriptorPool = @import("../descriptors.zig").DescriptorPool;
 const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
 const Texture = @import("../texture.zig").Texture;
+const log = @import("../utils/log.zig");
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
@@ -106,10 +107,10 @@ pub const RaytracingSystem = struct {
         self.blas_handles.clearRetainingCapacity();
         self.blas_buffers.clearRetainingCapacity();
         var mesh_count: usize = 0;
-        std.debug.print("[RaytracingSystem] Scene has {} objects\n", .{scene.objects.len});
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "Scene has {} objects", .{scene.objects.len});
         for (scene.objects.slice(), 0..) |*object, obj_idx| {
             if (object.model) |model| {
-                std.debug.print("[RaytracingSystem] Object {} has model with {} meshes\n", .{ obj_idx, model.meshes.items.len });
+                log.log(log.LogLevel.INFO, "RaytracingSystem", "Object {} has model with {} meshes", .{ obj_idx, model.meshes.items.len });
                 for (model.meshes.items) |*model_mesh| {
                     const geometry = model_mesh.geometry;
                     mesh_count += 1;
@@ -145,8 +146,8 @@ pub const RaytracingSystem = struct {
                         },
                         .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
                     };
-                    std.debug.print("[RaytracingSystem] BLAS mesh {}: index_count = {}, primitive_count = {}\n", .{ mesh_count, index_count, index_count / 3 });
-                    std.debug.print("[RaytracingSystem] Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}\n", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer, index_buffer });
+                    log.log(log.LogLevel.INFO, "RaytracingSystem", "BLAS mesh {}: index_count = {}, primitive_count = {}", .{ mesh_count, index_count, index_count / 3 });
+                    log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer, index_buffer });
                     var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
                         .primitive_count = @intCast(index_count / 3),
                         .primitive_offset = 0,
@@ -215,21 +216,21 @@ pub const RaytracingSystem = struct {
             }
         }
         if (mesh_count == 0) {
-            std.debug.print("[RaytracingSystem] Warning: No meshes found in scene, skipping BLAS creation.\n", .{});
+            log.log(log.LogLevel.WARN, "RaytracingSystem", "No meshes found in scene, skipping BLAS creation.", .{});
             return;
         }
-        std.debug.print("Created {d} BLASes for all meshes in scene\n", .{mesh_count});
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "Created {d} BLASes for all meshes in scene", .{mesh_count});
     }
 
     /// Create TLAS for all mesh instances in the scene
     pub fn createTLAS(self: *RaytracingSystem, scene: *Scene, allocator: std.mem.Allocator) !void {
         var instances = try std.ArrayList(vk.AccelerationStructureInstanceKHR).initCapacity(allocator, self.blas_handles.items.len);
         var mesh_index: u32 = 0;
-        std.debug.print("Creating TLAS for Scene with {} objects\n", .{scene.objects.len});
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating TLAS for Scene with {} objects", .{scene.objects.len});
         for (scene.objects.slice()) |*object| {
             if (object.model) |model| {
                 for (model.meshes.items) |mesh| {
-                    std.debug.print("Processing model with {} meshes and texture_id {}\n", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
+                    log.log(log.LogLevel.INFO, "RaytracingSystem", "Processing model with {} meshes and texture_id {}", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
                     var blas_addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
                         .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
                         .acceleration_structure = self.blas_handles.items[mesh_index],
@@ -246,7 +247,7 @@ pub const RaytracingSystem = struct {
             }
         }
         if (instances.items.len == 0) {
-            std.debug.print("[RaytracingSystem] Warning: No mesh instances found in scene, skipping TLAS creation.\n", .{});
+            log.log(log.LogLevel.WARN, "RaytracingSystem", "No mesh instances found in scene, skipping TLAS creation.", .{});
             return;
         }
         // --- TLAS instance buffer setup ---
@@ -265,9 +266,9 @@ pub const RaytracingSystem = struct {
         try instance_buffer.map(@sizeOf(vk.AccelerationStructureInstanceKHR) * instances.items.len, 0);
         instance_buffer.writeToBuffer(std.mem.sliceAsBytes(instances.items), @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.items.len, 0);
         // --- DEBUG: Print TLAS instance buffer contents before upload ---
-        std.debug.print("[RaytracingSystem] TLAS instance buffer contents ({} instances):\n", .{instances.items.len});
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "TLAS instance buffer contents ({} instances):", .{instances.items.len});
         for (instances.items, 0..) |inst, i| {
-            std.debug.print("  Instance {}: custom_index = {}, mask = {}, sbt_offset = {}, flags = {}, blas_addr = 0x{x}\n", .{ i, inst.instance_custom_index_and_mask.instance_custom_index, inst.instance_custom_index_and_mask.mask, inst.instance_shader_binding_table_record_offset_and_flags.instance_shader_binding_table_record_offset, inst.instance_shader_binding_table_record_offset_and_flags.flags, inst.acceleration_structure_reference });
+            log.log(log.LogLevel.DEBUG, "RaytracingSystem", "  Instance {}: custom_index = {}, mask = {}, sbt_offset = {}, flags = {}, blas_addr = 0x{x}", .{ i, inst.instance_custom_index_and_mask.instance_custom_index, inst.instance_custom_index_and_mask.mask, inst.instance_shader_binding_table_record_offset_and_flags.instance_shader_binding_table_record_offset, inst.instance_shader_binding_table_record_offset_and_flags.flags, inst.acceleration_structure_reference });
         }
         // --- TLAS BUILD SIZES SETUP ---
         // Get device address for TLAS geometry
@@ -355,7 +356,7 @@ pub const RaytracingSystem = struct {
         // TLAS build command
         try self.gc.endSingleTimeCommands(cmdbuf);
         tlas_scratch_buffer.deinit();
-        std.debug.print("TLAS created with number of instances: {}\n", .{instances.items.len});
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "TLAS created with number of instances: {}", .{instances.items.len});
         // Store instance buffer for later deinit
         self.tlas_instance_buffer = instance_buffer;
         self.tlas_instance_buffer_initialized = true;

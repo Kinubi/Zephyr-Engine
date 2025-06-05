@@ -32,8 +32,7 @@ pub const GlobalUboSet = struct {
         const pool = try allocator.create(DescriptorPool);
         pool.* = try pool_builder
             .setMaxSets(@intCast(frame_count))
-            .addPoolSize(.uniform_buffer, @intCast(frame_count))
-            .build();
+            .addPoolSize(.uniform_buffer, @intCast(frame_count)).build();
 
         var layout_builder = DescriptorSetLayout.Builder{
             .gc = gc,
