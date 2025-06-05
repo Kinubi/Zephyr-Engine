@@ -125,7 +125,7 @@ pub const Swapchain = struct {
     }
 
     fn deinitExceptSwapchain(self: *Swapchain) void {
-        for (self.swap_images) |si| si.deinit(self.gc);
+        for (self.swap_images) |*si| si.deinit(self.gc);
         self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
         self.destroyFramebuffers();
     }

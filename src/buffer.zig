@@ -1,6 +1,8 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
 
 pub const Buffer = struct {
     gc: *GraphicsContext,

@@ -11,6 +11,8 @@ pub const ComputeShaderSystem = struct {
     command_buffers: []vk.CommandBuffer = &.{},
     current_frame_index: usize = 0,
     is_dispatched: bool = false,
+    frame_count: usize = 0,
+    command_pool: vk.CommandPool = undefined,
 
     pub fn init(
         device: *GraphicsContext,
@@ -22,6 +24,8 @@ pub const ComputeShaderSystem = struct {
         var self = ComputeShaderSystem{
             .device = device,
             .descriptor_set_layout = descriptor_set_layout,
+            .frame_count = frame_count,
+            .command_pool = command_pool,
         };
         // Create pipeline layout
         var pipeline_layout_info = vk.PipelineLayoutCreateInfo{
@@ -35,13 +39,13 @@ pub const ComputeShaderSystem = struct {
             return error.PipelineLayoutCreationFailed;
         }
         // Create compute pipeline
-        var stage_info = vk.PipelineShaderStageCreateInfo{
+        const stage_info = vk.PipelineShaderStageCreateInfo{
             .sType = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = vk.SHADER_STAGE_COMPUTE_BIT,
             .module = shader_module,
             .pName = "main",
         };
-        var pipeline_info = vk.ComputePipelineCreateInfo{
+        const pipeline_info = vk.ComputePipelineCreateInfo{
             .sType = vk.STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage = stage_info,
             .layout = self.pipeline_layout,
@@ -49,41 +53,61 @@ pub const ComputeShaderSystem = struct {
         if (vk.createComputePipelines(device.dev, null, 1, &pipeline_info, null, &self.pipeline) != vk.SUCCESS) {
             return error.PipelineCreationFailed;
         }
-        // Allocate command buffers
-        var alloc_info = vk.CommandBufferAllocateInfo{
-            .sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .commandPool = command_pool,
-            .level = vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = @intCast(u32, frame_count),
-        };
-        self.command_buffers = try device.allocator.alloc(vk.CommandBuffer, frame_count);
-        if (vk.allocateCommandBuffers(device.dev, &alloc_info, self.command_buffers.ptr) != vk.SUCCESS) {
-            return error.CommandBufferAllocationFailed;
-        }
+        try self.createCommandBuffers();
         return self;
     }
 
-    pub fn begin(self: *ComputeShaderSystem) vk.CommandBuffer {
+    fn createCommandBuffers(self: *ComputeShaderSystem) !void {
+        var alloc_info = vk.CommandBufferAllocateInfo{
+            .sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = self.command_pool,
+            .level = vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = @intCast(self.frame_count),
+        };
+        self.command_buffers = try self.device.allocator.alloc(vk.CommandBuffer, self.frame_count);
+        if (vk.allocateCommandBuffers(self.device.dev, &alloc_info, self.command_buffers.ptr) != vk.SUCCESS) {
+            return error.CommandBufferAllocationFailed;
+        }
+    }
+
+    fn freeCommandBuffers(self: *ComputeShaderSystem) void {
+        if (self.command_buffers.len > 0) {
+            vk.freeCommandBuffers(
+                self.device.dev,
+                self.command_pool,
+                @intCast(self.command_buffers.len),
+                self.command_buffers.ptr,
+            );
+            self.device.allocator.free(self.command_buffers);
+            self.command_buffers = &.{};
+        }
+    }
+
+    pub fn beginCompute(self: *ComputeShaderSystem) vk.CommandBuffer {
         std.debug.assert(!self.is_dispatched);
         self.is_dispatched = true;
         const cmd = self.command_buffers[self.current_frame_index];
         var begin_info = vk.CommandBufferBeginInfo{
             .sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         };
-        _ = vk.beginCommandBuffer(cmd, &begin_info);
+        if (vk.beginCommandBuffer(cmd, &begin_info) != vk.SUCCESS) {
+            @panic("failed to begin recording command buffer!");
+        }
         return cmd;
     }
 
-    pub fn end(self: *ComputeShaderSystem) vk.CommandBuffer {
+    pub fn endCompute(self: *ComputeShaderSystem) vk.CommandBuffer {
         std.debug.assert(self.is_dispatched);
         const cmd = self.command_buffers[self.current_frame_index];
-        _ = vk.endCommandBuffer(cmd);
+        if (vk.endCommandBuffer(cmd) != vk.SUCCESS) {
+            @panic("failed to record command buffer!");
+        }
         self.is_dispatched = false;
-        self.current_frame_index = (self.current_frame_index + 1) % self.command_buffers.len;
+        self.current_frame_index = (self.current_frame_index + 1) % self.frame_count;
         return cmd;
     }
 
-    pub fn dispatch(self: *ComputeShaderSystem, cmd: vk.CommandBuffer, descriptor_set: vk.DescriptorSet, x: u32, y: u32, z: u32) void {
+    pub fn dispatchCompute(self: *ComputeShaderSystem, cmd: vk.CommandBuffer, descriptor_set: vk.DescriptorSet, x: u32, y: u32, z: u32) void {
         vk.cmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, self.pipeline);
         vk.cmdBindDescriptorSets(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, self.pipeline_layout, 0, 1, &descriptor_set, 0, null);
         vk.cmdDispatch(cmd, x, y, z);
@@ -92,6 +116,6 @@ pub const ComputeShaderSystem = struct {
     pub fn deinit(self: *ComputeShaderSystem) void {
         if (self.pipeline != undefined) vk.destroyPipeline(self.device.dev, self.pipeline, null);
         if (self.pipeline_layout != undefined) vk.destroyPipelineLayout(self.device.dev, self.pipeline_layout, null);
-        if (self.command_buffers.len > 0) self.device.allocator.free(self.command_buffers);
+        self.freeCommandBuffers();
     }
 };

@@ -66,7 +66,7 @@ pub const RaytracingSystem = struct {
             },
             null,
         );
-        const pipeline = try Pipeline.initRaytracing(gc.*, render_pass, shader_library, Pipeline.defaultRaytracingLayout(layout), alloc);
+        const pipeline = try Pipeline.initRaytracing(gc.*, render_pass, shader_library, layout, Pipeline.defaultRaytracingLayout(layout), alloc);
         // Create output image using Texture abstraction
         std.debug.print("Swapchain surface format: {}\n", .{swapchain.surface_format.format});
         // If the swapchain format is ARGB, use ABGR for the output image format, else use the swapchain format.
@@ -614,7 +614,10 @@ pub const RaytracingSystem = struct {
         // Destroy shader binding table buffer and free its memory
         if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
-        // ...existing code...
+        // Destroy output image/texture
+        self.output_texture.deinit(null);
+        // Destroy pipeline and associated resources
+        self.pipeline.deinit();
     }
 
     pub fn getAccelerationStructureDescriptorInfo(self: *RaytracingSystem) !vk.WriteDescriptorSetAccelerationStructureKHR {

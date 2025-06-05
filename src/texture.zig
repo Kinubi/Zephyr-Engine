@@ -4,6 +4,8 @@ const zstbi = @import("zstbi");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Allocator = std.mem.Allocator;
 const Buffer = @import("buffer.zig").Buffer;
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
 
 pub const Texture = struct {
     image: vk.Image,
@@ -177,6 +179,7 @@ pub const Texture = struct {
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
+        defer staging_buffer.deinit();
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(image.data, buffer_size, 0);
 
