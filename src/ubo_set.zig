@@ -7,12 +7,14 @@ const DescriptorWriter = @import("descriptors.zig").DescriptorWriter;
 const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const deinitDescriptorResources = @import("descriptors.zig").deinitDescriptorResources;
 
 pub const GlobalUboSet = struct {
     pool: *DescriptorPool,
     layout: *DescriptorSetLayout,
     sets: []vk.DescriptorSet,
     buffers: []Buffer,
+    allocator: std.mem.Allocator,
 
     /// Create pool and layout for the global UBO set, matching RaytracingDescriptorSet style
     pub fn createPoolAndLayout(
@@ -82,6 +84,7 @@ pub const GlobalUboSet = struct {
             .layout = pool_layout.layout,
             .sets = sets,
             .buffers = buffers,
+            .allocator = allocator,
         };
     }
 
@@ -92,6 +95,8 @@ pub const GlobalUboSet = struct {
 
     pub fn deinit(self: *GlobalUboSet) void {
         for (self.buffers) |*buf| buf.deinit();
-        // Optionally deinit pool/layout/sets if you own them
+        deinitDescriptorResources(self.pool, self.layout, self.sets, self.allocator) catch |err| {
+            std.debug.print("Error deinitializing GlobalUboSet: {}\n", .{err});
+        };
     }
 };

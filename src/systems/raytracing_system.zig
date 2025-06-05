@@ -14,6 +14,7 @@ const DescriptorPool = @import("../descriptors.zig").DescriptorPool;
 const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
 const Texture = @import("../texture.zig").Texture;
 const log = @import("../utils/log.zig");
+const deinitDescriptorResources = @import("../descriptors.zig").deinitDescriptorResources;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
@@ -616,6 +617,10 @@ pub const RaytracingSystem = struct {
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
         // Destroy output image/texture
         self.output_texture.deinit(null);
+        // Clean up descriptor sets, pool, and layout
+        deinitDescriptorResources(self.descriptor_pool, self.descriptor_set_layout, @ptrCast(&self.descriptor_set), null) catch |err| {
+            log.log(log.LogLevel.ERROR, "RaytracingSystem", "Failed to deinit descriptor resources: {}", .{err});
+        };
         // Destroy pipeline and associated resources
         self.pipeline.deinit();
     }

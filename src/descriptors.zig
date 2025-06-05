@@ -31,7 +31,7 @@ pub const DescriptorSetLayout = struct {
     }
 
     pub fn deinit(self: *DescriptorSetLayout) void {
-        self.gc.vkd.vkDestroyDescriptorSetLayout(self.gc.dev, self.descriptorSetLayout, null);
+        self.gc.vkd.destroyDescriptorSetLayout(self.gc.dev, self.descriptor_set_layout, null);
     }
 
     pub const Builder = struct {
@@ -96,8 +96,8 @@ pub const DescriptorPool = struct {
         };
     }
 
-    pub fn freeDescriptors(self: *DescriptorPool, descriptors: []vk.DescriptorSet) void {
-        self.gc.vkd.freeDescriptorSets(self.gc.dev, self.descriptorPool, @as(u32, @intCast(descriptors.len)), descriptors.ptr);
+    pub fn freeDescriptors(self: *DescriptorPool, descriptors: []vk.DescriptorSet) !void {
+        try self.gc.vkd.freeDescriptorSets(self.gc.dev, self.descriptorPool, @as(u32, @intCast(descriptors.len)), descriptors.ptr);
     }
 
     pub fn resetPool(self: *DescriptorPool) !void {
@@ -241,3 +241,24 @@ pub const DescriptorWriter = struct {
         self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
     }
 };
+
+pub fn deinitDescriptorResources(
+    pool: ?*DescriptorPool,
+    layout: ?*DescriptorSetLayout,
+    sets: ?[]vk.DescriptorSet,
+    allocator: ?std.mem.Allocator,
+) !void {
+    // Free descriptor sets if provided
+    if (pool) |p| {
+        if (sets) |s| {
+            try p.freeDescriptors(s);
+        }
+        p.deinit();
+        if (allocator) |a| a.destroy(p);
+    }
+    // Destroy layout
+    if (layout) |l| {
+        l.deinit();
+        if (allocator) |a| a.destroy(l);
+    }
+}

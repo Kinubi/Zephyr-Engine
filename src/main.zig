@@ -1,5 +1,3 @@
-const std = @import("std");
-const Window = @import("window.zig").Window;
 const App = @import("app.zig").App;
 
 pub fn main() !void {
