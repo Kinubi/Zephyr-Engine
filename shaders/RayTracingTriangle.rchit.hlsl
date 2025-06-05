@@ -35,29 +35,63 @@ struct Vertex
   float2 uv;
 };
 
-StructuredBuffer<Vertex> vertex_buffer : register(t3);
-StructuredBuffer<uint> index_buffer : register(t4);
+struct Material {
+    uint albedoTextureIndex;
+    float roughness;
+    float metallic;
+    float emissive;
+    float4 emissive_color;
+};
+
+
+StructuredBuffer<Vertex> vertex_buffer[] : register(t3);
+StructuredBuffer<uint> index_buffer[]: register(t4);
+StructuredBuffer<Material> material_buffer: register(t5);
+Texture2D texture_buffer[] : register(t6);
+SamplerState sampler0 : register(s6);
+
+
 
 
 
 
 [shader("closesthit")]
-void main(inout Payload p, in Attributes attribs)
+void main(
+    inout Payload p,
+    in Attributes attribs
+)
 {
-    uint i0 = index_buffer[PrimitiveIndex() * 3 + 0];
-    uint i1 = index_buffer[PrimitiveIndex() * 3 + 1];
-    uint i2 = index_buffer[PrimitiveIndex() * 3 + 2];
+    uint primID = PrimitiveIndex();
+    uint instID = InstanceIndex();
+    uint customIndex = InstanceID();
 
-    Vertex v0 = vertex_buffer[i0];
-    Vertex v1 = vertex_buffer[i1];
-    Vertex v2 = vertex_buffer[i2];
+
+    uint i0 = index_buffer[instID][primID * 3 + 0];
+    uint i1 = index_buffer[instID][primID * 3 + 1];
+    uint i2 = index_buffer[instID][primID * 3 + 2];
+
+    Vertex v0 = vertex_buffer[instID][i0];
+    Vertex v1 = vertex_buffer[instID][i1];
+    Vertex v2 = vertex_buffer[instID][i2];
 
     float3 bary = float3(1.0f - attribs.bary.x - attribs.bary.y, attribs.bary.x, attribs.bary.y);
     float3 normal = normalize(
-        v0.normal * bary.x +
-        v1.normal * bary.y +
-        v2.normal * bary.z
+        v0.normal +
+        v1.normal +
+        v2.normal
     );
 
-    p.hitValue = normal * 0.5 + 0.5; 
+    if (customIndex >= 0) {
+        Material mat = material_buffer[customIndex];
+        Texture2D tex = texture_buffer[mat.albedoTextureIndex];
+
+        float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
+   
+        float3 albedo = tex.SampleLevel(sampler0, uv, 0).rgb;
+        p.hitValue = albedo + (mat.emissive_color * mat.emissive);
+    } else {
+        p.hitValue = normal * 0.5 + 0.5; 
+    }
+    
+
 }

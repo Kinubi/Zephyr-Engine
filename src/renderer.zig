@@ -9,6 +9,7 @@ const glfw = @import("mach-glfw");
 const Camera = @import("camera.zig").Camera;
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
+const Geometry = @import("geometry.zig").Geometry;
 
 const SimplePushConstantData = extern struct {
     transform: [16]f32 = Math.Mat4x4.identity().data,
@@ -22,16 +23,16 @@ const PointLightPushConstant = struct {
 };
 
 pub const SimpleRenderer = struct {
-    scene: Scene = undefined,
+    scene: *Scene = undefined,
     pipeline: Pipeline = undefined,
     gc: *GraphicsContext = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
     camera: *Camera = undefined,
 
-    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !SimpleRenderer {
+    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: *Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !SimpleRenderer {
         const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(SimplePushConstantData) }};
         const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
-        const layout = try gc.*.vkd.createPipelineLayout(
+        const layout = try gc.vkd.createPipelineLayout(
             gc.*.dev,
             &vk.PipelineLayoutCreateInfo{
                 .flags = .{},
@@ -48,21 +49,18 @@ pub const SimpleRenderer = struct {
 
     pub fn deinit(self: *SimpleRenderer) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
-        self.scene.deinit(self.gc.*);
         self.pipeline.deinit();
     }
 
     pub fn render(self: *@This(), frame_info: FrameInfo) !void {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
-
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
         for (self.scene.objects.slice()) |*object| {
-            if (object.model == null) {
-                continue;
-            }
-
-            const push = SimplePushConstantData{ .transform = object.transform.local2world.data, .normal_matrix = object.transform.normal2world.data };
-
+            if (object.geometry == null) continue;
+            const push = SimplePushConstantData{
+                .transform = object.transform.local2world.data,
+                .normal_matrix = object.transform.normal2world.data,
+            };
             self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(SimplePushConstantData), @ptrCast(&push));
             try object.render(self.gc.*, frame_info.command_buffer);
         }
@@ -70,13 +68,13 @@ pub const SimpleRenderer = struct {
 };
 
 pub const PointLightRenderer = struct {
-    scene: Scene = undefined,
+    scene: *Scene = undefined,
     pipeline: Pipeline = undefined,
     gc: *GraphicsContext = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
     camera: *Camera = undefined,
 
-    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !PointLightRenderer {
+    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: *Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !PointLightRenderer {
         const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(PointLightPushConstant) }};
         const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
         const layout = try gc.*.vkd.createPipelineLayout(
@@ -118,7 +116,6 @@ pub const PointLightRenderer = struct {
 
     pub fn deinit(self: *@This()) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
-        self.scene.deinit(self.gc.*);
         self.pipeline.deinit();
     }
 

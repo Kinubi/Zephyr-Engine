@@ -153,6 +153,7 @@ pub const Texture = struct {
             .rgb8 => 3,
             .gray8 => 1,
         });
+        defer zstbi.deinit();
         defer image.deinit();
 
         const mip_levels: u32 = std.math.log2_int(u32, @max(image.width, image.height)) + 1;
@@ -280,7 +281,7 @@ pub const Texture = struct {
             .unnormalized_coordinates = vk.FALSE,
             .compare_enable = vk.FALSE,
             .compare_op = vk.CompareOp.always,
-            .anisotropy_enable = vk.TRUE,
+            .anisotropy_enable = vk.FALSE,
         };
         const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
         return Texture{
@@ -320,5 +321,15 @@ pub const Texture = struct {
 
     pub fn getDescriptorInfo(self: *Texture) vk.DescriptorImageInfo {
         return self.descriptor;
+    }
+
+    pub fn deinit(self: *Texture, allocator: ?std.mem.Allocator) void {
+        // Destroy Vulkan resources in reverse order of creation
+        self.gc.vkd.destroySampler(self.gc.dev, self.sampler, null);
+        self.gc.vkd.destroyImageView(self.gc.dev, self.image_view, null);
+        self.gc.vkd.destroyImage(self.gc.dev, self.image, null);
+        self.gc.vkd.freeMemory(self.gc.dev, self.memory, null);
+        // allocator is unused, but included for API compatibility
+        _ = allocator;
     }
 };
