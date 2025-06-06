@@ -28,7 +28,7 @@ pub const GlobalUboSet = struct {
         var pool_builder = DescriptorPool.Builder{
             .gc = gc,
             .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(allocator),
-            .poolFlags = .{},
+            .poolFlags = .{ .free_descriptor_set_bit = true },
             .maxSets = 0,
         };
         const pool = try allocator.create(DescriptorPool);
