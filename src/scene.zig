@@ -138,7 +138,7 @@ pub const Scene = struct {
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
         try buf.map(@sizeOf(Material) * self.materials.items.len, 0);
-        std.debug.print("Updating material buffer with {any} materials\n", .{self.materials.items});
+        log(.DEBUG, "scene", "Updating material buffer with {d} materials", .{self.materials.items.len});
         buf.writeToBuffer(
             std.mem.sliceAsBytes(self.materials.items),
             @sizeOf(Material) * self.materials.items.len,

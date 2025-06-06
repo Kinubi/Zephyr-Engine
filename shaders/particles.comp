@@ -35,7 +35,7 @@ void main()
 
     Particle particleIn = particlesIn[index];
 
-    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.deltaTime;
+    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.deltaTime * 1000;
     particlesOut[index].velocity = particleIn.velocity;
 
     // Flip movement at window border

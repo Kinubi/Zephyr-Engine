@@ -3,6 +3,7 @@ const vk = @import("vulkan");
 const GC = @import("graphics_context.zig").GraphicsContext;
 const Vertex = @import("mesh.zig").Vertex;
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
+const Particle = @import("renderer.zig").Particle;
 
 pub const Pipeline = struct {
     gc: GC,
@@ -36,6 +37,59 @@ pub const Pipeline = struct {
             .vertex_binding_description_count = 1,
             .p_vertex_binding_descriptions = @as([*]const vk.VertexInputBindingDescription, @ptrCast(&Vertex.binding_description)),
             .vertex_attribute_description_count = Vertex.attribute_description.len,
+            .p_vertex_attribute_descriptions = &Vertex.attribute_description,
+        };
+
+        var gpci_var = gpci;
+        gpci_var.render_pass = render_pass;
+        gpci_var.stage_count = @intCast(pssci.items.len);
+        gpci_var.p_stages = pssci.items.ptr;
+        gpci_var.p_vertex_input_state = &pvisci;
+
+        var pipeline: vk.Pipeline = undefined;
+        _ = try gc.vkd.createGraphicsPipelines(
+            gc.dev,
+            .null_handle,
+            1,
+            @as([*]const vk.GraphicsPipelineCreateInfo, @ptrCast(&gpci_var)),
+            null,
+            @as([*]vk.Pipeline, @ptrCast(&pipeline)),
+        );
+
+        return Pipeline{
+            .gc = gc,
+            .pipeline = pipeline,
+            .render_pass = render_pass,
+            .shader_library = shader_library,
+            .pipeline_layout = layout,
+        };
+    }
+
+    pub fn initParticles(
+        gc: GC,
+        render_pass: vk.RenderPass,
+        shader_library: ShaderLibrary,
+        layout: vk.PipelineLayout,
+        gpci: vk.GraphicsPipelineCreateInfo,
+        alloc: std.mem.Allocator,
+    ) !Pipeline {
+        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(alloc);
+        for (shader_library.shaders.items) |shader| {
+            try pssci.append(vk.PipelineShaderStageCreateInfo{
+                .flags = .{},
+                .stage = shader.shader_type,
+                .module = shader.module,
+                .p_name = @ptrCast(shader.entry_point.name.ptr),
+                .p_specialization_info = null,
+            });
+        }
+        // Do not defer shader_library.deinit(); now owned by Pipeline
+
+        const pvisci = vk.PipelineVertexInputStateCreateInfo{
+            .flags = .{},
+            .vertex_binding_description_count = 1,
+            .p_vertex_binding_descriptions = @as([*]const vk.VertexInputBindingDescription, @ptrCast(&Particle.binding_description)),
+            .vertex_attribute_description_count = Particle.attribute_description.len,
             .p_vertex_attribute_descriptions = &Vertex.attribute_description,
         };
 

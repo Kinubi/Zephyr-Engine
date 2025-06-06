@@ -30,7 +30,7 @@ const PointLightPushConstant = struct {
     radius: f32 = 1.0,
 };
 
-const Particle = extern struct {
+pub const Particle = extern struct {
     position: [2]f32,
     velocity: [2]f32,
     color: [4]f32,
@@ -263,12 +263,14 @@ pub const ParticleRenderer = struct {
             null,
         );
         // Create raster pipeline using Pipeline.init and default create info
-        const raster_pipeline = try Pipeline.init(
+        var default_render_create_info = try Pipeline.defaultLayout(raster_pipeline_layout);
+        default_render_create_info.p_input_assembly_state = &.{ .topology = .point_list, .primitive_restart_enable = vk.TRUE };
+        const raster_pipeline = try Pipeline.initParticles(
             gc.*,
             render_pass,
             raster_shader_library,
             raster_pipeline_layout,
-            try Pipeline.defaultLayout(raster_pipeline_layout),
+            default_render_create_info,
             allocator,
         );
         // Create compute pipeline layout
@@ -326,6 +328,7 @@ pub const ParticleRenderer = struct {
 
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.raster_pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.raster_pipeline.pipeline_layout, 0, 1, @ptrCast(&self.descriptor_set), 0, null);
+        self.gc.vkd.cmdBindVertexBuffers(frame_info.command_buffer, 0, 1, @ptrCast(&self.particle_buffer_in.buffer), &.{0});
         self.gc.vkd.cmdDraw(frame_info.command_buffer, @intCast(self.num_particles), 1, 0, 0);
     }
 
