@@ -16,6 +16,7 @@ pub const GlobalUbo = struct {
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
     point_lights: [MAX_LIGHTS]PointLight = undefined,
     num_point_lights: u32 = 6,
+    dt: f32 = 0,
 };
 
 pub const FrameInfo = struct {

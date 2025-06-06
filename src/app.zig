@@ -18,6 +18,7 @@ const ModelMesh = @import("mesh.zig").ModelMesh;
 const Scene = @import("scene.zig").Scene;
 const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
 const PointLightRenderer = @import("renderer.zig").PointLightRenderer;
+const ParticleRenderer = @import("renderer.zig").ParticleRenderer;
 const Math = @import("utils/math.zig");
 const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
@@ -52,6 +53,7 @@ pub const App = struct {
     var simple_renderer: SimpleRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_system: RaytracingSystem = undefined;
+    var particle_renderer: ParticleRenderer = undefined;
     var compute_shader_system: ComputeShaderSystem = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
@@ -332,6 +334,46 @@ pub const App = struct {
         log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
+        var particle_render_shader_library = ShaderLibrary.init(self.gc, self.allocator);
+        // Read raytracing SPV files at runtime instead of @embedFile
+        const prvert = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.vert.spv", 10 * 1024 * 1024);
+        const prfrag = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.frag.spv", 10 * 1024 * 1024);
+
+        try particle_render_shader_library.add(
+            &.{ prvert, prfrag },
+            &.{
+                vk.ShaderStageFlags{ .vertex_bit = true },
+                vk.ShaderStageFlags{ .fragment_bit = true },
+            },
+            &.{
+                entry_point_definition{},
+                entry_point_definition{},
+            },
+        );
+
+        var particle_comp_shader_library = ShaderLibrary.init(self.gc, self.allocator);
+        // Read raytracing SPV files at runtime instead of @embedFile
+        const prcomp = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.comp.spv", 10 * 1024 * 1024);
+
+        try particle_comp_shader_library.add(
+            &.{prcomp},
+            &.{
+                vk.ShaderStageFlags{ .compute_bit = true },
+            },
+            &.{
+                entry_point_definition{},
+            },
+        );
+
+        particle_renderer = try ParticleRenderer.init(
+            &self.gc,
+            swapchain.render_pass,
+            particle_render_shader_library,
+            particle_comp_shader_library,
+            self.allocator,
+            1024,
+            ubo_infos,
+        );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
         last_frame_time = c.glfwGetTime();
         frame_info.camera = &camera;
@@ -356,6 +398,7 @@ pub const App = struct {
 
         compute_shader_system.beginCompute(frame_info);
         // Each compute system will dispatch its own compute shader
+        particle_renderer.dispatch(frame_info, @intCast(particle_renderer.num_particles / 256), 1, 1);
         compute_shader_system.endCompute(frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
@@ -367,12 +410,14 @@ pub const App = struct {
         var ubo = GlobalUbo{
             .view = frame_info.camera.viewMatrix,
             .projection = frame_info.camera.projectionMatrix,
+            .dt = @floatCast(dt),
         };
 
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.update(frame_info.current_frame, &ubo);
         //try simple_renderer.render(frame_info);
         //try point_light_renderer.render(frame_info);
+        //try particle_renderer.render(frame_info);
         swapchain.endSwapChainRenderPass(frame_info);
         try raytracing_system.recordCommandBuffer(
             frame_info,

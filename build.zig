@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) !void {
             const spv_name = b.allocator.alloc(u8, entry.name.len + 4) catch unreachable;
             std.mem.copyForwards(u8, spv_name[0..entry.name.len], entry.name);
             std.mem.copyForwards(u8, spv_name[entry.name.len..], ".spv");
-            const spv_path = std.fs.path.join(b.allocator, &[_][]const u8{ shader_dir, spv_name }) catch unreachable;
+            const spv_path = std.fs.path.join(b.allocator, &[_][]const u8{ shader_dir, "cached", spv_name }) catch unreachable;
             exe.step.dependOn(&b.addSystemCommand(&[_][]const u8{
                 "dxc",
                 "-Ivendor/NRIFramework/External/NRI/Include",
@@ -118,6 +118,29 @@ pub fn build(b: *std.Build) !void {
                 "-Fo",
                 spv_path,
                 hlsl_path,
+            }).step);
+        }
+    }
+
+    // Shader compilation step: compile all .glsl files in shaders/ to .spv using glslc
+    var glsl_dir = try std.fs.cwd().openDir(shader_dir, .{ .iterate = true });
+    defer glsl_dir.close();
+    var glsl_it = glsl_dir.iterate();
+    while (try glsl_it.next()) |entry| {
+        if (entry.kind == .file and (std.mem.endsWith(u8, entry.name, ".vert") or
+            std.mem.endsWith(u8, entry.name, ".frag") or
+            std.mem.endsWith(u8, entry.name, ".comp")))
+        {
+            const glsl_path = std.fs.path.join(b.allocator, &[_][]const u8{ shader_dir, entry.name }) catch unreachable;
+            const spv_name = b.allocator.alloc(u8, entry.name.len + 4) catch unreachable;
+            std.mem.copyForwards(u8, spv_name[0..entry.name.len], entry.name);
+            std.mem.copyForwards(u8, spv_name[entry.name.len..], ".spv");
+            const spv_path = std.fs.path.join(b.allocator, &[_][]const u8{ shader_dir, "cached", spv_name }) catch unreachable;
+            exe.step.dependOn(&b.addSystemCommand(&[_][]const u8{
+                "glslc",
+                "-o",
+                spv_path,
+                glsl_path,
             }).step);
         }
     }

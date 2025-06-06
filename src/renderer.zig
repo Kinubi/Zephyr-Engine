@@ -15,6 +15,8 @@ const Buffer = @import("buffer.zig").Buffer;
 const DescriptorPool = @import("descriptors.zig").DescriptorPool;
 const DescriptorSetLayout = @import("descriptors.zig").DescriptorSetLayout;
 const DescriptorWriter = @import("descriptors.zig").DescriptorWriter;
+const Texture = @import("texture.zig").Texture;
+const deinitDescriptorResources = @import("descriptors.zig").deinitDescriptorResources;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 const SimplePushConstantData = extern struct {
@@ -26,6 +28,39 @@ const PointLightPushConstant = struct {
     position: Math.Vec4 = Math.Vec4.init(0, 0, 0, 1),
     color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 1),
     radius: f32 = 1.0,
+};
+
+const Particle = extern struct {
+    position: [2]f32,
+    velocity: [2]f32,
+    color: [4]f32,
+
+    pub const binding_description = vk.VertexInputBindingDescription{
+        .binding = 0,
+        .stride = @sizeOf(Particle),
+        .input_rate = .vertex,
+    };
+
+    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
+        .{
+            .binding = 0,
+            .location = 0,
+            .format = .r32g32_sfloat,
+            .offset = @offsetOf(Particle, "position"),
+        },
+        .{
+            .binding = 0,
+            .location = 1,
+            .format = .r32g32_sfloat,
+            .offset = @offsetOf(Particle, "velocity"),
+        },
+        .{
+            .binding = 0,
+            .location = 2,
+            .format = .r32g32b32a32_sfloat,
+            .offset = @offsetOf(Particle, "color"),
+        },
+    };
 };
 
 pub const SimpleRenderer = struct {
@@ -148,32 +183,41 @@ pub const PointLightRenderer = struct {
 
 pub const ParticleRenderer = struct {
     gc: *GraphicsContext = undefined,
-    compute_system: *ComputeShaderSystem = undefined,
     raster_pipeline: Pipeline = undefined,
     compute_pipeline: Pipeline = undefined,
-    particle_buffer: Buffer = undefined,
+    particle_buffer_in: Buffer = undefined,
+    particle_buffer_out: Buffer = undefined,
+    descriptor_pool: *DescriptorPool = undefined,
     descriptor_set: vk.DescriptorSet = undefined,
-    descriptor_set_layout: vk.DescriptorSetLayout = undefined,
+    descriptor_set_layout: *DescriptorSetLayout = undefined,
     num_particles: usize = 0,
-
+    allocator: std.mem.Allocator = undefined,
     pub fn init(
         gc: *GraphicsContext,
-        compute_system: *ComputeShaderSystem,
         render_pass: vk.RenderPass,
         raster_shader_library: ShaderLibrary,
         compute_shader_library: ShaderLibrary,
         allocator: std.mem.Allocator,
         num_particles: usize,
-        descriptor_pool: *DescriptorPool,
+        ubo_infos: []const vk.DescriptorBufferInfo,
     ) !ParticleRenderer {
-        // Create storage buffer for particles
-        const particle_buffer = try Buffer.init(
+        // Create storage buffer for particles (device local)
+        const buffer_size = @sizeOf(Particle) * num_particles;
+        const particle_buffer_in = try Buffer.init(
             gc,
-            @sizeOf(Math.Vec4) * num_particles,
+            buffer_size,
             1,
-            .{ .storage_buffer_bit = true },
+            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true },
             .{ .device_local_bit = true },
         );
+        const particle_buffer_out = try Buffer.init(
+            gc,
+            buffer_size,
+            1,
+            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_src_bit = true, .transfer_dst_bit = true },
+            .{ .device_local_bit = true },
+        );
+
         var pool_builder = DescriptorPool.Builder{
             .gc = gc,
             .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(allocator),
@@ -182,8 +226,9 @@ pub const ParticleRenderer = struct {
         };
         const pool = try allocator.create(DescriptorPool);
         pool.* = try pool_builder
-            .setMaxSets(@intCast(MAX_FRAMES_IN_FLIGHT))
-            .addPoolSize(.storage_buffer, @intCast(MAX_FRAMES_IN_FLIGHT)).build();
+            .setMaxSets(10)
+            .addPoolSize(.uniform_buffer, 10)
+            .addPoolSize(.storage_buffer, 10).build();
 
         var layout_builder = DescriptorSetLayout.Builder{
             .gc = gc,
@@ -191,20 +236,20 @@ pub const ParticleRenderer = struct {
         };
         const layout = try allocator.create(DescriptorSetLayout);
         layout.* = try layout_builder
-            .addBinding(0, .storage_buffer, .{ .vertex_bit = true, .fragment_bit = true }, 1)
+            .addBinding(0, .uniform_buffer, .{ .compute_bit = true }, 1)
+            .addBinding(1, .storage_buffer, .{ .compute_bit = true }, 1)
+            .addBinding(2, .storage_buffer, .{ .compute_bit = true }, 1)
             .build();
         // Allocate descriptor set
-        var descriptor_set = try descriptor_pool.allocate(&layout);
+        var descriptor_set: vk.DescriptorSet = undefined;
         // Write buffer info to descriptor set
-        var buffer_info = vk.DescriptorBufferInfo{
-            .buffer = particle_buffer.buffer,
-            .offset = 0,
-            .range = @sizeOf(Math.Vec4) * num_particles,
-        };
-        DescriptorWriter.init(gc, &layout, descriptor_pool)
-            .writeBuffer(0, &buffer_info)
+        var writer = DescriptorWriter.init(gc, layout, pool);
+        for (ubo_infos) |info| {
+            try writer.writeBuffer(0, @constCast(&info)).build(&descriptor_set);
+        }
+        writer.writeBuffer(1, @constCast(&particle_buffer_in.descriptor_info))
+            .writeBuffer(2, @constCast(&particle_buffer_out.descriptor_info))
             .build(&descriptor_set) catch |err| return err;
-        const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true }, .offset = 0, .size = 0 }};
         const dsl_arr = [_]vk.DescriptorSetLayout{layout.descriptor_set_layout};
         // Create raster pipeline layout
         const raster_pipeline_layout = try gc.vkd.createPipelineLayout(
@@ -213,8 +258,7 @@ pub const ParticleRenderer = struct {
                 .flags = .{},
                 .set_layout_count = dsl_arr.len,
                 .p_set_layouts = &dsl_arr,
-                .push_constant_range_count = pcr.len,
-                .p_push_constant_ranges = &pcr,
+                .push_constant_range_count = 0,
             },
             null,
         );
@@ -224,7 +268,7 @@ pub const ParticleRenderer = struct {
             render_pass,
             raster_shader_library,
             raster_pipeline_layout,
-            Pipeline.defaultLayout(raster_pipeline_layout, render_pass),
+            try Pipeline.defaultLayout(raster_pipeline_layout),
             allocator,
         );
         // Create compute pipeline layout
@@ -247,27 +291,39 @@ pub const ParticleRenderer = struct {
             compute_pipeline_layout,
             Pipeline.defaultComputeLayout(compute_pipeline_layout),
         );
-        return ParticleRenderer{
+        var self = ParticleRenderer{
             .gc = gc,
-            .compute_system = compute_system,
             .raster_pipeline = raster_pipeline,
             .compute_pipeline = compute_pipeline,
-            .particle_buffer = particle_buffer,
+            .particle_buffer_in = particle_buffer_in,
+            .particle_buffer_out = particle_buffer_out,
+            .descriptor_pool = pool,
             .descriptor_set = descriptor_set,
             .descriptor_set_layout = layout,
             .num_particles = num_particles,
+            .allocator = allocator,
         };
+        self.initialiseParticles(allocator, 1280, 720) catch |err| {
+            self.deinit();
+            return err;
+        };
+        return self;
     }
 
     pub fn deinit(self: *ParticleRenderer) void {
         self.raster_pipeline.deinit();
         self.compute_pipeline.deinit();
-        self.particle_buffer.deinit();
-        self.descriptor_set_layout.deinit();
+        self.particle_buffer_in.deinit();
+        self.particle_buffer_out.deinit();
+        var descriptor_sets = [_]vk.DescriptorSet{self.descriptor_set};
+        deinitDescriptorResources(self.descriptor_pool, self.descriptor_set_layout, descriptor_sets[0..], self.allocator) catch |err| {
+            std.debug.print("Failed to deinit descriptor resources: {}\n", .{err});
+        };
     }
 
     pub fn render(self: *ParticleRenderer, frame_info: FrameInfo) !void {
         // Render particles as points using the raster pipeline
+
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.raster_pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.raster_pipeline.pipeline_layout, 0, 1, @ptrCast(&self.descriptor_set), 0, null);
         self.gc.vkd.cmdDraw(frame_info.command_buffer, @intCast(self.num_particles), 1, 0, 0);
@@ -275,8 +331,55 @@ pub const ParticleRenderer = struct {
 
     pub fn dispatch(self: *ParticleRenderer, frame_info: FrameInfo, group_count_x: u32, group_count_y: u32, group_count_z: u32) void {
         // Dispatch compute shader using the owned compute pipeline
+        self.gc.copyBuffer(self.particle_buffer_in.buffer, self.particle_buffer_out.buffer, @sizeOf(Particle) * self.num_particles) catch |err| {
+            std.debug.print("Failed to copy particle buffers: {}\n", .{err});
+            return;
+        };
         self.gc.*.vkd.cmdBindPipeline(frame_info.compute_buffer, .compute, self.compute_pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.compute_buffer, .compute, self.compute_pipeline.pipeline_layout, 0, 1, @ptrCast(&self.descriptor_set), 0, null);
         self.gc.vkd.cmdDispatch(frame_info.compute_buffer, group_count_x, group_count_y, group_count_z);
+    }
+
+    fn initialiseParticles(self: *ParticleRenderer, allocator: std.mem.Allocator, width: f32, height: f32) !void {
+        // Create staging buffer (host visible)
+        const buffer_size = @sizeOf(Particle) * self.num_particles;
+        var staging_buffer = try Buffer.init(
+            self.gc,
+            buffer_size,
+            1,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        // Fill staging buffer with initial particle data
+        var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+        const rand = prng.random();
+        const pi = 3.14159265358979323846;
+        const scale = 0.25;
+        const vel_scale = 0.00025;
+        const particle_data = try allocator.alloc(Particle, self.num_particles);
+        for (particle_data) |*particle| {
+            const r = scale * @sqrt(rand.float(f32));
+            const theta = rand.float(f32) * 2.0 * pi;
+            const x = r * @cos(theta) * height / width;
+            const y = r * @sin(theta);
+            // Velocity as normalized (x, y) * vel_scale
+            const len = @sqrt(x * x + y * y);
+            const vx = if (len > 0.0) (x / len) * vel_scale else 0.0;
+            const vy = if (len > 0.0) (y / len) * vel_scale else 0.0;
+            // Color random
+            const color = .{ rand.float(f32), rand.float(f32), rand.float(f32), 1.0 };
+            particle.* = Particle{
+                .position = .{ x, y },
+                .velocity = .{ vx, vy },
+                .color = color,
+            };
+        }
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(std.mem.sliceAsBytes(particle_data), buffer_size, 0);
+        // Copy from staging buffer to device-local buffer
+        try self.gc.copyBuffer(self.particle_buffer_in.buffer, staging_buffer.buffer, buffer_size);
+        try self.gc.copyBuffer(self.particle_buffer_out.buffer, staging_buffer.buffer, buffer_size);
+        staging_buffer.deinit();
+        allocator.free(particle_data);
     }
 };
