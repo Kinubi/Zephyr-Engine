@@ -262,3 +262,5 @@ pub fn deinitDescriptorResources(
         if (allocator) |a| a.destroy(l);
     }
 }
+
+// DescriptorSetLayout, DescriptorPool, and DescriptorWriter structs already store gc as a member, matching their init signatures. Allocator is not stored, as not needed after construction.

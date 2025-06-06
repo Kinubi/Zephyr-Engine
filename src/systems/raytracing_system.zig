@@ -42,13 +42,14 @@ pub const RaytracingSystem = struct {
     height: u32 = 720,
     blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
     blas_buffers: std.ArrayList(Buffer) = undefined,
+    allocator: std.mem.Allocator = undefined,
 
     /// Idiomatic init, matching renderer.SimpleRenderer
     pub fn init(
         gc: *GraphicsContext,
         render_pass: vk.RenderPass,
         shader_library: ShaderLibrary,
-        alloc: std.mem.Allocator,
+        allocator: std.mem.Allocator,
         descriptor_set_layout: *DescriptorSetLayout, // now a pointer
         descriptor_pool: *DescriptorPool,
         swapchain: *Swapchain,
@@ -67,7 +68,7 @@ pub const RaytracingSystem = struct {
             },
             null,
         );
-        const pipeline = try Pipeline.initRaytracing(gc.*, render_pass, shader_library, layout, Pipeline.defaultRaytracingLayout(layout), alloc);
+        const pipeline = try Pipeline.initRaytracing(gc.*, render_pass, shader_library, layout, Pipeline.defaultRaytracingLayout(layout), allocator);
         // Create output image using Texture abstraction
         std.debug.print("Swapchain surface format: {}\n", .{swapchain.surface_format.format});
         // If the swapchain format is ARGB, use ABGR for the output image format, else use the swapchain format.
@@ -97,8 +98,9 @@ pub const RaytracingSystem = struct {
             .descriptor_pool = descriptor_pool,
             .width = width,
             .height = height,
-            .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(alloc, 8),
-            .blas_buffers = try std.ArrayList(Buffer).initCapacity(alloc, 8),
+            .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 8),
+            .blas_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 8),
+            .allocator = allocator,
             // ...existing code...
         };
     }
@@ -122,11 +124,11 @@ pub const RaytracingSystem = struct {
                     const vertex_size = @sizeOf(Vertex);
                     var vertex_address_info = vk.BufferDeviceAddressInfo{
                         .s_type = vk.StructureType.buffer_device_address_info,
-                        .buffer = vertex_buffer,
+                        .buffer = vertex_buffer.?.buffer,
                     };
                     var index_address_info = vk.BufferDeviceAddressInfo{
                         .s_type = vk.StructureType.buffer_device_address_info,
-                        .buffer = index_buffer,
+                        .buffer = index_buffer.?.buffer,
                     };
                     const vertex_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &vertex_address_info);
                     const index_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &index_address_info);
@@ -148,7 +150,7 @@ pub const RaytracingSystem = struct {
                         .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
                     };
                     log.log(log.LogLevel.INFO, "RaytracingSystem", "BLAS mesh {}: index_count = {}, primitive_count = {}", .{ mesh_count, index_count, index_count / 3 });
-                    log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer, index_buffer });
+                    log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer.?.buffer, index_buffer.?.buffer });
                     var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
                         .primitive_count = @intCast(index_count / 3),
                         .primitive_offset = 0,
@@ -224,8 +226,8 @@ pub const RaytracingSystem = struct {
     }
 
     /// Create TLAS for all mesh instances in the scene
-    pub fn createTLAS(self: *RaytracingSystem, scene: *Scene, allocator: std.mem.Allocator) !void {
-        var instances = try std.ArrayList(vk.AccelerationStructureInstanceKHR).initCapacity(allocator, self.blas_handles.items.len);
+    pub fn createTLAS(self: *RaytracingSystem, scene: *Scene) !void {
+        var instances = try std.ArrayList(vk.AccelerationStructureInstanceKHR).initCapacity(self.allocator, self.blas_handles.items.len);
         var mesh_index: u32 = 0;
         log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating TLAS for Scene with {} objects", .{scene.objects.len});
         for (scene.objects.slice()) |*object| {
@@ -392,8 +394,8 @@ pub const RaytracingSystem = struct {
         const sbt_size = sbt_stride * group_count;
 
         // 1. Query shader group handles
-        const handles = try std.heap.page_allocator.alloc(u8, handle_size * group_count);
-        defer std.heap.page_allocator.free(handles);
+        const handles = try self.allocator.alloc(u8, handle_size * group_count);
+        defer self.allocator.free(handles);
         try gc.vkd.getRayTracingShaderGroupHandlesKHR(gc.dev, self.pipeline.pipeline, 0, group_count, handle_size * group_count, handles.ptr);
 
         // 2. Allocate device-local SBT buffer
@@ -616,7 +618,7 @@ pub const RaytracingSystem = struct {
         if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
         // Destroy output image/texture
-        self.output_texture.deinit(null);
+        self.output_texture.deinit();
         // Clean up descriptor sets, pool, and layout
         deinitDescriptorResources(self.descriptor_pool, self.descriptor_set_layout, @ptrCast(&self.descriptor_set), null) catch |err| {
             log.log(log.LogLevel.ERROR, "RaytracingSystem", "Failed to deinit descriptor resources: {}", .{err});

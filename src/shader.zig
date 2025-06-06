@@ -33,7 +33,7 @@ pub const ShaderLibrary = struct {
         return ShaderLibrary{ .gc = gc, .shaders = std.ArrayList(Shader).init(alloc) };
     }
 
-    pub fn add(self: *@This(), shader_codes: []const []const u8, shader_types: []const vk.ShaderStageFlags, entry_points: []const entry_point_definition) !void {
+    pub fn add(self: *ShaderLibrary, shader_codes: []const []const u8, shader_types: []const vk.ShaderStageFlags, entry_points: []const entry_point_definition) !void {
         if (shader_codes.len != shader_types.len) {
             return error.InvalidShaderCode;
         }
@@ -44,9 +44,12 @@ pub const ShaderLibrary = struct {
         }
     }
 
-    pub fn deinit(self: @This()) void {
+    pub fn deinit(self: *ShaderLibrary) void {
         for (self.shaders.items) |shader| {
             shader.deinit(self.gc);
         }
+        self.shaders.deinit();
     }
 };
+
+// ShaderLibrary struct already stores gc as a member, matching the init signature. Allocator is not stored, as std.ArrayList handles it.

@@ -41,16 +41,16 @@ pub const Scene = struct {
         };
     }
 
-    pub fn deinit(self: *Scene, gc: GraphicsContext) void {
+    pub fn deinit(self: *Scene) void {
         log(.INFO, "scene", "Deinitializing Scene with {d} objects", .{self.objects.constSlice().len});
         // Deinit all objects (models/meshes)
         for (self.objects.constSlice()) |object| {
-            object.deinit(gc);
+            object.deinit();
         }
         // Deinit all textures
         log(.DEBUG, "scene", "Deinitializing {d} textures", .{self.textures.items.len});
         for (self.textures.items) |*tex| {
-            tex.deinit(null);
+            tex.deinit();
         }
         self.textures.deinit();
         // Deinit material buffer if present
@@ -144,7 +144,6 @@ pub const Scene = struct {
             @sizeOf(Material) * self.materials.items.len,
             0,
         );
-
         self.material_buffer = buf;
     }
 
@@ -186,4 +185,19 @@ pub const Scene = struct {
         log(.INFO, "scene", "Assigned material {d} to all meshes in model {s}", .{ material_id, model_path });
         return try self.addModel(model, null);
     }
+
+    pub fn addModelWithMaterialAndTransform(
+        self: *Scene,
+        model_path: []const u8,
+        texture_path: []const u8,
+        transform: Math.Vec3,
+        scale: Math.Vec3,
+    ) !*GameObject {
+        const obj = try self.addModelWithMaterial(model_path, texture_path);
+        obj.transform.translate(transform);
+        obj.transform.scale(scale);
+        return obj;
+    }
 };
+
+// No direct usage of mesh.vertex_buffer_descriptor or mesh.index_buffer_descriptor in this file, but if you add such usage, use mesh.vertex_buffer.?.descriptor_info and mesh.index_buffer.?.descriptor_info.

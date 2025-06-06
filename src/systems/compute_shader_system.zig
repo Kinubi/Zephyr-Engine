@@ -61,6 +61,37 @@ pub const ComputeShaderSystem = struct {
         };
     }
 
+    /// Dispatch a compute shader with the given pipeline and descriptor set abstraction.
+    /// - pipeline: expects .pipeline and .pipeline_layout fields
+    /// - descriptor_set: expects .descriptor_set field
+    /// - frame_info: FrameInfo for the current frame
+    /// - group_counts: [3]u32 for x, y, z group counts
+    pub fn dispatch(
+        self: *ComputeShaderSystem,
+        pipeline: anytype, // expects .pipeline and .pipeline_layout fields
+        descriptor_set: anytype, // expects .descriptor_set field
+        frame_info: FrameInfo,
+        group_counts: [3]u32,
+    ) void {
+        self.gc.vkd.cmdBindPipeline(frame_info.compute_buffer, vk.PipelineBindPoint.compute, pipeline.pipeline);
+        self.gc.vkd.cmdBindDescriptorSets(
+            frame_info.compute_buffer,
+            vk.PipelineBindPoint.compute,
+            pipeline.pipeline_layout,
+            0,
+            1,
+            @ptrCast(&descriptor_set.descriptor_set),
+            0,
+            null,
+        );
+        self.gc.vkd.cmdDispatch(
+            frame_info.compute_buffer,
+            group_counts[0],
+            group_counts[1],
+            group_counts[2],
+        );
+    }
+
     pub fn deinit(self: *ComputeShaderSystem) void {
         if (self.pipeline != undefined) self.gc.vkd.destroyPipeline(self.gc.dev, self.pipeline, null);
         if (self.pipeline_layout != undefined) self.gc.vkd.destroyPipelineLayout(self.gc.dev, self.pipeline_layout, null);

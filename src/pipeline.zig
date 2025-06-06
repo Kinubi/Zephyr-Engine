@@ -267,7 +267,6 @@ pub const Pipeline = struct {
                 .p_specialization_info = null,
             });
         }
-        errdefer shader_library.deinit();
 
         var rpcik_var = rpcik;
         rpcik_var.stage_count = @intCast(pssci.items.len);
@@ -388,3 +387,4 @@ pub const Pipeline = struct {
         };
     }
 };
+// Pipeline struct already stores gc as a member, matching the init signature. Allocator is not stored, as not needed after construction.

@@ -263,7 +263,7 @@ pub const Swapchain = struct {
         }
     }
 
-    pub fn createRenderPass(self: *@This()) !void {
+    pub fn createRenderPass(self: *Swapchain) !void {
         const attachments = [_]vk.AttachmentDescription{
             .{
                 .flags = .{},
@@ -335,7 +335,7 @@ pub const Swapchain = struct {
         }, null);
     }
 
-    pub fn createFramebuffers(self: *@This()) !void {
+    pub fn createFramebuffers(self: *Swapchain) !void {
         std.debug.print("Creating\n", .{});
         const framebuffers = try self.allocator.alloc(vk.Framebuffer, self.swap_images.len);
         errdefer self.allocator.free(framebuffers);
@@ -359,12 +359,12 @@ pub const Swapchain = struct {
 
         self.framebuffers = framebuffers;
     }
-    pub fn destroyFramebuffers(self: *@This()) void {
+    pub fn destroyFramebuffers(self: *Swapchain) void {
         for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
         self.allocator.free(self.framebuffers);
     }
 
-    pub fn beginSwapChainRenderPass(self: *@This(), frame_info: FrameInfo) void {
+    pub fn beginSwapChainRenderPass(self: *Swapchain, frame_info: FrameInfo) void {
         const clear_values = [_]vk.ClearValue{
             .{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } },
             .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
@@ -396,7 +396,7 @@ pub const Swapchain = struct {
         self.gc.vkd.cmdSetScissor(frame_info.command_buffer, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
     }
 
-    pub fn endSwapChainRenderPass(self: *@This(), frame_info: FrameInfo) void {
+    pub fn endSwapChainRenderPass(self: *Swapchain, frame_info: FrameInfo) void {
         self.gc.vkd.cmdEndRenderPass(frame_info.command_buffer);
     }
 
@@ -422,7 +422,7 @@ pub const Swapchain = struct {
         };
     }
 
-    pub fn beginComputePass(self: *@This(), frame_info: FrameInfo) !void {
+    pub fn beginComputePass(self: *Swapchain, frame_info: FrameInfo) !void {
         _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
 
         // Reset compute fence for this frame
@@ -434,7 +434,7 @@ pub const Swapchain = struct {
         try self.gc.vkd.beginCommandBuffer(frame_info.compute_buffer, &begin_info_compute);
     }
 
-    pub fn beginFrame(self: *@This(), frame_info: FrameInfo) !void {
+    pub fn beginFrame(self: *Swapchain, frame_info: FrameInfo) !void {
         if (self.image_acquired[frame_info.current_frame] != .null_handle) {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
         }
@@ -469,7 +469,7 @@ pub const Swapchain = struct {
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
     }
 
-    pub fn endFrame(self: *@This(), frame_info: FrameInfo, current_frame: *u32) !void {
+    pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             std.debug.print("Error ending command buffer: {any}\n", .{err});
         };

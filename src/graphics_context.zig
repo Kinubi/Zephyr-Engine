@@ -200,14 +200,14 @@ pub const GraphicsContext = struct {
         }, null);
     }
 
-    pub fn createCommandPool(self: *@This()) !void {
+    pub fn createCommandPool(self: *GraphicsContext) !void {
         self.command_pool = try self.vkd.createCommandPool(self.dev, &.{
             .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = self.graphics_queue.family,
         }, null);
     }
 
-    pub fn copyBuffer(self: *@This(), dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
+    pub fn copyBuffer(self: *GraphicsContext, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
         const cmdbuf = try self.beginSingleTimeCommands();
         const region = vk.BufferCopy{
             .src_offset = 0,
@@ -219,7 +219,7 @@ pub const GraphicsContext = struct {
     }
 
     pub fn createCommandBuffers(
-        self: *@This(),
+        self: *GraphicsContext,
         allocator: Allocator,
     ) ![]vk.CommandBuffer {
         const cmdbufs = try allocator.alloc(vk.CommandBuffer, MAX_FRAMES_IN_FLIGHT);
@@ -241,7 +241,7 @@ pub const GraphicsContext = struct {
     }
 
     pub fn createBuffer(
-        self: *@This(),
+        self: *GraphicsContext,
         size: u64,
         usage: vk.BufferUsageFlags,
         memory_properties: vk.MemoryPropertyFlags,

@@ -118,3 +118,5 @@ pub const Buffer = struct {
         };
     }
 };
+
+// Buffer struct already stores gc as a member, matching the init signature. Allocator is not stored, as not needed after construction.

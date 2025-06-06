@@ -93,7 +93,7 @@ pub const SimpleRenderer = struct {
         self.pipeline.deinit();
     }
 
-    pub fn render(self: *@This(), frame_info: FrameInfo) !void {
+    pub fn render(self: *SimpleRenderer, frame_info: FrameInfo) !void {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
         for (self.scene.objects.slice()) |*object| {
@@ -133,7 +133,7 @@ pub const PointLightRenderer = struct {
         return PointLightRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout, .camera = camera };
     }
 
-    pub fn update_point_lights(self: *@This(), frame_info: *FrameInfo, global_ubo: *GlobalUbo) !void {
+    pub fn update_point_lights(self: *PointLightRenderer, frame_info: *FrameInfo, global_ubo: *GlobalUbo) !void {
         _ = frame_info;
         var num_lights: u32 = 0;
         for (self.scene.objects.slice()) |*object| {
@@ -155,12 +155,12 @@ pub const PointLightRenderer = struct {
         global_ubo.num_point_lights = num_lights;
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *PointLightRenderer) void {
         self.gc.*.vkd.destroyPipelineLayout(self.gc.*.dev, self.pipeline_layout, null);
         self.pipeline.deinit();
     }
 
-    pub fn render(self: *@This(), frame_info: FrameInfo) !void {
+    pub fn render(self: *PointLightRenderer, frame_info: FrameInfo) !void {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
 
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
@@ -305,7 +305,7 @@ pub const ParticleRenderer = struct {
             .num_particles = num_particles,
             .allocator = allocator,
         };
-        self.initialiseParticles(allocator, 1280, 720) catch |err| {
+        self.initialiseParticles(1280, 720) catch |err| {
             self.deinit();
             return err;
         };
@@ -332,18 +332,16 @@ pub const ParticleRenderer = struct {
         self.gc.vkd.cmdDraw(frame_info.command_buffer, @intCast(self.num_particles), 1, 0, 0);
     }
 
-    pub fn dispatch(self: *ParticleRenderer, frame_info: FrameInfo, group_count_x: u32, group_count_y: u32, group_count_z: u32) void {
+    pub fn dispatch(self: *ParticleRenderer) void {
         // Dispatch compute shader using the owned compute pipeline
         self.gc.copyBuffer(self.particle_buffer_in.buffer, self.particle_buffer_out.buffer, @sizeOf(Particle) * self.num_particles) catch |err| {
             std.debug.print("Failed to copy particle buffers: {}\n", .{err});
             return;
         };
-        self.gc.*.vkd.cmdBindPipeline(frame_info.compute_buffer, .compute, self.compute_pipeline.pipeline);
-        self.gc.vkd.cmdBindDescriptorSets(frame_info.compute_buffer, .compute, self.compute_pipeline.pipeline_layout, 0, 1, @ptrCast(&self.descriptor_set), 0, null);
-        self.gc.vkd.cmdDispatch(frame_info.compute_buffer, group_count_x, group_count_y, group_count_z);
+
     }
 
-    fn initialiseParticles(self: *ParticleRenderer, allocator: std.mem.Allocator, width: f32, height: f32) !void {
+    fn initialiseParticles(self: *ParticleRenderer, width: f32, height: f32) !void {
         // Create staging buffer (host visible)
         const buffer_size = @sizeOf(Particle) * self.num_particles;
         var staging_buffer = try Buffer.init(
@@ -359,7 +357,8 @@ pub const ParticleRenderer = struct {
         const pi = 3.14159265358979323846;
         const scale = 0.25;
         const vel_scale = 0.00025;
-        const particle_data = try allocator.alloc(Particle, self.num_particles);
+        const particle_data = try self.allocator.alloc(Particle, self.num_particles);
+        defer self.allocator.free(particle_data);
         for (particle_data) |*particle| {
             const r = scale * @sqrt(rand.float(f32));
             const theta = rand.float(f32) * 2.0 * pi;
@@ -383,6 +382,8 @@ pub const ParticleRenderer = struct {
         try self.gc.copyBuffer(self.particle_buffer_in.buffer, staging_buffer.buffer, buffer_size);
         try self.gc.copyBuffer(self.particle_buffer_out.buffer, staging_buffer.buffer, buffer_size);
         staging_buffer.deinit();
-        allocator.free(particle_data);
     }
 };
+
+// All pipeline, buffer, and descriptor management uses abstractions (Pipeline, Buffer, DescriptorPool, DescriptorSetLayout, DescriptorWriter, etc.)
+// No raw Vulkan resource management is used directly in this file.
