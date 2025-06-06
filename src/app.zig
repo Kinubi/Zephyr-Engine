@@ -16,9 +16,9 @@ const Mesh = @import("mesh.zig").Mesh;
 const Model = @import("mesh.zig").Model;
 const ModelMesh = @import("mesh.zig").ModelMesh;
 const Scene = @import("scene.zig").Scene;
-const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
-const PointLightRenderer = @import("renderer.zig").PointLightRenderer;
-const ParticleRenderer = @import("renderer.zig").ParticleRenderer;
+const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
+const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
+const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
 const Math = @import("utils/math.zig");
 const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
@@ -41,6 +41,7 @@ const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
 const log = @import("utils/log.zig").log;
 const LogLevel = @import("utils/log.zig").LogLevel;
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
+const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 
 pub const App = struct {
     window: Window = undefined,
@@ -55,6 +56,7 @@ pub const App = struct {
     var raytracing_system: RaytracingSystem = undefined;
     var particle_renderer: ParticleRenderer = undefined;
     var compute_shader_system: ComputeShaderSystem = undefined;
+    var render_system: RenderSystem = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -84,6 +86,7 @@ pub const App = struct {
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
+        render_system = RenderSystem.init(&self.gc, &swapchain);
 
         std.debug.print("Creating command buffers\n", .{});
 
@@ -414,7 +417,7 @@ pub const App = struct {
 
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
-        swapchain.beginSwapChainRenderPass(frame_info);
+        render_system.beginRender(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         frame_info.camera.updateProjectionMatrix();
@@ -423,13 +426,12 @@ pub const App = struct {
             .projection = frame_info.camera.projectionMatrix,
             .dt = @floatCast(dt),
         };
-
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.update(frame_info.current_frame, &ubo);
         //try simple_renderer.render(frame_info);
         //try point_light_renderer.render(frame_info);
         //try particle_renderer.render(frame_info);
-        swapchain.endSwapChainRenderPass(frame_info);
+        render_system.endRender(frame_info);
         try raytracing_system.recordCommandBuffer(
             frame_info,
             &swapchain,
@@ -453,6 +455,7 @@ pub const App = struct {
         point_light_renderer.deinit();
         simple_renderer.deinit();
         raytracing_system.deinit();
+        particle_renderer.deinit();
         scene.deinit();
         swapchain.deinit();
         self.gc.deinit();
