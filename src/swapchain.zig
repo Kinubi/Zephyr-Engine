@@ -30,7 +30,7 @@ pub const Swapchain = struct {
 
     swap_images: []SwapImage,
     image_index: u32 = 0,
-    compute: bool = true, // Whether to use compute shaders in the swapchain
+    compute: bool = false, // Whether to use compute shaders in the swapchain
     pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
         var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
         var image_acquired = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
@@ -422,18 +422,19 @@ pub const Swapchain = struct {
         };
     }
 
+    pub fn beginComputePass(self: *@This(), frame_info: FrameInfo) !void {
+        _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
+
+        // Reset compute fence for this frame
+        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
+
+        try self.gc.vkd.resetCommandBuffer(frame_info.compute_buffer, .{});
+
+        const begin_info_compute = vk.CommandBufferBeginInfo{};
+        try self.gc.vkd.beginCommandBuffer(frame_info.compute_buffer, &begin_info_compute);
+    }
+
     pub fn beginFrame(self: *@This(), frame_info: FrameInfo) !void {
-        if (self.compute) {
-            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
-
-            // Reset compute fence for this frame
-            try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
-
-            try self.gc.vkd.resetCommandBuffer(frame_info.compute_buffer, .{});
-
-            const begin_info_compute = vk.CommandBufferBeginInfo{};
-            try self.gc.vkd.beginCommandBuffer(frame_info.compute_buffer, &begin_info_compute);
-        }
         if (self.image_acquired[frame_info.current_frame] != .null_handle) {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
         }
@@ -469,15 +470,6 @@ pub const Swapchain = struct {
     }
 
     pub fn endFrame(self: *@This(), frame_info: FrameInfo, current_frame: *u32) !void {
-        if (self.compute) {
-            self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
-                std.debug.print("Error ending command buffer: {any}\n", .{err});
-            };
-
-            self.submitCompute(frame_info.compute_buffer, current_frame.*) catch |err| {
-                std.debug.print("Error submitting compute command buffer: {any}\n", .{err});
-            };
-        }
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             std.debug.print("Error ending command buffer: {any}\n", .{err});
         };
@@ -486,6 +478,16 @@ pub const Swapchain = struct {
         };
 
         current_frame.* = (current_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    pub fn endComputePass(self: *Swapchain, frame_info: FrameInfo) !void {
+        self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
+            std.debug.print("Error ending command buffer: {any}\n", .{err});
+        };
+
+        self.submitCompute(frame_info.compute_buffer, frame_info.current_frame) catch |err| {
+            std.debug.print("Error submitting compute command buffer: {any}\n", .{err});
+        };
     }
 
     pub fn submitCompute(self: *Swapchain, cmdbuf: vk.CommandBuffer, current_frame: u32) !void {

@@ -283,7 +283,7 @@ pub const Pipeline = struct {
         };
     }
 
-    pub fn defaultComputeConfig(layout: vk.PipelineLayout) vk.ComputePipelineCreateInfo {
+    pub fn defaultComputeLayout(layout: vk.PipelineLayout) vk.ComputePipelineCreateInfo {
         return vk.ComputePipelineCreateInfo{
             .s_type = vk.StructureType.compute_pipeline_create_info,
             .p_next = null,

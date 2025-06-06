@@ -39,6 +39,7 @@ const Material = @import("scene.zig").Material;
 const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
 const log = @import("utils/log.zig").log;
 const LogLevel = @import("utils/log.zig").LogLevel;
+const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 
 pub const App = struct {
     window: Window = undefined,
@@ -48,10 +49,10 @@ pub const App = struct {
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
-    var computebufs: []vk.CommandBuffer = undefined;
     var simple_renderer: SimpleRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_system: RaytracingSystem = undefined;
+    var compute_shader_system: ComputeShaderSystem = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -184,10 +185,6 @@ pub const App = struct {
 
         log(.DEBUG, "renderer", "Creating command buffers", .{});
         cmdbufs = try self.gc.createCommandBuffers(
-            self.allocator,
-        );
-
-        computebufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
 
@@ -332,8 +329,10 @@ pub const App = struct {
         raytracing_system.descriptor_set = raytracing_descriptor_set.set;
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
-        log(.INFO, "raytracing", "Raytracing system fully initialized", .{});
-
+        log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
+        // --- Compute shader system initialization ---
+        compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
+        log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
         last_frame_time = c.glfwGetTime();
         frame_info.camera = &camera;
     }
@@ -344,7 +343,7 @@ pub const App = struct {
         const current_time = c.glfwGetTime();
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
-        const computebuf = computebufs[current_frame];
+        const computebuf = compute_shader_system.compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
         frame_info.compute_buffer = computebuf;
         frame_info.dt = @floatCast(dt);
@@ -354,6 +353,10 @@ pub const App = struct {
         var height: c_int = 0;
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
+
+        compute_shader_system.beginCompute(frame_info);
+        // Each compute system will dispatch its own compute shader
+        compute_shader_system.endCompute(frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
