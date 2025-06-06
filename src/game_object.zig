@@ -25,9 +25,9 @@ pub const GameObject = struct {
         }
     }
 
-    pub fn deinit(self: GameObject, gc: GraphicsContext) void {
+    pub fn deinit(self: GameObject) void {
         if (self.model) |model| {
-            model.deinit(gc);
+            model.deinit();
         }
     }
 };

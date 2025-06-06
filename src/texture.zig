@@ -2,8 +2,9 @@ const std = @import("std");
 const vk = @import("vulkan");
 const zstbi = @import("zstbi");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
-const Allocator = std.mem.Allocator;
 const Buffer = @import("buffer.zig").Buffer;
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
 
 pub const Texture = struct {
     image: vk.Image,
@@ -177,6 +178,7 @@ pub const Texture = struct {
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
+        defer staging_buffer.deinit();
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(image.data, buffer_size, 0);
 
@@ -323,13 +325,13 @@ pub const Texture = struct {
         return self.descriptor;
     }
 
-    pub fn deinit(self: *Texture, allocator: ?std.mem.Allocator) void {
+    pub fn deinit(self: *Texture) void {
         // Destroy Vulkan resources in reverse order of creation
         self.gc.vkd.destroySampler(self.gc.dev, self.sampler, null);
         self.gc.vkd.destroyImageView(self.gc.dev, self.image_view, null);
         self.gc.vkd.destroyImage(self.gc.dev, self.image, null);
         self.gc.vkd.freeMemory(self.gc.dev, self.memory, null);
-        // allocator is unused, but included for API compatibility
-        _ = allocator;
     }
 };
+
+// Texture struct already stores gc as a member, matching the init signature. Allocator is not stored, as not needed after construction.

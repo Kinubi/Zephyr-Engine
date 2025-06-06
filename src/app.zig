@@ -18,6 +18,7 @@ const ModelMesh = @import("mesh.zig").ModelMesh;
 const Scene = @import("scene.zig").Scene;
 const SimpleRenderer = @import("renderer.zig").SimpleRenderer;
 const PointLightRenderer = @import("renderer.zig").PointLightRenderer;
+const ParticleRenderer = @import("renderer.zig").ParticleRenderer;
 const Math = @import("utils/math.zig");
 const Camera = @import("camera.zig").Camera;
 const GameObject = @import("game_object.zig").GameObject;
@@ -39,6 +40,7 @@ const Material = @import("scene.zig").Material;
 const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
 const log = @import("utils/log.zig").log;
 const LogLevel = @import("utils/log.zig").LogLevel;
+const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 
 pub const App = struct {
     window: Window = undefined,
@@ -51,6 +53,8 @@ pub const App = struct {
     var simple_renderer: SimpleRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_system: RaytracingSystem = undefined;
+    var particle_renderer: ParticleRenderer = undefined;
+    var compute_shader_system: ComputeShaderSystem = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -65,7 +69,7 @@ pub const App = struct {
     var global_ubo_set: GlobalUboSet = undefined;
     var raytracing_descriptor_set: RaytracingDescriptorSet = undefined;
 
-    pub fn init(self: *@This()) !void {
+    pub fn init(self: *App) !void {
         std.debug.print("Initializing application...\n", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
         std.debug.print("Window created with title: {s}\n", .{self.window.window_props.title});
@@ -154,13 +158,13 @@ pub const App = struct {
 
         // --- User-friendly model+material+texture creation for the vase ---
         log(.DEBUG, "scene", "Loading vase model and texture", .{});
-        const object = try scene.addModelWithMaterial(
+        const object = try scene.addModelWithMaterialAndTransform(
             "models/smooth_vase.obj",
             "textures/granitesmooth1-albedo.png",
+            Math.Vec3.init(0, -1.5, 0.5),
+            Math.Vec3.init(0.5, 0.5, 0.5),
         );
         log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
-        object.transform.translate(Math.Vec3.init(0, -1.5, 0.5));
-        object.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
         // Use new user-friendly helpers for model/object creation
         log(.DEBUG, "scene", "Adding mesh3 as object2", .{});
@@ -229,8 +233,8 @@ pub const App = struct {
         log(.DEBUG, "renderer", "Initializing point light renderer", .{});
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
+        // Use ShaderLibrary abstraction for shader loading
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
-        // Read raytracing SPV files at runtime instead of @embedFile
         const rgen_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rgen.hlsl.spv", 10 * 1024 * 1024);
         const rmiss_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rmiss.hlsl.spv", 10 * 1024 * 1024);
         const rchit_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rchit.hlsl.spv", 10 * 1024 * 1024);
@@ -254,6 +258,7 @@ pub const App = struct {
         // Initialize RaytracingSystem with the created resources
         // --- Raytracing pool and layout creation (before RaytracingSystem.init) ---
         // --- Collect buffer infos for raytracing descriptors before pool/layout creation ---
+        // Use abstractions for buffer and descriptor management
         var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
         var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
         defer index_buffer_infos.deinit();
@@ -262,8 +267,12 @@ pub const App = struct {
             if (obj.model) |mdl| {
                 for (mdl.meshes.items) |model_mesh| {
                     const geometry = model_mesh.geometry;
-                    try vertex_buffer_infos.append(geometry.mesh.vertex_buffer_descriptor);
-                    try index_buffer_infos.append(geometry.mesh.index_buffer_descriptor);
+                    if (geometry.mesh.vertex_buffer) |buf| {
+                        try vertex_buffer_infos.append(buf.descriptor_info);
+                    }
+                    if (geometry.mesh.index_buffer) |buf| {
+                        try index_buffer_infos.append(buf.descriptor_info);
+                    }
                 }
             }
         }
@@ -298,7 +307,7 @@ pub const App = struct {
         log(.DEBUG, "raytracing", "Creating BLAS", .{});
         try raytracing_system.createBLAS(&scene);
         log(.DEBUG, "raytracing", "Creating TLAS", .{});
-        try raytracing_system.createTLAS(&scene, self.allocator);
+        try raytracing_system.createTLAS(&scene);
         log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
         try raytracing_system.createShaderBindingTable(3);
         // --- After RaytracingSystem has valid AS and image, create descriptor set ---
@@ -327,19 +336,63 @@ pub const App = struct {
         raytracing_system.descriptor_set = raytracing_descriptor_set.set;
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
-        log(.INFO, "raytracing", "Raytracing system fully initialized", .{});
+        log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
+        // --- Compute shader system initialization ---
+        compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
+        var particle_render_shader_library = ShaderLibrary.init(self.gc, self.allocator);
+        // Read raytracing SPV files at runtime instead of @embedFile
+        const prvert = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.vert.spv", 10 * 1024 * 1024);
+        const prfrag = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.frag.spv", 10 * 1024 * 1024);
 
+        try particle_render_shader_library.add(
+            &.{ prvert, prfrag },
+            &.{
+                vk.ShaderStageFlags{ .vertex_bit = true },
+                vk.ShaderStageFlags{ .fragment_bit = true },
+            },
+            &.{
+                entry_point_definition{},
+                entry_point_definition{},
+            },
+        );
+
+        var particle_comp_shader_library = ShaderLibrary.init(self.gc, self.allocator);
+        // Read raytracing SPV files at runtime instead of @embedFile
+        const prcomp = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.comp.spv", 10 * 1024 * 1024);
+
+        try particle_comp_shader_library.add(
+            &.{prcomp},
+            &.{
+                vk.ShaderStageFlags{ .compute_bit = true },
+            },
+            &.{
+                entry_point_definition{},
+            },
+        );
+
+        particle_renderer = try ParticleRenderer.init(
+            &self.gc,
+            swapchain.render_pass,
+            particle_render_shader_library,
+            particle_comp_shader_library,
+            self.allocator,
+            1024,
+            ubo_infos,
+        );
+        log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
         last_frame_time = c.glfwGetTime();
         frame_info.camera = &camera;
     }
 
-    pub fn onUpdate(self: *@This()) !bool {
+    pub fn onUpdate(self: *App) !bool {
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
+        const computebuf = compute_shader_system.compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
+        frame_info.compute_buffer = computebuf;
         frame_info.dt = @floatCast(dt);
         frame_info.current_frame = current_frame;
 
@@ -347,6 +400,17 @@ pub const App = struct {
         var height: c_int = 0;
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
+
+        compute_shader_system.beginCompute(frame_info);
+        // Each compute system will dispatch its own compute shader
+        particle_renderer.dispatch();
+        compute_shader_system.dispatch(
+            &particle_renderer.compute_pipeline,
+            &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = particle_renderer.descriptor_set },
+            frame_info,
+            .{ @intCast(particle_renderer.num_particles / 256), 1, 1 },
+        );
+        compute_shader_system.endCompute(frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
@@ -357,12 +421,14 @@ pub const App = struct {
         var ubo = GlobalUbo{
             .view = frame_info.camera.viewMatrix,
             .projection = frame_info.camera.projectionMatrix,
+            .dt = @floatCast(dt),
         };
 
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.update(frame_info.current_frame, &ubo);
         //try simple_renderer.render(frame_info);
         //try point_light_renderer.render(frame_info);
+        //try particle_renderer.render(frame_info);
         swapchain.endSwapChainRenderPass(frame_info);
         try raytracing_system.recordCommandBuffer(
             frame_info,
@@ -372,13 +438,13 @@ pub const App = struct {
             scene.material_buffer.?.descriptor_info,
             scene.texture_image_infos,
         );
-        try swapchain.endFrame(frame_info.command_buffer, &current_frame, frame_info.extent);
+        try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
         //log(.TRACE, "app", "Frame end", .{});
         return self.window.isRunning();
     }
 
-    pub fn deinit(self: @This()) void {
+    pub fn deinit(self: *App) void {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
         swapchain.waitForAllFences() catch unreachable;
@@ -387,7 +453,7 @@ pub const App = struct {
         point_light_renderer.deinit();
         simple_renderer.deinit();
         raytracing_system.deinit();
-        scene.deinit(self.gc);
+        scene.deinit();
         swapchain.deinit();
         self.gc.deinit();
         self.window.deinit();

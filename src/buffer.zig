@@ -1,6 +1,8 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
 
 pub const Buffer = struct {
     gc: *GraphicsContext,
@@ -116,3 +118,5 @@ pub const Buffer = struct {
         };
     }
 };
+
+// Buffer struct already stores gc as a member, matching the init signature. Allocator is not stored, as not needed after construction.

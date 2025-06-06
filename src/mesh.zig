@@ -51,12 +51,8 @@ pub const Mesh = struct {
     vertices: std.ArrayList(Vertex),
     indices: std.ArrayList(u32),
 
-    vertex_buffer: vk.Buffer = undefined,
-    vertex_buffer_memory: vk.DeviceMemory = undefined,
-    vertex_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
-    index_buffer: vk.Buffer = undefined,
-    index_buffer_memory: vk.DeviceMemory = undefined,
-    index_buffer_descriptor: vk.DescriptorBufferInfo = undefined,
+    vertex_buffer: ?Buffer = null,
+    index_buffer: ?Buffer = null,
 
     material_id: u32 = 0, // Index into Scene.materials
 
@@ -67,7 +63,7 @@ pub const Mesh = struct {
         };
     }
 
-    pub fn createVertexBuffers(self: *@This(), gc: *GraphicsContext) !void {
+    pub fn createVertexBuffers(self: *Mesh, gc: *GraphicsContext) !void {
         if (self.vertices.items.len < 3) {
             return error.VertexCountTooLow;
         }
@@ -87,27 +83,20 @@ pub const Mesh = struct {
         staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.vertices.items), buffer_size, 0);
 
         // Create device-local vertex buffer using Buffer abstraction
-        const device_buffer = try Buffer.init(
+        self.vertex_buffer = try Buffer.init(
             gc,
             @sizeOf(Vertex),
             vertex_count,
             .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
-            .{
-                .device_local_bit = true,
-            },
+            .{ .device_local_bit = true },
         );
         // Copy from staging to device-local
-        try gc.copyBuffer(device_buffer.buffer, staging_buffer.buffer, buffer_size);
+        try gc.copyBuffer(self.vertex_buffer.?.buffer, staging_buffer.buffer, buffer_size);
 
-        // Store handles
-        self.vertex_buffer = device_buffer.buffer;
-        self.vertex_buffer_descriptor = device_buffer.descriptor_info;
-        self.vertex_buffer_memory = device_buffer.memory;
         staging_buffer.deinit();
-        // Don't deinit device_buffer, as we take ownership of its memory
     }
 
-    pub fn createIndexBuffers(self: *@This(), gc: *GraphicsContext) !void {
+    pub fn createIndexBuffers(self: *Mesh, gc: *GraphicsContext) !void {
         if (self.indices.items.len == 0) {
             return;
         }
@@ -127,7 +116,7 @@ pub const Mesh = struct {
         staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.indices.items), buffer_size, 0);
 
         // Create device-local index buffer using Buffer abstraction
-        const device_buffer = try Buffer.init(
+        self.index_buffer = try Buffer.init(
             gc,
             @sizeOf(u32),
             index_count,
@@ -135,38 +124,34 @@ pub const Mesh = struct {
             .{ .device_local_bit = true },
         );
         // Copy from staging to device-local
-        try gc.copyBuffer(device_buffer.buffer, staging_buffer.buffer, buffer_size);
+        try gc.copyBuffer(self.index_buffer.?.buffer, staging_buffer.buffer, buffer_size);
 
-        // Store handles
-        self.index_buffer = device_buffer.buffer;
-        self.index_buffer_memory = device_buffer.memory;
-        self.index_buffer_descriptor = device_buffer.descriptor_info;
         staging_buffer.deinit();
-        // Don't deinit device_buffer, as we take ownership of its memory
     }
 
-    pub fn deinit(self: @This(), gc: GraphicsContext) void {
+    pub fn deinit(self: *Mesh) void {
         self.vertices.deinit();
         self.indices.deinit();
-        gc.vkd.freeMemory(gc.dev, self.vertex_buffer_memory, null);
-        gc.vkd.destroyBuffer(gc.dev, self.vertex_buffer, null);
-        gc.vkd.freeMemory(gc.dev, self.index_buffer_memory, null);
-        gc.vkd.destroyBuffer(gc.dev, self.index_buffer, null);
+        if (self.vertex_buffer) |*buf| buf.deinit();
+        if (self.index_buffer) |*buf| buf.deinit();
+        self.vertex_buffer = null;
+        self.index_buffer = null;
     }
 
-    pub fn draw(self: @This(), gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
+    pub fn draw(self: Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
         const offset = [_]vk.DeviceSize{0};
-        gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&self.vertex_buffer)), &offset);
-
-        if (self.indices.items.len > 0) {
-            gc.vkd.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, vk.IndexType.uint32);
+        if (self.vertex_buffer) |buf| {
+            gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buf.buffer)), &offset);
+        }
+        if (self.index_buffer) |buf| {
+            gc.vkd.cmdBindIndexBuffer(cmdbuf, buf.buffer, 0, vk.IndexType.uint32);
             gc.vkd.cmdDrawIndexed(cmdbuf, @intCast(self.indices.items.len), 1, 0, 0, 0);
         } else {
             gc.vkd.cmdDraw(cmdbuf, @intCast(self.vertices.items.len), 1, 0, 0);
         }
     }
 
-    pub fn loadFromObj(self: *@This(), allocator: std.mem.Allocator, data: []const u8) !void {
+    pub fn loadFromObj(self: *Mesh, allocator: std.mem.Allocator, data: []const u8) !void {
         const model = try Obj.parseObj(allocator, data);
         std.debug.print("Loadin model with {any} meshes and {any} distinct vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
         try self.vertices.ensureTotalCapacity(model.vertices.len);
@@ -314,9 +299,9 @@ pub const Model = struct {
     //     @compileError("Model.init(mesh) is deprecated. Use Model with meshes array and ModelMesh instead.");
     // }
 
-    pub fn deinit(self: *Model, gc: GraphicsContext) void {
-        for (self.meshes.items) |mesh| {
-            mesh.geometry.mesh.deinit(gc);
+    pub fn deinit(self: *Model) void {
+        for (self.meshes.items) |*mesh| {
+            mesh.geometry.mesh.deinit();
         }
         self.meshes.deinit();
     }

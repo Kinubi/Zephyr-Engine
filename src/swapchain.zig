@@ -25,32 +25,43 @@ pub const Swapchain = struct {
     image_acquired: []vk.Semaphore = undefined,
     render_finished: []vk.Semaphore = undefined,
     frame_fence: []vk.Fence = undefined,
+    compute_finished: []vk.Semaphore = undefined,
+    compute_fence: []vk.Fence = undefined,
 
     swap_images: []SwapImage,
     image_index: u32 = 0,
-
+    compute: bool = false, // Whether to use compute shaders in the swapchain
     pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
         var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
         var image_acquired = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
         var render_finished = try allocator.alloc(vk.Semaphore, swapchain.swap_images.len);
         var frame_fence = try allocator.alloc(vk.Fence, MAX_FRAMES_IN_FLIGHT);
+        // Allocate compute sync primitives
+        var compute_finished = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
+        var compute_fence = try allocator.alloc(vk.Fence, MAX_FRAMES_IN_FLIGHT);
         var i: usize = 0;
         while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
             image_acquired[i] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
             errdefer gc.vkd.destroySemaphore(gc.dev, image_acquired[i], null);
-
             frame_fence[i] = try gc.vkd.createFence(gc.dev, &.{ .flags = .{ .signaled_bit = true } }, null);
             errdefer gc.vkd.destroyFence(gc.dev, frame_fence[i], null);
-        }
 
+            // Compute sync
+
+            compute_finished[i] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
+            errdefer gc.vkd.destroySemaphore(gc.dev, compute_finished[i], null);
+            compute_fence[i] = try gc.vkd.createFence(gc.dev, &.{ .flags = .{ .signaled_bit = true } }, null);
+            errdefer gc.vkd.destroyFence(gc.dev, compute_fence[i], null);
+        }
         for (0..swapchain.swap_images.len) |j| {
             render_finished[j] = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
             errdefer gc.vkd.destroySemaphore(gc.dev, render_finished[j], null);
         }
-
         swapchain.image_acquired = image_acquired;
         swapchain.render_finished = render_finished;
         swapchain.frame_fence = frame_fence;
+        swapchain.compute_finished = compute_finished;
+        swapchain.compute_fence = compute_fence;
         return swapchain;
     }
 
@@ -69,7 +80,7 @@ pub const Swapchain = struct {
             image_count = @min(image_count, caps.max_image_count);
         }
 
-        const qfi = [_]u32{ gc.graphics_queue.family, gc.present_queue.family };
+        const qfi = [_]u32{ gc.graphics_queue.family, gc.present_queue.family, gc.compute_queue.family };
         const sharing_mode: vk.SharingMode = if (gc.graphics_queue.family != gc.present_queue.family)
             .concurrent
         else
@@ -125,7 +136,7 @@ pub const Swapchain = struct {
     }
 
     fn deinitExceptSwapchain(self: *Swapchain) void {
-        for (self.swap_images) |si| si.deinit(self.gc);
+        for (self.swap_images) |*si| si.deinit(self.gc);
         self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
         self.destroyFramebuffers();
     }
@@ -134,6 +145,7 @@ pub const Swapchain = struct {
         var i: usize = 0;
         while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[i]), vk.TRUE, std.math.maxInt(u64));
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[i]), vk.TRUE, std.math.maxInt(u64));
         }
     }
 
@@ -145,6 +157,9 @@ pub const Swapchain = struct {
             self.gc.vkd.destroySemaphore(self.gc.dev, self.image_acquired[i], null);
             self.gc.vkd.destroySemaphore(self.gc.dev, self.render_finished[i], null);
             self.gc.vkd.destroyFence(self.gc.dev, self.frame_fence[i], null);
+            // Compute sync
+            self.gc.vkd.destroySemaphore(self.gc.dev, self.compute_finished[i], null);
+            self.gc.vkd.destroyFence(self.gc.dev, self.compute_fence[i], null);
         }
     }
 
@@ -158,10 +173,14 @@ pub const Swapchain = struct {
         const old_acquire = self.image_acquired;
         const old_finished = self.render_finished;
         const old_fence = self.frame_fence;
+        const old_compute_finished = self.compute_finished;
+        const old_compute_fence = self.compute_fence;
         self.* = try initRecycle(gc, allocator, new_extent, old_handle, .null_handle);
         self.*.frame_fence = old_fence;
         self.*.image_acquired = old_acquire;
         self.*.render_finished = old_finished;
+        self.*.compute_finished = old_compute_finished;
+        self.*.compute_fence = old_compute_fence;
         try self.createRenderPass();
     }
 
@@ -194,16 +213,31 @@ pub const Swapchain = struct {
         // Step 1: Make sure the current frame has finished rendering
 
         // Step 2: Submit the command buffer
-        const wait_stage = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-        try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
-            .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&self.image_acquired[current_frame]),
-            .p_wait_dst_stage_mask = &wait_stage,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&cmdbuf),
-            .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(&self.render_finished[self.image_index]),
-        }}, self.frame_fence[current_frame]);
+        if (self.compute) {
+            const wait_stage = [_]vk.PipelineStageFlags{ .{ .color_attachment_output_bit = true }, .{ .compute_shader_bit = true } };
+            try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
+                .wait_semaphore_count = 2,
+                .p_wait_semaphores = &.{ self.image_acquired[current_frame], self.compute_finished[current_frame] },
+                .p_wait_dst_stage_mask = &wait_stage,
+                .command_buffer_count = 1,
+                .p_command_buffers = @ptrCast(&cmdbuf),
+                .signal_semaphore_count = 1,
+                .p_signal_semaphores = @ptrCast(&self.render_finished[self.image_index]),
+            }}, self.frame_fence[current_frame]);
+        } else {
+            const wait_stage = [_]vk.PipelineStageFlags{
+                .{ .color_attachment_output_bit = true },
+            };
+            try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
+                .wait_semaphore_count = 1,
+                .p_wait_semaphores = &.{self.image_acquired[current_frame]},
+                .p_wait_dst_stage_mask = &wait_stage,
+                .command_buffer_count = 1,
+                .p_command_buffers = @ptrCast(&cmdbuf),
+                .signal_semaphore_count = 1,
+                .p_signal_semaphores = @ptrCast(&self.render_finished[self.image_index]),
+            }}, self.frame_fence[current_frame]);
+        }
 
         // Step 3: Present the current frame
         const present_result = self.gc.vkd.queuePresentKHR(self.gc.present_queue.handle, &vk.PresentInfoKHR{
@@ -229,7 +263,7 @@ pub const Swapchain = struct {
         }
     }
 
-    pub fn createRenderPass(self: *@This()) !void {
+    pub fn createRenderPass(self: *Swapchain) !void {
         const attachments = [_]vk.AttachmentDescription{
             .{
                 .flags = .{},
@@ -301,7 +335,7 @@ pub const Swapchain = struct {
         }, null);
     }
 
-    pub fn createFramebuffers(self: *@This()) !void {
+    pub fn createFramebuffers(self: *Swapchain) !void {
         std.debug.print("Creating\n", .{});
         const framebuffers = try self.allocator.alloc(vk.Framebuffer, self.swap_images.len);
         errdefer self.allocator.free(framebuffers);
@@ -325,12 +359,12 @@ pub const Swapchain = struct {
 
         self.framebuffers = framebuffers;
     }
-    pub fn destroyFramebuffers(self: *@This()) void {
+    pub fn destroyFramebuffers(self: *Swapchain) void {
         for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
         self.allocator.free(self.framebuffers);
     }
 
-    pub fn beginSwapChainRenderPass(self: *@This(), frame_info: FrameInfo) void {
+    pub fn beginSwapChainRenderPass(self: *Swapchain, frame_info: FrameInfo) void {
         const clear_values = [_]vk.ClearValue{
             .{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } },
             .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
@@ -362,7 +396,7 @@ pub const Swapchain = struct {
         self.gc.vkd.cmdSetScissor(frame_info.command_buffer, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
     }
 
-    pub fn endSwapChainRenderPass(self: *@This(), frame_info: FrameInfo) void {
+    pub fn endSwapChainRenderPass(self: *Swapchain, frame_info: FrameInfo) void {
         self.gc.vkd.cmdEndRenderPass(frame_info.command_buffer);
     }
 
@@ -388,7 +422,19 @@ pub const Swapchain = struct {
         };
     }
 
-    pub fn beginFrame(self: *@This(), frame_info: FrameInfo) !void {
+    pub fn beginComputePass(self: *Swapchain, frame_info: FrameInfo) !void {
+        _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
+
+        // Reset compute fence for this frame
+        try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
+
+        try self.gc.vkd.resetCommandBuffer(frame_info.compute_buffer, .{});
+
+        const begin_info_compute = vk.CommandBufferBeginInfo{};
+        try self.gc.vkd.beginCommandBuffer(frame_info.compute_buffer, &begin_info_compute);
+    }
+
+    pub fn beginFrame(self: *Swapchain, frame_info: FrameInfo) !void {
         if (self.image_acquired[frame_info.current_frame] != .null_handle) {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
         }
@@ -423,16 +469,39 @@ pub const Swapchain = struct {
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
     }
 
-    pub fn endFrame(self: *@This(), cmdbuf: vk.CommandBuffer, current_frame: *u32, extent: vk.Extent2D) !void {
-        self.gc.vkd.endCommandBuffer(cmdbuf) catch |err| {
+    pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
+        self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             std.debug.print("Error ending command buffer: {any}\n", .{err});
         };
-
-        self.present(cmdbuf, current_frame.*, extent) catch |err| {
+        self.present(frame_info.command_buffer, current_frame.*, frame_info.extent) catch |err| {
             std.debug.print("Error presenting frame: {any}\n", .{err});
         };
 
         current_frame.* = (current_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    pub fn endComputePass(self: *Swapchain, frame_info: FrameInfo) !void {
+        self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
+            std.debug.print("Error ending command buffer: {any}\n", .{err});
+        };
+
+        self.submitCompute(frame_info.compute_buffer, frame_info.current_frame) catch |err| {
+            std.debug.print("Error submitting compute command buffer: {any}\n", .{err});
+        };
+    }
+
+    pub fn submitCompute(self: *Swapchain, cmdbuf: vk.CommandBuffer, current_frame: u32) !void {
+        // Wait for and reset compute fence for this frame
+        // Submit compute command buffer
+        //const wait_stage = [_]vk.PipelineStageFlags{.{ .compute_shader_bit = true }};
+        try self.gc.vkd.queueSubmit(self.gc.compute_queue.handle, 1, &[_]vk.SubmitInfo{.{
+            .wait_semaphore_count = 0,
+            .p_wait_dst_stage_mask = null,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cmdbuf),
+            .signal_semaphore_count = 1,
+            .p_signal_semaphores = @ptrCast(&self.compute_finished[current_frame]),
+        }}, self.compute_fence[current_frame]);
     }
 };
 

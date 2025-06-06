@@ -12,6 +12,7 @@ const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_ray_query.name,
     vk.extensions.khr_deferred_host_operations.name,
     vk.extensions.ext_swapchain_maintenance_1.name,
+        //vk.extensions.ext_surface_maintenance_1.name,
 };
 
 const optional_device_extensions = [_][*:0]const u8{};
@@ -39,6 +40,7 @@ const apis: []const vk.ApiInfo = &.{
     vk.extensions.khr_ray_query,
     vk.extensions.khr_acceleration_structure,
     vk.extensions.ext_swapchain_maintenance_1,
+    vk.extensions.ext_surface_maintenance_1,
 };
 
 /// Next, pass the `apis` to the wrappers to create dispatch tables.
@@ -60,6 +62,7 @@ pub const GraphicsContext = struct {
     dev: vk.Device,
     graphics_queue: Queue,
     present_queue: Queue,
+    compute_queue: Queue, // Added for async compute
     command_pool: vk.CommandPool,
 
     pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: *c.GLFWwindow) !GraphicsContext {
@@ -157,6 +160,7 @@ pub const GraphicsContext = struct {
 
         self.graphics_queue = Queue.init(self.vkd, self.dev, candidate.queues.graphics_family);
         self.present_queue = Queue.init(self.vkd, self.dev, candidate.queues.present_family);
+        self.compute_queue = Queue.init(self.vkd, self.dev, candidate.queues.compute_family); // Initialize compute queue
 
         self.mem_props = self.vki.getPhysicalDeviceMemoryProperties(self.pdev);
 
@@ -196,14 +200,14 @@ pub const GraphicsContext = struct {
         }, null);
     }
 
-    pub fn createCommandPool(self: *@This()) !void {
+    pub fn createCommandPool(self: *GraphicsContext) !void {
         self.command_pool = try self.vkd.createCommandPool(self.dev, &.{
             .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = self.graphics_queue.family,
         }, null);
     }
 
-    pub fn copyBuffer(self: *@This(), dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
+    pub fn copyBuffer(self: *GraphicsContext, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
         const cmdbuf = try self.beginSingleTimeCommands();
         const region = vk.BufferCopy{
             .src_offset = 0,
@@ -215,7 +219,7 @@ pub const GraphicsContext = struct {
     }
 
     pub fn createCommandBuffers(
-        self: *@This(),
+        self: *GraphicsContext,
         allocator: Allocator,
     ) ![]vk.CommandBuffer {
         const cmdbufs = try allocator.alloc(vk.CommandBuffer, MAX_FRAMES_IN_FLIGHT);
@@ -237,7 +241,7 @@ pub const GraphicsContext = struct {
     }
 
     pub fn createBuffer(
-        self: *@This(),
+        self: *GraphicsContext,
         size: u64,
         usage: vk.BufferUsageFlags,
         memory_properties: vk.MemoryPropertyFlags,
@@ -702,6 +706,7 @@ const DeviceCandidate = struct {
 const QueueAllocation = struct {
     graphics_family: u32,
     present_family: u32,
+    compute_family: u32, // Added for async compute
 };
 
 fn pickPhysicalDevice(
@@ -764,6 +769,7 @@ fn allocateQueues(vki: InstanceWrapper, pdev: vk.PhysicalDevice, allocator: Allo
 
     var graphics_family: ?u32 = null;
     var present_family: ?u32 = null;
+    var compute_family: ?u32 = null;
 
     for (families, 0..) |properties, i| {
         const family = @as(u32, @intCast(i));
@@ -775,12 +781,17 @@ fn allocateQueues(vki: InstanceWrapper, pdev: vk.PhysicalDevice, allocator: Allo
         if (present_family == null and (try vki.getPhysicalDeviceSurfaceSupportKHR(pdev, family, surface)) == vk.TRUE) {
             present_family = family;
         }
+
+        if (compute_family == null and properties.queue_flags.compute_bit) {
+            compute_family = family;
+        }
     }
 
-    if (graphics_family != null and present_family != null) {
+    if (graphics_family != null and present_family != null and compute_family != null) {
         return QueueAllocation{
             .graphics_family = graphics_family.?,
             .present_family = present_family.?,
+            .compute_family = compute_family.?,
         };
     }
 
