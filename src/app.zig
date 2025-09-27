@@ -78,6 +78,7 @@ pub const App = struct {
     var frame_index: u32 = 0;
     var scene: EnhancedScene = undefined;
     var asset_manager: AssetManager = undefined;
+    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Raytracing system field
     var global_ubo_set: GlobalUboSet = undefined;
@@ -116,6 +117,12 @@ pub const App = struct {
             log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
         };
 
+        // Register scene for hot reload callbacks and set up texture reload callback
+        scene.registerForHotReloadCallbacks();
+        if (scene.asset_manager.hot_reload_manager) |*hr_manager| {
+            hr_manager.setTextureReloadCallback(EnhancedScene.textureReloadCallbackWrapper);
+        }
+
         // Preload textures
         if (comptime std.debug.runtime_safety) {
             scene.startAsyncTextureLoad("textures/granitesmooth1-albedo.png") catch |err| {
@@ -127,20 +134,14 @@ pub const App = struct {
             log(.DEBUG, "app", "Loading stats: active={d}, completed={d}, failed={d}", .{ stats.active_loads, stats.completed_loads, stats.failed_loads });
         }
 
-        var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
 
-        // --- Load a texture and add it to the scene ---
-        const cube_texture = try Texture.initFromFile(&self.gc, self.allocator, "textures/missing.png", .rgba8);
-        const cube_texture_id = try scene.addTexture(cube_texture);
-        // --- Create a material for the cube mesh referencing the texture ---
-        const cube_material = Material{
-            .albedo_texture_id = @intCast(cube_texture_id),
-        };
-        const cube_material_id = try scene.addMaterial(cube_material);
+        // --- Load texture through enhanced scene system ---
+        // Pre-load the texture asynchronously (if needed)
+        try scene.startAsyncTextureLoad("textures/missing.png");
 
-        // --- Assign the material to the mesh ---
-        mesh3.material_id = @intCast(cube_material_id);
+        // Wait a moment for async loading then use the texture
+        std.Thread.sleep(50_000_000); // 50ms
 
         // Update material and texture buffers after all materials/textures are added
 
@@ -185,14 +186,12 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        // --- Load cube mesh from file instead of @embedFile ---
-        log(.DEBUG, "scene", "Loading cube mesh from models/cube.obj", .{});
-        const cube_data = try loadFileAlloc(self.allocator, "models/cube.obj", 10 * 1024 * 1024);
-        defer self.allocator.free(cube_data);
-        try mesh3.loadFromObj(self.allocator, cube_data);
-        try mesh3.createVertexBuffers(&self.gc);
-        try mesh3.createIndexBuffers(&self.gc);
-        log(.INFO, "scene", "Loaded cube mesh and created buffers", .{});
+        // --- Load cube mesh using non-blocking enhanced scene system ---
+        log(.DEBUG, "scene", "Loading cube with fallback through enhanced scene", .{});
+        const cube_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, -0.5, 0.5), // position
+            Math.Vec3.init(0.5, 0.001, 0.5) // scale
+        );
+        log(.INFO, "scene", "Added cube object (fallback) with {d} meshes", .{if (cube_object.model) |m| m.meshes.items.len else 0});
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
@@ -210,15 +209,26 @@ pub const App = struct {
         );
         log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
 
-        // Use new user-friendly helpers for model/object creation
-        log(.DEBUG, "scene", "Adding mesh3 as object2", .{});
-        const object2 = try scene.addModelFromMesh(mesh3, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
-        log(.INFO, "scene", "Added object2 with model: {d} meshes", .{if (object2.model) |m| m.meshes.items.len else 0});
-        object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
+        // Cube is now handled by enhanced scene system above
 
-        log(.DEBUG, "scene", "Adding mesh as object5", .{});
-        const object5 = try scene.addModelFromMesh(mesh, "mesh", null);
-        log(.INFO, "scene", "Added object5 with model: {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+        // Create another textured cube with a different texture (non-blocking)
+        log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
+        const cube2_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(1.0, -0.5, 0.5), // Different position
+            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
+        );
+        log(.INFO, "scene", "Added second cube object (fallback) with {d} meshes", .{if (cube2_object.model) |m| m.meshes.items.len else 0});
+
+        // Create a procedural mesh using the manual mesh (for demonstration)
+        log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
+        const object5 = try scene.addModelFromMesh(mesh, "procedural_mesh", null);
+        log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+
+        // Add another vase with a different texture (non-blocking fallback)
+        log(.DEBUG, "scene", "Adding second vase with error texture (fallback)", .{});
+        const vase2_object = try scene.addModelWithMaterialAndTransformAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-1.0, -1.5, 0.5), // Different position
+            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
+        );
+        log(.INFO, "scene", "Added second vase object (fallback) with {d} meshes", .{if (vase2_object.model) |m| m.meshes.items.len else 0});
 
         log(.DEBUG, "scene", "Adding point light objects", .{});
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
@@ -382,6 +392,10 @@ pub const App = struct {
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
         log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
+
+        // Register raytracing system with enhanced scene for texture updates
+        scene.setRaytracingSystem(&raytracing_system);
+
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
         var particle_render_shader_library = ShaderLibrary.init(self.gc, self.allocator);
@@ -435,6 +449,14 @@ pub const App = struct {
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
+
+        // Print performance report every 10 seconds in debug builds
+        if (comptime std.debug.runtime_safety) {
+            if (current_time - last_performance_report >= 10.0) {
+                asset_manager.printPerformanceReport();
+                last_performance_report = current_time;
+            }
+        }
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
         const computebuf = compute_shader_system.compute_bufs[current_frame];

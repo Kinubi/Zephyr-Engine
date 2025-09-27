@@ -13,7 +13,8 @@ const DescriptorSetLayout = @import("../descriptors.zig").DescriptorSetLayout;
 const DescriptorPool = @import("../descriptors.zig").DescriptorPool;
 const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
 const Texture = @import("../texture.zig").Texture;
-const log = @import("../utils/log.zig");
+const log = @import("../utils/log.zig").log;
+const LogLevel = @import("../utils/log.zig").LogLevel;
 const deinitDescriptorResources = @import("../descriptors.zig").deinitDescriptorResources;
 
 fn alignForward(val: usize, alignment: usize) usize {
@@ -43,6 +44,9 @@ pub const RaytracingSystem = struct {
     blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
     blas_buffers: std.ArrayList(Buffer) = undefined,
     allocator: std.mem.Allocator = undefined,
+
+    // Texture update tracking
+    descriptors_need_update: bool = false,
 
     /// Idiomatic init, matching renderer.SimpleRenderer
     pub fn init(
@@ -110,10 +114,10 @@ pub const RaytracingSystem = struct {
         self.blas_handles.clearRetainingCapacity();
         self.blas_buffers.clearRetainingCapacity();
         var mesh_count: usize = 0;
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "Scene has {} objects", .{scene.objects.items.len});
+        log(.INFO, "RaytracingSystem", "Scene has {} objects", .{scene.objects.items.len});
         for (scene.objects.items, 0..) |*object, obj_idx| {
             if (object.model) |model| {
-                log.log(log.LogLevel.INFO, "RaytracingSystem", "Object {} has model with {} meshes", .{ obj_idx, model.meshes.items.len });
+                log(.INFO, "RaytracingSystem", "Object {} has model with {} meshes", .{ obj_idx, model.meshes.items.len });
                 for (model.meshes.items) |*model_mesh| {
                     const geometry = model_mesh.geometry;
                     mesh_count += 1;
@@ -149,8 +153,8 @@ pub const RaytracingSystem = struct {
                         },
                         .flags = vk.GeometryFlagsKHR{ .opaque_bit_khr = true },
                     };
-                    log.log(log.LogLevel.INFO, "RaytracingSystem", "BLAS mesh {}: index_count = {}, primitive_count = {}", .{ mesh_count, index_count, index_count / 3 });
-                    log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer.?.buffer, index_buffer.?.buffer });
+                    log(.INFO, "RaytracingSystem", "BLAS mesh {}: index_count = {}, primitive_count = {}", .{ mesh_count, index_count, index_count / 3 });
+                    log(.INFO, "RaytracingSystem", "Creating BLAS for mesh {}: vertex_count = {}, index_count = {}, primitive_count = {}, vertex_buffer = {x}, index_buffer = {x}", .{ mesh_count, vertex_count, index_count, index_count / 3, vertex_buffer.?.buffer, index_buffer.?.buffer });
                     var range_info = vk.AccelerationStructureBuildRangeInfoKHR{
                         .primitive_count = @intCast(index_count / 3),
                         .primitive_offset = 0,
@@ -219,21 +223,21 @@ pub const RaytracingSystem = struct {
             }
         }
         if (mesh_count == 0) {
-            log.log(log.LogLevel.WARN, "RaytracingSystem", "No meshes found in scene, skipping BLAS creation.", .{});
+            log(.WARN, "RaytracingSystem", "No meshes found in scene, skipping BLAS creation.", .{});
             return;
         }
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "Created {d} BLASes for all meshes in scene", .{mesh_count});
+        log(.INFO, "RaytracingSystem", "Created {d} BLASes for all meshes in scene", .{mesh_count});
     }
 
     /// Create TLAS for all mesh instances in the scene
     pub fn createTLAS(self: *RaytracingSystem, scene: *Scene) !void {
         var instances = try std.ArrayList(vk.AccelerationStructureInstanceKHR).initCapacity(self.allocator, self.blas_handles.items.len);
         var mesh_index: u32 = 0;
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating TLAS for Scene with {} objects", .{scene.objects.items.len});
+        log(.INFO, "RaytracingSystem", "Creating TLAS for Scene with {} objects", .{scene.objects.items.len});
         for (scene.objects.items) |*object| {
             if (object.model) |model| {
                 for (model.meshes.items) |mesh| {
-                    log.log(log.LogLevel.INFO, "RaytracingSystem", "Processing model with {} meshes and texture_id {}", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
+                    log(.INFO, "RaytracingSystem", "Processing model with {} meshes and texture_id {}", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
                     var blas_addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
                         .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
                         .acceleration_structure = self.blas_handles.items[mesh_index],
@@ -250,7 +254,7 @@ pub const RaytracingSystem = struct {
             }
         }
         if (instances.items.len == 0) {
-            log.log(log.LogLevel.WARN, "RaytracingSystem", "No mesh instances found in scene, skipping TLAS creation.", .{});
+            log(.WARN, "RaytracingSystem", "No mesh instances found in scene, skipping TLAS creation.", .{});
             return;
         }
         // --- TLAS instance buffer setup ---
@@ -269,9 +273,9 @@ pub const RaytracingSystem = struct {
         try instance_buffer.map(@sizeOf(vk.AccelerationStructureInstanceKHR) * instances.items.len, 0);
         instance_buffer.writeToBuffer(std.mem.sliceAsBytes(instances.items), @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.items.len, 0);
         // --- DEBUG: Print TLAS instance buffer contents before upload ---
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "TLAS instance buffer contents ({} instances):", .{instances.items.len});
+        log(.INFO, "RaytracingSystem", "TLAS instance buffer contents ({} instances):", .{instances.items.len});
         for (instances.items, 0..) |inst, i| {
-            log.log(log.LogLevel.DEBUG, "RaytracingSystem", "  Instance {}: custom_index = {}, mask = {}, sbt_offset = {}, flags = {}, blas_addr = 0x{x}", .{ i, inst.instance_custom_index_and_mask.instance_custom_index, inst.instance_custom_index_and_mask.mask, inst.instance_shader_binding_table_record_offset_and_flags.instance_shader_binding_table_record_offset, inst.instance_shader_binding_table_record_offset_and_flags.flags, inst.acceleration_structure_reference });
+            log(.DEBUG, "RaytracingSystem", "  Instance {}: custom_index = {}, mask = {}, sbt_offset = {}, flags = {}, blas_addr = 0x{x}", .{ i, inst.instance_custom_index_and_mask.instance_custom_index, inst.instance_custom_index_and_mask.mask, inst.instance_shader_binding_table_record_offset_and_flags.instance_shader_binding_table_record_offset, inst.instance_shader_binding_table_record_offset_and_flags.flags, inst.acceleration_structure_reference });
         }
         // --- TLAS BUILD SIZES SETUP ---
         // Get device address for TLAS geometry
@@ -359,7 +363,7 @@ pub const RaytracingSystem = struct {
         // TLAS build command
         try self.gc.endSingleTimeCommands(cmdbuf);
         tlas_scratch_buffer.deinit();
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "TLAS created with number of instances: {}", .{instances.items.len});
+        log(.INFO, "RaytracingSystem", "TLAS created with number of instances: {}", .{instances.items.len});
         // Store instance buffer for later deinit
         self.tlas_instance_buffer = instance_buffer;
         self.tlas_instance_buffer_initialized = true;
@@ -447,22 +451,29 @@ pub const RaytracingSystem = struct {
     pub fn recordCommandBuffer(self: *RaytracingSystem, frame_info: FrameInfo, swapchain: *Swapchain, group_count: u32, global_ubo_buffer_info: vk.DescriptorBufferInfo, material_buffer_info: vk.DescriptorBufferInfo, texture_image_infos: []const vk.DescriptorImageInfo) !void {
         const gc = self.gc;
         _ = group_count;
-        if (swapchain.extent.width != self.width or swapchain.extent.height != self.height) {
-            self.width = swapchain.extent.width;
-            self.height = swapchain.extent.height;
-            const output_texture = try Texture.init(
-                gc,
-                swapchain.surface_format.format,
-                .{ .width = self.width, .height = self.height, .depth = 1 },
-                vk.ImageUsageFlags{
-                    .storage_bit = true,
-                    .transfer_src_bit = true,
-                    .transfer_dst_bit = true,
-                    .sampled_bit = true,
-                },
-                vk.SampleCountFlags{ .@"1_bit" = true },
-            );
-            self.output_texture = output_texture;
+        const swapchain_changed = swapchain.extent.width != self.width or swapchain.extent.height != self.height;
+
+        if (swapchain_changed or self.descriptors_need_update) {
+            // Only recreate output texture if swapchain changed
+            if (swapchain_changed) {
+                self.width = swapchain.extent.width;
+                self.height = swapchain.extent.height;
+                const output_texture = try Texture.init(
+                    gc,
+                    swapchain.surface_format.format,
+                    .{ .width = self.width, .height = self.height, .depth = 1 },
+                    vk.ImageUsageFlags{
+                        .storage_bit = true,
+                        .transfer_src_bit = true,
+                        .transfer_dst_bit = true,
+                        .sampled_bit = true,
+                    },
+                    vk.SampleCountFlags{ .@"1_bit" = true },
+                );
+                self.output_texture = output_texture;
+            }
+
+            // Always update descriptors when needed
             try self.descriptor_pool.resetPool();
             const output_image_info = self.output_texture.getDescriptorInfo();
             var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool, self.allocator);
@@ -472,6 +483,11 @@ pub const RaytracingSystem = struct {
             try set_writer.writeBuffer(2, @constCast(&global_ubo_buffer_info)).build(&self.descriptor_set);
             try set_writer.writeBuffer(3, @constCast(&material_buffer_info)).build(&self.descriptor_set);
             try set_writer.writeImages(4, texture_image_infos).build(&self.descriptor_set);
+
+            // Clear the update flag
+            self.descriptors_need_update = false;
+
+            log(.DEBUG, "raytracing", "Updated raytracing descriptors (swapchain_changed: {}, texture_update: {})", .{ swapchain_changed, !swapchain_changed });
         }
 
         // --- existing code for binding pipeline, descriptor sets, SBT, etc...
@@ -621,7 +637,7 @@ pub const RaytracingSystem = struct {
         self.output_texture.deinit();
         // Clean up descriptor sets, pool, and layout
         deinitDescriptorResources(self.descriptor_pool, self.descriptor_set_layout, @ptrCast(&self.descriptor_set), null) catch |err| {
-            log.log(log.LogLevel.ERROR, "RaytracingSystem", "Failed to deinit descriptor resources: {}", .{err});
+            log(.ERROR, "RaytracingSystem", "Failed to deinit descriptor resources: {}", .{err});
         };
         // Destroy pipeline and associated resources
         self.pipeline.deinit();
@@ -640,5 +656,11 @@ pub const RaytracingSystem = struct {
     pub fn getOutputImageDescriptorInfo(self: *RaytracingSystem) !vk.DescriptorImageInfo {
         // Assumes self.output_texture is valid
         return self.output_texture.getDescriptorInfo();
+    }
+
+    /// Request texture descriptor update on next frame
+    pub fn requestTextureDescriptorUpdate(self: *RaytracingSystem) void {
+        log(.DEBUG, "raytracing", "Raytracing texture descriptor update requested", .{});
+        self.descriptors_need_update = true;
     }
 };

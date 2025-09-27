@@ -8,6 +8,7 @@ const GameObject = @import("game_object.zig").GameObject;
 const PointLightComponent = @import("components.zig").PointLightComponent;
 const fromMesh = @import("mesh.zig").fromMesh;
 const Texture = @import("texture.zig").Texture;
+const FallbackMeshes = @import("utils/fallback_meshes.zig").FallbackMeshes;
 const Buffer = @import("buffer.zig").Buffer;
 const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
 const log = @import("utils/log.zig").log;
@@ -53,6 +54,9 @@ pub const EnhancedScene = struct {
 
     // Thread synchronization
     texture_mutex: std.Thread.Mutex = .{},
+
+    // Raytracing system reference for descriptor updates
+    raytracing_system: ?*@import("systems/raytracing_system.zig").RaytracingSystem = null,
 
     // Core dependencies
     gc: *GraphicsContext,
@@ -298,13 +302,18 @@ pub const EnhancedScene = struct {
     pub fn updateTextureImageInfos(self: *Self, allocator: std.mem.Allocator) !void {
         if (self.textures.items.len == 0) {
             self.texture_image_infos = &[_]vk.DescriptorImageInfo{};
-            return;
+        } else {
+            const infos = try allocator.alloc(vk.DescriptorImageInfo, self.textures.items.len);
+            for (self.textures.items, 0..) |tex, i| {
+                infos[i] = tex.descriptor;
+            }
+            self.texture_image_infos = infos;
         }
-        const infos = try allocator.alloc(vk.DescriptorImageInfo, self.textures.items.len);
-        for (self.textures.items, 0..) |tex, i| {
-            infos[i] = tex.descriptor;
+
+        // Notify raytracing system that texture descriptors need to be updated
+        if (self.raytracing_system) |rt_system| {
+            rt_system.requestTextureDescriptorUpdate();
         }
-        self.texture_image_infos = infos;
     }
 
     pub fn render(self: Self, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
@@ -340,15 +349,29 @@ pub const EnhancedScene = struct {
                 log(.INFO, "enhanced_scene", "Using completed async-loaded texture for {s} -> index {d}", .{ texture_path, cached_texture_id });
                 texture_id = cached_texture_id;
             } else {
-                // Async loading failed, fall back to sync
+                // Async loading failed, fall back to sync with fallback
                 log(.WARN, "enhanced_scene", "Async texture loading failed, falling back to sync: {s}", .{texture_path});
-                const texture = try Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8);
+                const texture = Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8) catch |err| blk: {
+                    log(.WARN, "enhanced_scene", "Failed to load texture {s}: {}, using fallback", .{ texture_path, err });
+                    const fallback_texture = Texture.initFromFile(self.gc, self.allocator, "textures/error.png", .rgba8) catch {
+                        log(.ERROR, "enhanced_scene", "Failed to load fallback texture, using missing.png", .{});
+                        break :blk try Texture.initFromFile(self.gc, self.allocator, "textures/missing.png", .rgba8);
+                    };
+                    break :blk fallback_texture;
+                };
                 texture_id = try self.addTexture(texture);
             }
         } else {
-            // No async loading was started, load synchronously
+            // No async loading was started, load synchronously with fallback
             log(.DEBUG, "enhanced_scene", "Loading texture synchronously from {s}", .{texture_path});
-            const texture = try Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8);
+            const texture = Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8) catch |err| blk: {
+                log(.WARN, "enhanced_scene", "Failed to load texture {s}: {}, using fallback", .{ texture_path, err });
+                const fallback_texture = Texture.initFromFile(self.gc, self.allocator, "textures/error.png", .rgba8) catch {
+                    log(.ERROR, "enhanced_scene", "Failed to load fallback texture, using missing.png", .{});
+                    break :blk try Texture.initFromFile(self.gc, self.allocator, "textures/missing.png", .rgba8);
+                };
+                break :blk fallback_texture;
+            };
             texture_id = try self.addTexture(texture);
         }
 
@@ -371,6 +394,60 @@ pub const EnhancedScene = struct {
         const obj = try self.addModelWithMaterial(model_path, texture_path);
         obj.transform.translate(transform);
         obj.transform.scale(scale);
+        return obj;
+    }
+
+    /// Non-blocking version that uses fallback cube while model loads
+    pub fn addModelWithMaterialAndTransformAsync(
+        self: *Self,
+        model_path: []const u8,
+        texture_path: []const u8,
+        transform: Math.Vec3,
+        scale: Math.Vec3,
+    ) !*GameObject {
+        // Create fallback cube model immediately
+        log(.INFO, "enhanced_scene", "Creating fallback cube for {s} while loading asynchronously", .{model_path});
+        const fallback_model = try FallbackMeshes.createCubeModel(self.allocator, self.gc, "fallback_cube");
+
+        // Handle texture loading (can be async or cached)
+        var texture_id: usize = undefined;
+
+        // Check if texture was already loaded asynchronously into cache
+        if (self.getCachedTexture(texture_path)) |cached_texture_id| {
+            log(.INFO, "enhanced_scene", "Using cached texture for {s} -> index {d}", .{ texture_path, cached_texture_id });
+            texture_id = cached_texture_id;
+        } else {
+            // Load texture synchronously with fallback on failure
+            log(.DEBUG, "enhanced_scene", "Loading texture synchronously from {s}", .{texture_path});
+            const texture = Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8) catch |err| blk: {
+                log(.WARN, "enhanced_scene", "Failed to load texture {s}: {}, using fallback", .{ texture_path, err });
+                const fallback_texture = Texture.initFromFile(self.gc, self.allocator, "textures/error.png", .rgba8) catch {
+                    log(.ERROR, "enhanced_scene", "Failed to load fallback texture, using missing.png", .{});
+                    break :blk try Texture.initFromFile(self.gc, self.allocator, "textures/missing.png", .rgba8);
+                };
+                break :blk fallback_texture;
+            };
+            texture_id = try self.addTexture(texture);
+        }
+
+        // Create material for the fallback
+        const material = Material{ .albedo_texture_id = @intCast(texture_id + 1) }; // 1-based
+        const material_id = try self.addMaterial(material);
+
+        // Assign material to fallback mesh
+        for (fallback_model.meshes.items) |*mesh_model| {
+            mesh_model.geometry.mesh.material_id = @intCast(material_id);
+        }
+
+        // Create the game object with fallback model
+        const obj = try self.addModel(fallback_model, null);
+        obj.transform.translate(transform);
+        obj.transform.scale(scale);
+
+        // TODO: Start async loading of the real model and replace when ready
+        // For now, we'll just use the fallback cube
+        log(.INFO, "enhanced_scene", "Created fallback object, real model loading TODO: {s}", .{model_path});
+
         return obj;
     }
 
@@ -594,4 +671,36 @@ pub const EnhancedScene = struct {
 
         log(.INFO, "enhanced_scene", "Auto hot reload enabled for {} texture assets", .{self.texture_assets.count()});
     }
+
+    /// Callback function for when textures are hot reloaded
+    pub fn onTextureReloaded(self: *Self, file_path: []const u8, asset_id: AssetId) void {
+        log(.INFO, "enhanced_scene", "Texture hot reload completed: {s} (AssetId: {})", .{ file_path, asset_id });
+        
+        // Update texture descriptor infos to refresh raytracing system
+        self.updateTextureImageInfos(self.allocator) catch |err| {
+            log(.ERROR, "enhanced_scene", "Failed to update texture descriptors after reload: {}", .{err});
+        };
+    }
+
+    /// Register raytracing system to receive texture update notifications
+    pub fn setRaytracingSystem(self: *Self, raytracing_system: *@import("systems/raytracing_system.zig").RaytracingSystem) void {
+        self.raytracing_system = raytracing_system;
+        log(.DEBUG, "enhanced_scene", "Raytracing system registered for texture updates", .{});
+    }
+
+    /// Register this scene instance for hot reload callbacks
+    pub fn registerForHotReloadCallbacks(self: *Self) void {
+        global_scene_instance = self;
+        log(.DEBUG, "enhanced_scene", "Scene registered for hot reload callbacks", .{});
+    }
+
+    /// Static callback wrapper for hot reload manager - requires global scene instance
+    pub fn textureReloadCallbackWrapper(file_path: []const u8, asset_id: AssetId) void {
+        if (global_scene_instance) |scene| {
+            scene.onTextureReloaded(file_path, asset_id);
+        }
+    }
 };
+
+// Global scene instance for callback access - needed because C-style callbacks can't capture context
+var global_scene_instance: ?*EnhancedScene = null;

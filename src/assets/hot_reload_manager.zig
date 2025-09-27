@@ -4,6 +4,9 @@ const AssetManager = @import("asset_manager.zig").AssetManager;
 const AssetId = @import("asset_types.zig").AssetId;
 const log = @import("../utils/log.zig").log;
 
+/// Callback function type for texture reload notifications
+pub const TextureReloadCallback = *const fn (file_path: []const u8, asset_id: AssetId) void;
+
 /// Manages hot reloading of assets when files change
 pub const HotReloadManager = struct {
     allocator: std.mem.Allocator,
@@ -23,6 +26,9 @@ pub const HotReloadManager = struct {
     // Debouncing state
     pending_reloads: std.StringHashMap(i64), // path -> timestamp
     mutex: std.Thread.Mutex = .{},
+
+    // Callback for texture reload notifications
+    texture_reload_callback: ?TextureReloadCallback = null,
 
     /// File metadata for change detection
     const FileMetadata = struct {
@@ -126,6 +132,11 @@ pub const HotReloadManager = struct {
         }
     }
 
+    /// Set callback to be called when textures are hot reloaded
+    pub fn setTextureReloadCallback(self: *Self, callback: TextureReloadCallback) void {
+        self.texture_reload_callback = callback;
+    }
+
     /// Add a directory to watch for new asset files
     pub fn watchDirectory(self: *Self, dir_path: []const u8) !void {
         try self.file_watcher.addWatch(dir_path, true);
@@ -211,6 +222,17 @@ pub const HotReloadManager = struct {
             };
 
             log(.INFO, "hot_reload", "Successfully hot reloaded: {s}", .{file_path});
+
+            // Notify texture reload callback if this is a texture file
+            if (self.texture_reload_callback) |callback| {
+                if (std.mem.endsWith(u8, file_path, ".png") or 
+                    std.mem.endsWith(u8, file_path, ".jpg") or 
+                    std.mem.endsWith(u8, file_path, ".jpeg") or 
+                    std.mem.endsWith(u8, file_path, ".tga") or 
+                    std.mem.endsWith(u8, file_path, ".bmp")) {
+                    callback(file_path, asset_id);
+                }
+            }
             return;
         }
 
@@ -225,6 +247,17 @@ pub const HotReloadManager = struct {
             };
 
             log(.INFO, "hot_reload", "Successfully hot reloaded discovered asset: {s}", .{file_path});
+
+            // Notify texture reload callback if this is a texture file
+            if (self.texture_reload_callback) |callback| {
+                if (std.mem.endsWith(u8, file_path, ".png") or 
+                    std.mem.endsWith(u8, file_path, ".jpg") or 
+                    std.mem.endsWith(u8, file_path, ".jpeg") or 
+                    std.mem.endsWith(u8, file_path, ".tga") or 
+                    std.mem.endsWith(u8, file_path, ".bmp")) {
+                    callback(file_path, asset_id);
+                }
+            }
         } else {
             // Check if this is a directory change - scan for specific files
             if (self.isWatchedDirectory(file_path)) {
@@ -419,6 +452,21 @@ pub const HotReloadManager = struct {
         } else |err| {
             log(.WARN, "hot_reload", "Failed to update metadata for {s}: {}", .{ file_path, err });
         }
+    }
+
+    /// Get number of files currently being watched
+    pub fn getWatchedFileCount(self: *Self) u32 {
+        return @intCast(self.path_to_asset.count());
+    }
+
+    /// Get number of events processed (approximation)
+    pub fn getProcessedEventCount(self: *Self) u32 {
+        return @intCast(self.pending_reloads.count() * 2); // Rough estimate
+    }
+
+    /// Get total number of successful reloads (approximation)
+    pub fn getTotalReloadCount(self: *Self) u32 {
+        return @intCast(self.file_metadata.count()); // Files that have been updated at least once
     }
 };
 
