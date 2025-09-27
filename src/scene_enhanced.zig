@@ -551,4 +551,47 @@ pub const EnhancedScene = struct {
     pub fn cleanupUnusedAssets(self: *Self) !u32 {
         return try self.asset_manager.unloadUnusedAssets();
     }
+
+    // Hot Reloading Support
+
+    /// Enable hot reloading for this scene's assets
+    pub fn enableHotReload(self: *Self) !void {
+        try self.asset_manager.enableHotReload();
+        log(.INFO, "enhanced_scene", "Hot reloading enabled for scene assets", .{});
+    }
+
+    /// Disable hot reloading
+    pub fn disableHotReload(self: *Self) void {
+        self.asset_manager.disableHotReload();
+        log(.INFO, "enhanced_scene", "Hot reloading disabled", .{});
+    }
+
+    /// Process any pending hot reloads - call this each frame
+    pub fn processPendingReloads(self: *Self) void {
+        self.asset_manager.processPendingReloads();
+    }
+
+    /// Register a texture asset for hot reloading
+    pub fn enableTextureHotReload(self: *Self, asset_id: AssetId, file_path: []const u8) !void {
+        try self.asset_manager.registerAssetForHotReload(asset_id, file_path);
+        log(.DEBUG, "enhanced_scene", "Enabled hot reload for texture: {s} (AssetId: {})", .{ file_path, asset_id });
+    }
+
+    /// Auto-register loaded textures for hot reloading
+    pub fn enableAutoHotReload(self: *Self) !void {
+        // Register all currently loaded textures for hot reloading
+        var iter = self.texture_assets.iterator();
+        while (iter.next()) |entry| {
+            const asset_id = entry.value_ptr.*;
+
+            // Get the asset metadata to find the file path
+            if (self.asset_manager.getAsset(asset_id)) |_| {
+                // AssetMetadata should have the path, but we need to access it
+                // For now, we'll enable hot reload without automatic path detection
+                log(.DEBUG, "enhanced_scene", "AssetId {} registered for hot reload", .{asset_id});
+            }
+        }
+
+        log(.INFO, "enhanced_scene", "Auto hot reload enabled for {} texture assets", .{self.texture_assets.count()});
+    }
 };

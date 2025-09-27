@@ -111,12 +111,13 @@ pub const App = struct {
         // Initialize Enhanced Scene with Asset Manager integration
         scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
 
-        // Demonstrate async loading capabilities
-        log(.INFO, "app", "Asset Manager async loading enabled: {}", .{scene.isAsyncLoadingEnabled()});
-        if (scene.isAsyncLoadingEnabled()) {
-            log(.INFO, "app", "Demonstrating async asset preloading...", .{});
+        // Enable hot reloading for development BEFORE loading assets
+        scene.enableHotReload() catch |err| {
+            log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
+        };
 
-            // Start preloading texture that will be used later in the scene
+        // Preload textures
+        if (comptime std.debug.runtime_safety) {
             scene.startAsyncTextureLoad("textures/granitesmooth1-albedo.png") catch |err| {
                 log(.WARN, "app", "Failed to start async texture preload: {}", .{err});
             };
@@ -429,6 +430,8 @@ pub const App = struct {
     }
 
     pub fn onUpdate(self: *App) !bool {
+        // Process any pending hot reloads first
+        scene.processPendingReloads();
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();

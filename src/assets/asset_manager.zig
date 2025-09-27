@@ -2,6 +2,8 @@ const std = @import("std");
 const asset_types = @import("asset_types.zig");
 const asset_registry = @import("asset_registry.zig");
 const asset_loader = @import("asset_loader.zig");
+const HotReloadManager = @import("hot_reload_manager.zig").HotReloadManager;
+const log = @import("../utils/log.zig").log;
 
 // Re-export key types for convenience
 pub const AssetId = asset_types.AssetId;
@@ -79,6 +81,9 @@ pub const AssetManager = struct {
     // Fallback assets for safe rendering
     fallbacks: FallbackAssets,
 
+    // Hot reloading
+    hot_reload_manager: ?HotReloadManager = null,
+
     // Configuration
     max_loader_threads: u32 = 4,
 
@@ -105,7 +110,13 @@ pub const AssetManager = struct {
 
         return self;
     }
+
     pub fn deinit(self: *Self) void {
+        // Clean up hot reload manager
+        if (self.hot_reload_manager) |*manager| {
+            manager.deinit();
+        }
+
         self.loader.deinit();
         self.registry.deinit();
 
@@ -143,6 +154,12 @@ pub const AssetManager = struct {
     pub fn loadAsset(self: *Self, path: []const u8, asset_type: AssetType) !AssetId {
         const asset_id = try self.registerAsset(path, asset_type);
         try self.loader.loadSync(asset_id);
+        
+        // Auto-register for hot reloading
+        self.registerAssetForHotReload(asset_id, path) catch |err| {
+            log(.WARN, "asset_manager", "Failed to register asset for hot reload: {} ({})", .{ asset_id, err });
+        };
+        
         return asset_id;
     }
 
@@ -151,6 +168,12 @@ pub const AssetManager = struct {
     pub fn loadAssetAsync(self: *Self, path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
         const asset_id = try self.registerAsset(path, asset_type);
         try self.loader.requestLoad(asset_id, priority);
+        
+        // Auto-register for hot reloading
+        self.registerAssetForHotReload(asset_id, path) catch |err| {
+            log(.WARN, "asset_manager", "Failed to register asset for hot reload: {} ({})", .{ asset_id, err });
+        };
+        
         return asset_id;
     }
 
@@ -375,6 +398,62 @@ pub const AssetManager = struct {
     /// Load a scene asset
     pub fn loadScene(self: *Self, path: []const u8, priority: LoadPriority) !AssetId {
         return try self.loadAssetAsync(path, .scene, priority);
+    }
+
+    // Hot Reloading
+
+    /// Enable hot reloading for assets
+    pub fn enableHotReload(self: *Self) !void {
+        if (self.hot_reload_manager == null) {
+            self.hot_reload_manager = HotReloadManager.init(self.allocator, self);
+        }
+
+        if (self.hot_reload_manager) |*manager| {
+            try manager.start();
+            const hot_reload_module = @import("hot_reload_manager.zig");
+            hot_reload_module.setGlobalHotReloadManager(manager);
+        }
+    }
+
+    /// Disable hot reloading
+    pub fn disableHotReload(self: *Self) void {
+        if (self.hot_reload_manager) |*manager| {
+            manager.stop();
+        }
+    }
+
+    /// Process pending hot reloads (call this regularly from main thread)
+    pub fn processPendingReloads(self: *Self) void {
+        if (self.hot_reload_manager) |*manager| {
+            manager.processPendingReloads();
+        }
+    }
+
+    /// Reload a specific asset from disk
+    pub fn reloadAsset(self: *Self, asset_id: AssetId, file_path: []const u8) !void {
+        if (self.getAsset(asset_id)) |asset| {
+            const previous_state = asset.state;
+
+            log(.INFO, "asset_manager", "Reloading asset {} from {s} (was: {s})", .{ asset_id, file_path, @tagName(previous_state) });
+
+            // Mark asset as loading (this will trigger fallback rendering)
+            asset.state = .loading;
+
+            // Queue for async reload with high priority
+            try self.loader.loadAsync(asset_id, .high);
+
+            log(.DEBUG, "asset_manager", "Asset {} reload queued", .{asset_id});
+        } else {
+            log(.WARN, "asset_manager", "Cannot reload asset {}: not found in registry", .{asset_id});
+            return error.AssetNotFound;
+        }
+    }
+
+    /// Register an asset for hot reloading when its file changes
+    pub fn registerAssetForHotReload(self: *Self, asset_id: AssetId, file_path: []const u8) !void {
+        if (self.hot_reload_manager) |*manager| {
+            try manager.registerAsset(asset_id, file_path);
+        }
     }
 };
 
