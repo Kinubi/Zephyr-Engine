@@ -45,7 +45,7 @@ pub const PointLightRenderer = struct {
     pub fn update_point_lights(self: *PointLightRenderer, frame_info: *FrameInfo, global_ubo: *GlobalUbo) !void {
         _ = frame_info;
         var num_lights: u32 = 0;
-        for (self.scene.objects.slice()) |*object| {
+        for (self.scene.objects.items) |*object| {
             if (object.point_light == null) {
                 continue;
             }
@@ -68,7 +68,7 @@ pub const PointLightRenderer = struct {
     pub fn render(self: *PointLightRenderer, frame_info: FrameInfo) !void {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
-        for (self.scene.objects.slice()) |*object| {
+        for (self.scene.objects.items) |*object| {
             if (object.point_light == null) {
                 continue;
             }

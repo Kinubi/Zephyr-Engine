@@ -12,10 +12,14 @@ const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_ray_query.name,
     vk.extensions.khr_deferred_host_operations.name,
     vk.extensions.ext_swapchain_maintenance_1.name,
-        //vk.extensions.ext_surface_maintenance_1.name,
 };
 
 const optional_device_extensions = [_][*:0]const u8{};
+
+const required_instance_extensions = [_][*:0]const u8{
+    vk.extensions.khr_get_surface_capabilities_2.name,
+    vk.extensions.ext_surface_maintenance_1.name,
+};
 
 const optional_instance_extensions = [_][*:0]const u8{
     vk.extensions.khr_get_physical_device_properties_2.name,
@@ -81,9 +85,12 @@ pub const GraphicsContext = struct {
             glfw_exts[i] = glfw_exts_ptr[i];
         }
 
-        var instance_extensions = try std.ArrayList([*:0]const u8).initCapacity(allocator, glfw_exts.len + 1);
-        defer instance_extensions.deinit();
-        try instance_extensions.appendSlice(glfw_exts);
+        var instance_extensions = try std.ArrayList([*:0]const u8).initCapacity(allocator, glfw_exts.len + required_instance_extensions.len + optional_instance_extensions.len);
+        defer instance_extensions.deinit(allocator);
+        try instance_extensions.appendSlice(allocator, glfw_exts);
+
+        // Add required instance extensions
+        try instance_extensions.appendSlice(allocator, &required_instance_extensions);
 
         var count: u32 = undefined;
         _ = try self.vkb.enumerateInstanceExtensionProperties(null, &count, null);
@@ -98,7 +105,7 @@ pub const GraphicsContext = struct {
                 const len = std.mem.indexOfScalar(u8, &prop.extension_name, 0).?;
                 const prop_ext_name = prop.extension_name[0..len];
                 if (std.mem.eql(u8, prop_ext_name, std.mem.span(extension_name))) {
-                    try instance_extensions.append(@ptrCast(extension_name));
+                    try instance_extensions.append(allocator, @ptrCast(extension_name));
                     break;
                 }
             }
@@ -112,7 +119,8 @@ pub const GraphicsContext = struct {
         defer allocator.free(available_layers);
         _ = try self.vkb.enumerateInstanceLayerProperties(&count, available_layers.ptr);
 
-        var layers = std.BoundedArray([*:0]const u8, instance_layers.len){};
+        var layers = try std.ArrayList([*:0]const u8).initCapacity(allocator, instance_layers.len);
+        defer layers.deinit(allocator);
         for (instance_layers) |optional| {
             for (available_layers) |available| {
                 if (std.mem.eql(
@@ -120,7 +128,7 @@ pub const GraphicsContext = struct {
                     std.mem.sliceTo(optional, 0),
                     std.mem.sliceTo(&available.layer_name, 0),
                 )) {
-                    layers.appendAssumeCapacity(optional);
+                    try layers.append(allocator, optional);
                     break;
                 }
             }
@@ -139,8 +147,8 @@ pub const GraphicsContext = struct {
                 .enumerate_portability_bit_khr = true,
             } else .{},
             .p_application_info = &app_info,
-            .enabled_layer_count = @intCast(layers.len),
-            .pp_enabled_layer_names = layers.slice().ptr,
+            .enabled_layer_count = @intCast(layers.items.len),
+            .pp_enabled_layer_names = layers.items.ptr,
             .enabled_extension_count = @intCast(instance_extensions.items.len),
             .pp_enabled_extension_names = @ptrCast(instance_extensions.items),
         }, null);
@@ -638,9 +646,9 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         2; // amd
 
     var device_extensions = try std.ArrayList([*:0]const u8).initCapacity(allocator, required_device_extensions.len);
-    defer device_extensions.deinit();
+    defer device_extensions.deinit(allocator);
 
-    try device_extensions.appendSlice(required_device_extensions[0..required_device_extensions.len]);
+    try device_extensions.appendSlice(allocator, required_device_extensions[0..required_device_extensions.len]);
 
     var count: u32 = undefined;
     _ = try vki.enumerateDeviceExtensionProperties(candidate.pdev, null, &count, null);
@@ -673,23 +681,23 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .p_enabled_features = null,
     };
     var ray_query_create = vk.PhysicalDeviceRayQueryFeaturesKHR{
-        .ray_query = 1,
+        .ray_query = .true,
     };
 
     var ray_tracing_create = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{
-        .ray_tracing_pipeline = 1,
+        .ray_tracing_pipeline = .true,
     };
     ray_query_create.p_next = &ray_tracing_create;
 
     var bda_create = vk.PhysicalDeviceBufferDeviceAddressFeatures{
-        .buffer_device_address = 1,
-        .buffer_device_address_capture_replay = 1,
-        .buffer_device_address_multi_device = 1,
+        .buffer_device_address = .true,
+        .buffer_device_address_capture_replay = .true,
+        .buffer_device_address_multi_device = .true,
     };
     ray_tracing_create.p_next = &bda_create;
 
     var accel_create = vk.PhysicalDeviceAccelerationStructureFeaturesKHR{
-        .acceleration_structure = 1,
+        .acceleration_structure = .true,
     };
     bda_create.p_next = &accel_create;
 
@@ -778,7 +786,7 @@ fn allocateQueues(vki: InstanceWrapper, pdev: vk.PhysicalDevice, allocator: Allo
             graphics_family = family;
         }
 
-        if (present_family == null and (try vki.getPhysicalDeviceSurfaceSupportKHR(pdev, family, surface)) == vk.TRUE) {
+        if (present_family == null and (try vki.getPhysicalDeviceSurfaceSupportKHR(pdev, family, surface)) == .true) {
             present_family = family;
         }
 

@@ -29,9 +29,10 @@ pub const RaytracingDescriptorSet = struct {
     } {
         var pool_builder = DescriptorPool.Builder{
             .gc = gc,
-            .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(allocator),
+            .poolSizes = std.ArrayList(vk.DescriptorPoolSize){},
             .poolFlags = .{ .free_descriptor_set_bit = true },
             .maxSets = 0,
+            .allocator = allocator,
         };
         const pool = try allocator.create(DescriptorPool);
         pool.* = try pool_builder
@@ -65,6 +66,7 @@ pub const RaytracingDescriptorSet = struct {
         gc: *GraphicsContext,
         pool: *DescriptorPool,
         layout: *DescriptorSetLayout,
+        allocator: std.mem.Allocator,
         accel_info: *vk.WriteDescriptorSetAccelerationStructureKHR,
         output_image_info: *vk.DescriptorImageInfo,
         ubo_infos: []const vk.DescriptorBufferInfo,
@@ -74,7 +76,7 @@ pub const RaytracingDescriptorSet = struct {
         texture_image_infos: []const vk.DescriptorImageInfo,
     ) !vk.DescriptorSet {
         var set: vk.DescriptorSet = undefined;
-        var writer = DescriptorWriter.init(gc, layout, pool);
+        var writer = DescriptorWriter.init(gc, layout, pool, allocator);
         try writer.writeAccelerationStructure(0, accel_info)
             .writeImage(1, output_image_info)
             .build(&set);

@@ -14,7 +14,7 @@ pub const Geometry = struct {
     // ...
 
     pub fn deinit(self: *Geometry, allocator: std.mem.Allocator) void {
-        self.mesh.deinit();
+        self.mesh.deinit(allocator);
 
         if (self.material) |mat| mat.deinit(allocator);
         // TODO: deinit BLAS if used

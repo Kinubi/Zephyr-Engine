@@ -101,7 +101,7 @@ pub const Swapchain = struct {
             .pre_transform = caps.current_transform,
             .composite_alpha = .{ .opaque_bit_khr = true },
             .present_mode = present_mode,
-            .clipped = vk.TRUE,
+            .clipped = .true,
             .old_swapchain = old_handle,
         }, null);
         errdefer gc.vkd.destroySwapchainKHR(gc.dev, handle, null);
@@ -144,8 +144,8 @@ pub const Swapchain = struct {
     pub fn waitForAllFences(self: *Swapchain) !void {
         var i: usize = 0;
         while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
-            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[i]), vk.TRUE, std.math.maxInt(u64));
-            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[i]), vk.TRUE, std.math.maxInt(u64));
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[i]), .true, std.math.maxInt(u64));
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[i]), .true, std.math.maxInt(u64));
         }
     }
 
@@ -423,7 +423,7 @@ pub const Swapchain = struct {
     }
 
     pub fn beginComputePass(self: *Swapchain, frame_info: FrameInfo) !void {
-        _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
+        _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), .true, std.math.maxInt(u64));
 
         // Reset compute fence for this frame
         try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
@@ -436,7 +436,7 @@ pub const Swapchain = struct {
 
     pub fn beginFrame(self: *Swapchain, frame_info: FrameInfo) !void {
         if (self.image_acquired[frame_info.current_frame] != .null_handle) {
-            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), vk.TRUE, std.math.maxInt(u64));
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), .true, std.math.maxInt(u64));
         }
 
         if (frame_info.extent.width != self.extent.width or frame_info.extent.height != self.extent.height) {

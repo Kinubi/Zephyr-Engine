@@ -110,10 +110,10 @@ pub const Texture = struct {
             .border_color = vk.BorderColor.float_opaque_black,
             .flags = .{},
             .p_next = null,
-            .unnormalized_coordinates = vk.FALSE,
-            .compare_enable = vk.FALSE,
+            .unnormalized_coordinates = .false,
+            .compare_enable = .false,
             .compare_op = vk.CompareOp.always,
-            .anisotropy_enable = vk.FALSE,
+            .anisotropy_enable = .false,
         };
         const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
         return Texture{
@@ -280,10 +280,10 @@ pub const Texture = struct {
             .border_color = vk.BorderColor.int_opaque_black,
             .flags = .{},
             .p_next = null,
-            .unnormalized_coordinates = vk.FALSE,
-            .compare_enable = vk.FALSE,
+            .unnormalized_coordinates = .false,
+            .compare_enable = .false,
             .compare_op = vk.CompareOp.always,
-            .anisotropy_enable = vk.FALSE,
+            .anisotropy_enable = .false,
         };
         const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
         return Texture{

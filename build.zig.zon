@@ -15,7 +15,7 @@
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
-    //.minimum_zig_version = "0.11.0",
+    .minimum_zig_version = "0.15.1",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -58,16 +58,16 @@
             .hash = "N-V-__8AAPJS7wFRVAIGhMZ7cis5e-y5LZfn2KfO5O2jiHGH",
         },
         .@"zig-obj" = .{
-            .url = "git+https://github.com/chip2n/zig-obj.git#619027e58a6ce30b5d9a362c76dc2c6c2ce51ee9",
-            .hash = "12203513bf3fa5045a984aba014afaf152df4b618742bcd37768d3075dafe715a1e1",
+            .url = "git+https://github.com/chip2n/zig-obj.git?ref=master#47410383c81d24454e370ffadc0980af7abea522",
+            .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
         },
         .vulkan_zig = .{
-            .url = "https://github.com/Snektron/vulkan-zig/archive/9b4090c852760ce3210562f62ffaf301479c38ba.tar.gz",
-            .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
+            .url = "https://github.com/Snektron/vulkan-zig/archive/c9c4dae70356766f0954ae7d2b8aba4d1dd53a2a.tar.gz",
+            .hash = "vulkan-0.0.0-r7Ytx6hBAwBUnt0XA-uOkR2hda4fAHFhQITNTgJpnFkY",
         },
         .zstbi = .{
-            .url = "git+https://github.com/zig-gamedev/zstbi#094c4bba5cdbec167d3f6aaa98cccccd5c99145f",
-            .hash = "zstbi-0.11.0-dev-L0Ea_-eVBwCl8RYA98PhLDw3Fhw5k7FJOHSMDKWDOvqx",
+            .url = "https://github.com/zig-gamedev/zstbi/archive/main.tar.gz",
+            .hash = "zstbi-0.11.0-dev-L0Ea_yaWBwAHwFoCuyjkFyaiSsbjt4UOrkntR0c_nmzz",
         },
     },
 

@@ -46,7 +46,7 @@ pub const SimpleRenderer = struct {
     pub fn render(self: *SimpleRenderer, frame_info: FrameInfo) !void {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
-        for (self.scene.objects.slice()) |*object| {
+        for (self.scene.objects.items) |*object| {
             if (object.geometry == null) continue;
             const push = SimplePushConstantData{
                 .transform = object.transform.local2world.data,

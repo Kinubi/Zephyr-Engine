@@ -110,8 +110,8 @@ pub const RaytracingSystem = struct {
         self.blas_handles.clearRetainingCapacity();
         self.blas_buffers.clearRetainingCapacity();
         var mesh_count: usize = 0;
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "Scene has {} objects", .{scene.objects.len});
-        for (scene.objects.slice(), 0..) |*object, obj_idx| {
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "Scene has {} objects", .{scene.objects.items.len});
+        for (scene.objects.items, 0..) |*object, obj_idx| {
             if (object.model) |model| {
                 log.log(log.LogLevel.INFO, "RaytracingSystem", "Object {} has model with {} meshes", .{ obj_idx, model.meshes.items.len });
                 for (model.meshes.items) |*model_mesh| {
@@ -212,8 +212,8 @@ pub const RaytracingSystem = struct {
                     // BLAS build command
                     try self.gc.endSingleTimeCommands(cmdbuf);
                     scratch_buffer.deinit();
-                    try self.blas_handles.append(blas);
-                    try self.blas_buffers.append(blas_buffer);
+                    try self.blas_handles.append(self.allocator, blas);
+                    try self.blas_buffers.append(self.allocator, blas_buffer);
                     // Optionally deinit scratch_buffer here
                 }
             }
@@ -229,8 +229,8 @@ pub const RaytracingSystem = struct {
     pub fn createTLAS(self: *RaytracingSystem, scene: *Scene) !void {
         var instances = try std.ArrayList(vk.AccelerationStructureInstanceKHR).initCapacity(self.allocator, self.blas_handles.items.len);
         var mesh_index: u32 = 0;
-        log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating TLAS for Scene with {} objects", .{scene.objects.len});
-        for (scene.objects.slice()) |*object| {
+        log.log(log.LogLevel.INFO, "RaytracingSystem", "Creating TLAS for Scene with {} objects", .{scene.objects.items.len});
+        for (scene.objects.items) |*object| {
             if (object.model) |model| {
                 for (model.meshes.items) |mesh| {
                     log.log(log.LogLevel.INFO, "RaytracingSystem", "Processing model with {} meshes and texture_id {}", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
@@ -239,7 +239,7 @@ pub const RaytracingSystem = struct {
                         .acceleration_structure = self.blas_handles.items[mesh_index],
                     };
                     const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_addr_info);
-                    try instances.append(vk.AccelerationStructureInstanceKHR{
+                    try instances.append(self.allocator, vk.AccelerationStructureInstanceKHR{
                         .transform = .{ .matrix = object.transform.local2world.to_3x4() },
                         .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh.geometry.mesh.material_id), .mask = 0xFF },
                         .instance_shader_binding_table_record_offset_and_flags = .{ .instance_shader_binding_table_record_offset = 0, .flags = 0 },
@@ -288,7 +288,7 @@ pub const RaytracingSystem = struct {
             .geometry = .{
                 .instances = vk.AccelerationStructureGeometryInstancesDataKHR{
                     .s_type = vk.StructureType.acceleration_structure_geometry_instances_data_khr,
-                    .array_of_pointers = vk.FALSE,
+                    .array_of_pointers = .false,
                     .data = .{ .device_address = instance_device_address },
                 },
             },
@@ -465,7 +465,7 @@ pub const RaytracingSystem = struct {
             self.output_texture = output_texture;
             try self.descriptor_pool.resetPool();
             const output_image_info = self.output_texture.getDescriptorInfo();
-            var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool);
+            var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool, self.allocator);
             const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
             try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set);
             try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);
@@ -609,8 +609,8 @@ pub const RaytracingSystem = struct {
             buf.deinit();
             if (blas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas, null);
         }
-        self.blas_buffers.deinit();
-        self.blas_handles.deinit();
+        self.blas_buffers.deinit(self.allocator);
+        self.blas_handles.deinit(self.allocator);
         // Destroy TLAS acceleration structure and deinit TLAS buffer
         if (self.tlas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
         self.tlas_buffer.deinit();

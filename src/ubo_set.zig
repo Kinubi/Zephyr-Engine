@@ -27,9 +27,10 @@ pub const GlobalUboSet = struct {
     } {
         var pool_builder = DescriptorPool.Builder{
             .gc = gc,
-            .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(allocator),
+            .poolSizes = std.ArrayList(vk.DescriptorPoolSize){},
             .poolFlags = .{ .free_descriptor_set_bit = true },
             .maxSets = 0,
+            .allocator = allocator,
         };
         const pool = try allocator.create(DescriptorPool);
         pool.* = try pool_builder
@@ -56,7 +57,7 @@ pub const GlobalUboSet = struct {
         buffers: []Buffer,
     ) ![]vk.DescriptorSet {
         var sets = try allocator.alloc(vk.DescriptorSet, buffers.len);
-        var writer = DescriptorWriter.init(gc, layout, pool);
+        var writer = DescriptorWriter.init(gc, layout, pool, allocator);
         for (buffers, 0..) |buf, i| {
             const bufferInfo = buf.descriptor_info;
             try writer.writeBuffer(0, @constCast(&bufferInfo)).build(&sets[i]);
