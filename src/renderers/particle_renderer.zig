@@ -1,17 +1,17 @@
 // ParticleRenderer moved from renderer.zig
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../graphics_context.zig").GraphicsContext;
-const Pipeline = @import("../pipeline.zig").Pipeline;
-const ShaderLibrary = @import("../shader.zig").ShaderLibrary;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const Pipeline = @import("../core/pipeline.zig").Pipeline;
+const ShaderLibrary = @import("../core/shader.zig").ShaderLibrary;
 const Math = @import("../utils/math.zig");
-const FrameInfo = @import("../frameinfo.zig").FrameInfo;
-const Buffer = @import("../buffer.zig").Buffer;
-const DescriptorPool = @import("../descriptors.zig").DescriptorPool;
-const DescriptorSetLayout = @import("../descriptors.zig").DescriptorSetLayout;
-const DescriptorWriter = @import("../descriptors.zig").DescriptorWriter;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const Buffer = @import("../core/buffer.zig").Buffer;
+const DescriptorPool = @import("../core/descriptors.zig").DescriptorPool;
+const DescriptorSetLayout = @import("../core/descriptors.zig").DescriptorSetLayout;
+const DescriptorWriter = @import("../core/descriptors.zig").DescriptorWriter;
 const RenderSystem = @import("../systems/render_system.zig").RenderSystem;
-const deinitDescriptorResources = @import("../descriptors.zig").deinitDescriptorResources;
+const deinitDescriptorResources = @import("../core/descriptors.zig").deinitDescriptorResources;
 const log = @import("../utils/log.zig").log;
 
 pub const Particle = extern struct {

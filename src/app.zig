@@ -1,47 +1,78 @@
 const std = @import("std");
+
+// Core graphics imports
 const Window = @import("window.zig").Window;
-const Pipeline = @import("pipeline.zig").Pipeline;
+const Pipeline = @import("core/pipeline.zig").Pipeline;
+const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
+const Swapchain = @import("core/swapchain.zig").Swapchain;
+const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const ShaderLibrary = @import("core/shader.zig").ShaderLibrary;
+const entry_point_definition = @import("core/shader.zig").entry_point_definition;
+const Texture = @import("core/texture.zig").Texture;
+const DescriptorSetLayout = @import("core/descriptors.zig").DescriptorSetLayout;
+const DescriptorPool = @import("core/descriptors.zig").DescriptorPool;
+const DescriptorSetWriter = @import("core/descriptors.zig").DescriptorWriter;
+const Buffer = @import("core/buffer.zig").Buffer;
+
+// Rendering imports
+const Vertex = @import("rendering/mesh.zig").Vertex;
+const Mesh = @import("rendering/mesh.zig").Mesh;
+const Model = @import("rendering/mesh.zig").Model;
+const ModelMesh = @import("rendering/mesh.zig").ModelMesh;
+const Camera = @import("rendering/camera.zig").Camera;
+const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
+const GlobalUbo = @import("rendering/frameinfo.zig").GlobalUbo;
+const GlobalUboSet = @import("rendering/ubo_set.zig").GlobalUboSet;
+const RaytracingDescriptorSet = @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet;
+
+// Scene imports
+const Scene = @import("scene/scene.zig").Scene;
+const EnhancedScene = @import("scene/scene_enhanced.zig").EnhancedScene;
+const GameObject = @import("scene/game_object.zig").GameObject;
+const Material = @import("scene/scene.zig").Material;
+
+// Asset system imports
+const AssetManager = @import("assets/asset_manager.zig").AssetManager;
+
+// Renderer imports
+const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
+const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
+const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
+
+// System imports
+const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
+const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
+const RenderSystem = @import("systems/render_system.zig").RenderSystem;
+
+// Utility imports
+const Math = @import("utils/math.zig");
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
+const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
+
+// Input controller
+const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
+
+// Vulkan bindings and external C libraries
+const vk = @import("vulkan");
+const c = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
+
+// Embedded shaders
 const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
 const point_light_vert align(@alignOf(u32)) = @embedFile("point_light_vert").*;
 const point_light_frag align(@alignOf(u32)) = @embedFile("point_light_frag").*;
-const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
-const Swapchain = @import("swapchain.zig").Swapchain;
-const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
-const vk = @import("vulkan");
-const ShaderLibrary = @import("shader.zig").ShaderLibrary;
-const entry_point_definition = @import("shader.zig").entry_point_definition;
-const Vertex = @import("mesh.zig").Vertex;
-const Mesh = @import("mesh.zig").Mesh;
-const Model = @import("mesh.zig").Model;
-const ModelMesh = @import("mesh.zig").ModelMesh;
-const Scene = @import("scene.zig").Scene;
-const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
-const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
-const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
-const Math = @import("utils/math.zig");
-const Camera = @import("camera.zig").Camera;
-const GameObject = @import("game_object.zig").GameObject;
-const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
-const FrameInfo = @import("frameinfo.zig").FrameInfo;
-const Texture = @import("texture.zig").Texture;
-const DescriptorSetLayout = @import("descriptors.zig").DescriptorSetLayout;
-const DescriptorPool = @import("descriptors.zig").DescriptorPool;
-const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
-const Buffer = @import("buffer.zig").Buffer;
-const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
-const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
-const GlobalUboSet = @import("ubo_set.zig").GlobalUboSet;
-const RaytracingDescriptorSet = @import("raytracing_descriptor_set.zig").RaytracingDescriptorSet;
-const c = @cImport({
-    @cInclude("GLFW/glfw3.h");
-});
-const Material = @import("scene.zig").Material;
-const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
-const log = @import("utils/log.zig").log;
-const LogLevel = @import("utils/log.zig").LogLevel;
-const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
-const RenderSystem = @import("systems/render_system.zig").RenderSystem;
+
+// Callback function for ThreadPool running status changes
+fn onThreadPoolRunningChanged(running: bool) void {
+    if (running) {
+        log(.INFO, "app", "ThreadPool is now running", .{});
+    } else {
+        log(.WARN, "app", "ThreadPool has stopped running - no more async operations possible", .{});
+    }
+}
 
 pub const App = struct {
     window: Window = undefined,
@@ -65,7 +96,9 @@ pub const App = struct {
     var frame_info: FrameInfo = FrameInfo{};
 
     var frame_index: u32 = 0;
-    var scene: Scene = undefined;
+    var scene: EnhancedScene = undefined;
+    var asset_manager: AssetManager = undefined;
+    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Raytracing system field
     var global_ubo_set: GlobalUboSet = undefined;
@@ -90,22 +123,45 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        scene = Scene.init(&self.gc, self.allocator);
+        // Initialize Asset Manager
+        asset_manager = try AssetManager.init(self.allocator);
 
-        var mesh3 = Mesh.init(self.allocator);
+        // Set up ThreadPool callback to monitor running status
+        asset_manager.setThreadPoolCallback(onThreadPoolRunningChanged);
+
+        // Initialize Enhanced Scene with Asset Manager integration
+        scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
+
+        // Enable hot reloading for development BEFORE loading assets
+        scene.enableHotReload() catch |err| {
+            log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
+        };
+
+        // Register scene for hot reload callbacks and set up texture reload callback
+        scene.registerForHotReloadCallbacks();
+        if (scene.asset_manager.hot_reload_manager) |*hr_manager| {
+            hr_manager.setTextureReloadCallback(EnhancedScene.textureReloadCallbackWrapper);
+        }
+
+        // Preload textures
+        if (comptime std.debug.runtime_safety) {
+            scene.startAsyncTextureLoad("textures/granitesmooth1-albedo.png") catch |err| {
+                log(.WARN, "app", "Failed to start async texture preload: {}", .{err});
+            };
+
+            // Show loading stats
+            const stats = scene.getLoadingStats();
+            log(.DEBUG, "app", "Loading stats: active={d}, completed={d}, failed={d}", .{ stats.active_loads, stats.completed_loads, stats.failed_loads });
+        }
+
         var mesh = Mesh.init(self.allocator);
 
-        // --- Load a texture and add it to the scene ---
-        const cube_texture = try Texture.initFromFile(&self.gc, "textures/missing.png", .rgba8);
-        const cube_texture_id = try scene.addTexture(cube_texture);
-        // --- Create a material for the cube mesh referencing the texture ---
-        const cube_material = Material{
-            .albedo_texture_id = @intCast(cube_texture_id),
-        };
-        const cube_material_id = try scene.addMaterial(cube_material);
+        // --- Load texture through enhanced scene system ---
+        // Pre-load the texture asynchronously (if needed)
+        try scene.startAsyncTextureLoad("textures/missing.png");
 
-        // --- Assign the material to the mesh ---
-        mesh3.material_id = @intCast(cube_material_id);
+        // Wait a moment for async loading then use the texture
+        std.Thread.sleep(50_000_000); // 50ms
 
         // Update material and texture buffers after all materials/textures are added
 
@@ -150,34 +206,37 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        // --- Load cube mesh from file instead of @embedFile ---
-        log(.DEBUG, "scene", "Loading cube mesh from models/cube.obj", .{});
-        const cube_data = try loadFileAlloc(self.allocator, "models/cube.obj", 10 * 1024 * 1024);
-        defer self.allocator.free(cube_data);
-        try mesh3.loadFromObj(self.allocator, cube_data);
-        try mesh3.createVertexBuffers(&self.gc);
-        try mesh3.createIndexBuffers(&self.gc);
-        log(.INFO, "scene", "Loaded cube mesh and created buffers", .{});
-
-        // --- User-friendly model+material+texture creation for the vase ---
-        log(.DEBUG, "scene", "Loading vase model and texture", .{});
-        const object = try scene.addModelWithMaterialAndTransform(
-            "models/smooth_vase.obj",
-            "textures/granitesmooth1-albedo.png",
-            Math.Vec3.init(0, -1.5, 0.5),
-            Math.Vec3.init(0.5, 0.5, 0.5),
+        // --- Load cube mesh using non-blocking enhanced scene system ---
+        log(.DEBUG, "scene", "Loading cube with fallback through enhanced scene", .{});
+        const cube_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, -0.5, 0.5), // position
+            Math.Vec3.init(0.5, 0.001, 0.5) // scale
         );
-        log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
+        log(.INFO, "scene", "Added cube object (fallback) with {d} meshes", .{if (cube_object.model) |m| m.meshes.items.len else 0});
 
-        // Use new user-friendly helpers for model/object creation
-        log(.DEBUG, "scene", "Adding mesh3 as object2", .{});
-        const object2 = try scene.addModelFromMesh(mesh3, "mesh3", Math.Vec3.init(0, -0.5, 0.5));
-        log(.INFO, "scene", "Added object2 with model: {d} meshes", .{if (object2.model) |m| m.meshes.items.len else 0});
-        object2.transform.scale(Math.Vec3.init(0.5, 0.001, 0.5));
+        // Give async texture loading a moment to complete
+        std.Thread.sleep(100_000_000); // 100ms
 
-        log(.DEBUG, "scene", "Adding mesh as object5", .{});
-        const object5 = try scene.addModelFromMesh(mesh, "mesh", null);
-        log(.INFO, "scene", "Added object5 with model: {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+        // Update async textures for Vulkan descriptors (must be done on main thread)
+        try scene.updateAsyncTextures(self.allocator);
+
+        // Create another textured cube with a different texture (non-blocking)
+        log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
+        const cube2_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(1.0, -0.5, 0.5), // Different position
+            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
+        );
+        log(.INFO, "scene", "Added second cube object (fallback) with {d} meshes", .{if (cube2_object.model) |m| m.meshes.items.len else 0});
+
+        // Create a procedural mesh using the manual mesh (for demonstration)
+        log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
+        const object5 = try scene.addModelFromMesh(mesh, "procedural_mesh", null);
+        log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+
+        // Add another vase with a different texture (non-blocking fallback)
+        log(.DEBUG, "scene", "Adding second vase with error texture (fallback)", .{});
+        const vase2_object = try scene.addModelWithMaterialAndTransformAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-1.0, -1.5, 0.5), // Different position
+            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
+        );
+        log(.INFO, "scene", "Added second vase object (fallback) with {d} meshes", .{if (vase2_object.model) |m| m.meshes.items.len else 0});
 
         log(.DEBUG, "scene", "Adding point light objects", .{});
         const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
@@ -219,7 +278,7 @@ pub const App = struct {
             entry_point_definition{},
         });
         log(.DEBUG, "renderer", "Initializing simple renderer", .{});
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -234,7 +293,7 @@ pub const App = struct {
             entry_point_definition{},
         });
         log(.DEBUG, "renderer", "Initializing point light renderer", .{});
-        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         // Use ShaderLibrary abstraction for shader loading
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
@@ -308,9 +367,9 @@ pub const App = struct {
         );
 
         log(.DEBUG, "raytracing", "Creating BLAS", .{});
-        try raytracing_system.createBLAS(&scene);
+        try raytracing_system.createBLAS(scene.asScene());
         log(.DEBUG, "raytracing", "Creating TLAS", .{});
-        try raytracing_system.createTLAS(&scene);
+        try raytracing_system.createTLAS(scene.asScene());
         log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
         try raytracing_system.createShaderBindingTable(3);
         // --- After RaytracingSystem has valid AS and image, create descriptor set ---
@@ -341,6 +400,10 @@ pub const App = struct {
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
         log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
+
+        // Register raytracing system with enhanced scene for texture updates
+        scene.setRaytracingSystem(&raytracing_system);
+
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
         var particle_render_shader_library = ShaderLibrary.init(self.gc, self.allocator);
@@ -389,9 +452,19 @@ pub const App = struct {
     }
 
     pub fn onUpdate(self: *App) !bool {
+        // Process any pending hot reloads first
+        scene.processPendingReloads();
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
+
+        // Print performance report every 10 seconds in debug builds
+        if (comptime std.debug.runtime_safety) {
+            if (current_time - last_performance_report >= 10.0) {
+                asset_manager.printPerformanceReport();
+                last_performance_report = current_time;
+            }
+        }
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
         const computebuf = compute_shader_system.compute_bufs[current_frame];
@@ -458,8 +531,13 @@ pub const App = struct {
         raytracing_system.deinit();
         particle_renderer.deinit();
         scene.deinit();
+        asset_manager.deinit();
         swapchain.deinit();
         self.gc.deinit();
+
+        // Clean up zstbi global state
+        @import("core/texture.zig").deinitZstbi();
+
         self.window.deinit();
     }
 };

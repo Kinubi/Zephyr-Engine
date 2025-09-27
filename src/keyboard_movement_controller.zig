@@ -1,11 +1,11 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
 const Math = @import("utils/math.zig");
 const Window = @import("window.zig").Window;
-const Camera = @import("camera.zig").Camera;
+const Camera = @import("rendering/camera.zig").Camera;
 const glfw = @import("mach-glfw");
-const GameObject = @import("game_object.zig").GameObject;
+const GameObject = @import("scene/game_object.zig").GameObject;
 
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");

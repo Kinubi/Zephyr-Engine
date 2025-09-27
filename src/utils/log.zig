@@ -11,13 +11,17 @@ pub fn log(
     args: anytype,
 ) void {
     const now = std.time.milliTimestamp();
-    var buf: [32]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const allocator = fba.allocator();
+    var buf: [64]u8 = undefined; // Increased buffer size
     var timestamp: []const u8 = "<bad time>";
-    if (time_format.formatTimestamp(allocator, now)) |ts| {
+
+    // Use the buffer-based formatting function to avoid allocation issues
+    if (time_format.formatTimestampBuf(&buf, now)) |ts| {
         timestamp = ts;
-    } else |_| {}
+    } else |_| {
+        // Fallback to simple millisecond timestamp if formatting fails
+        timestamp = std.fmt.bufPrint(&buf, "{d}ms", .{now}) catch "<bad time>";
+    }
+
     const level_str = switch (level) {
         .TRACE => "TRACE",
         .DEBUG => "DEBUG",

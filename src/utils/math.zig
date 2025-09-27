@@ -1,11 +1,6 @@
-// This file is a copy of mach's math module for local use.
-// Add your math types, functions, and constants here as needed.
-// You can expand this as your project requires.
-
-// Example: re-export everything from mach's math module (to be replaced with actual code)
-// pub usingnamespace @import("mach").math;
-
-// TODO: Copy the relevant code from mach's math module here.
+// Local math library with essential types and functions for 3D graphics.
+// Provides Vec2, Vec3, Vec4, Mat3, Mat4 and common operations.
+// Expandable math module designed for Vulkan engine requirements.
 
 // Minimal math library based on mach's math.zig
 // You can expand this as needed for your project.
