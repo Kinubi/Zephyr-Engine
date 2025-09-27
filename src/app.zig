@@ -99,11 +99,26 @@ pub const App = struct {
         // Initialize Enhanced Scene with Asset Manager integration
         scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
 
+        // Demonstrate async loading capabilities
+        log(.INFO, "app", "Asset Manager async loading enabled: {}", .{scene.isAsyncLoadingEnabled()});
+        if (scene.isAsyncLoadingEnabled()) {
+            log(.INFO, "app", "Demonstrating async asset preloading...", .{});
+
+            // Start preloading texture that will be used later in the scene
+            scene.startAsyncTextureLoad("textures/granitesmooth1-albedo.png") catch |err| {
+                log(.WARN, "app", "Failed to start async texture preload: {}", .{err});
+            };
+
+            // Show loading stats
+            const stats = scene.getLoadingStats();
+            log(.DEBUG, "app", "Loading stats: active={d}, completed={d}, failed={d}", .{ stats.active_loads, stats.completed_loads, stats.failed_loads });
+        }
+
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
 
         // --- Load a texture and add it to the scene ---
-        const cube_texture = try Texture.initFromFile(&self.gc, "textures/missing.png", .rgba8);
+        const cube_texture = try Texture.initFromFile(&self.gc, self.allocator, "textures/missing.png", .rgba8);
         const cube_texture_id = try scene.addTexture(cube_texture);
         // --- Create a material for the cube mesh referencing the texture ---
         const cube_material = Material{
@@ -165,6 +180,12 @@ pub const App = struct {
         try mesh3.createVertexBuffers(&self.gc);
         try mesh3.createIndexBuffers(&self.gc);
         log(.INFO, "scene", "Loaded cube mesh and created buffers", .{});
+
+        // Give async texture loading a moment to complete
+        std.Thread.sleep(100_000_000); // 100ms
+
+        // Update async textures for Vulkan descriptors (must be done on main thread)
+        try scene.updateAsyncTextures(self.allocator);
 
         // --- User-friendly model+material+texture creation for the vase ---
         log(.DEBUG, "scene", "Loading vase model and texture", .{});
@@ -468,6 +489,10 @@ pub const App = struct {
         asset_manager.deinit();
         swapchain.deinit();
         self.gc.deinit();
+
+        // Clean up zstbi global state
+        @import("texture.zig").deinitZstbi();
+
         self.window.deinit();
     }
 };

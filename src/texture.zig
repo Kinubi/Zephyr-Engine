@@ -6,6 +6,35 @@ const Buffer = @import("buffer.zig").Buffer;
 const log = @import("utils/log.zig").log;
 const LogLevel = @import("utils/log.zig").LogLevel;
 
+// Global ZSTBI state management
+var zstbi_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var zstbi_init_mutex: std.Thread.Mutex = .{};
+
+/// Safely initialize zstbi once per application
+fn ensureZstbiInit(allocator: std.mem.Allocator) void {
+    if (!zstbi_initialized.load(.acquire)) {
+        zstbi_init_mutex.lock();
+        defer zstbi_init_mutex.unlock();
+
+        // Double-check pattern
+        if (!zstbi_initialized.load(.acquire)) {
+            zstbi.init(allocator);
+            zstbi_initialized.store(true, .release);
+        }
+    }
+}
+
+/// Safely deinitialize zstbi
+pub fn deinitZstbi() void {
+    zstbi_init_mutex.lock();
+    defer zstbi_init_mutex.unlock();
+
+    if (zstbi_initialized.load(.acquire)) {
+        zstbi.deinit();
+        zstbi_initialized.store(false, .release);
+    }
+}
+
 pub const Texture = struct {
     image: vk.Image,
     image_view: vk.ImageView,
@@ -141,20 +170,22 @@ pub const Texture = struct {
 
     pub fn initFromFile(
         gc: *GraphicsContext,
+        allocator: std.mem.Allocator,
         filepath: []const u8,
         image_format: ImageFormat,
     ) !Texture {
         // Convert filepath to null-terminated string for zstbi
-        const allocator = std.heap.c_allocator;
         const filepath_z = try std.mem.concatWithSentinel(allocator, u8, @ptrCast(&filepath), 0);
         defer allocator.free(filepath_z);
-        zstbi.init(allocator);
+
+        // Ensure zstbi is initialized (thread-safe, once per application)
+        ensureZstbiInit(allocator);
+
         var image = try zstbi.Image.loadFromFile(filepath_z, switch (image_format) {
             .rgba8 => 4,
             .rgb8 => 3,
             .gray8 => 1,
         });
-        defer zstbi.deinit();
         defer image.deinit();
 
         const mip_levels: u32 = std.math.log2_int(u32, @max(image.width, image.height)) + 1;

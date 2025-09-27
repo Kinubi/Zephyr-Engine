@@ -174,7 +174,7 @@ pub const Scene = struct {
         defer self.allocator.free(model_data);
         const model = try Model.loadFromObj(self.allocator, self.gc, model_data, model_path);
         log(.DEBUG, "scene", "Loading texture from {s}", .{texture_path});
-        const texture = try Texture.initFromFile(self.gc, texture_path, .rgba8);
+        const texture = try Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8);
         const texture_id = try self.addTexture(texture);
         const material = Material{ .albedo_texture_id = @intCast(texture_id) };
         const material_id = try self.addMaterial(material);

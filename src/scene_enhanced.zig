@@ -19,6 +19,15 @@ const AssetId = @import("assets/asset_manager.zig").AssetId;
 const AssetType = @import("assets/asset_manager.zig").AssetType;
 const LoadPriority = @import("assets/asset_manager.zig").LoadPriority;
 
+/// Task data for async texture loading
+const AsyncLoadTask = struct {
+    scene: *EnhancedScene,
+    path: []const u8,
+};
+
+/// Global mutex for texture loading to prevent zstbi init conflicts
+var texture_loading_mutex = std.Thread.Mutex{};
+
 // Re-export Material and Scene for compatibility
 pub const Material = @import("scene.zig").Material;
 const Scene = @import("scene.zig").Scene;
@@ -44,6 +53,13 @@ pub const EnhancedScene = struct {
     asset_to_texture: std.AutoHashMap(AssetId, usize), // AssetId -> legacy texture index
     asset_to_material: std.AutoHashMap(AssetId, usize), // AssetId -> legacy material index
 
+    // Direct texture cache for async loading
+    texture_cache: std.StringHashMap(usize), // path -> texture index
+    loading_textures: std.StringHashMap(bool), // path -> loading state
+
+    // Thread synchronization
+    texture_mutex: std.Thread.Mutex = .{},
+
     // Core dependencies
     gc: *GraphicsContext,
     allocator: std.mem.Allocator,
@@ -60,6 +76,8 @@ pub const EnhancedScene = struct {
             .material_assets = std.AutoHashMap(usize, AssetId).init(allocator),
             .asset_to_texture = std.AutoHashMap(AssetId, usize).init(allocator),
             .asset_to_material = std.AutoHashMap(AssetId, usize).init(allocator),
+            .texture_cache = std.StringHashMap(usize).init(allocator),
+            .loading_textures = std.StringHashMap(bool).init(allocator),
             .gc = gc,
             .allocator = allocator,
         };
@@ -104,6 +122,10 @@ pub const EnhancedScene = struct {
         self.material_assets.deinit();
         self.asset_to_texture.deinit();
         self.asset_to_material.deinit();
+
+        // Deinit texture cache
+        self.texture_cache.deinit();
+        self.loading_textures.deinit();
 
         log(.INFO, "enhanced_scene", "EnhancedScene deinit complete", .{});
     }
@@ -306,9 +328,36 @@ pub const EnhancedScene = struct {
         const model_data = try loadFileAlloc(self.allocator, model_path, 10 * 1024 * 1024);
         defer self.allocator.free(model_data);
         const model = try Model.loadFromObj(self.allocator, self.gc, model_data, model_path);
-        log(.DEBUG, "enhanced_scene", "Loading texture from {s}", .{texture_path});
-        const texture = try Texture.initFromFile(self.gc, texture_path, .rgba8);
-        const texture_id = try self.addTexture(texture);
+
+        var texture_id: usize = undefined;
+
+        // Check if texture was already loaded asynchronously into cache
+        if (self.getCachedTexture(texture_path)) |cached_texture_id| {
+            log(.INFO, "enhanced_scene", "Using async-loaded cached texture for {s} -> index {d}", .{ texture_path, cached_texture_id });
+            texture_id = cached_texture_id;
+        } else if (self.isTextureLoading(texture_path)) {
+            // Wait for loading to complete
+            log(.INFO, "enhanced_scene", "Waiting for async texture to finish loading: {s}", .{texture_path});
+            while (self.isTextureLoading(texture_path)) {
+                std.Thread.sleep(1_000_000); // 1ms
+            }
+            // Check cache again after loading completes
+            if (self.getCachedTexture(texture_path)) |cached_texture_id| {
+                log(.INFO, "enhanced_scene", "Using completed async-loaded texture for {s} -> index {d}", .{ texture_path, cached_texture_id });
+                texture_id = cached_texture_id;
+            } else {
+                // Async loading failed, fall back to sync
+                log(.WARN, "enhanced_scene", "Async texture loading failed, falling back to sync: {s}", .{texture_path});
+                const texture = try Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8);
+                texture_id = try self.addTexture(texture);
+            }
+        } else {
+            // No async loading was started, load synchronously
+            log(.DEBUG, "enhanced_scene", "Loading texture synchronously from {s}", .{texture_path});
+            const texture = try Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8);
+            texture_id = try self.addTexture(texture);
+        }
+
         const material = Material{ .albedo_texture_id = @intCast(texture_id + 1) }; // 1-based
         const material_id = try self.addMaterial(material);
         for (model.meshes.items) |*mesh| {
@@ -329,6 +378,176 @@ pub const EnhancedScene = struct {
         obj.transform.translate(transform);
         obj.transform.scale(scale);
         return obj;
+    }
+
+    // Async Loading Features
+
+    /// Request a texture to be loaded asynchronously
+    pub fn preloadTextureAsync(self: *Self, texture_path: []const u8, priority: LoadPriority) !AssetId {
+        log(.INFO, "enhanced_scene", "Requesting async texture preload: {s}", .{texture_path});
+        const asset_id = try self.asset_manager.registerAsset(texture_path, .texture);
+        try self.asset_manager.loader.loadAsync(asset_id, priority);
+        return asset_id;
+    }
+
+    /// Start loading a texture asynchronously into the scene's texture cache
+    pub fn startAsyncTextureLoad(self: *Self, texture_path: []const u8) !void {
+        // Check if already loaded or loading
+        if (self.texture_cache.contains(texture_path)) {
+            log(.DEBUG, "enhanced_scene", "Texture already loaded: {s}", .{texture_path});
+            return;
+        }
+
+        if (self.loading_textures.get(texture_path)) |is_loading| {
+            if (is_loading) {
+                log(.DEBUG, "enhanced_scene", "Texture already loading: {s}", .{texture_path});
+                return;
+            }
+        }
+
+        // Mark as loading
+        const path_copy = try self.allocator.dupe(u8, texture_path);
+        try self.loading_textures.put(path_copy, true);
+
+        log(.INFO, "enhanced_scene", "Starting async texture load: {s}", .{texture_path});
+
+        // Create task data for async loading
+        const task_data = try self.allocator.create(AsyncLoadTask);
+        task_data.* = .{
+            .scene = self,
+            .path = path_copy,
+        };
+
+        // Spawn async loading thread
+        const thread = try std.Thread.spawn(.{}, asyncTextureLoadWorker, .{task_data});
+        thread.detach(); // Don't block on thread completion
+    }
+
+    /// Worker function for async texture loading
+    fn asyncTextureLoadWorker(task_data: *AsyncLoadTask) void {
+        const scene = task_data.scene;
+        const path = task_data.path;
+
+        log(.INFO, "enhanced_scene", "Worker thread loading texture: {s}", .{path});
+
+        // Load texture on worker thread with proper synchronization
+        texture_loading_mutex.lock();
+        defer texture_loading_mutex.unlock();
+
+        var texture = Texture.initFromFile(scene.gc, scene.allocator, path, .rgba8) catch |err| {
+            log(.ERROR, "enhanced_scene", "Failed to load texture {s}: {}", .{ path, err });
+            _ = scene.loading_textures.put(path, false) catch {};
+            scene.allocator.free(path);
+            scene.allocator.destroy(task_data);
+            return;
+        };
+
+        // Add texture to scene (this needs to be thread-safe)
+        const texture_index = scene.addTextureThreadSafe(texture, path) catch |err| {
+            log(.ERROR, "enhanced_scene", "Failed to add texture {s}: {}", .{ path, err });
+            texture.deinit();
+            _ = scene.loading_textures.put(path, false) catch {};
+            scene.allocator.free(path);
+            scene.allocator.destroy(task_data);
+            return;
+        };
+
+        log(.INFO, "enhanced_scene", "Async texture load complete: {s} -> index {d}", .{ path, texture_index });
+
+        // Clean up
+        scene.allocator.free(path);
+        scene.allocator.destroy(task_data);
+    }
+
+    /// Get a texture from cache if available, returns texture index or null
+    pub fn getCachedTexture(self: *Self, texture_path: []const u8) ?usize {
+        return self.texture_cache.get(texture_path);
+    }
+
+    /// Check if a texture is currently being loaded
+    pub fn isTextureLoading(self: *Self, texture_path: []const u8) bool {
+        return self.loading_textures.get(texture_path) orelse false;
+    }
+
+    /// Thread-safe method to add textures from background threads
+    fn addTextureThreadSafe(self: *Self, texture: Texture, path: []const u8) !usize {
+        self.texture_mutex.lock();
+        defer self.texture_mutex.unlock();
+
+        // Add texture to scene array
+        try self.textures.append(self.allocator, texture);
+        const texture_index = self.textures.items.len - 1;
+
+        // Update texture image infos for Vulkan descriptors (must be done on main thread)
+        // For now, we'll skip this and do it lazily when needed
+
+        // Register with Asset Manager (using a generated path)
+        const path_buffer = try std.fmt.allocPrint(self.allocator, "async_texture_{s}", .{path});
+        defer self.allocator.free(path_buffer);
+
+        const asset_id = try self.asset_manager.registerAsset(path_buffer, .texture);
+        try self.texture_assets.put(texture_index, asset_id);
+        try self.asset_to_texture.put(asset_id, texture_index);
+
+        // Update cache
+        try self.texture_cache.put(path, texture_index);
+        _ = self.loading_textures.put(path, false) catch {};
+
+        log(.INFO, "enhanced_scene", "Added async texture at index {d} with AssetId {d} for path: {s}", .{ texture_index, asset_id.toU64(), path });
+        return texture_index;
+    }
+
+    /// Update texture image infos when new textures are added asynchronously
+    /// This must be called from the main thread for Vulkan descriptor updates
+    pub fn updateAsyncTextures(self: *Self, allocator: std.mem.Allocator) !void {
+        self.texture_mutex.lock();
+        defer self.texture_mutex.unlock();
+
+        // Only update if we have textures that need descriptor updates
+        if (self.textures.items.len > 0) {
+            try self.updateTextureImageInfos(allocator);
+        }
+    }
+
+    /// Preload multiple textures asynchronously
+    pub fn preloadTextures(self: *Self, texture_paths: []const []const u8) !void {
+        log(.INFO, "enhanced_scene", "Preloading {d} textures asynchronously", .{texture_paths.len});
+        for (texture_paths) |path| {
+            self.startAsyncTextureLoad(path) catch |err| {
+                log(.ERROR, "enhanced_scene", "Failed to start async load for {s}: {}", .{ path, err });
+            };
+        }
+    }
+
+    /// Request a model to be loaded asynchronously
+    pub fn preloadModelAsync(self: *Self, model_path: []const u8, priority: LoadPriority) !AssetId {
+        log(.INFO, "enhanced_scene", "Requesting async model preload: {s}", .{model_path});
+        const asset_id = try self.asset_manager.registerAsset(model_path, .mesh);
+        try self.asset_manager.loader.loadAsync(asset_id, priority);
+        return asset_id;
+    }
+
+    /// Check if an asset is ready to use
+    pub fn isAssetReady(self: *Self, asset_id: AssetId) bool {
+        const asset = self.asset_manager.getAssetMetadata(asset_id) orelse return false;
+        return asset.state == .loaded;
+    }
+
+    /// Wait for an asset to finish loading
+    pub fn waitForAsset(self: *Self, asset_id: AssetId) void {
+        log(.DEBUG, "enhanced_scene", "Waiting for asset {d} to load", .{asset_id});
+        self.asset_manager.loader.waitForAsset(asset_id);
+        log(.DEBUG, "enhanced_scene", "Asset {d} loading complete", .{asset_id});
+    }
+
+    /// Get current loading statistics from the Asset Manager
+    pub fn getLoadingStats(self: *Self) @TypeOf(self.asset_manager.loader.getLoadingStats()) {
+        return self.asset_manager.loader.getLoadingStats();
+    }
+
+    /// Check if async loading is enabled
+    pub fn isAsyncLoadingEnabled(self: *const Self) bool {
+        return self.asset_manager.loader.isAsyncEnabled();
     }
 
     // Asset Manager utility functions

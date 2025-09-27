@@ -10,17 +10,62 @@ const LoadRequest = asset_types.LoadRequest;
 const LoadResult = asset_types.LoadResult;
 const AssetRegistry = asset_registry.AssetRegistry;
 
+// Import the new ThreadPool implementation
+const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+
+// Worker function for the ThreadPool
+fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
+    // Mark this thread as ready
+    pool.markThreadReady();
+
+    while (pool.running) {
+        // Try to get a job
+        if (pool.getWork()) |work_item| {
+            // Cast the loader pointer back to AssetLoader
+            const loader: *AssetLoader = @ptrCast(@alignCast(work_item.loader));
+
+            std.debug.print("[ThreadPool] Worker {d} processing asset {d}\n", .{ worker_id, work_item.asset_id });
+
+            // Execute job
+            loader.performLoadAsync(work_item.asset_id) catch |err| {
+                // Log error and mark asset as failed
+                std.debug.print("[ThreadPool] Worker {d} failed to load asset {d}: {}\n", .{ worker_id, work_item.asset_id, err });
+
+                // Convert error to string for registry
+                var error_buf: [256]u8 = undefined;
+                const error_msg = std.fmt.bufPrint(&error_buf, "Async loading error: {}", .{err}) catch "Unknown async loading error";
+                loader.registry.markAsFailed(work_item.asset_id, error_msg);
+
+                // Update failed loads counter
+                _ = @atomicRmw(u32, &loader.failed_loads, .Add, 1, .monotonic);
+            };
+
+            std.debug.print("[ThreadPool] Worker {d} completed asset {d}\n", .{ worker_id, work_item.asset_id });
+        } else {
+            // No job available, sleep briefly to avoid busy waiting
+            std.Thread.sleep(std.time.ns_per_ms * 1); // 1ms sleep
+        }
+    }
+
+    // Mark this thread as shutting down
+    pool.markThreadShuttingDown(worker_id);
+}
+
 /// Asset loader that manages the loading pipeline
-/// Supports priority queues, dependency resolution, and sync loading
+/// Supports priority queues, dependency resolution, sync loading, and async loading with thread pool
 pub const AssetLoader = struct {
     // Core components
     registry: *AssetRegistry,
     allocator: std.mem.Allocator,
 
-    // Priority queues for load requests (simplified for now)
+    // Priority queues for load requests
     high_priority_queue: RequestQueue,
     medium_priority_queue: RequestQueue,
     low_priority_queue: RequestQueue,
+
+    // Async loading thread pool
+    thread_pool: ?ThreadPool = null,
+    async_enabled: bool = false,
 
     // Statistics
     active_loads: u32 = 0,
@@ -60,26 +105,31 @@ pub const AssetLoader = struct {
             return self.items.popOrNull();
         }
 
-        pub fn len(self: *RequestQueue) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn len(self: *const RequestQueue) usize {
+            // Note: This is a simple approximation for const access
+            // In a real implementation, we might want to avoid mutex operations for const methods
             return self.items.items.len;
         }
     };
 
     pub fn init(allocator: std.mem.Allocator, registry: *AssetRegistry, max_threads: u32) !Self {
-        _ = max_threads; // Not used in simplified version
-
         return Self{
             .registry = registry,
             .allocator = allocator,
             .high_priority_queue = RequestQueue.init(allocator),
             .medium_priority_queue = RequestQueue.init(allocator),
             .low_priority_queue = RequestQueue.init(allocator),
+            .thread_pool = if (max_threads > 0) try ThreadPool.init(allocator, max_threads, assetWorkerThread) else null,
+            .async_enabled = max_threads > 0,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Clean up thread pool first
+        if (self.thread_pool) |*pool| {
+            pool.deinit();
+        }
+
         // Clean up queues
         self.high_priority_queue.deinit(self.allocator);
         self.medium_priority_queue.deinit(self.allocator);
@@ -116,8 +166,26 @@ pub const AssetLoader = struct {
             .low => try self.low_priority_queue.push(request, self.allocator),
         }
 
-        // For simplified version, process immediately
-        try self.performLoad(asset_id);
+        // Use async loading if available, otherwise process synchronously
+        if (self.async_enabled and self.thread_pool != null) {
+            // Check if thread pool has available workers
+            if (!self.thread_pool.?.hasAvailableWorkers()) {
+                std.debug.print("[AssetLoader] No worker threads available, falling back to sync load for asset {d}\n", .{asset_id});
+                try self.performLoad(asset_id);
+                return;
+            }
+
+            // Submit to thread pool, with fallback to sync loading on error
+            self.thread_pool.?.submitWork(asset_id, self) catch |err| switch (err) {
+                error.ThreadPoolNotRunning, error.NoWorkerThreadsAvailable => {
+                    std.debug.print("[AssetLoader] Thread pool unavailable ({any}), falling back to sync load for asset {d}\n", .{ err, asset_id });
+                    try self.performLoad(asset_id);
+                },
+                else => return err,
+            };
+        } else {
+            try self.performLoad(asset_id);
+        }
     }
 
     /// Load an asset synchronously (blocks until complete)
@@ -129,6 +197,55 @@ pub const AssetLoader = struct {
 
         // Perform the actual load
         try self.performLoad(asset_id);
+    }
+
+    /// Request an asset to be loaded asynchronously (non-blocking)
+    pub fn loadAsync(self: *Self, asset_id: AssetId, priority: LoadPriority) !void {
+        return self.requestLoad(asset_id, priority);
+    }
+
+    /// Wait for an asset to finish loading (blocks until complete)
+    pub fn waitForAsset(self: *Self, asset_id: AssetId) void {
+        const asset = self.registry.getAsset(asset_id) orelse return;
+
+        // Poll until asset is loaded or failed
+        while (asset.state == .loading) {
+            std.Thread.sleep(1_000_000); // 1ms
+        }
+    }
+
+    /// Check if async loading is enabled
+    pub fn isAsyncEnabled(self: *const Self) bool {
+        return self.async_enabled;
+    }
+
+    /// Check if async loading is available and ready
+    pub fn isAsyncReady(self: *const Self) bool {
+        if (!self.async_enabled or self.thread_pool == null) return false;
+        return self.thread_pool.?.hasAvailableWorkers();
+    }
+
+    /// Get current loading statistics
+    pub fn getLoadingStats(self: *const Self) struct {
+        active_loads: u32,
+        completed_loads: u32,
+        failed_loads: u32,
+        queue_lengths: struct {
+            high_priority: usize,
+            medium_priority: usize,
+            low_priority: usize,
+        },
+    } {
+        return .{
+            .active_loads = @atomicLoad(u32, &self.active_loads, .monotonic),
+            .completed_loads = @atomicLoad(u32, &self.completed_loads, .monotonic),
+            .failed_loads = @atomicLoad(u32, &self.failed_loads, .monotonic),
+            .queue_lengths = .{
+                .high_priority = self.high_priority_queue.len(),
+                .medium_priority = self.medium_priority_queue.len(),
+                .low_priority = self.low_priority_queue.len(),
+            },
+        };
     }
 
     /// Get the next load request from queues (prioritized)
@@ -151,7 +268,7 @@ pub const AssetLoader = struct {
         return null;
     }
 
-    /// Perform the actual asset loading
+    /// Perform the actual asset loading (synchronous)
     fn performLoad(self: *Self, asset_id: AssetId) !void {
         self.active_loads += 1;
         defer self.active_loads -= 1;
@@ -172,6 +289,44 @@ pub const AssetLoader = struct {
         // Mark as loaded
         self.registry.markAsLoaded(asset_id, file_size);
         self.completed_loads += 1;
+    }
+
+    /// Perform the actual asset loading (asynchronous - called from worker threads)
+    fn performLoadAsync(self: *Self, asset_id: AssetId) !void {
+        // Use atomic increment for thread safety
+        _ = @atomicRmw(u32, &self.active_loads, .Add, 1, .monotonic);
+        defer _ = @atomicRmw(u32, &self.active_loads, .Sub, 1, .monotonic);
+
+        const asset = self.registry.getAsset(asset_id) orelse return error.AssetNotFound;
+
+        // Load dependencies first (async)
+        for (asset.dependencies.items) |dep_id| {
+            const dependency = self.registry.getAsset(dep_id) orelse continue;
+            if (dependency.state != .loaded and dependency.state != .loading) {
+                // Submit dependency for async loading and wait
+                if (self.thread_pool) |*pool| {
+                    try pool.submitWork(.{ .asset_id = dep_id, .loader = self });
+                }
+            }
+        }
+
+        // Wait for dependencies to load (simple polling for now)
+        for (asset.dependencies.items) |dep_id| {
+            const dependency = self.registry.getAsset(dep_id) orelse continue;
+            while (dependency.state == .loading) {
+                std.Thread.sleep(1_000_000); // 1ms
+            }
+            if (dependency.state != .loaded) {
+                return error.DependencyLoadFailed;
+            }
+        }
+
+        // Simulate actual file loading based on asset type
+        const file_size = try self.loadAssetFromDisk(asset);
+
+        // Mark as loaded (thread-safe)
+        self.registry.markAsLoaded(asset_id, file_size);
+        _ = @atomicRmw(u32, &self.completed_loads, .Add, 1, .monotonic);
     }
 
     /// Mock implementation of disk loading (replace with real file I/O)
