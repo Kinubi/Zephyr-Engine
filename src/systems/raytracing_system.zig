@@ -478,11 +478,12 @@ pub const RaytracingSystem = struct {
             const output_image_info = self.output_texture.getDescriptorInfo();
             var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool, self.allocator);
             const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
-            try set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info)).build(&self.descriptor_set);
-            try set_writer.writeImage(1, @constCast(&output_image_info)).build(&self.descriptor_set);
-            try set_writer.writeBuffer(2, @constCast(&global_ubo_buffer_info)).build(&self.descriptor_set);
-            try set_writer.writeBuffer(3, @constCast(&material_buffer_info)).build(&self.descriptor_set);
-            try set_writer.writeImages(4, texture_image_infos).build(&self.descriptor_set);
+            _ = set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info))
+                .writeImage(1, @constCast(&output_image_info))
+                .writeBuffer(2, @constCast(&global_ubo_buffer_info))
+                .writeBuffer(5, @constCast(&material_buffer_info)) // Material buffer is binding 5
+                .writeImages(6, texture_image_infos); // Textures are binding 6
+            try set_writer.build(&self.descriptor_set);
 
             // Clear the update flag
             self.descriptors_need_update = false;

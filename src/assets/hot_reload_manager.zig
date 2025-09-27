@@ -281,6 +281,19 @@ pub const HotReloadManager = struct {
         return self.asset_manager.getAssetId(file_path);
     }
 
+    /// Check if a file should be auto-loaded based on its extension
+    fn shouldAutoLoad(self: *Self, file_path: []const u8) bool {
+        _ = self; // suppress unused parameter warning
+
+        return std.mem.endsWith(u8, file_path, ".png") or
+            std.mem.endsWith(u8, file_path, ".jpg") or
+            std.mem.endsWith(u8, file_path, ".jpeg") or
+            std.mem.endsWith(u8, file_path, ".tga") or
+            std.mem.endsWith(u8, file_path, ".bmp") or
+            std.mem.endsWith(u8, file_path, ".obj") or
+            std.mem.endsWith(u8, file_path, ".gltf");
+    }
+
     /// Try to automatically load a new asset file
     fn tryAutoLoadAsset(self: *Self, file_path: []const u8) void {
         // Determine asset type from file extension
@@ -299,6 +312,11 @@ pub const HotReloadManager = struct {
 
             // Register for future hot reloading
             self.registerAsset(asset_id, file_path) catch {};
+
+            // Notify texture reload callback for newly loaded texture
+            if (self.texture_reload_callback) |callback| {
+                callback(file_path, asset_id);
+            }
         } else if (std.mem.endsWith(u8, file_path, ".obj") or
             std.mem.endsWith(u8, file_path, ".gltf"))
         {
@@ -385,7 +403,7 @@ pub const HotReloadManager = struct {
                 const file_path = std.fs.path.join(allocator, &[_][]const u8{ directory_path, entry.name }) catch continue;
                 defer allocator.free(file_path);
 
-                // Check if this file has an associated asset AND is registered for hot reload
+                // Check if this file has an associated asset
                 if (self.isAssetFile(file_path)) |asset_id| {
                     // Only check files that are registered for hot reload (have metadata)
                     if (self.file_metadata.contains(file_path)) {
@@ -403,6 +421,12 @@ pub const HotReloadManager = struct {
                         }
                     } else {
                         log(.DEBUG, "hot_reload", "File not registered for hot reload, skipping: {s}", .{file_path});
+                    }
+                } else {
+                    // File doesn't have an associated asset - check if it's a new asset file we should auto-load
+                    if (self.shouldAutoLoad(file_path)) {
+                        log(.INFO, "hot_reload", "Discovered new asset file in directory scan: {s}", .{file_path});
+                        self.tryAutoLoadAsset(file_path);
                     }
                 }
             }

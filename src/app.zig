@@ -199,15 +199,15 @@ pub const App = struct {
         // Update async textures for Vulkan descriptors (must be done on main thread)
         try scene.updateAsyncTextures(self.allocator);
 
-        // --- User-friendly model+material+texture creation for the vase ---
-        log(.DEBUG, "scene", "Loading vase model and texture", .{});
-        const object = try scene.addModelWithMaterialAndTransform(
-            "models/smooth_vase.obj",
-            "textures/granitesmooth1-albedo.png",
-            Math.Vec3.init(0, -1.5, 0.5),
-            Math.Vec3.init(0.5, 0.5, 0.5),
-        );
-        log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
+        // // --- User-friendly model+material+texture creation for the vase ---
+        // log(.DEBUG, "scene", "Loading vase model and texture", .{});
+        // const object = try scene.addModelWithMaterialAndTransform(
+        //     "models/smooth_vase.obj",
+        //     "textures/granitesmooth1-albedo.png",
+        //     Math.Vec3.init(0, -1.5, 0.5),
+        //     Math.Vec3.init(0.5, 0.5, 0.5),
+        // );
+        // log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
 
         // Cube is now handled by enhanced scene system above
 
