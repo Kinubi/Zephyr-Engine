@@ -16,6 +16,8 @@ const Mesh = @import("mesh.zig").Mesh;
 const Model = @import("mesh.zig").Model;
 const ModelMesh = @import("mesh.zig").ModelMesh;
 const Scene = @import("scene.zig").Scene;
+const EnhancedScene = @import("scene_enhanced.zig").EnhancedScene;
+const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
@@ -65,7 +67,8 @@ pub const App = struct {
     var frame_info: FrameInfo = FrameInfo{};
 
     var frame_index: u32 = 0;
-    var scene: Scene = undefined;
+    var scene: EnhancedScene = undefined;
+    var asset_manager: AssetManager = undefined;
 
     // Raytracing system field
     var global_ubo_set: GlobalUboSet = undefined;
@@ -90,7 +93,11 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        scene = Scene.init(&self.gc, self.allocator);
+        // Initialize Asset Manager
+        asset_manager = try AssetManager.init(self.allocator);
+
+        // Initialize Enhanced Scene with Asset Manager integration
+        scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
 
         var mesh3 = Mesh.init(self.allocator);
         var mesh = Mesh.init(self.allocator);
@@ -219,7 +226,7 @@ pub const App = struct {
             entry_point_definition{},
         });
         log(.DEBUG, "renderer", "Initializing simple renderer", .{});
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -234,7 +241,7 @@ pub const App = struct {
             entry_point_definition{},
         });
         log(.DEBUG, "renderer", "Initializing point light renderer", .{});
-        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, &scene, shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         // Use ShaderLibrary abstraction for shader loading
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
@@ -308,9 +315,9 @@ pub const App = struct {
         );
 
         log(.DEBUG, "raytracing", "Creating BLAS", .{});
-        try raytracing_system.createBLAS(&scene);
+        try raytracing_system.createBLAS(scene.asScene());
         log(.DEBUG, "raytracing", "Creating TLAS", .{});
-        try raytracing_system.createTLAS(&scene);
+        try raytracing_system.createTLAS(scene.asScene());
         log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
         try raytracing_system.createShaderBindingTable(3);
         // --- After RaytracingSystem has valid AS and image, create descriptor set ---
@@ -458,6 +465,7 @@ pub const App = struct {
         raytracing_system.deinit();
         particle_renderer.deinit();
         scene.deinit();
+        asset_manager.deinit();
         swapchain.deinit();
         self.gc.deinit();
         self.window.deinit();

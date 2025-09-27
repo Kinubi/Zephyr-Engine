@@ -155,13 +155,13 @@ pub const AssetLoader = struct {
 ### Phase 1 Implementation Steps (2-3 weeks)
 
 #### Week 1: Core Asset Infrastructure
-- [ ] Implement AssetId generation and validation
-- [ ] Create AssetRegistry with dependency tracking
-- [ ] Add basic asset loading for textures and meshes
-- [ ] Implement reference counting system
+- [x] Implement AssetId generation and validation
+- [x] Create AssetRegistry with dependency tracking
+- [x] Add basic asset loading for textures and meshes
+- [x] Implement reference counting system
 
 #### Week 2: Scene Integration
-- [ ] Bridge AssetManager with existing Scene texture/material arrays
+- [x] Bridge AssetManager with existing Scene texture/material arrays
 - [ ] Add async loading queue and basic thread pool
 - [ ] Implement asset change notification system
 - [ ] Add fallback asset system for failed loads

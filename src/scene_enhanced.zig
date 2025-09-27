@@ -1,0 +1,355 @@
+const std = @import("std");
+const vk = @import("vulkan");
+const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const Mesh = @import("mesh.zig").Mesh;
+const Model = @import("mesh.zig").Model;
+const Math = @import("utils/math.zig");
+const GameObject = @import("game_object.zig").GameObject;
+const PointLightComponent = @import("components.zig").PointLightComponent;
+const fromMesh = @import("mesh.zig").fromMesh;
+const Texture = @import("texture.zig").Texture;
+const Buffer = @import("buffer.zig").Buffer;
+const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
+
+// Import Asset Manager components
+const AssetManager = @import("assets/asset_manager.zig").AssetManager;
+const AssetId = @import("assets/asset_manager.zig").AssetId;
+const AssetType = @import("assets/asset_manager.zig").AssetType;
+const LoadPriority = @import("assets/asset_manager.zig").LoadPriority;
+
+// Re-export Material and Scene for compatibility
+pub const Material = @import("scene.zig").Material;
+const Scene = @import("scene.zig").Scene;
+
+/// Enhanced Scene with Asset Manager integration
+/// Provides both legacy compatibility and new asset-based workflow
+pub const EnhancedScene = struct {
+    // Legacy compatibility - keep existing arrays for gradual migration
+    objects: std.ArrayList(GameObject),
+    materials: std.ArrayList(Material),
+    textures: std.ArrayList(Texture),
+    material_buffer: ?*Buffer = null,
+    texture_image_infos: []const vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
+
+    // Asset Manager integration
+    asset_manager: *AssetManager,
+
+    // Asset ID mappings
+    texture_assets: std.AutoHashMap(usize, AssetId), // legacy texture index -> AssetId
+    material_assets: std.AutoHashMap(usize, AssetId), // legacy material index -> AssetId
+
+    // Reverse mappings for compatibility
+    asset_to_texture: std.AutoHashMap(AssetId, usize), // AssetId -> legacy texture index
+    asset_to_material: std.AutoHashMap(AssetId, usize), // AssetId -> legacy material index
+
+    // Core dependencies
+    gc: *GraphicsContext,
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, asset_manager: *AssetManager) Self {
+        return Self{
+            .objects = std.ArrayList(GameObject){},
+            .materials = std.ArrayList(Material){},
+            .textures = std.ArrayList(Texture){},
+            .asset_manager = asset_manager,
+            .texture_assets = std.AutoHashMap(usize, AssetId).init(allocator),
+            .material_assets = std.AutoHashMap(usize, AssetId).init(allocator),
+            .asset_to_texture = std.AutoHashMap(AssetId, usize).init(allocator),
+            .asset_to_material = std.AutoHashMap(AssetId, usize).init(allocator),
+            .gc = gc,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        log(.INFO, "enhanced_scene", "Deinitializing EnhancedScene with {d} objects", .{self.objects.items.len});
+
+        // Deinit GameObjects
+        for (self.objects.items) |object| {
+            object.deinit();
+        }
+        self.objects.deinit(self.allocator);
+
+        // Deinit textures
+        log(.DEBUG, "enhanced_scene", "Deinitializing {d} textures", .{self.textures.items.len});
+        for (self.textures.items) |*tex| {
+            tex.deinit();
+        }
+        self.textures.deinit(self.allocator);
+
+        // Deinit material buffer
+        if (self.material_buffer) |buf| {
+            log(.DEBUG, "enhanced_scene", "Deinitializing material buffer", .{});
+            buf.deinit();
+            self.allocator.destroy(buf);
+        }
+
+        // Free texture image infos
+        const static_empty_infos = &[_]vk.DescriptorImageInfo{};
+        if (self.texture_image_infos.len > 0 and self.texture_image_infos.ptr != static_empty_infos.ptr) {
+            log(.DEBUG, "enhanced_scene", "Freeing texture_image_infos array", .{});
+            self.allocator.free(self.texture_image_infos);
+        }
+
+        // Clear materials
+        self.materials.clearRetainingCapacity();
+        self.materials.deinit(self.allocator);
+
+        // Deinit asset mappings
+        self.texture_assets.deinit();
+        self.material_assets.deinit();
+        self.asset_to_texture.deinit();
+        self.asset_to_material.deinit();
+
+        log(.INFO, "enhanced_scene", "EnhancedScene deinit complete", .{});
+    }
+
+    /// Convert EnhancedScene to Scene for compatibility with legacy renderers
+    /// This is safe because EnhancedScene has the same memory layout as Scene for the first fields
+    pub fn asScene(self: *Self) *Scene {
+        return @ptrCast(self);
+    }
+
+    // Legacy API Compatibility
+
+    pub fn addEmpty(self: *Self) !*GameObject {
+        try self.objects.append(self.allocator, .{ .model = null });
+        return &self.objects.items[self.objects.items.len - 1];
+    }
+
+    pub fn addObject(self: *Self, model: ?*Model, point_light: ?PointLightComponent) !*GameObject {
+        try self.objects.append(self.allocator, .{
+            .model = if (model) |m| m else null,
+            .point_light = point_light,
+        });
+        return &self.objects.items[self.objects.items.len - 1];
+    }
+
+    pub fn addModelFromMesh(self: *Self, mesh: Mesh, name: []const u8, transform: ?Math.Vec3) !*GameObject {
+        const model = try fromMesh(self.allocator, mesh, name);
+        const object = try self.addObject(model, null);
+        if (transform) |t| {
+            object.transform.translate(t);
+        }
+        return object;
+    }
+
+    pub fn addModel(self: *Self, model: Model, point_light: ?PointLightComponent) !*GameObject {
+        // Heap-allocate the model internally
+        const model_ptr = try self.allocator.create(Model);
+        model_ptr.* = model;
+        const object = try self.addObject(model_ptr, point_light);
+        return object;
+    }
+
+    /// Legacy texture addition - automatically registers with Asset Manager
+    pub fn addTexture(self: *Self, texture: Texture) !usize {
+        try self.textures.append(self.allocator, texture);
+        const index = self.textures.items.len - 1;
+        try self.updateTextureImageInfos(self.allocator);
+
+        // Register with Asset Manager (using a generated path)
+        const path_buffer = try std.fmt.allocPrint(self.allocator, "legacy_texture_{d}", .{index});
+        defer self.allocator.free(path_buffer);
+
+        const asset_id = try self.asset_manager.registerAsset(path_buffer, .texture);
+        try self.texture_assets.put(index, asset_id);
+        try self.asset_to_texture.put(asset_id, index);
+
+        log(.INFO, "enhanced_scene", "Added texture at index {d} with AssetId {d}", .{ index, asset_id.toU64() });
+        return index;
+    }
+
+    /// Legacy material addition - automatically registers with Asset Manager
+    pub fn addMaterial(self: *Self, material: Material) !usize {
+        try self.materials.append(self.allocator, material);
+        const index = self.materials.items.len - 1;
+        try self.updateMaterialBuffer(self.gc, self.allocator);
+
+        // Register with Asset Manager
+        const path_buffer = try std.fmt.allocPrint(self.allocator, "legacy_material_{d}", .{index});
+        defer self.allocator.free(path_buffer);
+
+        const asset_id = try self.asset_manager.registerAsset(path_buffer, .material);
+        try self.material_assets.put(index, asset_id);
+        try self.asset_to_material.put(asset_id, index);
+
+        // Set up dependencies if material references a texture
+        if (material.albedo_texture_id > 0) {
+            const texture_index = material.albedo_texture_id - 1; // Assuming 1-based indexing
+            if (self.texture_assets.get(texture_index)) |texture_asset_id| {
+                try self.asset_manager.addDependency(asset_id, texture_asset_id);
+                log(.DEBUG, "enhanced_scene", "Added dependency: material {d} -> texture {d}", .{ asset_id.toU64(), texture_asset_id.toU64() });
+            }
+        }
+
+        log(.INFO, "enhanced_scene", "Added material at index {d} with AssetId {d}", .{ index, asset_id.toU64() });
+        return index;
+    }
+
+    // New Asset Manager API
+
+    /// Load a texture using Asset Manager
+    pub fn loadTexture(self: *Self, path: []const u8, priority: LoadPriority) !AssetId {
+        const asset_id = try self.asset_manager.loadTexture(path, priority);
+        self.asset_manager.addRef(asset_id);
+
+        // If we need immediate compatibility with legacy system, we could load it into the texture array
+        // For now, we'll keep it as AssetId only
+        log(.INFO, "enhanced_scene", "Loaded texture asset: {s} -> {d}", .{ path, asset_id.toU64() });
+        return asset_id;
+    }
+
+    /// Load a mesh/model using Asset Manager
+    pub fn loadMesh(self: *Self, path: []const u8, priority: LoadPriority) !AssetId {
+        const asset_id = try self.asset_manager.loadMesh(path, priority);
+        self.asset_manager.addRef(asset_id);
+
+        log(.INFO, "enhanced_scene", "Loaded mesh asset: {s} -> {d}", .{ path, asset_id.toU64() });
+        return asset_id;
+    }
+
+    /// Create a material with Asset Manager integration
+    pub fn createMaterial(self: *Self, albedo_texture_id: AssetId) !AssetId {
+        // For now, we'll still create a legacy material but track it with Asset Manager
+        var material = Material{
+            .albedo_texture_id = 0, // Will be resolved when needed
+        };
+
+        // If the texture is in our legacy system, map it
+        if (self.asset_to_texture.get(albedo_texture_id)) |texture_index| {
+            material.albedo_texture_id = @intCast(texture_index + 1); // 1-based indexing
+        }
+
+        const material_index = try self.addMaterial(material);
+        const asset_id = self.material_assets.get(material_index).?;
+
+        // Add dependency
+        try self.asset_manager.addDependency(asset_id, albedo_texture_id);
+
+        return asset_id;
+    }
+
+    /// Add a model with Asset Manager workflow
+    pub fn addModelWithAssets(self: *Self, model_path: []const u8, texture_path: []const u8, priority: LoadPriority) !*GameObject {
+        // Load assets through Asset Manager
+        const texture_asset_id = try self.loadTexture(texture_path, priority);
+        const mesh_asset_id = try self.loadMesh(model_path, priority);
+        const material_asset_id = try self.createMaterial(texture_asset_id);
+
+        // Log the asset IDs for debugging
+        log(.DEBUG, "enhanced_scene", "Loaded assets: texture={d}, mesh={d}, material={d}", .{ texture_asset_id.toU64(), mesh_asset_id.toU64(), material_asset_id.toU64() });
+
+        // Wait for assets to load
+        self.asset_manager.waitForAllLoads();
+
+        // For now, fall back to legacy loading for actual GameObject creation
+        // TODO: Replace this with pure Asset Manager workflow
+        return try self.addModelWithMaterial(model_path, texture_path);
+    }
+
+    // Legacy compatibility methods (unchanged)
+
+    pub fn updateMaterialBuffer(self: *Self, gc: *GraphicsContext, allocator: std.mem.Allocator) !void {
+        if (self.materials.items.len == 0) return;
+        if (self.material_buffer) |buf| {
+            buf.deinit();
+        }
+        const buf = try allocator.create(Buffer);
+        buf.* = try Buffer.init(
+            gc,
+            @sizeOf(Material),
+            @as(u32, @intCast(self.materials.items.len)),
+            .{
+                .storage_buffer_bit = true,
+            },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        try buf.map(@sizeOf(Material) * self.materials.items.len, 0);
+        log(.DEBUG, "enhanced_scene", "Updating material buffer with {d} materials", .{self.materials.items.len});
+        buf.writeToBuffer(
+            std.mem.sliceAsBytes(self.materials.items),
+            @sizeOf(Material) * self.materials.items.len,
+            0,
+        );
+        self.material_buffer = buf;
+    }
+
+    pub fn updateTextureImageInfos(self: *Self, allocator: std.mem.Allocator) !void {
+        if (self.textures.items.len == 0) {
+            self.texture_image_infos = &[_]vk.DescriptorImageInfo{};
+            return;
+        }
+        const infos = try allocator.alloc(vk.DescriptorImageInfo, self.textures.items.len);
+        for (self.textures.items, 0..) |tex, i| {
+            infos[i] = tex.descriptor;
+        }
+        self.texture_image_infos = infos;
+    }
+
+    pub fn render(self: Self, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
+        for (self.objects.items) |object| {
+            try object.render(gc, cmdbuf);
+        }
+    }
+
+    pub fn addModelWithMaterial(
+        self: *Self,
+        model_path: []const u8,
+        texture_path: []const u8,
+    ) !*GameObject {
+        log(.DEBUG, "enhanced_scene", "Loading model from {s}", .{model_path});
+        const model_data = try loadFileAlloc(self.allocator, model_path, 10 * 1024 * 1024);
+        defer self.allocator.free(model_data);
+        const model = try Model.loadFromObj(self.allocator, self.gc, model_data, model_path);
+        log(.DEBUG, "enhanced_scene", "Loading texture from {s}", .{texture_path});
+        const texture = try Texture.initFromFile(self.gc, texture_path, .rgba8);
+        const texture_id = try self.addTexture(texture);
+        const material = Material{ .albedo_texture_id = @intCast(texture_id + 1) }; // 1-based
+        const material_id = try self.addMaterial(material);
+        for (model.meshes.items) |*mesh| {
+            mesh.geometry.mesh.material_id = @intCast(material_id);
+        }
+        log(.INFO, "enhanced_scene", "Assigned material {d} to all meshes in model {s}", .{ material_id, model_path });
+        return try self.addModel(model, null);
+    }
+
+    pub fn addModelWithMaterialAndTransform(
+        self: *Self,
+        model_path: []const u8,
+        texture_path: []const u8,
+        transform: Math.Vec3,
+        scale: Math.Vec3,
+    ) !*GameObject {
+        const obj = try self.addModelWithMaterial(model_path, texture_path);
+        obj.transform.translate(transform);
+        obj.transform.scale(scale);
+        return obj;
+    }
+
+    // Asset Manager utility functions
+
+    /// Get Asset Manager statistics
+    pub fn getAssetStatistics(self: *Self) @import("assets/asset_manager.zig").AssetManagerStatistics {
+        return self.asset_manager.getStatistics();
+    }
+
+    /// Print debug information about assets
+    pub fn printAssetDebugInfo(self: *Self) void {
+        self.asset_manager.printDebugInfo();
+
+        std.debug.print("\n=== Enhanced Scene Asset Mapping ===\n");
+        std.debug.print("Legacy textures: {d}\n", .{self.textures.items.len});
+        std.debug.print("Legacy materials: {d}\n", .{self.materials.items.len});
+        std.debug.print("Asset mappings: {d} textures, {d} materials\n", .{ self.texture_assets.count(), self.material_assets.count() });
+    }
+
+    /// Cleanup unused assets based on reference counting
+    pub fn cleanupUnusedAssets(self: *Self) !u32 {
+        return try self.asset_manager.unloadUnusedAssets();
+    }
+};
