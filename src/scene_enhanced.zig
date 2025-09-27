@@ -675,7 +675,7 @@ pub const EnhancedScene = struct {
     /// Callback function for when textures are hot reloaded
     pub fn onTextureReloaded(self: *Self, file_path: []const u8, asset_id: AssetId) void {
         log(.INFO, "enhanced_scene", "Texture hot reload completed: {s} (AssetId: {})", .{ file_path, asset_id });
-        
+
         // Update texture descriptor infos to refresh raytracing system
         self.updateTextureImageInfos(self.allocator) catch |err| {
             log(.ERROR, "enhanced_scene", "Failed to update texture descriptors after reload: {}", .{err});

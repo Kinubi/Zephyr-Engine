@@ -225,11 +225,12 @@ pub const HotReloadManager = struct {
 
             // Notify texture reload callback if this is a texture file
             if (self.texture_reload_callback) |callback| {
-                if (std.mem.endsWith(u8, file_path, ".png") or 
-                    std.mem.endsWith(u8, file_path, ".jpg") or 
-                    std.mem.endsWith(u8, file_path, ".jpeg") or 
-                    std.mem.endsWith(u8, file_path, ".tga") or 
-                    std.mem.endsWith(u8, file_path, ".bmp")) {
+                if (std.mem.endsWith(u8, file_path, ".png") or
+                    std.mem.endsWith(u8, file_path, ".jpg") or
+                    std.mem.endsWith(u8, file_path, ".jpeg") or
+                    std.mem.endsWith(u8, file_path, ".tga") or
+                    std.mem.endsWith(u8, file_path, ".bmp"))
+                {
                     callback(file_path, asset_id);
                 }
             }
@@ -250,11 +251,12 @@ pub const HotReloadManager = struct {
 
             // Notify texture reload callback if this is a texture file
             if (self.texture_reload_callback) |callback| {
-                if (std.mem.endsWith(u8, file_path, ".png") or 
-                    std.mem.endsWith(u8, file_path, ".jpg") or 
-                    std.mem.endsWith(u8, file_path, ".jpeg") or 
-                    std.mem.endsWith(u8, file_path, ".tga") or 
-                    std.mem.endsWith(u8, file_path, ".bmp")) {
+                if (std.mem.endsWith(u8, file_path, ".png") or
+                    std.mem.endsWith(u8, file_path, ".jpg") or
+                    std.mem.endsWith(u8, file_path, ".jpeg") or
+                    std.mem.endsWith(u8, file_path, ".tga") or
+                    std.mem.endsWith(u8, file_path, ".bmp"))
+                {
                     callback(file_path, asset_id);
                 }
             }
