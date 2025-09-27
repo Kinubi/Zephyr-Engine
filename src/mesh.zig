@@ -57,9 +57,10 @@ pub const Mesh = struct {
     material_id: u32 = 0, // Index into Scene.materials
 
     pub fn init(allocator: std.mem.Allocator) Mesh {
+        _ = allocator; // Mesh itself doesn't store allocator
         return .{
-            .vertices = std.ArrayList(Vertex).init(allocator),
-            .indices = std.ArrayList(u32).init(allocator),
+            .vertices = std.ArrayList(Vertex){},
+            .indices = std.ArrayList(u32){},
         };
     }
 
@@ -129,9 +130,9 @@ pub const Mesh = struct {
         staging_buffer.deinit();
     }
 
-    pub fn deinit(self: *Mesh) void {
-        self.vertices.deinit();
-        self.indices.deinit();
+    pub fn deinit(self: *Mesh, allocator: std.mem.Allocator) void {
+        self.vertices.deinit(allocator);
+        self.indices.deinit(allocator);
         if (self.vertex_buffer) |*buf| buf.deinit();
         if (self.index_buffer) |*buf| buf.deinit();
         self.vertex_buffer = null;
@@ -154,8 +155,8 @@ pub const Mesh = struct {
     pub fn loadFromObj(self: *Mesh, allocator: std.mem.Allocator, data: []const u8) !void {
         const model = try Obj.parseObj(allocator, data);
         std.debug.print("Loadin model with {any} meshes and {any} distinct vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
-        try self.vertices.ensureTotalCapacity(model.vertices.len);
-        try self.indices.ensureTotalCapacity(model.meshes[0].indices.len);
+        try self.vertices.ensureTotalCapacity(allocator, model.vertices.len);
+        try self.indices.ensureTotalCapacity(allocator, model.meshes[0].indices.len);
 
         for (model.meshes) |mesh| {
             var i: u32 = 0;
@@ -170,10 +171,10 @@ pub const Mesh = struct {
                     };
                     const vertex_index = vertex_list_contains(self.vertices, new_vertex);
                     if (vertex_index == -1) {
-                        try self.vertices.append(new_vertex);
-                        try self.indices.append(@as(u32, @intCast(self.vertices.items.len - 1)));
+                        try self.vertices.append(allocator, new_vertex);
+                        try self.indices.append(allocator, @as(u32, @intCast(self.vertices.items.len - 1)));
                     } else {
-                        try self.indices.append(@as(u32, @intCast(vertex_index)));
+                        try self.indices.append(allocator, @as(u32, @intCast(vertex_index)));
                     }
                 }
                 i += 1;
@@ -201,14 +202,15 @@ pub const ModelMesh = struct {
 
 pub const Model = struct {
     meshes: std.ArrayList(ModelMesh),
+    allocator: std.mem.Allocator,
 
     pub fn loadFromObj(allocator: std.mem.Allocator, gc: *GraphicsContext, data: []const u8, name: []const u8) !Model {
         const obj = try Obj.parseObj(allocator, data);
-        var meshes = std.ArrayList(ModelMesh).init(allocator);
+        var meshes = std.ArrayList(ModelMesh){};
         for (obj.meshes) |obj_mesh| {
             var mesh = Mesh.init(allocator);
-            try mesh.vertices.ensureTotalCapacity(obj.vertices.len);
-            try mesh.indices.ensureTotalCapacity(obj_mesh.indices.len);
+            try mesh.vertices.ensureTotalCapacity(allocator, obj.vertices.len);
+            try mesh.indices.ensureTotalCapacity(allocator, obj_mesh.indices.len);
             var index_offset: usize = 0;
             for (obj_mesh.num_vertices) |face_vertex_count| {
                 // Compute face normal if any vertex is missing a normal
@@ -274,10 +276,10 @@ pub const Model = struct {
                     };
                     const vertex_index = vertex_list_contains(mesh.vertices, vertex);
                     if (vertex_index == -1) {
-                        try mesh.vertices.append(vertex);
-                        try mesh.indices.append(@as(u32, @intCast(mesh.vertices.items.len - 1)));
+                        try mesh.vertices.append(allocator, vertex);
+                        try mesh.indices.append(allocator, @as(u32, @intCast(mesh.vertices.items.len - 1)));
                     } else {
-                        try mesh.indices.append(@as(u32, @intCast(vertex_index)));
+                        try mesh.indices.append(allocator, @as(u32, @intCast(vertex_index)));
                     }
                 }
                 index_offset += face_vertex_count;
@@ -285,13 +287,14 @@ pub const Model = struct {
             try mesh.createIndexBuffers(gc);
             try mesh.createVertexBuffers(gc);
             const geometry = Geometry{ .mesh = mesh, .name = name };
-            try meshes.append(ModelMesh{
+            try meshes.append(allocator, ModelMesh{
                 .geometry = geometry,
                 .local_transform = Transform{},
             });
         }
         return Model{
             .meshes = meshes,
+            .allocator = allocator,
         };
     }
 
@@ -301,9 +304,9 @@ pub const Model = struct {
 
     pub fn deinit(self: *Model) void {
         for (self.meshes.items) |*mesh| {
-            mesh.geometry.mesh.deinit();
+            mesh.geometry.mesh.deinit(self.allocator);
         }
-        self.meshes.deinit();
+        self.meshes.deinit(self.allocator);
     }
 
     pub fn addTexture(self: *Model, texture: *Texture) void {
@@ -405,18 +408,19 @@ pub fn loadModelWithTransforms(
     name: []const u8,
     transforms: []const Transform,
 ) !Model {
-    var meshes = std.ArrayList(ModelMesh).init(allocator);
+    var meshes = std.ArrayList(ModelMesh){};
     for (mesh_datas, 0..) |mesh, i| {
         const geom_name = try std.fmt.allocPrint(allocator, "{s}_mesh_{d}", .{ name, i });
         const geometry = try mesh.toGeometry(allocator, gc, geom_name);
         const local_transform = if (i < transforms.len) transforms[i] else Transform{};
-        try meshes.append(ModelMesh{
+        try meshes.append(allocator, ModelMesh{
             .geometry = geometry,
             .local_transform = local_transform,
         });
     }
     return Model{
         .meshes = meshes,
+        .allocator = allocator,
     };
 }
 
@@ -428,10 +432,11 @@ pub fn fromMesh(allocator: std.mem.Allocator, mesh: Mesh, name: []const u8) !*Mo
     const model = try allocator.create(Model);
     model.* = Model{
         .meshes = blk: {
-            var arr = std.ArrayList(ModelMesh).init(allocator);
-            try arr.append(ModelMesh{ .geometry = geom, .local_transform = .{} });
+            var arr = std.ArrayList(ModelMesh){};
+            try arr.append(allocator, ModelMesh{ .geometry = geom, .local_transform = .{} });
             break :blk arr;
         },
+        .allocator = allocator,
     };
     return model;
 }

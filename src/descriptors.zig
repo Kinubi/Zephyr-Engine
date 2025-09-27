@@ -8,11 +8,11 @@ pub const DescriptorSetLayout = struct {
     descriptor_set_layout: vk.DescriptorSetLayout,
 
     pub fn init(gc: *GraphicsContext, bindings: std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding)) DescriptorSetLayout {
-        var setLayoutBindings = std.ArrayList(vk.DescriptorSetLayoutBinding).init(std.heap.page_allocator);
-        defer setLayoutBindings.deinit();
+        var setLayoutBindings = std.ArrayList(vk.DescriptorSetLayoutBinding){};
+        defer setLayoutBindings.deinit(std.heap.page_allocator);
         var it = bindings.valueIterator();
         while (it.next()) |kv| {
-            setLayoutBindings.append(kv.*) catch unreachable;
+            setLayoutBindings.append(std.heap.page_allocator, kv.*) catch unreachable;
         }
 
         var descriptorSetLayoutInfo = vk.DescriptorSetLayoutCreateInfo{
@@ -109,9 +109,10 @@ pub const DescriptorPool = struct {
         poolSizes: std.ArrayList(vk.DescriptorPoolSize),
         poolFlags: vk.DescriptorPoolCreateFlags,
         maxSets: u32,
+        allocator: std.mem.Allocator,
 
         pub fn addPoolSize(self: *Builder, descriptorType: vk.DescriptorType, count: u32) *Builder {
-            self.poolSizes.append(vk.DescriptorPoolSize{ .type = descriptorType, .descriptor_count = count }) catch unreachable;
+            self.poolSizes.append(self.allocator, vk.DescriptorPoolSize{ .type = descriptorType, .descriptor_count = count }) catch unreachable;
             return self;
         }
 
@@ -136,18 +137,20 @@ pub const DescriptorWriter = struct {
     pool: *DescriptorPool,
     writes: std.ArrayList(vk.WriteDescriptorSet),
     gc: *GraphicsContext,
+    allocator: std.mem.Allocator,
 
-    pub fn init(gc: *GraphicsContext, setLayout: *DescriptorSetLayout, pool: *DescriptorPool) DescriptorWriter {
+    pub fn init(gc: *GraphicsContext, setLayout: *DescriptorSetLayout, pool: *DescriptorPool, allocator: std.mem.Allocator) DescriptorWriter {
         return DescriptorWriter{
             .setLayout = setLayout,
             .pool = pool,
-            .writes = std.ArrayList(vk.WriteDescriptorSet).init(std.heap.page_allocator),
+            .writes = std.ArrayList(vk.WriteDescriptorSet){},
             .gc = gc,
+            .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *DescriptorWriter) void {
-        self.writes.deinit();
+        self.writes.deinit(self.allocator);
     }
 
     pub fn writeBuffer(self: *DescriptorWriter, binding: u32, bufferInfo: *vk.DescriptorBufferInfo) *DescriptorWriter {
@@ -162,7 +165,7 @@ pub const DescriptorWriter = struct {
             .p_image_info = undefined,
             .p_texel_buffer_view = undefined,
         };
-        self.writes.append(write) catch unreachable;
+        self.writes.append(self.allocator, write) catch unreachable;
         return self;
     }
 
@@ -179,7 +182,7 @@ pub const DescriptorWriter = struct {
             .p_buffer_info = undefined,
         };
 
-        self.writes.append(write) catch unreachable;
+        self.writes.append(self.allocator, write) catch unreachable;
         return self;
     }
 
@@ -196,7 +199,7 @@ pub const DescriptorWriter = struct {
             .p_buffer_info = undefined,
             .p_texel_buffer_view = undefined,
         };
-        self.writes.append(write) catch unreachable;
+        self.writes.append(self.allocator, write) catch unreachable;
         return self;
     }
 
@@ -212,7 +215,7 @@ pub const DescriptorWriter = struct {
             .p_image_info = undefined,
             .p_texel_buffer_view = undefined,
         };
-        self.writes.append(write) catch unreachable;
+        self.writes.append(self.allocator, write) catch unreachable;
         return self;
     }
 
@@ -229,7 +232,7 @@ pub const DescriptorWriter = struct {
             .p_texel_buffer_view = undefined,
             .p_buffer_info = undefined,
         };
-        self.writes.append(write) catch unreachable;
+        self.writes.append(self.allocator, write) catch unreachable;
         return self;
     }
 

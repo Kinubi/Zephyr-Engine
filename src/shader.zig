@@ -10,7 +10,7 @@ const Shader = struct {
     entry_point: entry_point_definition = entry_point_definition{ .name = "main" },
 
     pub fn create(gc: GC, code: []const u8, shader_type: vk.ShaderStageFlags, entry_point: ?entry_point_definition) !Shader {
-        const data: [*]const u32 = @alignCast(@ptrCast(code.ptr));
+        const data: [*]const u32 = @ptrCast(@alignCast(code.ptr));
 
         const module = try gc.vkd.createShaderModule(gc.dev, &vk.ShaderModuleCreateInfo{
             .flags = .{},
@@ -28,9 +28,10 @@ const Shader = struct {
 pub const ShaderLibrary = struct {
     gc: GC,
     shaders: std.ArrayList(Shader),
+    allocator: std.mem.Allocator,
 
     pub fn init(gc: GC, alloc: std.mem.Allocator) ShaderLibrary {
-        return ShaderLibrary{ .gc = gc, .shaders = std.ArrayList(Shader).init(alloc) };
+        return ShaderLibrary{ .gc = gc, .shaders = std.ArrayList(Shader){}, .allocator = alloc };
     }
 
     pub fn add(self: *ShaderLibrary, shader_codes: []const []const u8, shader_types: []const vk.ShaderStageFlags, entry_points: []const entry_point_definition) !void {
@@ -39,8 +40,8 @@ pub const ShaderLibrary = struct {
         }
 
         for (shader_codes, shader_types, entry_points) |code, shader_type, entry_point| {
-            const shader = try Shader.create(self.gc, @constCast(@ptrCast(code)), shader_type, entry_point);
-            try self.shaders.append(shader);
+            const shader = try Shader.create(self.gc, @ptrCast(@constCast(code)), shader_type, entry_point);
+            try self.shaders.append(self.allocator, shader);
         }
     }
 
@@ -48,7 +49,7 @@ pub const ShaderLibrary = struct {
         for (self.shaders.items) |shader| {
             shader.deinit(self.gc);
         }
-        self.shaders.deinit();
+        self.shaders.deinit(self.allocator);
     }
 };
 

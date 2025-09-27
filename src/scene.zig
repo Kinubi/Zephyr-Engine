@@ -23,7 +23,7 @@ pub const Material = extern struct {
 };
 
 pub const Scene = struct {
-    objects: std.BoundedArray(GameObject, 1024),
+    objects: std.ArrayList(GameObject),
     materials: std.ArrayList(Material),
     textures: std.ArrayList(Texture),
     material_buffer: ?*Buffer = null, // GPU buffer for materials
@@ -33,26 +33,27 @@ pub const Scene = struct {
 
     pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator) Scene {
         return Scene{
-            .objects = .{},
-            .materials = std.ArrayList(Material).init(allocator),
-            .textures = std.ArrayList(Texture).init(allocator),
+            .objects = std.ArrayList(GameObject){},
+            .materials = std.ArrayList(Material){},
+            .textures = std.ArrayList(Texture){},
             .gc = gc,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Scene) void {
-        log(.INFO, "scene", "Deinitializing Scene with {d} objects", .{self.objects.constSlice().len});
+        log(.INFO, "scene", "Deinitializing Scene with {d} objects", .{self.objects.items.len});
         // Deinit all objects (models/meshes)
-        for (self.objects.constSlice()) |object| {
+        for (self.objects.items) |object| {
             object.deinit();
         }
+        self.objects.deinit(self.allocator);
         // Deinit all textures
         log(.DEBUG, "scene", "Deinitializing {d} textures", .{self.textures.items.len});
         for (self.textures.items) |*tex| {
             tex.deinit();
         }
-        self.textures.deinit();
+        self.textures.deinit(self.allocator);
         // Deinit material buffer if present
         if (self.material_buffer) |buf| {
             log(.DEBUG, "scene", "Deinitializing material buffer", .{});
@@ -70,23 +71,21 @@ pub const Scene = struct {
         // Clear and deinit materials
         log(.DEBUG, "scene", "Clearing materials array", .{});
         self.materials.clearRetainingCapacity();
-        self.materials.deinit();
+        self.materials.deinit(self.allocator);
         log(.INFO, "scene", "Scene deinit complete", .{});
     }
 
     pub fn addEmpty(self: *Scene) !*GameObject {
-        const object = try self.objects.addOne();
-        object.* = .{ .model = null };
-        return object;
+        try self.objects.append(self.allocator, .{ .model = null });
+        return &self.objects.items[self.objects.items.len - 1];
     }
 
     pub fn addObject(self: *Scene, model: ?*Model, point_light: ?PointLightComponent) !*GameObject {
-        const object = try self.objects.addOne();
-        object.* = .{
+        try self.objects.append(self.allocator, .{
             .model = if (model) |m| m else null,
             .point_light = point_light,
-        };
-        return object;
+        });
+        return &self.objects.items[self.objects.items.len - 1];
     }
 
     pub fn addModelFromMesh(self: *Scene, mesh: Mesh, name: []const u8, transform: ?Math.Vec3) !*GameObject {
@@ -107,7 +106,7 @@ pub const Scene = struct {
     }
 
     pub fn addTexture(self: *Scene, texture: Texture) !usize {
-        try self.textures.append(texture);
+        try self.textures.append(self.allocator, texture);
         const index = self.textures.items.len - 1;
         try self.updateTextureImageInfos(self.allocator);
         log(.INFO, "scene", "Added texture at index {d}", .{index});
@@ -115,7 +114,7 @@ pub const Scene = struct {
     }
 
     pub fn addMaterial(self: *Scene, material: Material) !usize {
-        try self.materials.append(material);
+        try self.materials.append(self.allocator, material);
         const index = self.materials.items.len - 1;
         try self.updateMaterialBuffer(self.gc, self.allocator);
         log(.INFO, "scene", "Added material at index {d}", .{index});
@@ -160,7 +159,7 @@ pub const Scene = struct {
     }
 
     pub fn render(self: Scene, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
-        for (self.objects.constSlice()) |object| {
+        for (self.objects.items) |object| {
             try object.render(gc, cmdbuf);
         }
     }

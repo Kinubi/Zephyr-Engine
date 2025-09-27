@@ -19,7 +19,7 @@ pub const Window = struct {
     window: ?*c.GLFWwindow = null,
     window_props: WindowProps = undefined,
 
-    fn errorCallback(error_code: c_int, description: [*c]const u8) callconv(.C) void {
+    fn errorCallback(error_code: c_int, description: [*c]const u8) callconv(.c) void {
         std.log.err("glfw: {}: {s}\n", .{ error_code, description });
     }
 

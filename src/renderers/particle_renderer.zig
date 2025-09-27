@@ -68,9 +68,10 @@ pub const ParticleRenderer = struct {
         );
         var pool_builder = DescriptorPool.Builder{
             .gc = gc,
-            .poolSizes = std.ArrayList(vk.DescriptorPoolSize).init(allocator),
+            .poolSizes = std.ArrayList(vk.DescriptorPoolSize){},
             .poolFlags = .{ .free_descriptor_set_bit = true },
             .maxSets = 0,
+            .allocator = allocator,
         };
         const pool = try allocator.create(DescriptorPool);
         pool.* = try pool_builder
@@ -90,7 +91,7 @@ pub const ParticleRenderer = struct {
         // Allocate descriptor set
         var descriptor_set: vk.DescriptorSet = undefined;
         // Write buffer info to descriptor set
-        var writer = DescriptorWriter.init(gc, layout, pool);
+        var writer = DescriptorWriter.init(gc, layout, pool, allocator);
         for (ubo_infos) |info| {
             try writer.writeBuffer(0, @constCast(&info)).build(&descriptor_set);
         }
@@ -111,7 +112,7 @@ pub const ParticleRenderer = struct {
         );
         // Create raster pipeline using Pipeline.init and default create info
         var default_render_create_info = try Pipeline.defaultLayout(raster_pipeline_layout);
-        default_render_create_info.p_input_assembly_state = &.{ .topology = .point_list, .primitive_restart_enable = vk.TRUE };
+        default_render_create_info.p_input_assembly_state = &.{ .topology = .point_list, .primitive_restart_enable = .false };
         const raster_pipeline = try Pipeline.initParticles(
             gc.*,
             render_pass,

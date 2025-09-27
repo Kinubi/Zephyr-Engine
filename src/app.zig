@@ -109,7 +109,7 @@ pub const App = struct {
 
         // Update material and texture buffers after all materials/textures are added
 
-        try mesh.vertices.appendSlice(&.{
+        try mesh.vertices.appendSlice(self.allocator, &.{
             // Left Face
             Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
             Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
@@ -146,7 +146,7 @@ pub const App = struct {
             Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
             Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
         });
-        try mesh.indices.appendSlice(&.{ 0, 1, 2, 0, 3, 1, 4, 5, 6, 4, 7, 5, 8, 9, 10, 8, 11, 9, 12, 13, 14, 12, 15, 13, 16, 17, 18, 16, 19, 17, 20, 21, 22, 20, 23, 21 });
+        try mesh.indices.appendSlice(self.allocator, &.{ 0, 1, 2, 0, 3, 1, 4, 5, 6, 4, 7, 5, 8, 9, 10, 8, 11, 9, 12, 13, 14, 12, 15, 13, 16, 17, 18, 16, 19, 17, 20, 21, 22, 20, 23, 21 });
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
@@ -262,19 +262,19 @@ pub const App = struct {
         // --- Raytracing pool and layout creation (before RaytracingSystem.init) ---
         // --- Collect buffer infos for raytracing descriptors before pool/layout creation ---
         // Use abstractions for buffer and descriptor management
-        var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
-        var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo).init(self.allocator);
-        defer index_buffer_infos.deinit();
-        defer vertex_buffer_infos.deinit();
-        for (scene.objects.slice()) |*obj| {
+        var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){};
+        var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){};
+        defer index_buffer_infos.deinit(self.allocator);
+        defer vertex_buffer_infos.deinit(self.allocator);
+        for (scene.objects.items) |*obj| {
             if (obj.model) |mdl| {
                 for (mdl.meshes.items) |model_mesh| {
                     const geometry = model_mesh.geometry;
                     if (geometry.mesh.vertex_buffer) |buf| {
-                        try vertex_buffer_infos.append(buf.descriptor_info);
+                        try vertex_buffer_infos.append(self.allocator, buf.descriptor_info);
                     }
                     if (geometry.mesh.index_buffer) |buf| {
-                        try index_buffer_infos.append(buf.descriptor_info);
+                        try index_buffer_infos.append(self.allocator, buf.descriptor_info);
                     }
                 }
             }
@@ -326,6 +326,7 @@ pub const App = struct {
             &self.gc,
             rt_pool_layout.pool,
             rt_pool_layout.layout,
+            self.allocator,
             @constCast(&as_info),
             @constCast(&image_info),
             ubo_infos,

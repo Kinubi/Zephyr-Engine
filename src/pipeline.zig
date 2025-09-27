@@ -20,9 +20,9 @@ pub const Pipeline = struct {
         gpci: vk.GraphicsPipelineCreateInfo,
         alloc: std.mem.Allocator,
     ) !Pipeline {
-        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(alloc);
+        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo){};
         for (shader_library.shaders.items) |shader| {
-            try pssci.append(vk.PipelineShaderStageCreateInfo{
+            try pssci.append(alloc, vk.PipelineShaderStageCreateInfo{
                 .flags = .{},
                 .stage = shader.shader_type,
                 .module = shader.module,
@@ -73,9 +73,9 @@ pub const Pipeline = struct {
         gpci: vk.GraphicsPipelineCreateInfo,
         alloc: std.mem.Allocator,
     ) !Pipeline {
-        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(alloc);
+        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo){};
         for (shader_library.shaders.items) |shader| {
-            try pssci.append(vk.PipelineShaderStageCreateInfo{
+            try pssci.append(alloc, vk.PipelineShaderStageCreateInfo{
                 .flags = .{},
                 .stage = shader.shader_type,
                 .module = shader.module,
@@ -137,7 +137,7 @@ pub const Pipeline = struct {
         const piasci = vk.PipelineInputAssemblyStateCreateInfo{
             .flags = .{},
             .topology = .triangle_list,
-            .primitive_restart_enable = vk.FALSE,
+            .primitive_restart_enable = .false,
         };
 
         const pvsci = vk.PipelineViewportStateCreateInfo{
@@ -150,12 +150,12 @@ pub const Pipeline = struct {
 
         const prsci = vk.PipelineRasterizationStateCreateInfo{
             .flags = .{},
-            .depth_clamp_enable = vk.FALSE,
-            .rasterizer_discard_enable = vk.FALSE,
+            .depth_clamp_enable = .false,
+            .rasterizer_discard_enable = .false,
             .polygon_mode = .fill,
             .cull_mode = .{},
             .front_face = .clockwise,
-            .depth_bias_enable = vk.FALSE,
+            .depth_bias_enable = .false,
             .depth_bias_constant_factor = 0,
             .depth_bias_clamp = 0,
             .depth_bias_slope_factor = 0,
@@ -165,28 +165,44 @@ pub const Pipeline = struct {
         const pmsci = vk.PipelineMultisampleStateCreateInfo{
             .flags = .{},
             .rasterization_samples = .{ .@"1_bit" = true },
-            .sample_shading_enable = vk.FALSE,
+            .sample_shading_enable = .false,
             .min_sample_shading = 1,
             .p_sample_mask = null,
-            .alpha_to_coverage_enable = vk.FALSE,
-            .alpha_to_one_enable = vk.FALSE,
+            .alpha_to_coverage_enable = .false,
+            .alpha_to_one_enable = .false,
         };
 
         const pdssci = vk.PipelineDepthStencilStateCreateInfo{
             .flags = .{},
-            .depth_test_enable = vk.TRUE,
-            .depth_write_enable = vk.TRUE,
+            .depth_test_enable = .true,
+            .depth_write_enable = .true,
             .depth_compare_op = vk.CompareOp.less_or_equal,
-            .depth_bounds_test_enable = vk.FALSE,
-            .stencil_test_enable = vk.FALSE,
-            .front = undefined,
-            .back = undefined,
+            .depth_bounds_test_enable = .false,
+            .stencil_test_enable = .false,
+            .front = .{
+                .fail_op = .keep,
+                .pass_op = .keep,
+                .depth_fail_op = .keep,
+                .compare_op = .never,
+                .compare_mask = 0,
+                .write_mask = 0,
+                .reference = 0,
+            },
+            .back = .{
+                .fail_op = .keep,
+                .pass_op = .keep,
+                .depth_fail_op = .keep,
+                .compare_op = .never,
+                .compare_mask = 0,
+                .write_mask = 0,
+                .reference = 0,
+            },
             .min_depth_bounds = 0,
             .max_depth_bounds = 1,
         };
 
         const pcbas = vk.PipelineColorBlendAttachmentState{
-            .blend_enable = vk.FALSE,
+            .blend_enable = .false,
             .src_color_blend_factor = .one,
             .dst_color_blend_factor = .zero,
             .color_blend_op = .add,
@@ -198,7 +214,7 @@ pub const Pipeline = struct {
 
         const pcbsci = vk.PipelineColorBlendStateCreateInfo{
             .flags = .{},
-            .logic_op_enable = vk.FALSE,
+            .logic_op_enable = .false,
             .logic_op = .copy,
             .attachment_count = 1,
             .p_attachments = @as([*]const vk.PipelineColorBlendAttachmentState, @ptrCast(&pcbas)),
@@ -257,9 +273,9 @@ pub const Pipeline = struct {
         rpcik: vk.RayTracingPipelineCreateInfoKHR,
         alloc: std.mem.Allocator,
     ) !Pipeline {
-        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(alloc);
+        var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo){};
         for (shader_library.shaders.items) |shader| {
-            try pssci.append(vk.PipelineShaderStageCreateInfo{
+            try pssci.append(alloc, vk.PipelineShaderStageCreateInfo{
                 .flags = .{},
                 .stage = shader.shader_type,
                 .module = shader.module,
