@@ -238,7 +238,774 @@ if (self.hasFileChanged(file_path)) {  // Compare stored vs current metadata
 
 ---
 
-## Phase 2: Entity Component System Foundation 🎯 **READY TO START!**
+## Phase 1.5: Modular Render Pass Architecture & Dynamic Asset Integration 🎯 **CRITICAL PRIORITY**
+
+### Goals
+- Design and implement a modular render pass system supporting rasterization, raytracing, and compute
+- Create dynamic asset integration where geometry/texture changes automatically update all affected passes
+- Build a scene abstraction that can feed multiple render passes with different data requirements
+- Implement render graph with automatic dependency resolution and resource management
+- Enable hot reload to work across all rendering techniques (not just textures)
+
+### Why Modular Render Pass System Before ECS?
+1. **Current Architecture Debt**: Fixed SimpleRenderer/PointLightRenderer/RaytracingSystem are inflexible
+2. **Asset Integration Gap**: Hot reload only works for textures, not geometry/materials across all renderers
+3. **Scene Data Multiplication**: Same scene data is manually duplicated across different rendering systems
+4. **Foundation for ECS**: ECS entity changes need unified way to update all rendering techniques
+5. **Modern Engine Requirements**: Hybrid rendering (raster + RT + compute) requires modular architecture
+
+### Current System Limitations
+- **Hardcoded Renderers**: SimpleRenderer, PointLightRenderer, RaytracingSystem are separate silos
+- **Manual Integration**: Each renderer manually extracts data from Scene in `App.onUpdate()`
+- **Static BLAS/TLAS**: Built once in `App.init()`, never updated when geometry changes
+- **No Render Graph**: No automatic resource management or pass dependency resolution
+- **Asset Update Gap**: Hot reload works for raytracing textures but not rasterization geometry
+- **Scene Coupling**: Scene is tightly coupled to specific renderer expectations
+
+### Key Components to Implement
+
+#### 1. Modular Render Pass System (Vulkan-Inspired)
+```zig
+pub const RenderPassType = enum {
+    rasterization,    // Traditional vertex/fragment shaders
+    raytracing,      // Ray generation/miss/closest-hit shaders  
+    compute,         // Compute shaders for particles, post-processing
+    present,         // Final presentation pass
+};
+
+pub const RenderPass = struct {
+    id: PassId,
+    name: []const u8,
+    pass_type: RenderPassType,
+    
+    // Vulkan-style subpass dependencies
+    input_dependencies: []PassId,        // Which passes must complete first
+    output_dependencies: []PassId,       // Which passes depend on this one
+    
+    // Asset requirements - what scene data this pass needs
+    required_assets: AssetRequirements,
+    
+    // Resource management
+    descriptor_layouts: []vk.DescriptorSetLayout,
+    pipeline: Pipeline,
+    
+    // Pass-specific execution
+    vtable: *const RenderPassVTable,
+    impl_data: *anyopaque,
+    
+    pub fn execute(self: *Self, context: RenderContext) !void {
+        return self.vtable.execute(self.impl_data, context);
+    }
+    
+    pub fn onAssetChanged(self: *Self, asset_id: AssetId, change_type: AssetChangeType) !void {
+        return self.vtable.onAssetChanged(self.impl_data, asset_id, change_type);
+    }
+};
+
+pub const RenderPassVTable = struct {
+    execute: *const fn(impl: *anyopaque, context: RenderContext) anyerror!void,
+    onAssetChanged: *const fn(impl: *anyopaque, asset_id: AssetId, change_type: AssetChangeType) anyerror!void,
+    getAssetDependencies: *const fn(impl: *anyopaque) []AssetId,
+};
+```
+
+#### 2. Render Graph with Automatic Dependency Resolution
+```zig
+pub const RenderGraph = struct {
+    passes: std.HashMap(PassId, RenderPass),
+    execution_order: std.ArrayList(PassId),
+    resource_tracker: ResourceTracker,
+    
+    pub fn addPass(self: *Self, pass: RenderPass) !PassId;
+    pub fn addDependency(self: *Self, from: PassId, to: PassId) !void;
+    pub fn buildExecutionOrder(self: *Self) !void;  // Topological sort
+    
+    pub fn onAssetChanged(self: *Self, asset_id: AssetId, change_type: AssetChangeType) !void {
+        // Find all passes that depend on this asset
+        const affected_passes = try self.findPassesByAsset(asset_id);
+        
+        // Rebuild affected passes and their dependents
+        for (affected_passes) |pass_id| {
+            try self.rebuildPassAndDependents(pass_id);
+        }
+    }
+    
+    pub fn execute(self: *Self, scene: *SceneView, frame_info: FrameInfo) !void {
+        for (self.execution_order.items) |pass_id| {
+            const pass = self.passes.get(pass_id).?;
+            const context = RenderContext{
+                .scene = scene,
+                .frame_info = frame_info,
+                .resource_tracker = &self.resource_tracker,
+            };
+            try pass.execute(context);
+        }
+    }
+};
+```
+
+#### 3. Scene Abstraction for Multiple Render Passes
+```zig
+// New abstraction - Scene provides different "views" for different rendering needs
+pub const SceneView = struct {
+    // Core scene data
+    objects: []GameObject,
+    materials: []Material, 
+    textures: []Texture,
+    
+    // Pass-specific data extraction methods
+    pub fn getRasterizationData(self: *Self) RasterizationData {
+        return RasterizationData{
+            .meshes = self.extractMeshes(),
+            .materials = self.materials,
+            .textures = self.textures,
+            .lights = self.extractPointLights(),
+        };
+    }
+    
+    pub fn getRaytracingData(self: *Self) RaytracingData {
+        return RaytracingData{
+            .geometries = self.extractGeometries(),
+            .instances = self.extractInstances(),
+            .materials = self.materials,
+            .textures = self.textures,
+        };
+    }
+    
+    pub fn getComputeData(self: *Self) ComputeData {
+        return ComputeData{
+            .tasks = self.extractComputeTasks(),
+            .particles = self.extractParticles(),
+            .global_params = self.extractGlobalParams(),
+            .compute_buffers = self.extractComputeBuffers(),
+        };
+    }
+    
+    fn extractComputeTasks(self: *Self) []ComputeTask {
+        var tasks = std.ArrayList(ComputeTask).init(self.allocator);
+        
+        // Extract particle simulation tasks
+        for (self.objects) |*obj| {
+            if (obj.particle_system) |ps| {
+                tasks.append(ComputeTask{
+                    .type = .particle_simulation,
+                    .descriptor_set = ps.descriptor_set,
+                    .thread_groups = .{ ps.particle_count / 256, 1, 1 },
+                    .buffer_barriers = ps.required_barriers,
+                }) catch {};
+            }
+        }
+        
+        // Extract post-processing tasks based on camera settings
+        if (self.requiresPostProcessing()) {
+            tasks.append(ComputeTask{
+                .type = .post_processing,
+                .descriptor_set = self.post_process_descriptor_set,
+                .thread_groups = self.calculatePostProcessThreadGroups(),
+                .buffer_barriers = &.{},
+            }) catch {};
+        }
+        
+        // Extract physics tasks
+        if (self.hasPhysicsObjects()) {
+            tasks.append(ComputeTask{
+                .type = .physics_integration,
+                .descriptor_set = self.physics_descriptor_set,
+                .thread_groups = .{ self.physics_object_count / 64, 1, 1 },
+                .buffer_barriers = self.getPhysicsBarriers(),
+            }) catch {};
+        }
+        
+        return tasks.toOwnedSlice();
+    }
+};
+
+// Data structures for different rendering techniques
+pub const RasterizationData = struct {
+    meshes: []MeshData,
+    materials: []Material,
+    textures: []Texture,
+    lights: []PointLight,
+};
+
+pub const RaytracingData = struct {
+    geometries: []GeometryData,
+    instances: []InstanceData,
+    materials: []Material,
+    textures: []Texture,
+};
+
+pub const ComputeTaskType = enum {
+    particle_simulation,
+    post_processing,
+    physics_integration,
+    lighting_culling,
+};
+
+pub const ComputeTask = struct {
+    type: ComputeTaskType,
+    descriptor_set: vk.DescriptorSet,
+    thread_groups: struct { x: u32, y: u32, z: u32 },
+    buffer_barriers: []vk.BufferMemoryBarrier,
+};
+
+pub const ComputeData = struct {
+    tasks: []ComputeTask,
+    particles: []ParticleSystem,
+    global_params: GlobalComputeParams,
+    compute_buffers: []Buffer,
+};
+
+// Enhanced Scene becomes a SceneView provider
+pub const EnhancedScene = struct {
+    // ... existing fields ...
+    
+    pub fn getView(self: *Self) SceneView {
+        return SceneView{
+            .objects = self.objects.slice(),
+            .materials = self.materials.items,
+            .textures = self.textures.items,
+        };
+    }
+    
+    // Asset change notifications now update all passes
+    pub fn onAssetChanged(self: *Self, asset_id: AssetId, change_type: AssetChangeType) !void {
+        // Update scene data
+        try self.reloadAsset(asset_id);
+        
+        // Notify render graph
+        if (self.render_graph) |*graph| {
+            try graph.onAssetChanged(asset_id, change_type);
+        }
+    }
+};
+```
+
+#### 4. Concrete Pass Implementations
+```zig
+pub const RasterizationPass = struct {
+    simple_renderer: SimpleRenderer,
+    point_light_renderer: PointLightRenderer,
+    
+    pub fn create(gc: *GraphicsContext, swapchain: *Swapchain) !RenderPass {
+        var pass = RasterizationPass{
+            .simple_renderer = try SimpleRenderer.init(gc, swapchain.render_pass, ...),
+            .point_light_renderer = try PointLightRenderer.init(gc, swapchain.render_pass, ...),
+        };
+        
+        return RenderPass{
+            .id = PassId.generate(),
+            .name = "rasterization",
+            .pass_type = .rasterization,
+            .vtable = &rasterization_vtable,
+            .impl_data = @ptrCast(&pass),
+            // ...
+        };
+    }
+    
+    pub fn execute(impl: *anyopaque, context: RenderContext) !void {
+        const self: *RasterizationPass = @ptrCast(@alignCast(impl));
+        const raster_data = context.scene.getRasterizationData();
+        
+        try self.simple_renderer.render(context.frame_info, raster_data);
+        try self.point_light_renderer.render(context.frame_info, raster_data);
+    }
+};
+
+pub const RaytracingPass = struct {
+    raytracing_system: RaytracingSystem,
+    geometry_tracker: GeometryTracker,
+    
+    pub fn execute(impl: *anyopaque, context: RenderContext) !void {
+        const self: *RaytracingPass = @ptrCast(@alignCast(impl));
+        const rt_data = context.scene.getRaytracingData();
+        
+        // Check if BLAS/TLAS need updates
+        if (self.geometry_tracker.needsUpdate()) {
+            try self.geometry_tracker.rebuildAccelerationStructures(rt_data);
+        }
+        
+        try self.raytracing_system.render(context.frame_info, rt_data);
+    }
+    
+    pub fn onAssetChanged(impl: *anyopaque, asset_id: AssetId, change_type: AssetChangeType) !void {
+        const self: *RaytracingPass = @ptrCast(@alignCast(impl));
+        
+        if (change_type == .geometry_changed) {
+            self.geometry_tracker.markForUpdate();
+        }
+        // Texture changes handled automatically by descriptor updates
+    }
+};
+
+pub const ComputePass = struct {
+    compute_shader_system: ComputeShaderSystem,
+    particle_renderer: ParticleRenderer,
+    compute_pipelines: std.HashMap(ComputeTaskType, Pipeline),
+    
+    pub fn create(gc: *GraphicsContext, swapchain: *Swapchain) !RenderPass {
+        var pass = ComputePass{
+            .compute_shader_system = try ComputeShaderSystem.init(gc, swapchain, allocator),
+            .particle_renderer = try ParticleRenderer.init(gc, swapchain.render_pass, ...),
+            .compute_pipelines = std.HashMap(ComputeTaskType, Pipeline).init(allocator),
+        };
+        
+        return RenderPass{
+            .id = PassId.generate(),
+            .name = "compute",
+            .pass_type = .compute,
+            .vtable = &compute_vtable,
+            .impl_data = @ptrCast(&pass),
+            // ...
+        };
+    }
+    
+    pub fn execute(impl: *anyopaque, context: RenderContext) !void {
+        const self: *ComputePass = @ptrCast(@alignCast(impl));
+        const compute_data = context.scene.getComputeData();
+        
+        // Begin compute command buffer
+        self.compute_shader_system.beginCompute(context.frame_info);
+        
+        // Dispatch compute shaders for different tasks
+        for (compute_data.tasks) |task| {
+            switch (task.type) {
+                .particle_simulation => {
+                    try self.dispatchParticleSimulation(task, context.frame_info);
+                },
+                .post_processing => {
+                    try self.dispatchPostProcessing(task, context.frame_info);
+                },
+                .physics_integration => {
+                    try self.dispatchPhysicsIntegration(task, context.frame_info);
+                },
+                .lighting_culling => {
+                    try self.dispatchLightCulling(task, context.frame_info);
+                },
+            }
+        }
+        
+        // End compute and ensure synchronization
+        self.compute_shader_system.endCompute(context.frame_info);
+    }
+    
+    pub fn onAssetChanged(impl: *anyopaque, asset_id: AssetId, change_type: AssetChangeType) !void {
+        const self: *ComputePass = @ptrCast(@alignCast(impl));
+        
+        if (change_type == .shader_changed) {
+            // Recompile compute shaders that depend on this asset
+            try self.recompileAffectedShaders(asset_id);
+        }
+        // Compute passes typically don't depend on geometry/texture changes directly
+        // but may need buffer updates for particle systems
+        if (change_type == .geometry_changed) {
+            self.markBuffersForUpdate();
+        }
+    }
+    
+    fn dispatchParticleSimulation(self: *Self, task: ComputeTask, frame_info: FrameInfo) !void {
+        const pipeline = self.compute_pipelines.get(.particle_simulation).?;
+        
+        self.compute_shader_system.dispatch(
+            &pipeline,
+            &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = task.descriptor_set },
+            frame_info,
+            .{ @intCast(task.thread_groups.x), @intCast(task.thread_groups.y), @intCast(task.thread_groups.z) },
+        );
+    }
+    
+    fn dispatchPostProcessing(self: *Self, task: ComputeTask, frame_info: FrameInfo) !void {
+        // Post-processing compute shaders (bloom, tone mapping, etc.)
+        const pipeline = self.compute_pipelines.get(.post_processing).?;
+        
+        self.compute_shader_system.dispatch(
+            &pipeline,
+            &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = task.descriptor_set },
+            frame_info,
+            task.thread_groups,
+        );
+    }
+    
+    fn dispatchPhysicsIntegration(self: *Self, task: ComputeTask, frame_info: FrameInfo) !void {
+        // Physics simulation on GPU
+        const pipeline = self.compute_pipelines.get(.physics_integration).?;
+        
+        self.compute_shader_system.dispatch(
+            &pipeline,
+            &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = task.descriptor_set },
+            frame_info,
+            task.thread_groups,
+        );
+    }
+    
+    fn dispatchLightCulling(self: *Self, task: ComputeTask, frame_info: FrameInfo) !void {
+        // GPU-driven light culling for clustered/tiled rendering
+        const pipeline = self.compute_pipelines.get(.lighting_culling).?;
+        
+        self.compute_shader_system.dispatch(
+            &pipeline,
+            &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = task.descriptor_set },
+            frame_info,
+            task.thread_groups,
+        );
+    }
+};
+```
+
+### Integration with Existing Systems
+
+#### Hot Reload Manager → Render Graph Integration
+```zig
+// In hot_reload_manager.zig - unified asset change notification
+pub fn setRenderGraphCallback(self: *Self, callback: RenderGraphCallback) void {
+    self.render_graph_callback = callback;
+}
+
+// When any asset changes (texture, mesh, material, shader)
+pub fn onAssetChanged(self: *Self, file_path: []const u8, asset_id: AssetId) void {
+    const change_type = determineChangeType(file_path);
+    
+    if (self.render_graph_callback) |callback| {
+        callback(asset_id, change_type);
+    }
+}
+
+fn determineChangeType(file_path: []const u8) AssetChangeType {
+    if (std.mem.endsWith(u8, file_path, ".obj") or std.mem.endsWith(u8, file_path, ".gltf")) {
+        return .geometry_changed;
+    } else if (std.mem.endsWith(u8, file_path, ".png") or std.mem.endsWith(u8, file_path, ".jpg")) {
+        return .texture_changed;
+    } else if (std.mem.endsWith(u8, file_path, ".vert") or std.mem.endsWith(u8, file_path, ".frag")) {
+        return .shader_changed;
+    }
+    return .unknown;
+}
+```
+
+#### Enhanced Scene → Render Graph Bridge
+```zig
+// In scene_enhanced.zig - becomes a SceneView provider for render graph
+pub const EnhancedScene = struct {
+    // ... existing fields ...
+    render_graph: ?*RenderGraph = null,
+    
+    pub fn setRenderGraph(self: *Self, render_graph: *RenderGraph) void {
+        self.render_graph = render_graph;
+    }
+    
+    pub fn onAssetReloaded(self: *Self, file_path: []const u8, asset_id: AssetId) void {
+        log(.INFO, "scene", "Asset reloaded: {s}, updating all affected passes", .{file_path});
+        
+        // Update scene data
+        self.reloadAssetData(file_path, asset_id) catch |err| {
+            log(.ERROR, "scene", "Failed to reload asset data: {}", .{err});
+            return;
+        };
+        
+        // Notify render graph - this will update ALL affected passes
+        if (self.render_graph) |graph| {
+            const change_type = determineChangeType(file_path);
+            graph.onAssetChanged(asset_id, change_type) catch |err| {
+                log(.ERROR, "scene", "Failed to update render graph: {}", .{err});
+            };
+        }
+    }
+};
+```
+
+#### App Integration - Render Graph Orchestration
+```zig
+// In app.zig - replace individual renderers with unified render graph
+pub const App = struct {
+    // Remove individual renderers
+    // var simple_renderer: SimpleRenderer = undefined;
+    // var point_light_renderer: PointLightRenderer = undefined; 
+    // var raytracing_system: RaytracingSystem = undefined;
+    
+    // Replace with unified render graph
+    var render_graph: RenderGraph = undefined,
+    
+    pub fn init(self: *App) !void {
+        // ... asset manager and scene setup ...
+        
+        // Create render graph
+        render_graph = RenderGraph.init(self.allocator);
+        
+        // Add passes in dependency order
+        const compute_pass_id = try render_graph.addPass(try ComputePass.create(&self.gc, &swapchain));
+        const raster_pass_id = try render_graph.addPass(try RasterizationPass.create(&self.gc, &swapchain));
+        const rt_pass_id = try render_graph.addPass(try RaytracingPass.create(&self.gc, &swapchain));
+        const present_pass_id = try render_graph.addPass(try PresentPass.create(&self.gc, &swapchain));
+        
+        // Setup dependencies (Vulkan subpass-style)
+        try render_graph.addDependency(compute_pass_id, raster_pass_id);  // Compute updates particles before raster
+        try render_graph.addDependency(raster_pass_id, rt_pass_id);       // RT reads raster results
+        try render_graph.addDependency(rt_pass_id, present_pass_id);      // Present shows RT output
+        
+        try render_graph.buildExecutionOrder();
+        
+        // Connect scene to render graph
+        scene.setRenderGraph(&render_graph);
+        
+        // Connect hot reload to render graph
+        if (scene.asset_manager.hot_reload_manager) |*hr_manager| {
+            hr_manager.setRenderGraphCallback(renderGraphCallback);
+        }
+    }
+    
+    pub fn onUpdate(self: *App) !bool {
+        // ... frame setup ...
+        
+        // Single render graph execution replaces all individual renderer calls
+        const scene_view = scene.getView();
+        try render_graph.execute(&scene_view, frame_info);
+        
+        // ... frame end ...
+    }
+    
+    fn renderGraphCallback(asset_id: AssetId, change_type: AssetChangeType) void {
+        scene.onAssetReloaded(asset_id, change_type) catch |err| {
+            log(.ERROR, "app", "Failed to handle asset change: {}", .{err});
+        };
+    }
+};
+```
+
+### Phase 1.5 Implementation Steps (3-4 weeks)
+
+#### Week 1: Core Render Pass Architecture
+- [ ] Implement RenderPass trait/interface system with VTable
+- [ ] Create RenderGraph with dependency tracking and topological sorting
+- [ ] Design SceneView abstraction for pass-specific data extraction
+- [ ] Build ResourceTracker for automatic GPU resource management
+
+#### Week 2: Pass Implementations & Scene Integration
+- [ ] Convert existing renderers to modular RenderPass implementations
+  - [ ] RasterizationPass (SimpleRenderer + PointLightRenderer)
+  - [ ] RaytracingPass with dynamic BLAS/TLAS management
+  - [ ] ComputePass (ParticleRenderer + ComputeShaderSystem)
+    - [ ] Particle simulation dispatch
+    - [ ] Post-processing compute shaders
+    - [ ] Physics integration on GPU
+    - [ ] Light culling for clustered rendering
+- [ ] Implement SceneView data extraction methods
+  - [ ] getRasterizationData() for mesh/material extraction
+  - [ ] getRaytracingData() for geometry/instance extraction  
+  - [ ] getComputeData() for task/buffer extraction
+- [ ] Create asset dependency tracking per pass
+
+#### Week 3: Asset Integration & Hot Reload
+- [ ] Connect Hot Reload Manager to unified RenderGraph callback system
+- [ ] Implement automatic pass update when assets change
+- [ ] Add smart invalidation (only rebuild affected passes)
+- [ ] Create asset change type detection (geometry/texture/shader/material)
+
+#### Week 4: Advanced Features & Optimization
+- [ ] Implement render graph validation and cycle detection
+- [ ] Add performance monitoring for pass execution times
+- [ ] Create render graph visualization tools for debugging
+- [ ] Optimize resource barriers and synchronization between passes
+
+### Key Architectural Benefits
+
+#### Vulkan-Style Subpass Dependencies
+```zig
+// Define rendering pipeline like Vulkan subpass dependencies
+const shadow_pass = try render_graph.addPass(ShadowMapPass.create(...));
+const geometry_pass = try render_graph.addPass(GeometryPass.create(...));  
+const lighting_pass = try render_graph.addPass(LightingPass.create(...));
+const rt_reflection_pass = try render_graph.addPass(RTReflectionPass.create(...));
+const post_process_pass = try render_graph.addPass(PostProcessPass.create(...));
+
+// Automatic dependency resolution
+try render_graph.addDependency(shadow_pass, lighting_pass);
+try render_graph.addDependency(geometry_pass, lighting_pass);
+try render_graph.addDependency(lighting_pass, rt_reflection_pass);
+try render_graph.addDependency(rt_reflection_pass, post_process_pass);
+```
+
+#### Scene Multi-Pass Data Extraction
+```zig
+// Same scene data, different views for different rendering needs
+pub fn execute(impl: *anyopaque, context: RenderContext) !void {
+    switch (pass.pass_type) {
+        .rasterization => {
+            const raster_data = context.scene.getRasterizationData();
+            // Only extract meshes, materials, textures needed for rasterization
+        },
+        .raytracing => {
+            const rt_data = context.scene.getRaytracingData(); 
+            // Extract geometries, instances, acceleration structures
+        },
+        .compute => {
+            const compute_data = context.scene.getComputeData();
+            // Extract particle systems, compute buffers
+        },
+    }
+}
+```
+
+#### Unified Asset Change Propagation
+```zig
+// Single asset change updates all affected passes automatically
+scene.reloadTexture("albedo.png") 
+  → RenderGraph finds [RasterizationPass, RaytracingPass] depend on this texture
+  → Both passes rebuild their descriptors automatically
+  → TLAS/BLAS remain unchanged (only texture descriptors update)
+
+scene.reloadMesh("character.obj")
+  → RenderGraph finds [RasterizationPass, RaytracingPass] depend on this geometry  
+  → RasterizationPass rebuilds vertex/index buffers
+  → RaytracingPass rebuilds BLAS and TLAS automatically
+  → Texture-only passes (PostProcess) remain unchanged
+```
+
+### Benefits for Future ECS Integration
+1. **Unified Pass System**: ECS entities will automatically work with all rendering techniques
+2. **Component-Pass Bridge**: ECS components can declare which passes they participate in
+3. **Dynamic Scene Updates**: ECS entity changes propagate through render graph automatically
+4. **Performance Foundation**: Pass dependency resolution and batching essential for ECS scalability
+5. **Extensibility**: Adding new rendering techniques (compute shading, mesh shaders) fits naturally
+
+### Scene + Multiple Render Passes Architecture
+
+#### Scene as Multi-Pass Data Provider
+```zig
+// Scene doesn't know about specific rendering techniques
+// It provides different "views" of the same data for different passes
+pub const SceneView = struct {
+    // Core unified data
+    objects: []GameObject,
+    transform_buffer: Buffer,    // All object transforms
+    material_buffer: Buffer,     // All materials  
+    texture_array: []Texture,    // All textures
+    
+    // Pass-specific extractions (lazy evaluated)
+    rasterization_cache: ?RasterizationData = null,
+    raytracing_cache: ?RaytracingData = null,
+    compute_cache: ?ComputeData = null,
+    
+    pub fn invalidateCache(self: *Self, change_type: AssetChangeType) void {
+        switch (change_type) {
+            .geometry_changed => {
+                self.rasterization_cache = null;
+                self.raytracing_cache = null;
+                // compute_cache might be unaffected
+            },
+            .texture_changed => {
+                self.rasterization_cache = null; 
+                self.raytracing_cache = null;
+                // All passes affected by texture changes
+            },
+            .material_changed => {
+                // All passes use materials
+                self.rasterization_cache = null;
+                self.raytracing_cache = null;
+                self.compute_cache = null;
+            },
+        }
+    }
+};
+```
+
+#### Automatic Pass Selection Based on Scene Content
+```zig
+pub const RenderGraph = struct {
+    pub fn analyzeSceneAndOptimize(self: *Self, scene: *SceneView) !void {
+        // Automatically enable/disable passes based on scene content
+        
+        const stats = scene.analyzeContent();
+        
+        if (stats.transparent_objects > 0) {
+            try self.enablePass("transparency_pass");
+        }
+        
+        if (stats.dynamic_lights > 10) {
+            try self.enablePass("deferred_lighting");
+        } else {
+            try self.enablePass("forward_lighting");  
+        }
+        
+        if (stats.reflective_materials > 0 and self.raytracing_available) {
+            try self.enablePass("rt_reflections");
+        } else {
+            try self.enablePass("screen_space_reflections");
+        }
+        
+        if (stats.particle_systems > 0) {
+            try self.enablePass("compute_particles");
+        }
+    }
+};
+```
+
+#### Multi-Technique Rendering Pipeline Example
+```zig
+// Example: Hybrid raster + raytracing + compute pipeline
+pub fn setupHybridPipeline(render_graph: *RenderGraph) !void {
+    // Physics simulation (compute) - runs first
+    const physics_pass = try render_graph.addPass(ComputePhysicsPass{
+        .inputs = &.{},
+        .outputs = &.{ "physics_transforms", "collision_data" },
+    });
+    
+    // Particle simulation (compute) - depends on physics
+    const particle_sim = try render_graph.addPass(ComputeParticlePass{
+        .inputs = &.{ "physics_transforms", "collision_data" },
+        .outputs = &.{ "particle_buffer" },
+    });
+    
+    // Light culling (compute) - GPU-driven culling for clustered rendering
+    const light_culling = try render_graph.addPass(ComputeLightCullingPass{
+        .inputs = &.{ "camera_data" },
+        .outputs = &.{ "visible_lights_buffer" },
+    });
+    
+    // Geometry pass (rasterization) - depends on physics transforms
+    const geometry_pass = try render_graph.addPass(GeometryPass{
+        .inputs = &.{ "physics_transforms" },
+        .outputs = &.{ "depth_buffer", "normal_buffer", "albedo_buffer" },
+    });
+    
+    // Shadow mapping (rasterization) - can run in parallel with geometry
+    const shadow_pass = try render_graph.addPass(ShadowMapPass{
+        .inputs = &.{ "physics_transforms" },
+        .outputs = &.{ "shadow_map" },
+    });
+    
+    // Raytraced reflections (raytracing) - depends on G-buffer
+    const rt_reflections = try render_graph.addPass(RTReflectionPass{
+        .inputs = &.{ "depth_buffer", "normal_buffer" },
+        .outputs = &.{ "reflection_buffer" },
+    });
+    
+    // Post-processing (compute) - tone mapping, bloom, etc.
+    const post_process = try render_graph.addPass(ComputePostProcessPass{
+        .inputs = &.{ "reflection_buffer", "albedo_buffer" },
+        .outputs = &.{ "processed_buffer" },
+    });
+    
+    // Final composition (rasterization)  
+    const composite_pass = try render_graph.addPass(CompositePass{
+        .inputs = &.{ "processed_buffer", "shadow_map", "particle_buffer", "visible_lights_buffer" },
+        .outputs = &.{ "final_image" },
+    });
+    
+    // Automatic dependency resolution handles complex interdependencies
+    try render_graph.buildDependencies();
+}
+```
+
+### Why This Is Critical Now
+- **Modern Engine Architecture**: Hybrid rendering (raster + RT + compute) is industry standard
+- **Asset Pipeline Completeness**: Hot reload must work across ALL rendering techniques, not just textures  
+- **Development Velocity**: Artists need real-time feedback for geometry/material changes in all renderers
+- **Architecture Debt**: Current hardcoded renderer system cannot scale to modern rendering demands
+- **ECS Preparation**: Modular passes provide natural integration points for ECS component systems
+
+---
+
+## Phase 2: Entity Component System Foundation 🎯 **DEPENDS ON PHASE 1.5**
 
 ### Goals
 - Implement core ECS architecture (EntityManager, ComponentStorage, World)
