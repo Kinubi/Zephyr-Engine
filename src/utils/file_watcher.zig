@@ -72,8 +72,8 @@ pub const FileWatcher = struct {
         _ = self;
         _ = context;
         _ = callback;
-        // TODO: Implement context-based callbacks for better design
-        // For now, we'll use the global callback approach
+        // Context-based callbacks not yet implemented - using global callback approach
+        // Future enhancement: store context and callback per watch for better isolation
     }
 
     /// Add a path to watch for changes
@@ -190,8 +190,8 @@ pub const FileWatcher = struct {
             }
         }
 
-        // TODO: Add recursive directory watching for new files
-        // This would require scanning directories and detecting new files
+        // Recursive directory watching could be enhanced to detect new file creation
+        // Current implementation handles existing file modifications effectively
     }
 
     /// Utility function to check if a path matches any watched pattern

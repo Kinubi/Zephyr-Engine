@@ -1,12 +1,12 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../graphics_context.zig").GraphicsContext;
-const Scene = @import("../scene.zig").Scene;
-const Pipeline = @import("../pipeline.zig").Pipeline;
-const ShaderLibrary = @import("../shader.zig").ShaderLibrary;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const Scene = @import("../scene/scene.zig").Scene;
+const Pipeline = @import("../core/pipeline.zig").Pipeline;
+const ShaderLibrary = @import("../core/shader.zig").ShaderLibrary;
 const Math = @import("../utils/math.zig");
-const Camera = @import("../camera.zig").Camera;
-const FrameInfo = @import("../frameinfo.zig").FrameInfo;
+const Camera = @import("../rendering/camera.zig").Camera;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const RenderSystem = @import("../systems/render_system.zig").RenderSystem;
 
 const SimplePushConstantData = extern struct {

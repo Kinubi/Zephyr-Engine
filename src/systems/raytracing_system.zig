@@ -1,21 +1,21 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../graphics_context.zig").GraphicsContext;
-const Buffer = @import("../buffer.zig").Buffer;
-const Scene = @import("../scene.zig").Scene;
-const Vertex = @import("../mesh.zig").Vertex;
-const FrameInfo = @import("../frameinfo.zig").FrameInfo;
-const Pipeline = @import("../pipeline.zig").Pipeline;
-const ShaderLibrary = @import("../shader.zig").ShaderLibrary;
-const Swapchain = @import("../swapchain.zig").Swapchain;
-const DescriptorWriter = @import("../descriptors.zig").DescriptorWriter;
-const DescriptorSetLayout = @import("../descriptors.zig").DescriptorSetLayout;
-const DescriptorPool = @import("../descriptors.zig").DescriptorPool;
-const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
-const Texture = @import("../texture.zig").Texture;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const Buffer = @import("../core/buffer.zig").Buffer;
+const Scene = @import("../scene/scene.zig").Scene;
+const Vertex = @import("../rendering/mesh.zig").Vertex;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const Pipeline = @import("../core/pipeline.zig").Pipeline;
+const ShaderLibrary = @import("../core/shader.zig").ShaderLibrary;
+const Swapchain = @import("../core/swapchain.zig").Swapchain;
+const DescriptorWriter = @import("../core/descriptors.zig").DescriptorWriter;
+const DescriptorSetLayout = @import("../core/descriptors.zig").DescriptorSetLayout;
+const DescriptorPool = @import("../core/descriptors.zig").DescriptorPool;
+const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
+const Texture = @import("../core/texture.zig").Texture;
 const log = @import("../utils/log.zig").log;
 const LogLevel = @import("../utils/log.zig").LogLevel;
-const deinitDescriptorResources = @import("../descriptors.zig").deinitDescriptorResources;
+const deinitDescriptorResources = @import("../core/descriptors.zig").deinitDescriptorResources;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;

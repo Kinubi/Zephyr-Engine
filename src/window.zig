@@ -5,7 +5,7 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 const vk = @import("vulkan");
-const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
 
 pub const WindowProps = struct {
     width: u32 = 1280,

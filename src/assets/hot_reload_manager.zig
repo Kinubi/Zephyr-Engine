@@ -513,7 +513,10 @@ pub fn globalFileEventCallback(event: FileWatcher.FileEvent) void {
             },
             .created => {
                 log(.DEBUG, "hot_reload", "New file detected: {s}", .{event.path});
-                // TODO: Auto-register new assets if they match known patterns
+                // Auto-register new assets for known file types
+                if (manager.shouldAutoLoad(event.path)) {
+                    manager.tryAutoLoadAsset(event.path);
+                }
             },
             .deleted => {
                 manager.unregisterAsset(event.path);
@@ -522,12 +525,11 @@ pub fn globalFileEventCallback(event: FileWatcher.FileEvent) void {
                 if (event.old_path) |old_path| {
                     manager.unregisterAsset(old_path);
                 }
-                // TODO: Re-register at new path if needed
+                // Auto-load at new path if it's a supported file type
+                if (manager.shouldAutoLoad(event.path)) {
+                    manager.tryAutoLoadAsset(event.path);
+                }
             },
         }
     }
-}
-
-test "hot_reload_manager basic functionality" {
-    std.debug.print("✅ HotReloadManager compiled successfully!\n", .{});
 }

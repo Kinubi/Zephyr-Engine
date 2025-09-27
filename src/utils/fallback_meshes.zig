@@ -1,11 +1,11 @@
 const std = @import("std");
-const Mesh = @import("../mesh.zig").Mesh;
-const Vertex = @import("../mesh.zig").Vertex;
-const Model = @import("../mesh.zig").Model;
-const ModelMesh = @import("../mesh.zig").ModelMesh;
-const Transform = @import("../mesh.zig").Transform;
-const Geometry = @import("../geometry.zig").Geometry;
-const GraphicsContext = @import("../graphics_context.zig").GraphicsContext;
+const Mesh = @import("../rendering/mesh.zig").Mesh;
+const Vertex = @import("../rendering/mesh.zig").Vertex;
+const Model = @import("../rendering/mesh.zig").Model;
+const ModelMesh = @import("../rendering/mesh.zig").ModelMesh;
+const Transform = @import("../rendering/mesh.zig").Transform;
+const Geometry = @import("../rendering/geometry.zig").Geometry;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 
 /// Generate fallback meshes for when model loading fails or is slow
 pub const FallbackMeshes = struct {

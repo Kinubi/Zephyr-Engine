@@ -1,49 +1,69 @@
 const std = @import("std");
+
+// Core graphics imports
 const Window = @import("window.zig").Window;
-const Pipeline = @import("pipeline.zig").Pipeline;
+const Pipeline = @import("core/pipeline.zig").Pipeline;
+const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
+const Swapchain = @import("core/swapchain.zig").Swapchain;
+const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const ShaderLibrary = @import("core/shader.zig").ShaderLibrary;
+const entry_point_definition = @import("core/shader.zig").entry_point_definition;
+const Texture = @import("core/texture.zig").Texture;
+const DescriptorSetLayout = @import("core/descriptors.zig").DescriptorSetLayout;
+const DescriptorPool = @import("core/descriptors.zig").DescriptorPool;
+const DescriptorSetWriter = @import("core/descriptors.zig").DescriptorWriter;
+const Buffer = @import("core/buffer.zig").Buffer;
+
+// Rendering imports
+const Vertex = @import("rendering/mesh.zig").Vertex;
+const Mesh = @import("rendering/mesh.zig").Mesh;
+const Model = @import("rendering/mesh.zig").Model;
+const ModelMesh = @import("rendering/mesh.zig").ModelMesh;
+const Camera = @import("rendering/camera.zig").Camera;
+const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
+const GlobalUbo = @import("rendering/frameinfo.zig").GlobalUbo;
+const GlobalUboSet = @import("rendering/ubo_set.zig").GlobalUboSet;
+const RaytracingDescriptorSet = @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet;
+
+// Scene imports
+const Scene = @import("scene/scene.zig").Scene;
+const EnhancedScene = @import("scene/scene_enhanced.zig").EnhancedScene;
+const GameObject = @import("scene/game_object.zig").GameObject;
+const Material = @import("scene/scene.zig").Material;
+
+// Asset system imports
+const AssetManager = @import("assets/asset_manager.zig").AssetManager;
+
+// Renderer imports
+const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
+const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
+const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
+
+// System imports
+const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
+const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
+const RenderSystem = @import("systems/render_system.zig").RenderSystem;
+
+// Utility imports
+const Math = @import("utils/math.zig");
+const log = @import("utils/log.zig").log;
+const LogLevel = @import("utils/log.zig").LogLevel;
+const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
+
+// Input controller
+const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
+
+// Vulkan bindings and external C libraries
+const vk = @import("vulkan");
+const c = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
+
+// Embedded shaders
 const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
 const point_light_vert align(@alignOf(u32)) = @embedFile("point_light_vert").*;
 const point_light_frag align(@alignOf(u32)) = @embedFile("point_light_frag").*;
-const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
-const Swapchain = @import("swapchain.zig").Swapchain;
-const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
-const vk = @import("vulkan");
-const ShaderLibrary = @import("shader.zig").ShaderLibrary;
-const entry_point_definition = @import("shader.zig").entry_point_definition;
-const Vertex = @import("mesh.zig").Vertex;
-const Mesh = @import("mesh.zig").Mesh;
-const Model = @import("mesh.zig").Model;
-const ModelMesh = @import("mesh.zig").ModelMesh;
-const Scene = @import("scene.zig").Scene;
-const EnhancedScene = @import("scene_enhanced.zig").EnhancedScene;
-const AssetManager = @import("assets/asset_manager.zig").AssetManager;
-const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
-const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
-const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
-const Math = @import("utils/math.zig");
-const Camera = @import("camera.zig").Camera;
-const GameObject = @import("game_object.zig").GameObject;
-const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
-const FrameInfo = @import("frameinfo.zig").FrameInfo;
-const Texture = @import("texture.zig").Texture;
-const DescriptorSetLayout = @import("descriptors.zig").DescriptorSetLayout;
-const DescriptorPool = @import("descriptors.zig").DescriptorPool;
-const DescriptorSetWriter = @import("descriptors.zig").DescriptorWriter;
-const Buffer = @import("buffer.zig").Buffer;
-const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
-const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
-const GlobalUboSet = @import("ubo_set.zig").GlobalUboSet;
-const RaytracingDescriptorSet = @import("raytracing_descriptor_set.zig").RaytracingDescriptorSet;
-const c = @cImport({
-    @cInclude("GLFW/glfw3.h");
-});
-const Material = @import("scene.zig").Material;
-const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
-const log = @import("utils/log.zig").log;
-const LogLevel = @import("utils/log.zig").LogLevel;
-const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
-const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 
 // Callback function for ThreadPool running status changes
 fn onThreadPoolRunningChanged(running: bool) void {
@@ -198,18 +218,6 @@ pub const App = struct {
 
         // Update async textures for Vulkan descriptors (must be done on main thread)
         try scene.updateAsyncTextures(self.allocator);
-
-        // // --- User-friendly model+material+texture creation for the vase ---
-        // log(.DEBUG, "scene", "Loading vase model and texture", .{});
-        // const object = try scene.addModelWithMaterialAndTransform(
-        //     "models/smooth_vase.obj",
-        //     "textures/granitesmooth1-albedo.png",
-        //     Math.Vec3.init(0, -1.5, 0.5),
-        //     Math.Vec3.init(0.5, 0.5, 0.5),
-        // );
-        // log(.INFO, "scene", "Added object with model: {d} meshes", .{if (object.model) |m| m.meshes.items.len else 0});
-
-        // Cube is now handled by enhanced scene system above
 
         // Create another textured cube with a different texture (non-blocking)
         log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
@@ -528,7 +536,7 @@ pub const App = struct {
         self.gc.deinit();
 
         // Clean up zstbi global state
-        @import("texture.zig").deinitZstbi();
+        @import("core/texture.zig").deinitZstbi();
 
         self.window.deinit();
     }
