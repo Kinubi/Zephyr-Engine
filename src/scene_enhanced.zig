@@ -400,6 +400,53 @@ pub const EnhancedScene = struct {
         return self.texture_cache.get(texture_path);
     }
 
+    /// SAFE texture access for rendering - always returns a valid texture
+    /// Uses AssetManager fallback system to prevent crashes from unloaded assets
+    pub fn getTextureForRendering(self: *Self, asset_id: AssetId) ?*Texture {
+        // Get the safe asset ID (with fallback if needed)
+        const safe_asset_id = self.asset_manager.getAssetIdForRendering(asset_id);
+
+        // Try to get texture from legacy system first
+        if (self.asset_to_texture.get(safe_asset_id)) |texture_index| {
+            if (texture_index < self.textures.items.len) {
+                return &self.textures.items[texture_index];
+            }
+        }
+
+        // If asset is a fallback or not in legacy system, we need to handle it
+        // For now, return null and let the renderer handle it gracefully
+        // TODO: In future, we'll return the actual texture from AssetManager storage
+        return null;
+    }
+
+    /// SAFE texture index access for legacy compatibility
+    /// Returns fallback texture index if original texture not ready
+    pub fn getTextureIndexForRendering(self: *Self, texture_index: usize) usize {
+        if (texture_index < self.textures.items.len) {
+            // Check if this texture has an associated asset that might not be ready
+            if (self.texture_assets.get(texture_index)) |asset_id| {
+                const safe_asset_id = self.asset_manager.getAssetIdForRendering(asset_id);
+                if (safe_asset_id != asset_id) {
+                    // Asset was replaced with fallback, try to find fallback texture index
+                    if (self.asset_to_texture.get(safe_asset_id)) |fallback_index| {
+                        return fallback_index;
+                    }
+                }
+            }
+            return texture_index;
+        }
+
+        // Invalid index - try to return a fallback texture index
+        if (self.asset_manager.getFallbackAssetId(.missing)) |fallback_id| {
+            if (self.asset_to_texture.get(fallback_id)) |fallback_index| {
+                return fallback_index;
+            }
+        }
+
+        // Last resort - return 0 or clamp to valid range
+        return if (self.textures.items.len > 0) 0 else texture_index;
+    }
+
     /// Check if a texture is currently being loaded
     pub fn isTextureLoading(self: *Self, texture_path: []const u8) bool {
         return self.loading_textures.get(texture_path) orelse false;

@@ -12,6 +12,62 @@ pub const AssetMetadata = asset_types.AssetMetadata;
 pub const AssetRegistry = asset_registry.AssetRegistry;
 pub const AssetLoader = asset_loader.AssetLoader;
 
+/// Types of fallback assets for different scenarios
+pub const FallbackType = enum {
+    missing, // Pink checkerboard for missing textures
+    loading, // Animated or static "loading..." texture
+    @"error", // Red X or error indicator (error is keyword)
+    default, // Basic white texture for materials
+};
+
+/// Pre-loaded fallback assets for safe rendering
+pub const FallbackAssets = struct {
+    missing_texture: ?AssetId = null,
+    loading_texture: ?AssetId = null,
+    error_texture: ?AssetId = null,
+    default_texture: ?AssetId = null,
+
+    const Self = @This();
+
+    /// Initialize fallback assets by loading them synchronously
+    pub fn init(asset_manager: *AssetManager) !FallbackAssets {
+        var fallbacks = FallbackAssets{};
+
+        // Try to load each fallback texture, but don't fail if missing
+        fallbacks.missing_texture = asset_manager.loadTextureSync("textures/missing.png") catch |err| blk: {
+            std.log.warn("Could not load missing.png fallback: {}", .{err});
+            break :blk null;
+        };
+
+        fallbacks.loading_texture = asset_manager.loadTextureSync("textures/loading.png") catch |err| blk: {
+            std.log.warn("Could not load loading.png fallback: {}", .{err});
+            break :blk null;
+        };
+
+        fallbacks.error_texture = asset_manager.loadTextureSync("textures/error.png") catch |err| blk: {
+            std.log.warn("Could not load error.png fallback: {}", .{err});
+            break :blk null;
+        };
+
+        fallbacks.default_texture = asset_manager.loadTextureSync("textures/default.png") catch |err| blk: {
+            std.log.warn("Could not load default.png fallback: {}", .{err});
+            break :blk null;
+        };
+
+        return fallbacks;
+    }
+
+    /// Get fallback asset ID for given type
+    pub fn getAssetId(self: *const Self, fallback_type: FallbackType) ?AssetId {
+        return switch (fallback_type) {
+            .missing => self.missing_texture,
+            .loading => self.loading_texture,
+            .@"error" => self.error_texture,
+            .default => self.default_texture,
+        };
+    }
+};
+
 /// Central Asset Manager that coordinates all asset operations
 /// This is the main interface for the game engine to interact with assets
 pub const AssetManager = struct {
@@ -19,6 +75,9 @@ pub const AssetManager = struct {
     registry: *AssetRegistry,
     loader: *AssetLoader,
     allocator: std.mem.Allocator,
+
+    // Fallback assets for safe rendering
+    fallbacks: FallbackAssets,
 
     // Configuration
     max_loader_threads: u32 = 4,
@@ -34,11 +93,17 @@ pub const AssetManager = struct {
         const loader = try allocator.create(AssetLoader);
         loader.* = try AssetLoader.init(allocator, registry, 4);
 
-        return Self{
+        var self = Self{
             .registry = registry,
             .loader = loader,
             .allocator = allocator,
+            .fallbacks = FallbackAssets{}, // Initialize empty first
         };
+
+        // Initialize fallback assets after AssetManager is created
+        self.fallbacks = try FallbackAssets.init(&self);
+
+        return self;
     }
     pub fn deinit(self: *Self) void {
         self.loader.deinit();
@@ -94,6 +159,12 @@ pub const AssetManager = struct {
         try self.loader.requestLoad(asset_id, priority);
     }
 
+    /// Load a texture synchronously (blocks until complete)
+    /// Used for fallback assets that must be available immediately
+    pub fn loadTextureSync(self: *Self, path: []const u8) !AssetId {
+        return try self.loadAsset(path, .texture);
+    }
+
     // Asset Access
 
     /// Get asset metadata by ID
@@ -117,6 +188,49 @@ pub const AssetManager = struct {
             return asset.state == .loaded;
         }
         return false;
+    }
+
+    // Safe Asset Access with Fallbacks
+
+    /// Get asset ID for rendering - returns fallback if asset not ready
+    /// This is the SAFE way to access assets that might still be loading
+    pub fn getAssetIdForRendering(self: *Self, asset_id: AssetId) AssetId {
+        if (self.getAsset(asset_id)) |asset| {
+            switch (asset.state) {
+                .loaded => {
+                    // Return actual asset if loaded
+                    return asset_id;
+                },
+                .loading => {
+                    // Show loading indicator while asset loads
+                    if (self.fallbacks.getAssetId(.loading)) |fallback_id| {
+                        return fallback_id;
+                    }
+                    // Fallback to missing if no loading texture
+                    return self.fallbacks.getAssetId(.missing) orelse asset_id;
+                },
+                .failed => {
+                    // Show error texture for failed loads
+                    if (self.fallbacks.getAssetId(.@"error")) |fallback_id| {
+                        return fallback_id;
+                    }
+                    // Fallback to missing if no error texture
+                    return self.fallbacks.getAssetId(.missing) orelse asset_id;
+                },
+                .unloaded => {
+                    // Start loading and show missing texture
+                    self.loadAssetById(asset_id, .normal) catch {};
+                    return self.fallbacks.getAssetId(.missing) orelse asset_id;
+                },
+            }
+        }
+        // Asset doesn't exist at all - return missing fallback
+        return self.fallbacks.getAssetId(.missing) orelse asset_id;
+    }
+
+    /// Get fallback asset ID for a specific type
+    pub fn getFallbackAssetId(self: *Self, fallback_type: FallbackType) ?AssetId {
+        return self.fallbacks.getAssetId(fallback_type);
     }
 
     // Reference Counting
