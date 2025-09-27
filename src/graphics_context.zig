@@ -689,17 +689,38 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
     };
     ray_query_create.p_next = &ray_tracing_create;
 
-    var bda_create = vk.PhysicalDeviceBufferDeviceAddressFeatures{
+    var accel_create = vk.PhysicalDeviceAccelerationStructureFeaturesKHR{
+        .acceleration_structure = .true,
+    };
+    ray_tracing_create.p_next = &accel_create;
+
+    var vulkan12_features = vk.PhysicalDeviceVulkan12Features{
+        .runtime_descriptor_array = .true,
+        .descriptor_indexing = .true,
+        .shader_input_attachment_array_dynamic_indexing = .true,
+        .shader_uniform_texel_buffer_array_dynamic_indexing = .true,
+        .shader_storage_texel_buffer_array_dynamic_indexing = .true,
+        .shader_uniform_buffer_array_non_uniform_indexing = .true,
+        .shader_sampled_image_array_non_uniform_indexing = .true,
+        .shader_storage_buffer_array_non_uniform_indexing = .true,
+        .shader_storage_image_array_non_uniform_indexing = .true,
+        .shader_uniform_texel_buffer_array_non_uniform_indexing = .true,
+        .shader_storage_texel_buffer_array_non_uniform_indexing = .true,
+        .descriptor_binding_uniform_buffer_update_after_bind = .true,
+        .descriptor_binding_sampled_image_update_after_bind = .true,
+        .descriptor_binding_storage_image_update_after_bind = .true,
+        .descriptor_binding_storage_buffer_update_after_bind = .true,
+        .descriptor_binding_uniform_texel_buffer_update_after_bind = .true,
+        .descriptor_binding_storage_texel_buffer_update_after_bind = .true,
+        .descriptor_binding_update_unused_while_pending = .true,
+        .descriptor_binding_partially_bound = .true,
+        .descriptor_binding_variable_descriptor_count = .true,
+        // Buffer device address features (promoted to Vulkan 1.2)
         .buffer_device_address = .true,
         .buffer_device_address_capture_replay = .true,
         .buffer_device_address_multi_device = .true,
     };
-    ray_tracing_create.p_next = &bda_create;
-
-    var accel_create = vk.PhysicalDeviceAccelerationStructureFeaturesKHR{
-        .acceleration_structure = .true,
-    };
-    bda_create.p_next = &accel_create;
+    accel_create.p_next = &vulkan12_features;
 
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const asset_types = @import("asset_types.zig");
 const asset_registry = @import("asset_registry.zig");
+const log = @import("../utils/log.zig").log;
 
 const AssetId = asset_types.AssetId;
 const AssetType = asset_types.AssetType;
@@ -12,11 +13,12 @@ const AssetRegistry = asset_registry.AssetRegistry;
 
 // Import the new ThreadPool implementation
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
 
 // Worker function for the ThreadPool
 fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
     // Mark this thread as ready
-    pool.markThreadReady();
+    pool.markThreadReady(worker_id);
 
     while (pool.running) {
         // Try to get a job
@@ -24,12 +26,12 @@ fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
             // Cast the loader pointer back to AssetLoader
             const loader: *AssetLoader = @ptrCast(@alignCast(work_item.loader));
 
-            std.debug.print("[ThreadPool] Worker {d} processing asset {d}\n", .{ worker_id, work_item.asset_id });
+            log(.DEBUG, "asset_loader", "Worker {d} processing asset {d}", .{ worker_id, work_item.asset_id });
 
             // Execute job
             loader.performLoadAsync(work_item.asset_id) catch |err| {
                 // Log error and mark asset as failed
-                std.debug.print("[ThreadPool] Worker {d} failed to load asset {d}: {}\n", .{ worker_id, work_item.asset_id, err });
+                log(.ERROR, "asset_loader", "Worker {d} failed to load asset {d}: {}", .{ worker_id, work_item.asset_id, err });
 
                 // Convert error to string for registry
                 var error_buf: [256]u8 = undefined;
@@ -40,7 +42,7 @@ fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
                 _ = @atomicRmw(u32, &loader.failed_loads, .Add, 1, .monotonic);
             };
 
-            std.debug.print("[ThreadPool] Worker {d} completed asset {d}\n", .{ worker_id, work_item.asset_id });
+            log(.DEBUG, "asset_loader", "Worker {d} completed asset {d}", .{ worker_id, work_item.asset_id });
         } else {
             // No job available, sleep briefly to avoid busy waiting
             std.Thread.sleep(std.time.ns_per_ms * 1); // 1ms sleep
@@ -63,8 +65,8 @@ pub const AssetLoader = struct {
     medium_priority_queue: RequestQueue,
     low_priority_queue: RequestQueue,
 
-    // Async loading thread pool
-    thread_pool: ?ThreadPool = null,
+    // Async loading thread pool (heap allocated to prevent move corruption)
+    thread_pool: ?*ThreadPool = null,
     async_enabled: bool = false,
 
     // Statistics
@@ -113,27 +115,45 @@ pub const AssetLoader = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, registry: *AssetRegistry, max_threads: u32) !Self {
+        // Allocate ThreadPool on heap if needed
+        const thread_pool = if (max_threads > 0) blk: {
+            const pool_ptr = try allocator.create(ThreadPool);
+            pool_ptr.* = try ThreadPool.init(allocator, max_threads, assetWorkerThread);
+            // Start the ThreadPool after initialization
+            try pool_ptr.start();
+            break :blk pool_ptr;
+        } else null;
+
         return Self{
             .registry = registry,
             .allocator = allocator,
             .high_priority_queue = RequestQueue.init(allocator),
             .medium_priority_queue = RequestQueue.init(allocator),
             .low_priority_queue = RequestQueue.init(allocator),
-            .thread_pool = if (max_threads > 0) try ThreadPool.init(allocator, max_threads, assetWorkerThread) else null,
+            .thread_pool = thread_pool,
             .async_enabled = max_threads > 0,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        log(.ERROR, "asset_loader", "AssetLoader deinit called, cleaning up resources", .{});
         // Clean up thread pool first
-        if (self.thread_pool) |*pool| {
+        if (self.thread_pool) |pool| {
             pool.deinit();
+            self.allocator.destroy(pool);
         }
 
         // Clean up queues
         self.high_priority_queue.deinit(self.allocator);
         self.medium_priority_queue.deinit(self.allocator);
         self.low_priority_queue.deinit(self.allocator);
+    }
+
+    /// Set callback for ThreadPool running status changes
+    pub fn setThreadPoolCallback(self: *Self, callback: *const fn (bool) void) void {
+        if (self.thread_pool) |pool| {
+            pool.setOnRunningChangedCallback(callback);
+        }
     }
 
     /// Request an asset to be loaded with the given priority
@@ -170,15 +190,16 @@ pub const AssetLoader = struct {
         if (self.async_enabled and self.thread_pool != null) {
             // Check if thread pool has available workers
             if (!self.thread_pool.?.hasAvailableWorkers()) {
-                std.debug.print("[AssetLoader] No worker threads available, falling back to sync load for asset {d}\n", .{asset_id});
+                log(.WARN, "asset_loader", "No worker threads available, falling back to sync load for asset {d}", .{asset_id});
                 try self.performLoad(asset_id);
                 return;
             }
 
             // Submit to thread pool, with fallback to sync loading on error
-            self.thread_pool.?.submitWork(asset_id, self) catch |err| switch (err) {
+            const work_item = WorkItem{ .asset_id = asset_id, .loader = self };
+            self.thread_pool.?.submitWork(work_item) catch |err| switch (err) {
                 error.ThreadPoolNotRunning, error.NoWorkerThreadsAvailable => {
-                    std.debug.print("[AssetLoader] Thread pool unavailable ({any}), falling back to sync load for asset {d}\n", .{ err, asset_id });
+                    log(.WARN, "asset_loader", "Thread pool unavailable ({any}), falling back to sync load for asset {d}", .{ err, asset_id });
                     try self.performLoad(asset_id);
                 },
                 else => return err,
@@ -304,7 +325,7 @@ pub const AssetLoader = struct {
             const dependency = self.registry.getAsset(dep_id) orelse continue;
             if (dependency.state != .loaded and dependency.state != .loading) {
                 // Submit dependency for async loading and wait
-                if (self.thread_pool) |*pool| {
+                if (self.thread_pool) |pool| {
                     try pool.submitWork(.{ .asset_id = dep_id, .loader = self });
                 }
             }

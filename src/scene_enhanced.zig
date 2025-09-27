@@ -13,17 +13,11 @@ const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
 const log = @import("utils/log.zig").log;
 const LogLevel = @import("utils/log.zig").LogLevel;
 
-// Import Asset Manager components
+// Asset management imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 const AssetId = @import("assets/asset_manager.zig").AssetId;
 const AssetType = @import("assets/asset_manager.zig").AssetType;
 const LoadPriority = @import("assets/asset_manager.zig").LoadPriority;
-
-/// Task data for async texture loading
-const AsyncLoadTask = struct {
-    scene: *EnhancedScene,
-    path: []const u8,
-};
 
 /// Global mutex for texture loading to prevent zstbi init conflicts
 var texture_loading_mutex = std.Thread.Mutex{};
@@ -385,78 +379,20 @@ pub const EnhancedScene = struct {
     /// Request a texture to be loaded asynchronously
     pub fn preloadTextureAsync(self: *Self, texture_path: []const u8, priority: LoadPriority) !AssetId {
         log(.INFO, "enhanced_scene", "Requesting async texture preload: {s}", .{texture_path});
-        const asset_id = try self.asset_manager.registerAsset(texture_path, .texture);
-        try self.asset_manager.loader.loadAsync(asset_id, priority);
-        return asset_id;
+        return try self.asset_manager.loadTexture(texture_path, priority);
     }
 
-    /// Start loading a texture asynchronously into the scene's texture cache
+    /// Start loading a texture asynchronously using AssetManager
     pub fn startAsyncTextureLoad(self: *Self, texture_path: []const u8) !void {
-        // Check if already loaded or loading
-        if (self.texture_cache.contains(texture_path)) {
-            log(.DEBUG, "enhanced_scene", "Texture already loaded: {s}", .{texture_path});
-            return;
-        }
+        log(.INFO, "enhanced_scene", "Starting async texture load via AssetManager: {s}", .{texture_path});
 
-        if (self.loading_textures.get(texture_path)) |is_loading| {
-            if (is_loading) {
-                log(.DEBUG, "enhanced_scene", "Texture already loading: {s}", .{texture_path});
-                return;
-            }
-        }
+        // Use AssetManager to start async loading with high priority
+        const asset_id = try self.asset_manager.loadTexture(texture_path, .high);
 
-        // Mark as loading
-        const path_copy = try self.allocator.dupe(u8, texture_path);
-        try self.loading_textures.put(path_copy, true);
+        log(.DEBUG, "enhanced_scene", "AssetManager texture load queued: {s} -> AssetId: {d}", .{ texture_path, asset_id.toU64() });
 
-        log(.INFO, "enhanced_scene", "Starting async texture load: {s}", .{texture_path});
-
-        // Create task data for async loading
-        const task_data = try self.allocator.create(AsyncLoadTask);
-        task_data.* = .{
-            .scene = self,
-            .path = path_copy,
-        };
-
-        // Spawn async loading thread
-        const thread = try std.Thread.spawn(.{}, asyncTextureLoadWorker, .{task_data});
-        thread.detach(); // Don't block on thread completion
-    }
-
-    /// Worker function for async texture loading
-    fn asyncTextureLoadWorker(task_data: *AsyncLoadTask) void {
-        const scene = task_data.scene;
-        const path = task_data.path;
-
-        log(.INFO, "enhanced_scene", "Worker thread loading texture: {s}", .{path});
-
-        // Load texture on worker thread with proper synchronization
-        texture_loading_mutex.lock();
-        defer texture_loading_mutex.unlock();
-
-        var texture = Texture.initFromFile(scene.gc, scene.allocator, path, .rgba8) catch |err| {
-            log(.ERROR, "enhanced_scene", "Failed to load texture {s}: {}", .{ path, err });
-            _ = scene.loading_textures.put(path, false) catch {};
-            scene.allocator.free(path);
-            scene.allocator.destroy(task_data);
-            return;
-        };
-
-        // Add texture to scene (this needs to be thread-safe)
-        const texture_index = scene.addTextureThreadSafe(texture, path) catch |err| {
-            log(.ERROR, "enhanced_scene", "Failed to add texture {s}: {}", .{ path, err });
-            texture.deinit();
-            _ = scene.loading_textures.put(path, false) catch {};
-            scene.allocator.free(path);
-            scene.allocator.destroy(task_data);
-            return;
-        };
-
-        log(.INFO, "enhanced_scene", "Async texture load complete: {s} -> index {d}", .{ path, texture_index });
-
-        // Clean up
-        scene.allocator.free(path);
-        scene.allocator.destroy(task_data);
+        // For now, we'll just queue the load through AssetManager
+        // The legacy texture loading system will handle the actual Texture object creation
     }
 
     /// Get a texture from cache if available, returns texture index or null
@@ -522,22 +458,19 @@ pub const EnhancedScene = struct {
     /// Request a model to be loaded asynchronously
     pub fn preloadModelAsync(self: *Self, model_path: []const u8, priority: LoadPriority) !AssetId {
         log(.INFO, "enhanced_scene", "Requesting async model preload: {s}", .{model_path});
-        const asset_id = try self.asset_manager.registerAsset(model_path, .mesh);
-        try self.asset_manager.loader.loadAsync(asset_id, priority);
-        return asset_id;
+        return try self.asset_manager.loadMesh(model_path, priority);
     }
 
     /// Check if an asset is ready to use
     pub fn isAssetReady(self: *Self, asset_id: AssetId) bool {
-        const asset = self.asset_manager.getAssetMetadata(asset_id) orelse return false;
-        return asset.state == .loaded;
+        return self.asset_manager.isAssetLoaded(asset_id);
     }
 
     /// Wait for an asset to finish loading
     pub fn waitForAsset(self: *Self, asset_id: AssetId) void {
-        log(.DEBUG, "enhanced_scene", "Waiting for asset {d} to load", .{asset_id});
+        log(.DEBUG, "enhanced_scene", "Waiting for asset {d} to load", .{asset_id.toU64()});
         self.asset_manager.loader.waitForAsset(asset_id);
-        log(.DEBUG, "enhanced_scene", "Asset {d} loading complete", .{asset_id});
+        log(.DEBUG, "enhanced_scene", "Asset {d} loading complete", .{asset_id.toU64()});
     }
 
     /// Get current loading statistics from the Asset Manager

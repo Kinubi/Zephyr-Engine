@@ -45,6 +45,15 @@ const LogLevel = @import("utils/log.zig").LogLevel;
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 
+// Callback function for ThreadPool running status changes
+fn onThreadPoolRunningChanged(running: bool) void {
+    if (running) {
+        log(.INFO, "app", "ThreadPool is now running", .{});
+    } else {
+        log(.WARN, "app", "ThreadPool has stopped running - no more async operations possible", .{});
+    }
+}
+
 pub const App = struct {
     window: Window = undefined,
 
@@ -95,6 +104,9 @@ pub const App = struct {
 
         // Initialize Asset Manager
         asset_manager = try AssetManager.init(self.allocator);
+
+        // Set up ThreadPool callback to monitor running status
+        asset_manager.setThreadPoolCallback(onThreadPoolRunningChanged);
 
         // Initialize Enhanced Scene with Asset Manager integration
         scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);

@@ -49,6 +49,11 @@ pub const AssetManager = struct {
         self.allocator.destroy(self.registry);
     }
 
+    /// Set callback for ThreadPool running status changes
+    pub fn setThreadPoolCallback(self: *Self, callback: *const fn (bool) void) void {
+        self.loader.setThreadPoolCallback(callback);
+    }
+
     // Asset Registration
 
     /// Register a new asset at the given path

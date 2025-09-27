@@ -42,8 +42,10 @@ pub const WorkQueue = struct {
 
         const item = self.items.items[0];
         // Move remaining items forward
-        for (1..self.len) |i| {
-            self.items.items[i - 1] = self.items.items[i];
+        if (self.len > 1) {
+            for (1..self.len) |i| {
+                self.items.items[i - 1] = self.items.items[i];
+            }
         }
         self.len -= 1;
         return item;
@@ -61,6 +63,9 @@ pub const ThreadPool = struct {
     ready_count: std.atomic.Value(u32),
     worker_fn: *const fn (*ThreadPool, usize) void,
 
+    // Callback for when pool running status changes
+    on_running_changed: ?*const fn (bool) void = null,
+
     const WorkerContext = struct {
         pool: *ThreadPool,
         worker_id: usize,
@@ -71,12 +76,12 @@ pub const ThreadPool = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, worker_count: u32, comptime worker_fn: anytype) !ThreadPool {
-        log(.INFO, "thread_pool", "Starting with {} worker threads...", .{worker_count});
+        log(.INFO, "thread_pool", "Initializing ThreadPool with {} worker threads...", .{worker_count});
 
         var pool = ThreadPool{
             .threads = try allocator.alloc(std.Thread, worker_count),
             .work_queue = WorkQueue.init(allocator),
-            .running = true,
+            .running = false, // Start as false, will be set true in start()
             .shutting_down = std.atomic.Value(bool).init(false),
             .allocator = allocator,
             .threads_ready = std.ArrayList(bool){},
@@ -90,19 +95,27 @@ pub const ThreadPool = struct {
             try pool.threads_ready.append(allocator, false);
         }
 
+        return pool;
+    }
+
+    /// Start the worker threads (call after init)
+    pub fn start(self: *ThreadPool) !void {
+        log(.INFO, "thread_pool", "Starting {} worker threads...", .{self.threads.len});
+
+        // Set running to true before starting threads
+        self.running = true;
+
         // Start worker threads
-        for (pool.threads, 0..) |*thread, i| {
-            thread.* = try std.Thread.spawn(.{}, genericWorkerThread, .{WorkerContext{ .pool = &pool, .worker_id = i }});
+        for (self.threads, 0..) |*thread, i| {
+            thread.* = try std.Thread.spawn(.{}, genericWorkerThread, .{WorkerContext{ .pool = self, .worker_id = i }});
         }
 
         // Wait for all threads to become ready
-        log(.DEBUG, "thread_pool", "Waiting for {d} worker threads to become ready...", .{worker_count});
-        while (pool.ready_count.load(.acquire) < worker_count) {
+        log(.DEBUG, "thread_pool", "Waiting for {d} worker threads to become ready...", .{self.threads.len});
+        while (self.ready_count.load(.acquire) < self.threads.len) {
             std.Thread.sleep(std.time.ns_per_ms * 1); // 1ms sleep
         }
-        log(.INFO, "thread_pool", "All {d} worker threads are ready!", .{worker_count});
-
-        return pool;
+        log(.INFO, "thread_pool", "All {d} worker threads are ready!", .{self.threads.len});
     }
 
     pub fn deinit(self: *ThreadPool) void {
@@ -112,6 +125,12 @@ pub const ThreadPool = struct {
         // Signal all threads to stop under mutex protection
         self.work_queue.mutex.lock();
         self.running = false;
+
+        // Call callback when running is set to false
+        if (self.on_running_changed) |callback| {
+            callback(false);
+        }
+
         // Clear any existing jobs to avoid processing them during shutdown
         self.work_queue.len = 0;
         self.work_queue.mutex.unlock();
@@ -123,11 +142,12 @@ pub const ThreadPool = struct {
             thread.join();
         }
 
+        log(.INFO, "thread_pool", "All worker threads shut down cleanly", .{});
+
+        // Only deinitialize after all threads are joined
         self.work_queue.deinit(self.allocator);
         self.threads_ready.deinit(self.allocator);
         self.allocator.free(self.threads);
-
-        log(.INFO, "thread_pool", "All worker threads shut down cleanly", .{});
     }
 
     pub fn submitWork(self: *ThreadPool, work_item: WorkItem) !void {
@@ -148,13 +168,48 @@ pub const ThreadPool = struct {
         return self.running and self.ready_count.load(.acquire) > 0;
     }
 
-    /// Mark thread as ready (called by worker threads)
-    pub fn markThreadReady(self: *ThreadPool) void {
-        const ready = self.ready_count.fetchAdd(1, .monotonic) + 1;
-        log(.DEBUG, "thread_pool", "Thread ready! ({}/{})", .{ ready, self.threads.len });
+    /// Set callback function to be called when running status changes
+    pub fn setOnRunningChangedCallback(self: *ThreadPool, callback: *const fn (bool) void) void {
+        self.on_running_changed = callback;
+    }
 
-        if (ready == self.threads.len) {
-            log(.INFO, "thread_pool", "All {} worker threads are ready!", .{self.threads.len});
+    /// Stop the thread pool (set running to false) without deinitializing
+    pub fn stop(self: *ThreadPool) void {
+        self.work_queue.mutex.lock();
+        defer self.work_queue.mutex.unlock();
+
+        if (self.running) {
+            self.running = false;
+            log(.INFO, "thread_pool", "ThreadPool stopped manually", .{});
+
+            // Call callback when running is set to false
+            if (self.on_running_changed) |callback| {
+                callback(false);
+            }
+        }
+    }
+
+    /// Mark thread as ready (called by worker threads)
+    pub fn markThreadReady(self: *ThreadPool, worker_id: usize) void {
+        self.threads_ready_mutex.lock();
+        defer self.threads_ready_mutex.unlock();
+
+        // Set thread as ready in the boolean array
+        if (worker_id < self.threads_ready.items.len and !self.threads_ready.items[worker_id]) {
+            self.threads_ready.items[worker_id] = true;
+            const ready = self.ready_count.fetchAdd(1, .monotonic) + 1;
+            log(.DEBUG, "thread_pool", "Thread {d} ready! ({}/{})", .{ worker_id, ready, self.threads.len });
+
+            if (ready == self.threads.len) {
+                log(.INFO, "thread_pool", "All {} worker threads are ready!", .{self.threads.len});
+            }
+        } else {
+            const current_count = self.ready_count.load(.acquire);
+            if (worker_id < self.threads_ready.items.len) {
+                log(.WARN, "thread_pool", "Thread {d} already marked as ready! (current count: {d})", .{ worker_id, current_count });
+            } else {
+                log(.ERROR, "thread_pool", "Invalid worker_id {d} (max: {d}, current count: {d})", .{ worker_id, self.threads_ready.items.len, current_count });
+            }
         }
     }
 
@@ -175,12 +230,34 @@ pub const ThreadPool = struct {
             return;
         }
 
-        if (worker_id < self.threads_ready.items.len and self.threads_ready.items[worker_id]) {
+        // Triple-check right before accessing the array to prevent race condition
+        if (self.shutting_down.load(.acquire)) {
+            log(.DEBUG, "thread_pool", "Worker {d} shutting down (pool deallocating during check)", .{worker_id});
+            return;
+        }
+
+        // Final safety check before any array access
+        if (self.shutting_down.load(.acquire)) {
+            log(.DEBUG, "thread_pool", "Worker {d} shutting down (pool deallocating before array access)", .{worker_id});
+            return;
+        }
+
+        if (worker_id < self.threads_ready.items.len and !self.shutting_down.load(.acquire) and self.threads_ready.items[worker_id]) {
+            // Another safety check after array bounds check but before array access
+            if (self.shutting_down.load(.acquire)) {
+                log(.DEBUG, "thread_pool", "Worker {d} shutting down (pool deallocating during bounds check)", .{worker_id});
+                return;
+            }
+
             self.threads_ready.items[worker_id] = false;
             const old_count = self.ready_count.fetchSub(1, .acq_rel);
-            if (old_count > 0) {
-                log(.DEBUG, "thread_pool", "Worker {d} shutting down (ready count: {d})", .{ worker_id, old_count - 1 });
-            }
+            const new_count = if (old_count > 0) old_count - 1 else 0;
+
+            // Don't access self.threads.len during shutdown to avoid segfault
+            log(.DEBUG, "thread_pool", "Worker {d} shutting down (ready count: {d}, was: {d})", .{ worker_id, new_count, old_count });
+        } else {
+            const current_count = self.ready_count.load(.acquire);
+            log(.DEBUG, "thread_pool", "Worker {d} shutting down (already marked as not ready, current count: {d})", .{ worker_id, current_count });
         }
     }
 
