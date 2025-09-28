@@ -78,6 +78,9 @@ pub const EnhancedScene = struct {
     gc: *GraphicsContext,
     allocator: std.mem.Allocator,
 
+    // Deferred destruction for replaced models (avoid use-after-free)
+    pending_model_destructions: std.ArrayList(*Model),
+
     const Self = @This();
 
     /// Callback function called when assets complete loading
@@ -122,7 +125,7 @@ pub const EnhancedScene = struct {
             },
             .material => {
                 self.materials_dirty = true;
-                self.handleMaterialCompletion(asset_id);
+                //self.handleMaterialCompletion(asset_id);
             },
             .shader, .audio, .scene, .animation => {
                 // Not handled by scene system yet
@@ -148,9 +151,10 @@ pub const EnhancedScene = struct {
             if (self.asset_manager.getLoadedModel(asset_id)) |loaded_model| {
                 // Replace the fallback model with the loaded model
                 if (game_object.model) |old_model| {
-                    // Clean up old fallback model
-                    old_model.deinit();
-                    self.allocator.destroy(old_model);
+                    // Defer destruction of the old model to avoid use-after-free
+                    self.pending_model_destructions.append(self.allocator, old_model) catch |err| {
+                        log(.ERROR, "enhanced_scene", "Failed to queue old model for deferred destruction: {}", .{err});
+                    };
                 }
                 // Assign the new model
                 const model_ptr = self.allocator.create(Model) catch |err| {
@@ -170,13 +174,18 @@ pub const EnhancedScene = struct {
         }
     }
 
-    /// Handle material completion
-    fn handleMaterialCompletion(self: *Self, asset_id: AssetId) void {
-        _ = self;
-        _ = asset_id;
-        // TODO: Update material buffer
+    /// Call this at a safe point (e.g. start of frame) to actually destroy replaced models
+    pub fn processDeferredModelDestruction(self: *Self) void {
+        var i: usize = 0;
+        while (i < self.pending_model_destructions.items.len) : (i += 1) {
+            const model = self.pending_model_destructions.items[i];
+            model.deinit();
+            self.allocator.destroy(model);
+        }
+        self.pending_model_destructions.clearRetainingCapacity();
     }
 
+    /// Initialize the EnhancedScene
     pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, asset_manager: *AssetManager) Self {
         const scene = Self{
             .objects = std.ArrayList(GameObject){},
@@ -197,6 +206,7 @@ pub const EnhancedScene = struct {
             .texture_descriptors_dirty = false,
             .gc = gc,
             .allocator = allocator,
+            .pending_model_destructions = std.ArrayList(*Model){},
         };
 
         // Note: We'll register the callback once we modify the scene to be heap-allocated
@@ -206,6 +216,7 @@ pub const EnhancedScene = struct {
         return scene;
     }
 
+    /// Deinitialize the EnhancedScene
     pub fn deinit(self: *Self) void {
         log(.INFO, "enhanced_scene", "Deinitializing EnhancedScene with {d} objects", .{self.objects.items.len});
 
@@ -253,6 +264,9 @@ pub const EnhancedScene = struct {
         // Deinit async model loading tracking
         self.pending_model_loads.deinit();
         self.loading_models.deinit();
+
+        // Deinit deferred model destructions
+        self.pending_model_destructions.deinit(self.allocator);
 
         log(.INFO, "enhanced_scene", "EnhancedScene deinit complete", .{});
     }
