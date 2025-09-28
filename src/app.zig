@@ -586,6 +586,7 @@ pub const App = struct {
         // );
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
+        scene.processDeferredModelDestruction();
         //log(.TRACE, "app", "Frame end", .{});
         return self.window.isRunning();
     }
