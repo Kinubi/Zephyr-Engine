@@ -243,6 +243,14 @@ pub const DescriptorWriter = struct {
         }
         self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
     }
+
+    /// Update an existing descriptor set without allocating a new one
+    pub fn update(self: *DescriptorWriter, set: vk.DescriptorSet) void {
+        for (0..self.writes.items.len) |i| {
+            self.writes.items[i].dst_set = set;
+        }
+        self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
+    }
 };
 
 pub fn deinitDescriptorResources(

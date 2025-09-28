@@ -661,7 +661,7 @@ pub const RaytracingSystem = struct {
 
     /// Request texture descriptor update on next frame
     pub fn requestTextureDescriptorUpdate(self: *RaytracingSystem) void {
-        log(.DEBUG, "raytracing", "Raytracing texture descriptor update requested", .{});
+        //log(.DEBUG, "raytracing", "Raytracing texture descriptor update requested", .{});
         self.descriptors_need_update = true;
     }
 };

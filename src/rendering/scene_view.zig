@@ -14,7 +14,7 @@ pub const RasterizationData = struct {
         texture_index: u32,
         visible: bool = true,
     };
-    
+
     /// Material data for GPU upload
     pub const MaterialData = struct {
         base_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
@@ -23,11 +23,11 @@ pub const RasterizationData = struct {
         emissive: f32 = 0.0,
         texture_index: u32 = 0,
     };
-    
+
     objects: []const RenderableObject,
     materials: []const MaterialData,
     textures: []const *const Texture,
-    
+
     /// Get objects that should be rendered this frame
     pub fn getVisibleObjects(self: *const RasterizationData) []const RenderableObject {
         // TODO: Implement frustum culling
@@ -35,7 +35,7 @@ pub const RasterizationData = struct {
     }
 };
 
-/// Raytracing-specific scene data  
+/// Raytracing-specific scene data
 pub const RaytracingData = struct {
     /// Geometry instance for raytracing
     pub const RTInstance = struct {
@@ -45,7 +45,7 @@ pub const RaytracingData = struct {
         geometry_index: u32,
         material_index: u32,
     };
-    
+
     /// Raytracing geometry description
     pub const RTGeometry = struct {
         vertex_buffer: vk.Buffer,
@@ -57,11 +57,11 @@ pub const RaytracingData = struct {
         index_count: u32 = 0,
         blas: ?vk.AccelerationStructureKHR = null,
     };
-    
+
     instances: []const RTInstance,
     geometries: []const RTGeometry,
     materials: []const RasterizationData.MaterialData, // Reuse material structure
-    
+
     /// Check if TLAS needs rebuilding
     pub fn needsTLASRebuild(self: *const RaytracingData) bool {
         _ = self;
@@ -81,7 +81,7 @@ pub const ComputeData = struct {
         emit_rate: f32,
         lifetime: f32,
     };
-    
+
     /// Compute task description
     pub const ComputeTask = struct {
         dispatch_x: u32,
@@ -90,10 +90,10 @@ pub const ComputeData = struct {
         pipeline: vk.Pipeline,
         descriptor_set: vk.DescriptorSet,
     };
-    
+
     particle_systems: []const ParticleSystem,
     compute_tasks: []const ComputeTask,
-    
+
     /// Get active particle systems that need updating
     pub fn getActiveParticleSystems(self: *const ComputeData) []const ParticleSystem {
         return self.particle_systems; // TODO: Filter active systems

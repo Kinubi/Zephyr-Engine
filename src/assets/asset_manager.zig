@@ -3,6 +3,9 @@ const asset_types = @import("asset_types.zig");
 const asset_registry = @import("asset_registry.zig");
 const asset_loader = @import("asset_loader.zig");
 const HotReloadManager = @import("hot_reload_manager.zig").HotReloadManager;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const Model = @import("../rendering/mesh.zig").Model;
+const Texture = @import("../core/texture.zig").Texture;
 const log = @import("../utils/log.zig").log;
 
 // Re-export key types for convenience
@@ -70,6 +73,9 @@ pub const FallbackAssets = struct {
     }
 };
 
+/// Asset completion callback function type
+pub const AssetCompletionCallback = *const fn (asset_id: AssetId, asset_type: AssetType, user_data: ?*anyopaque) void;
+
 /// Central Asset Manager that coordinates all asset operations
 /// This is the main interface for the game engine to interact with assets
 pub const AssetManager = struct {
@@ -84,19 +90,23 @@ pub const AssetManager = struct {
     // Hot reloading
     hot_reload_manager: ?HotReloadManager = null,
 
+    // Asset completion notification
+    completion_callback: ?AssetCompletionCallback = null,
+    completion_user_data: ?*anyopaque = null,
+
     // Configuration
     max_loader_threads: u32 = 4,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) !Self {
         // Allocate registry on heap to avoid HashMap corruption
         const registry = try allocator.create(AssetRegistry);
         registry.* = AssetRegistry.init(allocator);
 
         // Allocate loader on heap
         const loader = try allocator.create(AssetLoader);
-        loader.* = try AssetLoader.init(allocator, registry, 4);
+        loader.* = try AssetLoader.init(allocator, registry, graphics_context, 4);
 
         var self = Self{
             .registry = registry,
@@ -128,6 +138,49 @@ pub const AssetManager = struct {
     /// Set callback for ThreadPool running status changes
     pub fn setThreadPoolCallback(self: *Self, callback: *const fn (bool) void) void {
         self.loader.setThreadPoolCallback(callback);
+    }
+
+    /// Set callback for asset completion notifications
+    pub fn setAssetCompletionCallback(self: *Self, callback: AssetCompletionCallback, user_data: ?*anyopaque) void {
+        self.completion_callback = callback;
+        self.completion_user_data = user_data;
+
+        // Set up asset loader to call back through the asset manager
+        self.loader.setAssetCompletionCallback(assetLoaderCompletionWrapper, self);
+    }
+
+    /// Clear the asset completion callback
+    pub fn clearAssetCompletionCallback(self: *Self) void {
+        self.completion_callback = null;
+        self.completion_user_data = null;
+
+        // Clear asset loader callback as well
+        self.loader.clearAssetCompletionCallback();
+    }
+
+    /// Internal method to notify completion callback when assets finish loading
+    pub fn notifyAssetCompletion(self: *Self, asset_id: AssetId, asset_type: AssetType) void {
+        if (self.completion_callback) |callback| {
+            callback(asset_id, asset_type, self.completion_user_data);
+        }
+    }
+
+    /// Get a loaded model by AssetId
+    pub fn getLoadedModel(self: *Self, asset_id: AssetId) ?*Model {
+        return self.loader.getLoadedModel(asset_id);
+    }
+
+    /// Get a loaded texture by AssetId
+    pub fn getLoadedTexture(self: *Self, asset_id: AssetId) ?*Texture {
+        return self.loader.getLoadedTexture(asset_id);
+    }
+
+    /// Static wrapper function for asset loader callback
+    fn assetLoaderCompletionWrapper(asset_id: AssetId, asset_type: AssetType, user_data: ?*anyopaque) void {
+        if (user_data) |data| {
+            const self: *Self = @ptrCast(@alignCast(data));
+            self.notifyAssetCompletion(asset_id, asset_type);
+        }
     }
 
     // Asset Registration
@@ -167,6 +220,7 @@ pub const AssetManager = struct {
     /// Load an asset asynchronously with priority
     /// Returns the asset ID immediately, asset loads in background
     pub fn loadAssetAsync(self: *Self, path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
+        log(.DEBUG, "asset_manager", "Requesting async load for asset path {s} of type {}", .{ path, asset_type });
         const asset_id = try self.registerAsset(path, asset_type);
         try self.loader.requestLoad(asset_id, priority);
 

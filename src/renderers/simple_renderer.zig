@@ -47,7 +47,7 @@ pub const SimpleRenderer = struct {
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
         for (self.scene.objects.items) |*object| {
-            if (object.geometry == null) continue;
+            if (object.model == null) continue;
             const push = SimplePushConstantData{
                 .transform = object.transform.local2world.data,
                 .normal_matrix = object.transform.normal2world.data,

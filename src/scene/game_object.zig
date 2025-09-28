@@ -14,13 +14,8 @@ pub const GameObject = struct {
     pub fn render(self: GameObject, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
         if (self.model) |model| {
             for (model.meshes.items) |mesh| {
-                mesh.geometry.vertex_buffer.bind(gc, cmdbuf);
-                mesh.geometry.index_buffer.bind(gc, cmdbuf);
-                if (mesh.geometry.index_count > 0) {
-                    gc.vkd.cmdDrawIndexed(cmdbuf, mesh.geometry.index_count, 1, 0, 0, 0);
-                } else {
-                    // Fallback: draw non-indexed
-                }
+                // Use the mesh's draw method which handles binding
+                mesh.geometry.mesh.draw(gc, cmdbuf);
             }
         }
     }

@@ -32,21 +32,22 @@ pub const WorkQueue = struct {
 
         try self.items.append(allocator, item);
         self.len += 1;
+        log(.DEBUG, "thread_pool", "Pushed work item to queue (new length: {d})", .{self.len});
+        log(.DEBUG, "thread_pool", "Current work queue items length after push: {d}", .{self.items.items.len});
     }
 
     pub fn pop(self: *WorkQueue) ?WorkItem {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.len == 0) return null;
-
-        const item = self.items.items[0];
-        // Move remaining items forward
-        if (self.len > 1) {
-            for (1..self.len) |i| {
-                self.items.items[i - 1] = self.items.items[i];
-            }
+        if (self.len == 0 or self.items.items.len == 0) {
+            return null;
         }
+        log(.DEBUG, "thread_pool", "Popping work item from queue (current length: {d})", .{self.len});
+        log(.DEBUG, "thread_pool", "Current work queue items length: {d}", .{self.items.items.len});
+        const item = self.items.items[0];
+        // Remove the first item and shift the rest left
+        _ = self.items.orderedRemove(0);
         self.len -= 1;
         return item;
     }
@@ -159,7 +160,11 @@ pub const ThreadPool = struct {
             log(.WARN, "thread_pool", "WARNING: No ready worker threads available for work item", .{});
             return error.NoWorkerThreadsAvailable;
         }
-
+        log(.DEBUG, "thread_pool", "Submitting work item to queue (ready threads: {d}, asset_id: {any}, loader: {any})", .{
+            ready_count,
+            work_item.asset_id,
+            work_item.loader,
+        });
         try self.work_queue.push(work_item, self.allocator);
     }
 

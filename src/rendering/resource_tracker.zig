@@ -25,10 +25,10 @@ pub const ResourceUsageFlags = packed struct {
     shader_write: bool = false,
     transfer_src: bool = false,
     transfer_dst: bool = false,
-    
+
     pub fn toPipelineStageFlags(self: ResourceUsageFlags) vk.PipelineStageFlags {
         var flags: vk.PipelineStageFlags = .{};
-        
+
         if (self.vertex_buffer or self.index_buffer) {
             flags.vertex_input_bit = true;
         }
@@ -50,13 +50,13 @@ pub const ResourceUsageFlags = packed struct {
         if (self.transfer_src or self.transfer_dst) {
             flags.transfer_bit = true;
         }
-        
+
         return flags;
     }
-    
+
     pub fn toAccessFlags(self: ResourceUsageFlags) vk.AccessFlags {
         var flags: vk.AccessFlags = .{};
-        
+
         if (self.vertex_buffer) flags.vertex_attribute_read_bit = true;
         if (self.index_buffer) flags.index_read_bit = true;
         if (self.uniform_buffer) flags.uniform_read_bit = true;
@@ -76,14 +76,14 @@ pub const ResourceUsageFlags = packed struct {
         }
         if (self.transfer_src) flags.transfer_read_bit = true;
         if (self.transfer_dst) flags.transfer_write_bit = true;
-        
+
         return flags;
     }
 };
 
 /// Resource state for barrier tracking
 pub const ResourceState = struct {
-    layout: vk.ImageLayout = .@"undefined",
+    layout: vk.ImageLayout = .undefined,
     access_flags: vk.AccessFlags = .{},
     stage_flags: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true },
     queue_family: u32 = vk.QUEUE_FAMILY_IGNORED,
@@ -115,12 +115,12 @@ pub const ResourceBarrier = struct {
 /// ResourceTracker manages GPU resource states and generates barriers automatically
 pub const ResourceTracker = struct {
     const Self = @This();
-    
+
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
     resources: std.HashMap(u64, TrackedResource, std.hash_map.DefaultContext(u64), std.hash_map.default_max_load_percentage),
     pending_barriers: std.ArrayList(ResourceBarrier),
-    
+
     pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) Self {
         return Self{
             .allocator = allocator,
@@ -129,12 +129,12 @@ pub const ResourceTracker = struct {
             .pending_barriers = std.ArrayList(ResourceBarrier).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *Self) void {
         self.resources.deinit();
         self.pending_barriers.deinit();
     }
-    
+
     /// Register a buffer for tracking
     pub fn trackBuffer(self: *Self, buffer: vk.Buffer, name: []const u8) !void {
         const handle = @intFromPtr(buffer.handle);
@@ -147,10 +147,10 @@ pub const ResourceTracker = struct {
             },
             .name = try self.allocator.dupe(u8, name),
         };
-        
+
         try self.resources.put(handle, resource);
     }
-    
+
     /// Register an image for tracking
     pub fn trackImage(self: *Self, image: vk.Image, initial_layout: vk.ImageLayout, name: []const u8) !void {
         const handle = @intFromPtr(image.handle);
@@ -164,17 +164,17 @@ pub const ResourceTracker = struct {
             },
             .name = try self.allocator.dupe(u8, name),
         };
-        
+
         try self.resources.put(handle, resource);
     }
-    
+
     /// Request a resource transition
     pub fn requestTransition(self: *Self, handle: u64, usage: ResourceUsageFlags, layout: ?vk.ImageLayout) !void {
         if (self.resources.getPtr(handle)) |resource| {
             const new_access = usage.toAccessFlags();
             const new_stage = usage.toPipelineStageFlags();
             const new_layout = layout orelse resource.current_state.layout;
-            
+
             // Check if transition is needed
             if (!std.meta.eql(resource.current_state.access_flags, new_access) or
                 !std.meta.eql(resource.current_state.stage_flags, new_stage) or
@@ -190,9 +190,9 @@ pub const ResourceTracker = struct {
                     .old_layout = resource.current_state.layout,
                     .new_layout = new_layout,
                 };
-                
+
                 try self.pending_barriers.append(barrier);
-                
+
                 // Update pending state
                 resource.pending_state = ResourceState{
                     .layout = new_layout,
@@ -203,25 +203,25 @@ pub const ResourceTracker = struct {
             }
         }
     }
-    
+
     /// Emit all pending barriers to command buffer
     pub fn emitBarriers(self: *Self, command_buffer: vk.CommandBuffer) !void {
         if (self.pending_barriers.items.len == 0) return;
-        
+
         var memory_barriers = std.ArrayList(vk.MemoryBarrier).init(self.allocator);
         defer memory_barriers.deinit();
         var buffer_barriers = std.ArrayList(vk.BufferMemoryBarrier).init(self.allocator);
         defer buffer_barriers.deinit();
         var image_barriers = std.ArrayList(vk.ImageMemoryBarrier).init(self.allocator);
         defer image_barriers.deinit();
-        
+
         var src_stage_mask: vk.PipelineStageFlags = .{};
         var dst_stage_mask: vk.PipelineStageFlags = .{};
-        
+
         for (self.pending_barriers.items) |barrier| {
             src_stage_mask = unionFlags(src_stage_mask, barrier.src_stage);
             dst_stage_mask = unionFlags(dst_stage_mask, barrier.dst_stage);
-            
+
             switch (barrier.resource_type) {
                 .buffer => {
                     const buffer_barrier = vk.BufferMemoryBarrier{
@@ -264,7 +264,7 @@ pub const ResourceTracker = struct {
                 },
             }
         }
-        
+
         // Emit pipeline barrier
         self.graphics_context.device.cmdPipelineBarrier(
             command_buffer,
@@ -278,7 +278,7 @@ pub const ResourceTracker = struct {
             @intCast(image_barriers.items.len),
             if (image_barriers.items.len > 0) image_barriers.items.ptr else null,
         );
-        
+
         // Apply pending states
         for (self.pending_barriers.items) |barrier| {
             if (self.resources.getPtr(barrier.resource_handle)) |resource| {
@@ -288,16 +288,16 @@ pub const ResourceTracker = struct {
                 }
             }
         }
-        
+
         // Clear barriers
         self.pending_barriers.clearAndFree();
     }
-    
+
     /// Helper to union pipeline stage flags
     fn unionFlags(a: vk.PipelineStageFlags, b: vk.PipelineStageFlags) vk.PipelineStageFlags {
         return @bitCast(@as(u32, @bitCast(a)) | @as(u32, @bitCast(b)));
     }
-    
+
     /// Get current resource state
     pub fn getResourceState(self: *const Self, handle: u64) ?ResourceState {
         if (self.resources.get(handle)) |resource| {
@@ -305,14 +305,14 @@ pub const ResourceTracker = struct {
         }
         return null;
     }
-    
+
     /// Untrack a resource
     pub fn untrack(self: *Self, handle: u64) void {
         if (self.resources.fetchRemove(handle)) |entry| {
             self.allocator.free(entry.value.name);
         }
     }
-    
+
     /// Get resource tracking statistics
     pub fn getStats(self: *const Self) struct {
         tracked_resources: usize,
@@ -323,13 +323,13 @@ pub const ResourceTracker = struct {
             .pending_barriers = self.pending_barriers.items.len,
         };
     }
-    
+
     /// Print debug information
     pub fn printDebugInfo(self: *const Self) void {
         std.log.info("=== Resource Tracker Debug Info ===");
         std.log.info("Tracked Resources: {d}", .{self.resources.count()});
         std.log.info("Pending Barriers: {d}", .{self.pending_barriers.items.len});
-        
+
         var iterator = self.resources.iterator();
         while (iterator.next()) |entry| {
             const resource = entry.value_ptr.*;

@@ -36,6 +36,7 @@ const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
+const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
 
@@ -43,6 +44,12 @@ const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRend
 const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 const RenderSystem = @import("systems/render_system.zig").RenderSystem;
+
+// Render Pass System imports
+const RenderPass = @import("rendering/render_pass.zig").RenderPass;
+const RenderContext = @import("rendering/render_pass.zig").RenderContext;
+const SceneView = @import("rendering/render_pass.zig").SceneView;
+const ForwardPass = @import("rendering/passes/forward_pass.zig").ForwardPass;
 
 // Utility imports
 const Math = @import("utils/math.zig");
@@ -62,6 +69,8 @@ const c = @cImport({
 // Embedded shaders
 const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
+const textured_vert align(@alignOf(u32)) = @embedFile("textured_vert").*;
+const textured_frag align(@alignOf(u32)) = @embedFile("textured_frag").*;
 const point_light_vert align(@alignOf(u32)) = @embedFile("point_light_vert").*;
 const point_light_frag align(@alignOf(u32)) = @embedFile("point_light_frag").*;
 
@@ -82,7 +91,7 @@ pub const App = struct {
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
-    var simple_renderer: SimpleRenderer = undefined;
+    var textured_renderer: TexturedRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_system: RaytracingSystem = undefined;
     var particle_renderer: ParticleRenderer = undefined;
@@ -104,6 +113,10 @@ pub const App = struct {
     var global_ubo_set: GlobalUboSet = undefined;
     var raytracing_descriptor_set: RaytracingDescriptorSet = undefined;
 
+    // Forward Pass System
+    var forward_pass: ForwardPass = undefined;
+    var scene_view: SceneView = undefined;
+
     pub fn init(self: *App) !void {
         std.debug.print("Initializing application...\n", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
@@ -124,13 +137,16 @@ pub const App = struct {
         std.debug.print("Creating command buffers\n", .{});
 
         // Initialize Asset Manager
-        asset_manager = try AssetManager.init(self.allocator);
+        asset_manager = try AssetManager.init(self.allocator, &self.gc);
 
         // Set up ThreadPool callback to monitor running status
         asset_manager.setThreadPoolCallback(onThreadPoolRunningChanged);
 
         // Initialize Enhanced Scene with Asset Manager integration
         scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
+
+        // Register completion callback for asset loading notifications
+        asset_manager.setAssetCompletionCallback(EnhancedScene.onAssetCompleted, &scene);
 
         // Enable hot reloading for development BEFORE loading assets
         scene.enableHotReload() catch |err| {
@@ -209,9 +225,29 @@ pub const App = struct {
         // --- Load cube mesh using non-blocking enhanced scene system ---
         log(.DEBUG, "scene", "Loading cube with fallback through enhanced scene", .{});
         const cube_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, -0.5, 0.5), // position
-            Math.Vec3.init(0.5, 0.001, 0.5) // scale
+            Math.Vec3.init(0.5, 0.005, 0.5) // scale - Fixed Y from 0.001 to 0.5
         );
         log(.INFO, "scene", "Added cube object (fallback) with {d} meshes", .{if (cube_object.model) |m| m.meshes.items.len else 0});
+
+        // Create another textured cube with a different texture (non-blocking)
+        log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
+        const cube2_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // Closer to center
+            Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as first cube
+        );
+        log(.INFO, "scene", "Added second cube object (fallback) with {d} meshes", .{if (cube2_object.model) |m| m.meshes.items.len else 0});
+
+        // Create a procedural mesh using the manual mesh (for demonstration)
+        log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
+        const object5 = try scene.addModelFromMesh(mesh, "procedural_mesh", Math.Vec3.init(0, 0.5, 0.5)); // Position it above the cubes
+        object5.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5)); // Scale it to same size as cubes
+        log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+
+        // Add another vase with a different texture (non-blocking fallback)
+        log(.DEBUG, "scene", "Adding second vase with error texture (fallback)", .{});
+        const vase2_object = try scene.addModelWithMaterialAndTransformAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-0.7, -0.5, 0.5), // Closer to center and same Y
+            Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as cubes
+        );
+        log(.INFO, "scene", "Added second vase object (fallback) with {d} meshes", .{if (vase2_object.model) |m| m.meshes.items.len else 0});
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
@@ -219,33 +255,18 @@ pub const App = struct {
         // Update async textures for Vulkan descriptors (must be done on main thread)
         try scene.updateAsyncTextures(self.allocator);
 
-        // Create another textured cube with a different texture (non-blocking)
-        log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
-        const cube2_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(1.0, -0.5, 0.5), // Different position
-            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
-        );
-        log(.INFO, "scene", "Added second cube object (fallback) with {d} meshes", .{if (cube2_object.model) |m| m.meshes.items.len else 0});
+        // log(.DEBUG, "scene", "Adding point light objects", .{});
+        // const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
+        // object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
+        // object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
-        // Create a procedural mesh using the manual mesh (for demonstration)
-        log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
-        const object5 = try scene.addModelFromMesh(mesh, "procedural_mesh", null);
-        log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+        // const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
+        // object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
+        // object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
-        // Add another vase with a different texture (non-blocking fallback)
-        log(.DEBUG, "scene", "Adding second vase with error texture (fallback)", .{});
-        const vase2_object = try scene.addModelWithMaterialAndTransformAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-1.0, -1.5, 0.5), // Different position
-            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
-        );
-        log(.INFO, "scene", "Added second vase object (fallback) with {d} meshes", .{if (vase2_object.model) |m| m.meshes.items.len else 0});
-
-        log(.DEBUG, "scene", "Adding point light objects", .{});
-        const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
-        object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
-        object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-
-        const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
-        object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
-        object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
+        // const object6 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
+        // object6.transform.translate(Math.Vec3.init(0, -1, 0.5));
+        // object6.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
         log(.DEBUG, "renderer", "Creating command buffers", .{});
         cmdbufs = try self.gc.createCommandBuffers(
@@ -268,8 +289,8 @@ pub const App = struct {
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
 
         try shader_library.add(&.{
-            &simple_frag,
-            &simple_vert,
+            &textured_frag,
+            &textured_vert,
         }, &.{
             vk.ShaderStageFlags{ .fragment_bit = true },
             vk.ShaderStageFlags{ .vertex_bit = true },
@@ -277,8 +298,8 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-        log(.DEBUG, "renderer", "Initializing simple renderer", .{});
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        log(.DEBUG, "renderer", "Initializing textured renderer", .{});
+        textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -350,7 +371,7 @@ pub const App = struct {
             rt_counts.vertex_buffer_count,
             rt_counts.index_buffer_count,
             scene.materials.items.len,
-            scene.textures.items.len,
+            @max(scene.textures.items.len, 32), // Match forward renderer's 32-texture capacity
         );
 
         // --- RaytracingSystem init with pool/layout ---
@@ -447,6 +468,29 @@ pub const App = struct {
             ubo_infos,
         );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
+
+        // Initialize Forward Pass System
+        forward_pass = try ForwardPass.create(self.allocator);
+        try forward_pass.init(&self.gc);
+        forward_pass.setRenderers(&textured_renderer, &point_light_renderer);
+
+        // Create scene view
+        scene_view = scene.createSceneView();
+
+        // Update textured renderer with initial material data
+        if (scene.material_buffer) |mat_buf| {
+            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                try textured_renderer.updateMaterialData(
+                    @intCast(frame_idx),
+                    mat_buf.descriptor_info,
+                    scene.texture_image_infos,
+                );
+            }
+            log(.INFO, "TexturedRenderer", "Updated material data for all frames", .{});
+        }
+
+        log(.INFO, "ForwardPass", "Forward pass system initialized", .{});
+
         last_frame_time = c.glfwGetTime();
         frame_info.camera = &camera;
     }
@@ -454,6 +498,21 @@ pub const App = struct {
     pub fn onUpdate(self: *App) !bool {
         // Process any pending hot reloads first
         scene.processPendingReloads();
+
+        // Check for and update any newly loaded async resources (textures, models, materials)
+        const resources_updated = try scene.updateAsyncResources(self.allocator);
+
+        // Update textured renderer with any new material/texture data if resources changed
+        if (resources_updated or scene.material_buffer != null) {
+            if (scene.material_buffer) |mat_buf| {
+                // Only update for the current frame to avoid redundant updates
+                try textured_renderer.updateMaterialData(
+                    current_frame,
+                    mat_buf.descriptor_info,
+                    scene.texture_image_infos,
+                );
+            }
+        }
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
@@ -502,18 +561,29 @@ pub const App = struct {
         };
         try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.update(frame_info.current_frame, &ubo);
-        //try simple_renderer.render(frame_info);
-        //try point_light_renderer.render(frame_info);
-        //try particle_renderer.render(frame_info);
+
+        // Execute Forward Pass - renders all objects in scene
+        const render_context = RenderContext{
+            .graphics_context = &self.gc,
+            .frame_info = &frame_info,
+            .command_buffer = frame_info.command_buffer,
+            .frame_index = frame_info.current_frame,
+            .scene_view = &scene_view,
+        };
+        try forward_pass.execute(render_context);
+
+        // Render particles separately for now
+        try particle_renderer.render(frame_info);
+
         render_system.endRender(frame_info);
-        try raytracing_system.recordCommandBuffer(
-            frame_info,
-            &swapchain,
-            3,
-            global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
-            scene.material_buffer.?.descriptor_info,
-            scene.texture_image_infos,
-        );
+        // try raytracing_system.recordCommandBuffer(
+        //     frame_info,
+        //     &swapchain,
+        //     3,
+        //     global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
+        //     scene.material_buffer.?.descriptor_info,
+        //     scene.texture_image_infos,
+        // );
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
         //log(.TRACE, "app", "Frame end", .{});
@@ -525,9 +595,10 @@ pub const App = struct {
 
         swapchain.waitForAllFences() catch unreachable;
         global_ubo_set.deinit();
+        forward_pass.deinit();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
-        simple_renderer.deinit();
+        textured_renderer.deinit();
         raytracing_system.deinit();
         particle_renderer.deinit();
         scene.deinit();

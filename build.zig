@@ -166,6 +166,16 @@ pub fn build(b: *std.Build) !void {
     frag_point_cmd.addFileArg(b.path("shaders/point_light.frag"));
     exe.root_module.addAnonymousImport("point_light_frag", .{ .root_source_file = frag_point_spv });
 
+    const textured_vert_cmd = b.addSystemCommand(&.{ "glslc", "-o" });
+    const textured_vert_spv = textured_vert_cmd.addOutputFileArg("textured_vert.spv");
+    textured_vert_cmd.addFileArg(b.path("shaders/textured.vert"));
+    exe.root_module.addAnonymousImport("textured_vert", .{ .root_source_file = textured_vert_spv });
+
+    const textured_frag_cmd = b.addSystemCommand(&.{ "glslc", "-o" });
+    const textured_frag_spv = textured_frag_cmd.addOutputFileArg("textured_frag.spv");
+    textured_frag_cmd.addFileArg(b.path("shaders/textured.frag"));
+    exe.root_module.addAnonymousImport("textured_frag", .{ .root_source_file = textured_frag_spv });
+
     exe.root_module.addAnonymousImport("smooth_vase", .{ .root_source_file = b.path("models/smooth_vase.obj") });
     exe.root_module.addAnonymousImport("cube", .{ .root_source_file = b.path("models/cube.obj") });
 
