@@ -33,6 +33,7 @@ pub const AssetCompletionCallback = *const fn (asset_id: AssetId, asset_type: As
 /// Enhanced Scene with Asset Manager integration
 /// Provides both legacy compatibility and new asset-based workflow
 pub const EnhancedScene = struct {
+
     // Legacy compatibility - keep existing arrays for gradual migration
     objects: std.ArrayList(GameObject),
     materials: std.ArrayList(Material),
@@ -81,18 +82,34 @@ pub const EnhancedScene = struct {
 
     /// Callback function called when assets complete loading
     pub fn onAssetCompleted(asset_id: AssetId, asset_type: AssetType, user_data: ?*anyopaque) void {
-        log(.DEBUG, "enhanced_scene", "onAssetCompleted called for asset {d} of type {}", .{ asset_id.toU64(), asset_type });
-
         if (user_data == null) return;
-
         const scene: *Self = @ptrCast(@alignCast(user_data));
         scene.handleAssetCompletion(asset_id, asset_type);
     }
 
+    /// Poll the asset loader's completed queue and process all finished assets (main thread only)
+    pub fn pollCompletedAssets(self: *Self) void {
+        // Process all completed textures
+        var texture_iter = self.asset_manager.loader.completed_queue.texture_queue.iterator();
+        while (texture_iter.next()) |entry| {
+            const asset_id = entry.key_ptr.*;
+            self.handleTextureCompletion(asset_id);
+            // Remove from queue after processing
+            _ = self.asset_manager.loader.completed_queue.texture_queue.remove(asset_id);
+        }
+
+        // Process all completed meshes
+        var mesh_iter = self.asset_manager.loader.completed_queue.mesh_queue.iterator();
+        while (mesh_iter.next()) |entry| {
+            const asset_id = entry.key_ptr.*;
+            self.handleModelCompletion(asset_id);
+            // Remove from queue after processing
+            _ = self.asset_manager.loader.completed_queue.mesh_queue.remove(asset_id);
+        }
+    }
+
     /// Handle completion of a specific asset type
     fn handleAssetCompletion(self: *Self, asset_id: AssetId, asset_type: AssetType) void {
-        log(.INFO, "enhanced_scene", "Asset {d} of type {} completed loading", .{ asset_id.toU64(), asset_type });
-
         switch (asset_type) {
             .texture => {
                 self.textures_dirty = true;
@@ -109,86 +126,54 @@ pub const EnhancedScene = struct {
             },
             .shader, .audio, .scene, .animation => {
                 // Not handled by scene system yet
-                log(.DEBUG, "enhanced_scene", "Asset type {} completion not handled by scene", .{asset_type});
             },
         }
     }
 
     /// Handle texture completion - update cached textures and descriptors
     fn handleTextureCompletion(self: *Self, asset_id: AssetId) void {
-        log(.DEBUG, "enhanced_scene", "Processing texture completion for asset {d}", .{asset_id.toU64()});
-
+        self.asset_manager.loader.processCompletedTexture(asset_id);
         // Update raytracing descriptors if system is available
         if (self.raytracing_system) |rt_system| {
             rt_system.requestTextureDescriptorUpdate();
         }
-
-        // TODO: Update texture cache and descriptor arrays
     }
 
     /// Handle model completion - replace fallback models with actual loaded models
     fn handleModelCompletion(self: *Self, asset_id: AssetId) void {
-        log(.DEBUG, "enhanced_scene", "Processing model completion for asset {d}", .{asset_id.toU64()});
-
+        self.asset_manager.loader.processCompletedMesh(asset_id);
         // Check if we have a pending model load for this asset
         if (self.pending_model_loads.get(asset_id)) |game_object| {
-            if (asset_id.toU64() == 14) {
-                log(.ERROR, "enhanced_scene", "[ASSET 14] Replacing fallback model for asset 14!", .{});
-            }
-            log(.INFO, "enhanced_scene", "Replacing fallback model for asset {d}", .{asset_id.toU64()});
-
             // Get the loaded model from asset manager
             if (self.asset_manager.getLoadedModel(asset_id)) |loaded_model| {
-                log(.INFO, "enhanced_scene", "Loaded model has {d} meshes", .{loaded_model.meshes.items.len});
-                for (loaded_model.meshes.items, 0..) |model_mesh, mesh_idx| {
-                    log(.INFO, "enhanced_scene", "  Mesh {d}: vertex_count={d}, index_count={d}", .{ mesh_idx, model_mesh.geometry.mesh.vertices.items.len, model_mesh.geometry.mesh.indices.items.len });
-                }
                 // Replace the fallback model with the loaded model
                 if (game_object.model) |old_model| {
                     // Clean up old fallback model
                     old_model.deinit();
                     self.allocator.destroy(old_model);
                 }
-
                 // Assign the new model
                 const model_ptr = self.allocator.create(Model) catch |err| {
                     log(.ERROR, "enhanced_scene", "Failed to allocate memory for model replacement: {}", .{err});
                     return;
                 };
-                model_ptr.* = loaded_model.*; // Copy the model data
+                model_ptr.* = loaded_model; // Copy the model data
                 game_object.model = model_ptr;
-                log(.INFO, "enhanced_scene", "Assigned loaded model to game object. Model ptr: {x}", .{@intFromPtr(model_ptr)});
-                for (model_ptr.meshes.items, 0..) |model_mesh, mesh_idx| {
-                    log(.INFO, "enhanced_scene", "  [Assigned] Mesh {d}: vertex_count={d}, index_count={d}", .{ mesh_idx, model_mesh.geometry.mesh.vertices.items.len, model_mesh.geometry.mesh.indices.items.len });
-                }
-
-                log(.INFO, "enhanced_scene", "Successfully replaced fallback with loaded model (asset {d}) - {d} meshes", .{ asset_id.toU64(), loaded_model.meshes.items.len });
-
                 // TODO: Mark scene as needing rebuild for raytracing
                 // The raytracing system will need to be updated to handle dynamic model changes
                 _ = self.raytracing_system; // Suppress unused variable warning
             } else {
                 log(.ERROR, "enhanced_scene", "Failed to get loaded model for asset {d}", .{asset_id.toU64()});
             }
-
             // Remove from pending loads
             _ = self.pending_model_loads.remove(asset_id);
-        } else {
-            log(.WARN, "enhanced_scene", "Model completion: asset_id {d} not found in pending_model_loads!", .{asset_id.toU64()});
-            var it = self.pending_model_loads.iterator();
-            var count: usize = 0;
-            while (it.next()) |entry| {
-                log(.DEBUG, "enhanced_scene", "  pending_model_loads key {d}", .{entry.key_ptr.*.toU64()});
-                count += 1;
-            }
-            log(.DEBUG, "enhanced_scene", "  Total pending_model_loads: {d}", .{count});
         }
     }
 
     /// Handle material completion
     fn handleMaterialCompletion(self: *Self, asset_id: AssetId) void {
-        _ = self; // Suppress unused warning
-        log(.DEBUG, "enhanced_scene", "Processing material completion for asset {d}", .{asset_id.toU64()});
+        _ = self;
+        _ = asset_id;
         // TODO: Update material buffer
     }
 

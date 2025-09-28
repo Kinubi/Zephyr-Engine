@@ -71,28 +71,18 @@ const CompletedLoadQueue = struct {
         };
     }
 
-    // Add to CompletedLoadQueue:
-    pub fn pushLoadedTexture(self: *CompletedLoadQueue, asset_id: AssetId, texture: Texture) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        // Store the loaded Texture in the texture_queue, replacing TextureStaging
-        self.texture_queue.put(asset_id, texture) catch |err| {
-            log(.ERROR, "CompletedLoadQueue", "Failed to push loaded texture: asset_id={d}, err={}", .{ asset_id.toU64(), err });
-        };
-    }
-
     /// Get a mesh by asset_id (does not remove)
-    pub fn getMesh(self: *CompletedLoadQueue, asset_id: AssetId) ?*MeshStaging {
+    pub fn getMesh(self: *CompletedLoadQueue, asset_id: AssetId) ?MeshStaging {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.mesh_queue.getPtr(asset_id);
+        return self.mesh_queue.fetchRemove(asset_id).?.value;
     }
 
     /// Get a texture by asset_id (does not remove)
-    pub fn getTexture(self: *CompletedLoadQueue, asset_id: AssetId) ?*TextureStaging {
+    pub fn getTexture(self: *CompletedLoadQueue, asset_id: AssetId) ?TextureStaging {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.texture_queue.getPtr(asset_id);
+        return self.texture_queue.fetchRemove(asset_id).?.value;
     }
 
     // /// Pop (remove and return) a mesh by asset_id
@@ -121,12 +111,9 @@ fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
             // Cast the loader pointer back to AssetLoader
             const loader: *AssetLoader = @ptrCast(@alignCast(work_item.loader));
 
-            log(.DEBUG, "asset_loader", "Worker {d} processing asset {d}", .{ worker_id, work_item.asset_id });
-
             // Execute job
             loader.performLoadAsync(work_item.asset_id) catch |err| {
                 // Log error and mark asset as failed
-                log(.ERROR, "asset_loader", "Worker {d} failed to load asset {d}: {}", .{ worker_id, work_item.asset_id, err });
 
                 // Convert error to string for registry
                 var error_buf: [256]u8 = undefined;
@@ -136,8 +123,6 @@ fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
                 // Update failed loads counter
                 _ = @atomicRmw(u32, &loader.failed_loads, .Add, 1, .monotonic);
             };
-
-            log(.DEBUG, "asset_loader", "Worker {d} completed asset {d}", .{ worker_id, work_item.asset_id });
         } else {
             // No job available, sleep briefly to avoid busy waiting
             std.Thread.sleep(std.time.ns_per_ms * 1); // 1ms sleep
@@ -253,7 +238,6 @@ pub const AssetLoader = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        log(.ERROR, "asset_loader", "AssetLoader deinit called, cleaning up resources", .{});
         // Clean up thread pool first
         if (self.thread_pool) |pool| {
             pool.deinit();
@@ -298,25 +282,19 @@ pub const AssetLoader = struct {
                 return;
             };
             self.setLoadedModel(asset_id, model);
-            log(.INFO, "asset_loader", "Processed completed mesh for asset {d}", .{asset_id.toU64()});
-        } else {
-            log(.ERROR, "asset_loader", "No completed mesh staging found for asset {d}", .{asset_id.toU64()});
-        }
+        } else {}
     }
 
-    /// Process a completed mesh staging entry: convert to Model and store in loaded_models
+    /// Process a completed texture staging entry: convert to Texture and store in loaded_textures
     pub fn processCompletedTexture(self: *Self, asset_id: AssetId) void {
         if (self.completed_queue.getTexture(asset_id)) |staging| {
-            // Convert TextureStaging to Texture (GPU upload)
+            // Convert TextureStaging to Texture (GPU upload) on main thread
             const texture = Texture.initFromMemory(self.graphics_context, self.allocator, staging.img_data, .rgba8) catch |err| {
                 log(.ERROR, "asset_loader", "Failed to create Texture from memory for asset {d}: {}", .{ asset_id.toU64(), err });
                 return;
             };
             self.setLoadedTexture(asset_id, texture);
-            log(.INFO, "asset_loader", "Processed completed texture for asset {d}", .{asset_id.toU64()});
-        } else {
-            log(.ERROR, "asset_loader", "No completed mesh staging found for asset {d}", .{asset_id.toU64()});
-        }
+        } else {}
     }
 
     /// Manually set a loaded model for an asset ID (for hot-reload, tests, or manual injection)
@@ -324,7 +302,6 @@ pub const AssetLoader = struct {
         self.loaded_models.put(asset_id, model) catch |err| {
             log(.ERROR, "asset_loader", "Failed to set loaded model for asset {d}: {}", .{ asset_id.toU64(), err });
         };
-        log(.INFO, "asset_loader", "setLoadedModel: asset_id={d} (now {d} loaded models)", .{ asset_id.toU64(), self.loaded_models.count() });
     }
 
     /// Manually set a loaded texture for an asset ID (for hot-reload, tests, or manual injection)
@@ -332,26 +309,22 @@ pub const AssetLoader = struct {
         self.loaded_textures.put(asset_id, texture) catch |err| {
             log(.ERROR, "asset_loader", "Failed to set loaded texture for asset {d}: {}", .{ asset_id.toU64(), err });
         };
-        log(.INFO, "asset_loader", "setLoadedTexture: asset_id={d} (now {d} loaded textures)", .{ asset_id.toU64(), self.loaded_textures.count() });
     }
 
     /// Get a loaded model by AssetId
-    pub fn getLoadedModel(self: *Self, asset_id: AssetId) ?*Model {
-        log(.DEBUG, "asset_loader", "Loaded models: {d}", .{self.loaded_models.count()});
-        return self.loaded_models.getPtr(asset_id);
+    pub fn getLoadedModel(self: *Self, asset_id: AssetId) ?Model {
+        return self.loaded_models.fetchRemove(asset_id).?.value;
     }
 
     /// Get a loaded texture by AssetId
-    pub fn getLoadedTexture(self: *Self, asset_id: AssetId) ?*Texture {
-        log(.DEBUG, "asset_loader", "Loaded textures: {d}", .{self.loaded_textures.count()});
-        return self.loaded_textures.getPtr(asset_id);
+    pub fn getLoadedTexture(self: *Self, asset_id: AssetId) ?Texture {
+        return self.loaded_textures.fetchRemove(asset_id).?.value;
     }
 
     /// Request an asset to be loaded with the given priority
     pub fn requestLoad(self: *Self, asset_id: AssetId, priority: LoadPriority) !void {
         // Check if asset exists in registry
         const asset = self.registry.getAsset(asset_id) orelse return error.AssetNotRegistered;
-        log(.DEBUG, "asset_loader", "Requesting load for asset {d} of type {} with priority {}", .{ asset_id.toU64(), asset.asset_type, priority });
         // Skip if already loaded or loading
         switch (asset.state) {
             .loaded => return,
@@ -542,11 +515,7 @@ pub const AssetLoader = struct {
         // Mark as loaded (thread-safe)
         self.registry.markAsLoaded(asset_id, file_size);
         // Main-thread processing: convert staging to final asset and store
-        switch (asset.asset_type) {
-            .mesh => self.processCompletedMesh(asset_id),
-            .texture => self.processCompletedTexture(asset_id), // Texture already handled in loadTextureFromDisk
-            else => {},
-        }
+
         _ = @atomicRmw(u32, &self.completed_loads, .Add, 1, .monotonic);
 
         // Notify completion callback if set

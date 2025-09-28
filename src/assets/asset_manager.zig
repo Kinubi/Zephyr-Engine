@@ -166,12 +166,12 @@ pub const AssetManager = struct {
     }
 
     /// Get a loaded model by AssetId
-    pub fn getLoadedModel(self: *Self, asset_id: AssetId) ?*Model {
+    pub fn getLoadedModel(self: *Self, asset_id: AssetId) ?Model {
         return self.loader.getLoadedModel(asset_id);
     }
 
     /// Get a loaded texture by AssetId
-    pub fn getLoadedTexture(self: *Self, asset_id: AssetId) ?*Texture {
+    pub fn getLoadedTexture(self: *Self, asset_id: AssetId) ?Texture {
         return self.loader.getLoadedTexture(asset_id);
     }
 

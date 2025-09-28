@@ -4,6 +4,7 @@ const vk = @import("vulkan");
 const c = @import("c.zig");
 const Allocator = std.mem.Allocator;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const log = @import("../utils/log.zig").log;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
@@ -68,11 +69,12 @@ pub const GraphicsContext = struct {
     present_queue: Queue,
     compute_queue: Queue, // Added for async compute
     command_pool: vk.CommandPool,
+    main_thread_id: std.Thread.Id,
 
     pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: *c.GLFWwindow) !GraphicsContext {
         var self: GraphicsContext = undefined;
         self.vkb = BaseWrapper.load(@as(vk.PfnGetInstanceProcAddr, @ptrCast(&c.glfwGetInstanceProcAddress)));
-
+        self.main_thread_id = std.Thread.getCurrentId();
         var glfw_ext_count: u32 = 0;
         const glfw_exts_ptr = c.glfwGetRequiredInstanceExtensions(&glfw_ext_count);
         if (glfw_exts_ptr == null) {
@@ -166,9 +168,9 @@ pub const GraphicsContext = struct {
         self.vkd = DeviceWrapper.load(self.dev, self.vki.dispatch.vkGetDeviceProcAddr.?);
         errdefer self.vkd.destroyDevice(self.dev, null);
 
-        self.graphics_queue = Queue.init(self.vkd, self.dev, candidate.queues.graphics_family);
-        self.present_queue = Queue.init(self.vkd, self.dev, candidate.queues.present_family);
-        self.compute_queue = Queue.init(self.vkd, self.dev, candidate.queues.compute_family); // Initialize compute queue
+        self.graphics_queue = Queue.init(self.vkd, self.dev, candidate.queues.graphics_family, false);
+        self.present_queue = Queue.init(self.vkd, self.dev, candidate.queues.present_family, false);
+        self.compute_queue = Queue.init(self.vkd, self.dev, candidate.queues.compute_family, false);
 
         self.mem_props = self.vki.getPhysicalDeviceMemoryProperties(self.pdev);
 
@@ -215,15 +217,44 @@ pub const GraphicsContext = struct {
         }, null);
     }
 
+    /// Returns a command pool appropriate for the current thread.
+    /// Main thread uses self.command_pool, worker threads use a thread-local pool created on first use.
+    pub fn getThreadCommandPool(self: *GraphicsContext) !vk.CommandPool {
+        // Use Zig's threadlocal storage for worker command pools
+        if (std.Thread.getCurrentId() == self.main_thread_id) {
+            return self.command_pool;
+        } else {
+            const worker_command_pool = try self.vkd.createCommandPool(self.dev, &.{
+                .flags = .{ .reset_command_buffer_bit = true },
+                .queue_family_index = self.graphics_queue.family,
+            }, null);
+
+            return worker_command_pool;
+        }
+    }
+
+    pub fn getThreadQueue(self: *GraphicsContext) !Queue {
+        // Use Zig's threadlocal storage for worker command pools
+        if (std.Thread.getCurrentId() == self.main_thread_id) {
+            return self.graphics_queue;
+        } else {
+            // Create a thread-local queue for worker threads
+            const new_queue = Queue.init(self.vkd, self.dev, self.graphics_queue.family, true);
+            return new_queue;
+        }
+    }
+
     pub fn copyBuffer(self: *GraphicsContext, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
-        const cmdbuf = try self.beginSingleTimeCommands();
+        var threaded_command_pool = try self.beginSingleTimeCommands();
+        defer self.endSingleTimeCommands(&threaded_command_pool) catch |err| {
+            std.log.err("endSingleTimeCommands failed: {any}", .{err});
+        };
         const region = vk.BufferCopy{
             .src_offset = 0,
             .dst_offset = 0,
             .size = size,
         };
-        self.vkd.cmdCopyBuffer(cmdbuf, src, dst, 1, @ptrCast(&region));
-        try self.endSingleTimeCommands(cmdbuf);
+        self.vkd.cmdCopyBuffer(threaded_command_pool.commandBuffer, src, dst, 1, @ptrCast(&region));
     }
 
     pub fn createCommandBuffers(
@@ -362,10 +393,25 @@ pub const GraphicsContext = struct {
         try self.vkd.bindImageMemory(self.dev, image.*, memory.*, 0);
     }
 
-    pub fn beginSingleTimeCommands(self: *GraphicsContext) !vk.CommandBuffer {
+    const threadedCommandPool = struct {
+        pool: vk.CommandPool = undefined,
+        commandBuffer: vk.CommandBuffer = undefined,
+        single_time_queue: Queue = undefined,
+    };
+
+    pub fn beginSingleTimeCommands(self: *GraphicsContext) !threadedCommandPool {
+        var threaded_command_pool: threadedCommandPool = .{};
+        threaded_command_pool.pool = self.getThreadCommandPool() catch |err| {
+            std.log.err("Failed to get thread command pool: {any}", .{err});
+            return err;
+        };
+        threaded_command_pool.single_time_queue = self.getThreadQueue() catch |err| {
+            std.log.err("Failed to get thread queue: {any}", .{err});
+            return err;
+        };
         var alloc_info = vk.CommandBufferAllocateInfo{
             .s_type = vk.StructureType.command_buffer_allocate_info,
-            .command_pool = self.command_pool,
+            .command_pool = threaded_command_pool.pool,
             .level = .primary,
             .command_buffer_count = 1,
         };
@@ -377,24 +423,25 @@ pub const GraphicsContext = struct {
             .p_inheritance_info = null,
         };
         try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
-        return command_buffer;
+        threaded_command_pool.commandBuffer = command_buffer;
+        return threaded_command_pool;
     }
 
-    pub fn endSingleTimeCommands(self: *GraphicsContext, command_buffer: vk.CommandBuffer) !void {
-        try self.vkd.endCommandBuffer(command_buffer);
+    pub fn endSingleTimeCommands(self: *GraphicsContext, threaded_command_pool: *threadedCommandPool) !void {
+        try self.vkd.endCommandBuffer(threaded_command_pool.*.commandBuffer);
         var submit_info = vk.SubmitInfo{
             .s_type = vk.StructureType.submit_info,
             .wait_semaphore_count = 0,
             .p_wait_semaphores = null,
             .p_wait_dst_stage_mask = null,
             .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&command_buffer),
+            .p_command_buffers = @ptrCast(&threaded_command_pool.*.commandBuffer),
             .signal_semaphore_count = 0,
             .p_signal_semaphores = null,
         };
-        try self.vkd.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
-        try self.vkd.queueWaitIdle(self.graphics_queue.handle);
-        self.vkd.freeCommandBuffers(self.dev, self.command_pool, 1, @ptrCast(&command_buffer));
+        try self.vkd.queueSubmit(threaded_command_pool.*.single_time_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
+        try self.vkd.queueWaitIdle(threaded_command_pool.*.single_time_queue.handle);
+        self.vkd.freeCommandBuffers(self.dev, threaded_command_pool.*.pool, 1, @ptrCast(&threaded_command_pool.*.commandBuffer));
     }
 
     pub fn transitionImageLayoutSingleTime(
@@ -404,15 +451,15 @@ pub const GraphicsContext = struct {
         new_layout: vk.ImageLayout,
         subresource_range: vk.ImageSubresourceRange,
     ) !void {
-        const command_buffer = try self.beginSingleTimeCommands();
+        var threaded_command_pool = try self.beginSingleTimeCommands();
         var defer_err: ?anyerror = null;
         defer {
-            self.endSingleTimeCommands(command_buffer) catch |err| {
+            self.endSingleTimeCommands(&threaded_command_pool) catch |err| {
                 std.log.err("endSingleTimeCommands failed: {any}", .{err});
                 defer_err = err;
             };
         }
-        self.transitionImageLayout(command_buffer, image, old_layout, new_layout, subresource_range);
+        self.transitionImageLayout(threaded_command_pool.commandBuffer, image, old_layout, new_layout, subresource_range);
         if (defer_err) |err| return err;
     }
 
@@ -423,10 +470,10 @@ pub const GraphicsContext = struct {
         width: u32,
         height: u32,
     ) !void {
-        const command_buffer = try self.beginSingleTimeCommands();
+        var threaded_command_pool = try self.beginSingleTimeCommands();
         var defer_err: ?anyerror = null;
         defer {
-            self.endSingleTimeCommands(command_buffer) catch |err| {
+            self.endSingleTimeCommands(&threaded_command_pool) catch |err| {
                 std.log.err("endSingleTimeCommands failed: {any}", .{err});
                 defer_err = err;
             };
@@ -445,7 +492,7 @@ pub const GraphicsContext = struct {
             .image_extent = .{ .width = width, .height = height, .depth = 1 },
         };
         self.vkd.cmdCopyBufferToImage(
-            command_buffer,
+            threaded_command_pool.commandBuffer,
             buffer,
             image,
             vk.ImageLayout.transfer_dst_optimal,
@@ -462,10 +509,10 @@ pub const GraphicsContext = struct {
         height: u32,
         mip_levels: u32,
     ) !void {
-        const command_buffer = try self.beginSingleTimeCommands();
+        var threaded_command_pool = try self.beginSingleTimeCommands();
         var defer_err: ?anyerror = null;
         defer {
-            self.endSingleTimeCommands(command_buffer) catch |err| {
+            self.endSingleTimeCommands(&threaded_command_pool) catch |err| {
                 std.log.err("endSingleTimeCommands failed: {any}", .{err});
                 defer_err = err;
             };
@@ -493,7 +540,7 @@ pub const GraphicsContext = struct {
                 },
             };
             self.vkd.cmdPipelineBarrier(
-                command_buffer,
+                threaded_command_pool.commandBuffer,
                 vk.PipelineStageFlags{ .transfer_bit = true },
                 vk.PipelineStageFlags{ .transfer_bit = true },
                 .{},
@@ -527,7 +574,7 @@ pub const GraphicsContext = struct {
                 },
             };
             self.vkd.cmdBlitImage(
-                command_buffer,
+                threaded_command_pool.commandBuffer,
                 image,
                 vk.ImageLayout.transfer_src_optimal,
                 image,
@@ -555,7 +602,7 @@ pub const GraphicsContext = struct {
                 },
             };
             self.vkd.cmdPipelineBarrier(
-                command_buffer,
+                threaded_command_pool.commandBuffer,
                 vk.PipelineStageFlags{ .transfer_bit = true },
                 vk.PipelineStageFlags{ .fragment_shader_bit = true },
                 .{},
@@ -588,7 +635,7 @@ pub const GraphicsContext = struct {
             },
         };
         self.vkd.cmdPipelineBarrier(
-            command_buffer,
+            threaded_command_pool.commandBuffer,
             vk.PipelineStageFlags{ .transfer_bit = true },
             vk.PipelineStageFlags{ .fragment_shader_bit = true },
             .{},
@@ -606,7 +653,13 @@ pub const Queue = struct {
     handle: vk.Queue,
     family: u32,
 
-    fn init(vkd: DeviceWrapper, dev: vk.Device, family: u32) Queue {
+    fn init(vkd: DeviceWrapper, dev: vk.Device, family: u32, new: bool) Queue {
+        if (new) {
+            return .{
+                .handle = vkd.getDeviceQueue(dev, family, 1),
+                .family = family,
+            };
+        }
         return .{
             .handle = vkd.getDeviceQueue(dev, family, 0),
             .family = family,
@@ -629,7 +682,7 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .{
             .flags = .{},
             .queue_family_index = candidate.queues.graphics_family,
-            .queue_count = 1,
+            .queue_count = 2,
             .p_queue_priorities = &priority,
         },
         .{
