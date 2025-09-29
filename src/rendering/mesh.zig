@@ -139,7 +139,7 @@ pub const Mesh = struct {
         self.index_buffer = null;
     }
 
-    pub fn draw(self: Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
+    pub fn draw(self: *const Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
         const offset = [_]vk.DeviceSize{0};
         if (self.vertex_buffer) |buf| {
             gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buf.buffer)), &offset);
@@ -204,13 +204,33 @@ pub const Model = struct {
     meshes: std.ArrayList(ModelMesh),
     allocator: std.mem.Allocator,
 
-    pub fn loadFromObj(allocator: std.mem.Allocator, gc: *GraphicsContext, data: []const u8, name: []const u8) !Model {
-        const obj = try Obj.parseObj(allocator, data);
-        var meshes = std.ArrayList(ModelMesh){};
+    pub fn create(allocator: std.mem.Allocator, gc: *GraphicsContext, data: []const u8, name: []const u8) !*Model {
+        const model_ptr = try allocator.create(Model);
+        errdefer allocator.destroy(model_ptr);
+
+        // Initialize the model directly in the heap allocation to avoid copy issues
+        model_ptr.* = Model{
+            .meshes = std.ArrayList(ModelMesh){},
+            .allocator = allocator,
+        };
+
+        // Load OBJ data directly into the heap-allocated model
+        try model_ptr.loadFromObjInPlace(gc, data, name);
+        return model_ptr;
+    }
+
+    fn loadFromObjInPlace(self: *Model, gc: *GraphicsContext, data: []const u8, name: []const u8) !void {
+        const obj = try Obj.parseObj(self.allocator, data);
         for (obj.meshes) |obj_mesh| {
-            var mesh = Mesh.init(allocator);
-            try mesh.vertices.ensureTotalCapacity(allocator, obj.vertices.len);
-            try mesh.indices.ensureTotalCapacity(allocator, obj_mesh.indices.len);
+            std.log.info("Loading mesh: vertex count = {}, index count = {}, face count = {}", .{
+                obj.vertices.len / 3,
+                obj_mesh.indices.len,
+                obj_mesh.num_vertices.len,
+            });
+            var mesh_ptr = try self.allocator.create(Mesh);
+            mesh_ptr.* = Mesh.init(self.allocator);
+            try mesh_ptr.vertices.ensureTotalCapacity(self.allocator, obj.vertices.len);
+            try mesh_ptr.indices.ensureTotalCapacity(self.allocator, obj_mesh.indices.len);
             var index_offset: usize = 0;
             for (obj_mesh.num_vertices) |face_vertex_count| {
                 // Compute face normal if any vertex is missing a normal
@@ -274,19 +294,117 @@ pub const Model = struct {
                         .normal = normal,
                         .uv = uv,
                     };
-                    const vertex_index = vertex_list_contains(mesh.vertices, vertex);
+                    const vertex_index = vertex_list_contains(mesh_ptr.vertices, vertex);
                     if (vertex_index == -1) {
-                        try mesh.vertices.append(allocator, vertex);
-                        try mesh.indices.append(allocator, @as(u32, @intCast(mesh.vertices.items.len - 1)));
+                        try mesh_ptr.vertices.append(self.allocator, vertex);
+                        try mesh_ptr.indices.append(self.allocator, @as(u32, @intCast(mesh_ptr.vertices.items.len - 1)));
                     } else {
-                        try mesh.indices.append(allocator, @as(u32, @intCast(vertex_index)));
+                        try mesh_ptr.indices.append(self.allocator, @as(u32, @intCast(vertex_index)));
                     }
                 }
                 index_offset += face_vertex_count;
             }
-            try mesh.createIndexBuffers(gc);
-            try mesh.createVertexBuffers(gc);
-            const geometry = Geometry{ .mesh = mesh, .name = name };
+            std.log.info("Mesh index buffer: {any}, vertex buffer: {any}, name: {s}", .{ mesh_ptr.vertices.items[0], mesh_ptr.indices.items.len, name });
+            try mesh_ptr.createIndexBuffers(gc);
+            try mesh_ptr.createVertexBuffers(gc);
+            std.log.info("Mesh vertex buffer: {any}, index buffer: {any}, name: {s}", .{ mesh_ptr.vertex_buffer.?.instance_count, mesh_ptr.index_buffer.?.instance_count, name });
+            const geometry = Geometry{ .mesh = mesh_ptr, .name = name };
+            try self.meshes.append(self.allocator, ModelMesh{
+                .geometry = geometry,
+                .local_transform = Transform{},
+            });
+        }
+    }
+
+    pub fn loadFromObj(allocator: std.mem.Allocator, gc: *GraphicsContext, data: []const u8, name: []const u8) !Model {
+        const obj = try Obj.parseObj(allocator, data);
+        var meshes = std.ArrayList(ModelMesh){};
+        for (obj.meshes) |obj_mesh| {
+            std.log.info("Loading mesh: vertex count = {}, index count = {}, face count = {}", .{
+                obj.vertices.len / 3,
+                obj_mesh.indices.len,
+                obj_mesh.num_vertices.len,
+            });
+            var mesh_ptr = try allocator.create(Mesh);
+            mesh_ptr.* = Mesh.init(allocator);
+            try mesh_ptr.vertices.ensureTotalCapacity(allocator, obj.vertices.len);
+            try mesh_ptr.indices.ensureTotalCapacity(allocator, obj_mesh.indices.len);
+            var index_offset: usize = 0;
+            for (obj_mesh.num_vertices) |face_vertex_count| {
+                // Compute face normal if any vertex is missing a normal
+                var face_normal: [3]f32 = .{ 0.0, 0.0, 0.0 };
+                var need_compute_normal = false;
+                var face_positions: [3][3]f32 = undefined;
+                var vtx_count: usize = 0;
+                for (0..face_vertex_count) |vtx_in_face| {
+                    const idx = obj_mesh.indices[index_offset + vtx_in_face];
+                    if (idx.normal == null) need_compute_normal = true;
+                    if (vtx_count < 3) {
+                        const pos_idx = idx.vertex.?;
+                        face_positions[vtx_count] = .{
+                            obj.vertices[pos_idx * 3],
+                            obj.vertices[pos_idx * 3 + 1],
+                            obj.vertices[pos_idx * 3 + 2],
+                        };
+                        vtx_count += 1;
+                    }
+                }
+                if (need_compute_normal and vtx_count == 3) {
+                    // Compute face normal using cross product
+                    const v0 = face_positions[0];
+                    const v1 = face_positions[1];
+                    const v2 = face_positions[2];
+                    const u = .{ v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
+                    const v = .{ v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] };
+                    face_normal = .{
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    };
+                    // Normalize
+                    const length = @sqrt(face_normal[0] * face_normal[0] + face_normal[1] * face_normal[1] + face_normal[2] * face_normal[2]);
+                    if (length > 0.0) {
+                        face_normal = .{ face_normal[0] / length, face_normal[1] / length, face_normal[2] / length };
+                    }
+                }
+
+                for (0..face_vertex_count) |vtx_in_face| {
+                    const idx = obj_mesh.indices[index_offset + vtx_in_face];
+                    const pos = .{
+                        obj.vertices[3 * idx.vertex.?],
+                        obj.vertices[3 * idx.vertex.? + 1],
+                        obj.vertices[3 * idx.vertex.? + 2],
+                    };
+                    const normal = if (idx.normal) |nidx| .{
+                        obj.normals[3 * nidx],
+                        obj.normals[3 * nidx + 1],
+                        obj.normals[3 * nidx + 2],
+                    } else face_normal;
+                    const uv = if (idx.tex_coord) |tidx| .{
+                        obj.tex_coords[tidx * 2],
+                        obj.tex_coords[tidx * 2 + 1],
+                    } else .{ 0.0, 0.0 };
+                    const vertex = Vertex{
+                        .pos = pos,
+                        .color = .{ 1.0, 1.0, 1.0 },
+                        .normal = normal,
+                        .uv = uv,
+                    };
+                    const vertex_index = vertex_list_contains(mesh_ptr.vertices, vertex);
+                    if (vertex_index == -1) {
+                        try mesh_ptr.vertices.append(allocator, vertex);
+                        try mesh_ptr.indices.append(allocator, @as(u32, @intCast(mesh_ptr.vertices.items.len - 1)));
+                    } else {
+                        try mesh_ptr.indices.append(allocator, @as(u32, @intCast(vertex_index)));
+                    }
+                }
+                index_offset += face_vertex_count;
+            }
+            std.log.info("Mesh index buffer: {any}, vertex buffer: {any}, name: {s}", .{ mesh_ptr.vertices.items[0], mesh_ptr.indices.items.len, name });
+            try mesh_ptr.createIndexBuffers(gc);
+            try mesh_ptr.createVertexBuffers(gc);
+            std.log.info("Mesh vertex buffer: {any}, index buffer: {any}, name: {s}", .{ mesh_ptr.vertex_buffer.?.instance_count, mesh_ptr.index_buffer.?.instance_count, name });
+            const geometry = Geometry{ .mesh = mesh_ptr, .name = name };
             try meshes.append(allocator, ModelMesh{
                 .geometry = geometry,
                 .local_transform = Transform{},
@@ -304,7 +422,8 @@ pub const Model = struct {
 
     pub fn deinit(self: *Model) void {
         for (self.meshes.items) |*mesh| {
-            mesh.geometry.mesh.deinit(self.allocator);
+            mesh.geometry.mesh.*.deinit(self.allocator);
+            self.allocator.destroy(mesh.geometry.mesh);
         }
         self.meshes.deinit(self.allocator);
     }
@@ -333,7 +452,7 @@ pub const Model = struct {
     pub fn dumpVertexColors(self: Model) void {
         std.debug.print("[Model] Dumping vertex colors for all meshes in model:\n", .{});
         for (self.meshes.items, 0..) |model_mesh, mesh_idx| {
-            const mesh = &model_mesh.geometry.mesh;
+            const mesh = model_mesh.geometry.mesh;
             std.debug.print("  Mesh {d}:\n", .{mesh_idx});
             for (mesh.vertices.items, 0..) |v, i| {
                 std.debug.print("    Vertex {d}: color = ({any}, {any}, {any})\n", .{ i, v.color[0], v.color[1], v.color[2] });
@@ -425,8 +544,12 @@ pub fn loadModelWithTransforms(
 }
 
 pub fn fromMesh(allocator: std.mem.Allocator, mesh: Mesh, name: []const u8) !*Model {
+    // Create a heap-allocated copy of the mesh to avoid ownership issues
+    const mesh_ptr = try allocator.create(Mesh);
+    mesh_ptr.* = mesh;
+
     const geom = Geometry{
-        .mesh = mesh,
+        .mesh = mesh_ptr,
         .name = name,
     };
     const model = try allocator.create(Model);

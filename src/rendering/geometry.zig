@@ -6,7 +6,7 @@ const Mesh = @import("mesh.zig").Mesh;
 
 pub const Geometry = struct {
     name: []const u8,
-    mesh: Mesh = undefined,
+    mesh: *Mesh,
     material: ?*Material = null,
     // Optional: BLAS for raytracing
     blas: ?*anyopaque = null, // Replace with actual BLAS type if available
@@ -15,6 +15,7 @@ pub const Geometry = struct {
 
     pub fn deinit(self: *Geometry, allocator: std.mem.Allocator) void {
         self.mesh.deinit(allocator);
+        allocator.destroy(self.mesh);
 
         if (self.material) |mat| mat.deinit(allocator);
         // Note: BLAS (raytracing acceleration structure) managed by raytracing system

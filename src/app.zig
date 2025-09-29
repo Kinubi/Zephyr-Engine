@@ -145,8 +145,7 @@ pub const App = struct {
         // Initialize Enhanced Scene with Asset Manager integration
         scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
 
-        // Register completion callback for asset loading notifications
-        asset_manager.setAssetCompletionCallback(EnhancedScene.onAssetCompleted, &scene);
+        // EnhancedScene registers for asset completion callbacks during its init
 
         // Enable hot reloading for development BEFORE loading assets
         scene.enableHotReload() catch |err| {
@@ -157,17 +156,6 @@ pub const App = struct {
         scene.registerForHotReloadCallbacks();
         if (scene.asset_manager.hot_reload_manager) |*hr_manager| {
             hr_manager.setTextureReloadCallback(EnhancedScene.textureReloadCallbackWrapper);
-        }
-
-        // Preload textures
-        if (comptime std.debug.runtime_safety) {
-            scene.startAsyncTextureLoad("textures/granitesmooth1-albedo.png") catch |err| {
-                log(.WARN, "app", "Failed to start async texture preload: {}", .{err});
-            };
-
-            // Show loading stats
-            const stats = scene.getLoadingStats();
-            log(.DEBUG, "app", "Loading stats: active={d}, completed={d}, failed={d}", .{ stats.active_loads, stats.completed_loads, stats.failed_loads });
         }
 
         var mesh = Mesh.init(self.allocator);
@@ -222,19 +210,18 @@ pub const App = struct {
         try mesh.createVertexBuffers(&self.gc);
         try mesh.createIndexBuffers(&self.gc);
 
-        // --- Load cube mesh using non-blocking enhanced scene system ---
-        log(.DEBUG, "scene", "Loading cube with fallback through enhanced scene", .{});
-        const cube_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, -0.5, 0.5), // position
-            Math.Vec3.init(0.5, 0.005, 0.5) // scale - Fixed Y from 0.001 to 0.5
-        );
-        log(.INFO, "scene", "Added cube object (fallback) with {d} meshes", .{if (cube_object.model) |m| m.meshes.items.len else 0});
+        // --- Load cube mesh using asset-based enhanced scene system ---
+        log(.DEBUG, "scene", "Loading cube with asset-based approach", .{});
+        const cube_object = try scene.addModelAssetAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, 0.5, 0.5), // position
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale - Fixed Y from 0.001 to 0.5
+        log(.INFO, "scene", "Added cube object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (cube_object.model_asset) |id| id.toU64() else 0, if (cube_object.material_asset) |id| id.toU64() else 0, if (cube_object.texture_asset) |id| id.toU64() else 0 });
 
-        // Create another textured cube with a different texture (non-blocking)
-        log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
-        const cube2_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // Closer to center
+        // Create another textured cube with a different texture (asset-based)
+        log(.DEBUG, "scene", "Adding second cube with different texture (asset-based)", .{});
+        const cube2_object = try scene.addModelAssetAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // Closer to center
             Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as first cube
         );
-        log(.INFO, "scene", "Added second cube object (fallback) with {d} meshes", .{if (cube2_object.model) |m| m.meshes.items.len else 0});
+        log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (cube2_object.model_asset) |id| id.toU64() else 0, if (cube2_object.material_asset) |id| id.toU64() else 0, if (cube2_object.texture_asset) |id| id.toU64() else 0 });
 
         // Create a procedural mesh using the manual mesh (for demonstration)
         log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
@@ -242,18 +229,15 @@ pub const App = struct {
         object5.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5)); // Scale it to same size as cubes
         log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
 
-        // Add another vase with a different texture (non-blocking fallback)
-        log(.DEBUG, "scene", "Adding second vase with error texture (fallback)", .{});
-        const vase2_object = try scene.addModelWithMaterialAndTransformAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-0.7, -0.5, 0.5), // Closer to center and same Y
+        // Add another vase with a different texture (asset-based)
+        log(.DEBUG, "scene", "Adding second vase with error texture (asset-based)", .{});
+        const vase2_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-0.7, -0.5, 0.5), // Closer to center and same Y
             Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as cubes
         );
-        log(.INFO, "scene", "Added second vase object (fallback) with {d} meshes", .{if (vase2_object.model) |m| m.meshes.items.len else 0});
+        log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (vase2_object.model_asset) |id| id.toU64() else 0, if (vase2_object.material_asset) |id| id.toU64() else 0, if (vase2_object.texture_asset) |id| id.toU64() else 0 });
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
-
-        // Update async textures for Vulkan descriptors (must be done on main thread)
-        try scene.updateAsyncTextures(self.allocator);
 
         // log(.DEBUG, "scene", "Adding point light objects", .{});
         // const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
@@ -483,7 +467,7 @@ pub const App = struct {
                 try textured_renderer.updateMaterialData(
                     @intCast(frame_idx),
                     mat_buf.descriptor_info,
-                    scene.texture_image_infos,
+                    scene.asset_manager.getTextureDescriptorArray(),
                 );
             }
             log(.INFO, "TexturedRenderer", "Updated material data for all frames", .{});
@@ -500,6 +484,7 @@ pub const App = struct {
         scene.processPendingReloads();
 
         // Check for and update any newly loaded async resources (textures, models, materials)
+        // Note: Asset completion is handled automatically by the asset manager's worker thread
         const resources_updated = try scene.updateAsyncResources(self.allocator);
 
         // Update textured renderer with any new material/texture data if resources changed
@@ -509,7 +494,7 @@ pub const App = struct {
                 try textured_renderer.updateMaterialData(
                     current_frame,
                     mat_buf.descriptor_info,
-                    scene.texture_image_infos,
+                    scene.asset_manager.getTextureDescriptorArray(),
                 );
             }
         }
@@ -586,7 +571,7 @@ pub const App = struct {
         // );
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
-        scene.processDeferredModelDestruction();
+
         //log(.TRACE, "app", "Frame end", .{});
         return self.window.isRunning();
     }

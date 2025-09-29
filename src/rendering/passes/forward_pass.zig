@@ -44,7 +44,6 @@ pub const ForwardPass = struct {
 
         // Get scene data to show we can access it
         const raster_data = context.scene_view.getRasterizationData();
-        //std.log.info("  - Processing {d} objects with {d} materials", .{ raster_data.objects.len, raster_data.materials.len });
 
         // Render opaque objects using TexturedRenderer
         if (self.textured_renderer) |renderer| {

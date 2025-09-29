@@ -6,10 +6,20 @@ const Texture = @import("../core/texture.zig").Texture;
 
 /// Rasterization-specific scene data
 pub const RasterizationData = struct {
+    /// Mesh handle for efficient referencing without copying
     /// Renderable objects with meshes and materials
     pub const RenderableObject = struct {
+        /// Mesh handle for efficient referencing without copying
+        pub const MeshHandle = struct {
+            mesh_ptr: *const Mesh,
+
+            pub fn getMesh(self: MeshHandle) *const Mesh {
+                return self.mesh_ptr;
+            }
+        };
+
         transform: [16]f32, // 4x4 matrix
-        mesh: *const Mesh,
+        mesh_handle: MeshHandle,
         material_index: u32,
         texture_index: u32,
         visible: bool = true,

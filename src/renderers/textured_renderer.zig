@@ -121,6 +121,7 @@ pub const TexturedRenderer = struct {
         // Render each object
         for (raster_data.objects) |object| {
             if (!object.visible) continue;
+            // std.log.info("  Object {d}: mesh ptr={x}", .{ i, @intFromPtr(object.mesh) });
 
             // Set up push constants with transform and material index
             const push_constants = TexturedPushConstantData{
@@ -138,8 +139,7 @@ pub const TexturedRenderer = struct {
                 &push_constants,
             );
 
-            // Draw the mesh
-            object.mesh.draw(self.gc.*, frame_info.command_buffer);
+            object.mesh_handle.getMesh().draw(self.gc.*, frame_info.command_buffer);
         }
     }
 };

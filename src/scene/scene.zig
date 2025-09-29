@@ -179,7 +179,7 @@ pub const Scene = struct {
         const material = Material{ .albedo_texture_id = @intCast(texture_id) };
         const material_id = try self.addMaterial(material);
         for (model.meshes.items) |*mesh| {
-            mesh.geometry.mesh.material_id = @intCast(material_id);
+            mesh.geometry.mesh.*.material_id = @intCast(material_id);
         }
         log(.INFO, "scene", "Assigned material {d} to all meshes in model {s}", .{ material_id, model_path });
         return try self.addModel(model, null);

@@ -36,7 +36,7 @@ void main() {
 
     v_color = color;
     v_uv = uv;
-    v_normal = normalize((push.normalMatrix * vec4(normal, 0.0)).xyz);
+    //v_normal = normalize((push.normalMatrix * vec4(normal, 0.0)).xyz);
     v_pos = positionWorld.xyz;
     v_material_index = push.materialIndex;
 }

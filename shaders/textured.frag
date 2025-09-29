@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout (location = 0) out vec4 outColor;
 
@@ -47,35 +48,22 @@ void main() {
     
     // Start with vertex color as default
     vec3 albedo = color;
-    
-    // Sample texture if available 
-    if (mat.albedoTextureIndex > 0) {
-        // Use the correct texture index from material (convert from 1-based to 0-based)
-        if (mat.albedoTextureIndex == 1) {
-            vec3 texColor = texture(textures[0], uv).rgb;
-            albedo = texColor;
-        } else if (mat.albedoTextureIndex == 2) {
-            vec3 texColor = texture(textures[1], uv).rgb;
-            albedo = texColor;
-        } else if (mat.albedoTextureIndex == 3) {
-            vec3 texColor = texture(textures[2], uv).rgb;
-            albedo = texColor;
-        }
-    }
-    
-    
-    // Basic lighting calculation
-    vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w;
-    vec3 surfaceNormal = normalize(normal);
 
-    for (int i = 0; i < ubo.numPointLights; i++) {
-        PointLight light = ubo.pointLights[i];
-        vec3 directionToLight = light.position.xyz - positionWorld;
-        float attenuation = 1.0 / dot(directionToLight, directionToLight);
-        float cosAngIncidence = max(dot(surfaceNormal, normalize(directionToLight)), 0);
-        vec3 lightColor = light.color.xyz * light.color.w * attenuation;
-        diffuseLight += lightColor * cosAngIncidence;
-    }
+    albedo = texture(textures[mat.albedoTextureIndex], uv).rgb;
 
-    outColor = vec4(diffuseLight * albedo, 1.0);
+
+    outColor = vec4(albedo, 1.0);
+    // vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w;
+    // vec3 surfaceNormal = normalize(normal);
+
+    // for (int i = 0; i < ubo.numPointLights; i++) {
+    //     PointLight light = ubo.pointLights[i];
+    //     vec3 directionToLight = light.position.xyz - positionWorld;
+    //     float attenuation = 1.0 / dot(directionToLight, directionToLight);
+    //     float cosAngIncidence = max(dot(surfaceNormal, normalize(directionToLight)), 0);
+    //     vec3 lightColor = light.color.xyz * light.color.w * attenuation;
+    //     diffuseLight += lightColor * cosAngIncidence;
+    // }
+
+    // outColor = vec4(diffuseLight * albedo, 1.0);
 }

@@ -74,10 +74,13 @@ pub const FallbackMeshes = struct {
         try cube_mesh.createVertexBuffers(gc);
         try cube_mesh.createIndexBuffers(gc);
 
-        // Create a geometry wrapper
+        // Create a geometry wrapper with heap-allocated mesh
+        const mesh_ptr = try allocator.create(Mesh);
+        mesh_ptr.* = cube_mesh;
+
         const geometry = Geometry{
             .name = try allocator.dupe(u8, name),
-            .mesh = cube_mesh,
+            .mesh = mesh_ptr,
             .material = null,
             .blas = null,
         };

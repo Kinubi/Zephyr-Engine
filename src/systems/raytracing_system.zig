@@ -237,7 +237,7 @@ pub const RaytracingSystem = struct {
         for (scene.objects.items) |*object| {
             if (object.model) |model| {
                 for (model.meshes.items) |mesh| {
-                    log(.INFO, "RaytracingSystem", "Processing model with {} meshes and texture_id {}", .{ model.meshes.items.len, mesh.geometry.mesh.material_id });
+                    log(.INFO, "RaytracingSystem", "Processing model with {} meshes and texture_id {}", .{ model.meshes.items.len, mesh.geometry.mesh.*.material_id });
                     var blas_addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
                         .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
                         .acceleration_structure = self.blas_handles.items[mesh_index],
@@ -245,7 +245,7 @@ pub const RaytracingSystem = struct {
                     const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_addr_info);
                     try instances.append(self.allocator, vk.AccelerationStructureInstanceKHR{
                         .transform = .{ .matrix = object.transform.local2world.to_3x4() },
-                        .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh.geometry.mesh.material_id), .mask = 0xFF },
+                        .instance_custom_index_and_mask = .{ .instance_custom_index = @intCast(mesh.geometry.mesh.*.material_id), .mask = 0xFF },
                         .instance_shader_binding_table_record_offset_and_flags = .{ .instance_shader_binding_table_record_offset = 0, .flags = 0 },
                         .acceleration_structure_reference = blas_device_address,
                     });
