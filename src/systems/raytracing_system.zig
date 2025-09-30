@@ -30,6 +30,7 @@ pub const RaytracingSystem = struct {
     blas: vk.AccelerationStructureKHR = undefined,
     tlas: vk.AccelerationStructureKHR = undefined,
     tlas_buffer: Buffer = undefined,
+    tlas_buffer_initialized: bool = false,
     shader_binding_table: vk.Buffer = undefined,
     shader_binding_table_memory: vk.DeviceMemory = undefined,
     current_frame_index: usize = 0,

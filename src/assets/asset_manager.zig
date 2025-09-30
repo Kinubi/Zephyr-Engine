@@ -495,8 +495,14 @@ pub const AssetManager = struct {
 
         // Create the material object
         const material = try self.allocator.create(Material);
+        const texture_id_u64 = albedo_texture_id.toU64();
+        const texture_id_u32 = if (texture_id_u64 > std.math.maxInt(u32))
+            0 // Use 0 as fallback for oversized IDs
+        else
+            @as(u32, @intCast(texture_id_u64));
+
         material.* = Material{
-            .albedo_texture_id = @intCast(albedo_texture_id.toU64()),
+            .albedo_texture_id = texture_id_u32,
         };
 
         // Add it to the loaded materials

@@ -242,7 +242,7 @@ pub const AssetRegistry = struct {
         // Prevent integer underflow by ensuring loading_assets is never negative
         const completed_assets = self.loaded_assets + self.failed_assets;
         const loading_assets = if (completed_assets > self.total_assets) 0 else self.total_assets - completed_assets;
-        
+
         return AssetStatistics{
             .total_assets = self.total_assets,
             .loaded_assets = self.loaded_assets,

@@ -34,6 +34,8 @@ const Material = @import("scene/scene.zig").Material;
 
 // Asset system imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
+const EnhancedAssetManager = @import("assets/enhanced_asset_manager.zig").EnhancedAssetManager;
+const EnhancedThreadPool = @import("threading/enhanced_thread_pool.zig").EnhancedThreadPool;
 
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
@@ -107,7 +109,8 @@ pub const App = struct {
 
     var frame_index: u32 = 0;
     var scene: EnhancedScene = undefined;
-    var asset_manager: *AssetManager = undefined;
+    var thread_pool: *EnhancedThreadPool = undefined;
+    var asset_manager: *EnhancedAssetManager = undefined;
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Raytracing system field
@@ -137,51 +140,65 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        // Initialize Asset Manager on heap for stable pointer address
-        asset_manager = try self.allocator.create(AssetManager);
-        asset_manager.* = try AssetManager.init(self.allocator, &self.gc);
+        // Initialize Enhanced Thread Pool with dynamic scaling
+        thread_pool = try self.allocator.create(EnhancedThreadPool);
+        thread_pool.* = try EnhancedThreadPool.init(self.allocator, 16); // Max 16 workers
 
-        // Start GPU worker now that AssetManager has a stable heap address
-        try asset_manager.startGpuWorker();
+        // Register subsystems with thread pool
 
-        // Set up ThreadPool callback to monitor running status
-        asset_manager.setThreadPoolCallback(onThreadPoolRunningChanged);
+        try thread_pool.registerSubsystem(.{
+            .name = "hot_reload",
+            .min_workers = 1,
+            .max_workers = 2,
+            .priority = .high,
+            .work_item_type = .hot_reload,
+        });
 
-        // Initialize Enhanced Scene with Asset Manager integration
+        try thread_pool.registerSubsystem(.{
+            .name = "bvh_building",
+            .min_workers = 2,
+            .max_workers = 4,
+            .priority = .normal,
+            .work_item_type = .bvh_building,
+        });
+
+        // Start the thread pool with initial workers
+        try thread_pool.start(4); // Start with 4 workers
+
+        // Initialize Enhanced Asset Manager on heap for stable pointer address
+        asset_manager = try self.allocator.create(EnhancedAssetManager);
+        asset_manager = try EnhancedAssetManager.init(self.allocator, &self.gc, thread_pool);
+
+        // Initialize Enhanced Scene with Enhanced Asset Manager integration
         scene = EnhancedScene.init(&self.gc, self.allocator, asset_manager);
 
-        // EnhancedScene registers for asset completion callbacks during its init
+        // Enhanced Scene registers for asset completion callbacks during its init
 
         // Enable hot reloading for development BEFORE loading assets
         scene.enableHotReload() catch |err| {
             log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
         };
 
-        // Register scene for hot reload callbacks and set up texture reload callback
-        scene.registerForHotReloadCallbacks();
-        if (scene.asset_manager.hot_reload_manager) |*hr_manager| {
-            hr_manager.setTextureReloadCallback(EnhancedScene.textureReloadCallbackWrapper);
-        }
-
         // --- Load cube mesh using asset-based enhanced scene system ---
         log(.DEBUG, "scene", "Loading cube with asset-based approach", .{});
         const cube_object = try scene.addModelAssetAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, 0.5, 0.5), // position
-            Math.Vec3.init(0.5, 0.5, 0.5)); // scale - Fixed Y from 0.001 to 0.5
-        log(.INFO, "scene", "Added cube object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (cube_object.model_asset) |id| id.toU64() else 0, if (cube_object.material_asset) |id| id.toU64() else 0, if (cube_object.texture_asset) |id| id.toU64() else 0 });
+            Math.Vec3.init(0, 0, 0), // rotation
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        log(.INFO, "scene", "Added cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube_object.model_asset orelse @as(@TypeOf(cube_object.model_asset.?), @enumFromInt(0)), cube_object.material_asset orelse @as(@TypeOf(cube_object.material_asset.?), @enumFromInt(0)), cube_object.texture_asset orelse @as(@TypeOf(cube_object.texture_asset.?), @enumFromInt(0)) });
 
         // Create another textured cube with a different texture (asset-based)
         log(.DEBUG, "scene", "Adding second cube with different texture (asset-based)", .{});
-        const cube2_object = try scene.addModelAssetAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // Closer to center
-            Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as first cube
-        );
-        log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (cube2_object.model_asset) |id| id.toU64() else 0, if (cube2_object.material_asset) |id| id.toU64() else 0, if (cube2_object.texture_asset) |id| id.toU64() else 0 });
+        const cube2_object = try scene.addModelAssetAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // position
+            Math.Vec3.init(0, 0, 0), // rotation
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
 
         // Add another vase with a different texture (asset-based)
         log(.DEBUG, "scene", "Adding second vase with error texture (asset-based)", .{});
-        const vase2_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-0.7, -0.5, 0.5), // Closer to center and same Y
-            Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as cubes
-        );
-        log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (vase2_object.model_asset) |id| id.toU64() else 0, if (vase2_object.material_asset) |id| id.toU64() else 0, if (vase2_object.texture_asset) |id| id.toU64() else 0 });
+        const vase2_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
+            Math.Vec3.init(0, 0, 0), // rotation
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase2_object.model_asset orelse @as(@TypeOf(vase2_object.model_asset.?), @enumFromInt(0)), vase2_object.material_asset orelse @as(@TypeOf(vase2_object.material_asset.?), @enumFromInt(0)), vase2_object.texture_asset orelse @as(@TypeOf(vase2_object.texture_asset.?), @enumFromInt(0)) });
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
@@ -212,8 +229,6 @@ pub const App = struct {
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
-        _ = try scene.updateAsyncResources(self.allocator);
-
         // --- Use new GlobalUboSet abstraction ---
         log(.DEBUG, "renderer", "Initializing GlobalUboSet", .{});
         global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
@@ -231,6 +246,7 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
+        _ = try scene.updateAsyncResources(self.allocator);
         log(.DEBUG, "renderer", "Initializing textured renderer", .{});
         textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
         for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
