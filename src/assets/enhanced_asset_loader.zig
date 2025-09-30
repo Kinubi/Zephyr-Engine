@@ -259,7 +259,7 @@ pub const EnhancedAssetLoader = struct {
     pub fn requestLoad(self: *Self, asset_id: AssetId, priority: WorkPriority) !void {
         // Check if asset is already loaded or loading
         if (self.registry.getAsset(asset_id)) |metadata| {
-            if (metadata.state == .loaded or metadata.state == .loading) {
+            if (metadata.state == .loaded or metadata.state == .loading or metadata.state == .staged) {
                 log(.DEBUG, "enhanced_asset_loader", "Asset {} already loaded/loading, skipping", .{asset_id.toU64()});
                 return;
             }
@@ -329,35 +329,6 @@ pub const EnhancedAssetLoader = struct {
         return self.stats;
     }
 
-    // /// Start the GPU worker thread
-    // fn startGpuWorker(self: *Self) !void {
-    //     if (self.gpu_worker_running.load(.acquire)) {
-    //         log(.WARN, "enhanced_asset_loader", "GPU worker already running", .{});
-    //         return;
-    //     }
-
-    //     self.gpu_worker_running.store(true, .release);
-    //     self.gpu_worker_thread = try std.Thread.spawn(.{}, gpuWorkerMain, .{self});
-
-    //     log(.INFO, "enhanced_asset_loader", "GPU worker thread started", .{});
-    // }
-
-    // /// Stop the GPU worker thread
-    // fn stopGpuWorker(self: *Self) void {
-    //     if (!self.gpu_worker_running.load(.acquire)) {
-    //         return;
-    //     }
-
-    //     self.gpu_worker_running.store(false, .release);
-
-    //     if (self.gpu_worker_thread) |thread| {
-    //         thread.join();
-    //         self.gpu_worker_thread = null;
-    //     }
-
-    //     log(.INFO, "enhanced_asset_loader", "GPU worker thread stopped", .{});
-    // }
-
     /// Process texture staging on GPU thread
     fn processTextureStaging(self: *Self, staging: *TextureStaging) !void {
         defer {
@@ -386,9 +357,6 @@ pub const EnhancedAssetLoader = struct {
 
         // Mark asset as loaded
         self.registry.markAsLoaded(staging.asset_id, staging.image_data.len);
-
-        // Update statistics
-        _ = self.stats.completed_loads.fetchAdd(1, .monotonic);
 
         // Update average load time
         const current_avg = self.stats.average_load_time_us.load(.acquire);
@@ -424,9 +392,6 @@ pub const EnhancedAssetLoader = struct {
 
         // Mark asset as loaded
         self.registry.markAsLoaded(staging.asset_id, staging.obj_data.len);
-
-        // Update statistics
-        _ = self.stats.completed_loads.fetchAdd(1, .monotonic);
 
         // Update average load time
         const current_avg = self.stats.average_load_time_us.load(.acquire);
@@ -601,6 +566,7 @@ fn gpuWorker(context: *anyopaque, work_item: WorkItem) void {
                 loader.registry.markAsFailed(staging.asset_id, @errorName(err));
                 _ = loader.stats.failed_loads.fetchAdd(1, .monotonic);
             };
+            processed_any = true;
         },
     }
 }

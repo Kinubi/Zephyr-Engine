@@ -477,6 +477,7 @@ pub const EnhancedAssetManager = struct {
         // If there's a duplicate, it will just overwrite the mapping which is fine
         try self.asset_to_model.put(safe_asset_id, index);
 
+        self.completeRequest(asset_id, true);
         log(.INFO, "asset_manager", "Successfully added model asset {} at index {}", .{ safe_asset_id.toU64(), index });
     }
 
@@ -751,7 +752,7 @@ pub const EnhancedAssetManager = struct {
             const texture_index = self.asset_to_texture.get(resolved_texture_id) orelse 0;
             material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
 
-            log(.DEBUG, "asset_manager", "Material {}: resolved texture {} -> {} (index: {})", .{ i, texture_asset_id.toU64(), resolved_texture_id.toU64(), texture_index });
+            log(.DEBUG, "Enhanced asset_manager", "Material {}: resolved texture {} -> {} (index: {})", .{ i, texture_asset_id.toU64(), resolved_texture_id.toU64(), texture_index });
         }
 
         self.material_buffer.?.writeToBuffer(
@@ -760,7 +761,7 @@ pub const EnhancedAssetManager = struct {
             0,
         );
 
-        log(.INFO, "asset_manager", "Created material buffer with {d} materials (texture IDs resolved)", .{self.loaded_materials.items.len});
+        log(.INFO, "Enhanced asset_manager", "Created material buffer with {d} materials (texture IDs resolved)", .{self.loaded_materials.items.len});
     }
 
     /// Check if asset is ready for use

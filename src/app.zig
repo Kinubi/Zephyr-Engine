@@ -462,6 +462,10 @@ pub const App = struct {
 
         // Update textured renderer with any new material/texture data if resources changed
         if (resources_updated) {
+            // Wait for GPU to finish using any pending descriptor sets before updating
+            // This prevents the validation error: VUID-vkUpdateDescriptorSets-None-03047
+            try self.gc.vkd.deviceWaitIdle(self.gc.dev);
+            
             // Update all frame indices when texture descriptors change
             for (0..MAX_FRAMES_IN_FLIGHT) |ff_index| {
                 try textured_renderer.updateMaterialData(
