@@ -6,6 +6,7 @@ const AssetType = asset_types.AssetType;
 const AssetState = asset_types.AssetState;
 const AssetMetadata = asset_types.AssetMetadata;
 const LoadPriority = asset_types.LoadPriority;
+const log = @import("../utils/log.zig").log;
 
 /// Central registry for all assets in the system
 /// Manages metadata, dependencies, and reference counting
@@ -19,6 +20,9 @@ pub const AssetRegistry = struct {
 
     // Allocator for registry operations
     allocator: std.mem.Allocator,
+
+    // Thread safety
+    mutex: std.Thread.Mutex = .{},
 
     // Statistics
     total_assets: u32 = 0,
@@ -51,6 +55,9 @@ pub const AssetRegistry = struct {
     /// Register a new asset with the given path and type
     /// Returns existing asset ID if path is already registered
     pub fn registerAsset(self: *Self, path: []const u8, asset_type: AssetType) !AssetId {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // Check if already registered
         if (self.path_to_id.get(path)) |existing_id| {
             return existing_id;
@@ -73,6 +80,8 @@ pub const AssetRegistry = struct {
 
     /// Get asset metadata by ID
     pub fn getAsset(self: *Self, asset_id: AssetId) ?*AssetMetadata {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.assets.getPtr(asset_id);
     }
 
@@ -127,6 +136,7 @@ pub const AssetRegistry = struct {
 
     /// Mark an asset as loaded
     pub fn markAsLoaded(self: *Self, asset_id: AssetId, file_size: u64) void {
+        log(.DEBUG, "asset_registry", "Marking asset {d} as loaded", .{asset_id.toU64()});
         if (self.getAsset(asset_id)) |asset| {
             const old_state = asset.state;
             asset.state = .loaded;
@@ -162,6 +172,15 @@ pub const AssetRegistry = struct {
     pub fn markAsLoading(self: *Self, asset_id: AssetId) void {
         if (self.getAsset(asset_id)) |asset| {
             asset.state = .loading;
+        }
+    }
+
+    /// Mark an asset as staged (loaded from disk but not yet processed)
+    pub fn markAsStaged(self: *Self, asset_id: AssetId, file_size: u64) void {
+        log(.DEBUG, "asset_registry", "Marking asset {d} as staged", .{asset_id.toU64()});
+        if (self.getAsset(asset_id)) |asset| {
+            asset.state = .staged;
+            asset.file_size = file_size;
         }
     }
 
@@ -220,11 +239,15 @@ pub const AssetRegistry = struct {
 
     /// Get statistics about the asset registry
     pub fn getStatistics(self: *Self) AssetStatistics {
+        // Prevent integer underflow by ensuring loading_assets is never negative
+        const completed_assets = self.loaded_assets + self.failed_assets;
+        const loading_assets = if (completed_assets > self.total_assets) 0 else self.total_assets - completed_assets;
+        
         return AssetStatistics{
             .total_assets = self.total_assets,
             .loaded_assets = self.loaded_assets,
             .failed_assets = self.failed_assets,
-            .loading_assets = self.total_assets - self.loaded_assets - self.failed_assets,
+            .loading_assets = loading_assets,
         };
     }
 };

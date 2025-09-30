@@ -21,7 +21,6 @@ pub const RasterizationData = struct {
         transform: [16]f32, // 4x4 matrix
         mesh_handle: MeshHandle,
         material_index: u32,
-        texture_index: u32,
         visible: bool = true,
     };
 
@@ -35,8 +34,8 @@ pub const RasterizationData = struct {
     };
 
     objects: []const RenderableObject,
-    materials: []const MaterialData,
-    textures: []const *const Texture,
+    // materials: []const MaterialData,
+    // textures: []const *const Texture,
 
     /// Get objects that should be rendered this frame
     pub fn getVisibleObjects(self: *const RasterizationData) []const RenderableObject {

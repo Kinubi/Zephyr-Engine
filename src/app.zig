@@ -3,6 +3,7 @@ const std = @import("std");
 // Core graphics imports
 const Window = @import("window.zig").Window;
 const Pipeline = @import("core/pipeline.zig").Pipeline;
+
 const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
 const Swapchain = @import("core/swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -106,7 +107,7 @@ pub const App = struct {
 
     var frame_index: u32 = 0;
     var scene: EnhancedScene = undefined;
-    var asset_manager: AssetManager = undefined;
+    var asset_manager: *AssetManager = undefined;
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Raytracing system field
@@ -136,14 +137,18 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        // Initialize Asset Manager
-        asset_manager = try AssetManager.init(self.allocator, &self.gc);
+        // Initialize Asset Manager on heap for stable pointer address
+        asset_manager = try self.allocator.create(AssetManager);
+        asset_manager.* = try AssetManager.init(self.allocator, &self.gc);
+
+        // Start GPU worker now that AssetManager has a stable heap address
+        try asset_manager.startGpuWorker();
 
         // Set up ThreadPool callback to monitor running status
         asset_manager.setThreadPoolCallback(onThreadPoolRunningChanged);
 
         // Initialize Enhanced Scene with Asset Manager integration
-        scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
+        scene = EnhancedScene.init(&self.gc, self.allocator, asset_manager);
 
         // EnhancedScene registers for asset completion callbacks during its init
 
@@ -158,58 +163,6 @@ pub const App = struct {
             hr_manager.setTextureReloadCallback(EnhancedScene.textureReloadCallbackWrapper);
         }
 
-        var mesh = Mesh.init(self.allocator);
-
-        // --- Load texture through enhanced scene system ---
-        // Pre-load the texture asynchronously (if needed)
-        try scene.startAsyncTextureLoad("textures/missing.png");
-
-        // Wait a moment for async loading then use the texture
-        std.Thread.sleep(50_000_000); // 50ms
-
-        // Update material and texture buffers after all materials/textures are added
-
-        try mesh.vertices.appendSlice(self.allocator, &.{
-            // Left Face
-            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-
-            // Right face (yellow)
-            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-
-            // Top face (orange, remember y axis points down)
-            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-
-            // Bottom face (red)
-            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-
-            // Front Face
-            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-
-            // Back Face
-            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-        });
-        try mesh.indices.appendSlice(self.allocator, &.{ 0, 1, 2, 0, 3, 1, 4, 5, 6, 4, 7, 5, 8, 9, 10, 8, 11, 9, 12, 13, 14, 12, 15, 13, 16, 17, 18, 16, 19, 17, 20, 21, 22, 20, 23, 21 });
-        try mesh.createVertexBuffers(&self.gc);
-        try mesh.createIndexBuffers(&self.gc);
-
         // --- Load cube mesh using asset-based enhanced scene system ---
         log(.DEBUG, "scene", "Loading cube with asset-based approach", .{});
         const cube_object = try scene.addModelAssetAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, 0.5, 0.5), // position
@@ -223,15 +176,9 @@ pub const App = struct {
         );
         log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (cube2_object.model_asset) |id| id.toU64() else 0, if (cube2_object.material_asset) |id| id.toU64() else 0, if (cube2_object.texture_asset) |id| id.toU64() else 0 });
 
-        // Create a procedural mesh using the manual mesh (for demonstration)
-        log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
-        const object5 = try scene.addModelFromMesh(mesh, "procedural_mesh", Math.Vec3.init(0, 0.5, 0.5)); // Position it above the cubes
-        object5.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5)); // Scale it to same size as cubes
-        log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
-
         // Add another vase with a different texture (asset-based)
         log(.DEBUG, "scene", "Adding second vase with error texture (asset-based)", .{});
-        const vase2_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-0.7, -0.5, 0.5), // Closer to center and same Y
+        const vase2_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-0.7, -0.5, 0.5), // Closer to center and same Y
             Math.Vec3.init(0.5, 0.5, 0.5) // Same scale as cubes
         );
         log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={d}, material={d}, texture={d}", .{ if (vase2_object.model_asset) |id| id.toU64() else 0, if (vase2_object.material_asset) |id| id.toU64() else 0, if (vase2_object.texture_asset) |id| id.toU64() else 0 });
@@ -265,6 +212,8 @@ pub const App = struct {
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
+        _ = try scene.updateAsyncResources(self.allocator);
+
         // --- Use new GlobalUboSet abstraction ---
         log(.DEBUG, "renderer", "Initializing GlobalUboSet", .{});
         global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
@@ -284,7 +233,9 @@ pub const App = struct {
         });
         log(.DEBUG, "renderer", "Initializing textured renderer", .{});
         textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
-
+        for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
+            try textured_renderer.updateMaterialData(@intCast(FF_index), scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray());
+        }
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
         try shader_library_point_light.add(&.{
@@ -354,8 +305,8 @@ pub const App = struct {
             rt_counts.ubo_count,
             rt_counts.vertex_buffer_count,
             rt_counts.index_buffer_count,
-            scene.materials.items.len,
-            @max(scene.textures.items.len, 32), // Match forward renderer's 32-texture capacity
+            scene.asset_manager.loaded_materials.items.len, // Materials now handled by AssetManager - minimal count
+            @max(scene.asset_manager.loaded_textures.items.len, 32), // Use AssetManager textures
         );
 
         // --- RaytracingSystem init with pool/layout ---
@@ -386,19 +337,36 @@ pub const App = struct {
         for (global_ubo_set.buffers, 0..) |buf, i| {
             ubo_infos[i] = buf.descriptor_info;
         }
-        raytracing_descriptor_set.set = try RaytracingDescriptorSet.createDescriptorSet(
+
+        const pool_layout = try @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet.createPoolAndLayout(
             &self.gc,
-            rt_pool_layout.pool,
-            rt_pool_layout.layout,
+            self.allocator,
+            rt_counts.ubo_count,
+            rt_counts.vertex_buffer_count,
+            rt_counts.index_buffer_count,
+            1, // Materials now handled by AssetManager - minimal count
+            @max(scene.asset_manager.loaded_textures.items.len, 32), // Use AssetManager textures
+        );
+
+        const descriptor_set = try @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet.createDescriptorSet(
+            &self.gc,
+            pool_layout.pool,
+            pool_layout.layout,
             self.allocator,
             @constCast(&as_info),
             @constCast(&image_info),
             ubo_infos,
             vertex_buffer_infos.items,
             index_buffer_infos.items,
-            scene.material_buffer.?.descriptor_info,
-            scene.texture_image_infos,
+            scene.asset_manager.material_buffer.?.descriptor_info,
+            scene.asset_manager.texture_image_infos,
         );
+
+        raytracing_descriptor_set = @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet{
+            .pool = pool_layout.pool,
+            .layout = pool_layout.layout,
+            .set = descriptor_set,
+        };
         raytracing_descriptor_set.pool = rt_pool_layout.pool;
         raytracing_descriptor_set.layout = rt_pool_layout.layout;
         raytracing_system.descriptor_set = raytracing_descriptor_set.set;
@@ -454,24 +422,13 @@ pub const App = struct {
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
         // Initialize Forward Pass System
+
         forward_pass = try ForwardPass.create(self.allocator);
         try forward_pass.init(&self.gc);
         forward_pass.setRenderers(&textured_renderer, &point_light_renderer);
 
         // Create scene view
         scene_view = scene.createSceneView();
-
-        // Update textured renderer with initial material data
-        if (scene.material_buffer) |mat_buf| {
-            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                try textured_renderer.updateMaterialData(
-                    @intCast(frame_idx),
-                    mat_buf.descriptor_info,
-                    scene.asset_manager.getTextureDescriptorArray(),
-                );
-            }
-            log(.INFO, "TexturedRenderer", "Updated material data for all frames", .{});
-        }
 
         log(.INFO, "ForwardPass", "Forward pass system initialized", .{});
 
@@ -488,12 +445,12 @@ pub const App = struct {
         const resources_updated = try scene.updateAsyncResources(self.allocator);
 
         // Update textured renderer with any new material/texture data if resources changed
-        if (resources_updated or scene.material_buffer != null) {
-            if (scene.material_buffer) |mat_buf| {
-                // Only update for the current frame to avoid redundant updates
+        if (resources_updated) {
+            // Update all frame indices when texture descriptors change
+            for (0..MAX_FRAMES_IN_FLIGHT) |ff_index| {
                 try textured_renderer.updateMaterialData(
-                    current_frame,
-                    mat_buf.descriptor_info,
+                    @intCast(ff_index),
+                    scene.asset_manager.material_buffer.?.descriptor_info,
                     scene.asset_manager.getTextureDescriptorArray(),
                 );
             }

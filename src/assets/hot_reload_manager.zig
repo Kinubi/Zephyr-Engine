@@ -101,6 +101,13 @@ pub const HotReloadManager = struct {
         const owned_path = try self.allocator.dupe(u8, file_path);
 
         // Add to our mapping
+        if (self.path_to_asset.get(file_path)) |existing_id| {
+            if (existing_id == asset_id) {
+                // Already registered, free the duplicate path and return
+                self.allocator.free(owned_path);
+                return;
+            }
+        }
         try self.path_to_asset.put(owned_path, asset_id);
 
         // Store initial file metadata
@@ -303,7 +310,7 @@ pub const HotReloadManager = struct {
         {
 
             // Try to load as texture
-            const asset_id = self.asset_manager.loadAssetAsync(file_path, .texture, .normal) catch {
+            const asset_id = self.asset_manager.loadAssetAsync(file_path, .texture) catch {
                 log(.DEBUG, "hot_reload", "Could not auto-load texture: {s}", .{file_path});
                 return;
             };
@@ -322,7 +329,7 @@ pub const HotReloadManager = struct {
         {
 
             // Try to load as mesh
-            const asset_id = self.asset_manager.loadAssetAsync(file_path, .mesh, .normal) catch {
+            const asset_id = self.asset_manager.loadAssetAsync(file_path, .mesh) catch {
                 log(.DEBUG, "hot_reload", "Could not auto-load mesh: {s}", .{file_path});
                 return;
             };

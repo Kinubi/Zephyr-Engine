@@ -18,7 +18,6 @@ const LogLevel = @import("../utils/log.zig").LogLevel;
 const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../assets/asset_manager.zig").AssetId;
 const AssetType = @import("../assets/asset_manager.zig").AssetType;
-const LoadPriority = @import("../assets/asset_manager.zig").LoadPriority;
 
 /// Global mutex for texture loading to prevent zstbi init conflicts
 var texture_loading_mutex = std.Thread.Mutex{};
@@ -33,35 +32,15 @@ pub const AssetCompletionCallback = *const fn (asset_id: AssetId, asset_type: As
 /// Enhanced Scene with Asset Manager integration
 /// Provides both legacy compatibility and new asset-based workflow
 pub const EnhancedScene = struct {
-
-    // Legacy compatibility - keep existing arrays for gradual migration
+    // Core scene data - only GameObjects with asset references
     objects: std.ArrayList(GameObject),
-    next_object_id: u64 = 1,
-    materials: std.ArrayList(Material),
-    textures: std.ArrayList(Texture),
-    material_buffer: ?*Buffer = null,
-    texture_image_infos: []const vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
+    next_object_id: u64,
 
-    // Asset Manager integration
+    // Asset Manager integration - all assets handled here
     asset_manager: *AssetManager,
 
-    // Direct texture cache for async loading
-    texture_cache: std.StringHashMap(usize), // path -> texture index
-    loading_textures: std.StringHashMap(bool), // path -> loading state
-
-    // Dirty flags for different asset types
-    textures_dirty: bool = false,
-    models_dirty: bool = false,
-    materials_dirty: bool = false,
-
-    // Thread synchronization
-    texture_mutex: std.Thread.Mutex = .{},
-
-    // Track when texture descriptors need updates (legacy)
-    texture_descriptors_dirty: bool = false,
-
     // Raytracing system reference for descriptor updates
-    raytracing_system: ?*@import("../systems/raytracing_system.zig").RaytracingSystem = null,
+    raytracing_system: ?*@import("../systems/raytracing_system.zig").RaytracingSystem,
 
     // Core dependencies
     gc: *GraphicsContext,
@@ -71,23 +50,14 @@ pub const EnhancedScene = struct {
 
     /// Initialize the EnhancedScene
     pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, asset_manager: *AssetManager) Self {
-        const scene = Self{
+        return Self{
             .objects = std.ArrayList(GameObject){},
-            .materials = std.ArrayList(Material){},
-            .textures = std.ArrayList(Texture){},
+            .next_object_id = 1,
             .asset_manager = asset_manager,
-            .texture_cache = std.StringHashMap(usize).init(allocator),
-            .loading_textures = std.StringHashMap(bool).init(allocator),
-            .textures_dirty = false,
-            .materials_dirty = false,
-            .texture_descriptors_dirty = false,
+            .raytracing_system = null,
             .gc = gc,
             .allocator = allocator,
         };
-
-        // Scene no longer handles asset completion callbacks - that's the asset manager's job
-
-        return scene;
     }
 
     /// Deinitialize the EnhancedScene
@@ -99,35 +69,6 @@ pub const EnhancedScene = struct {
             object.deinit();
         }
         self.objects.deinit(self.allocator);
-
-        // Deinit textures
-        log(.DEBUG, "enhanced_scene", "Deinitializing {d} textures", .{self.textures.items.len});
-        for (self.textures.items) |*tex| {
-            tex.deinit();
-        }
-        self.textures.deinit(self.allocator);
-
-        // Deinit material buffer
-        if (self.material_buffer) |buf| {
-            log(.DEBUG, "enhanced_scene", "Deinitializing material buffer", .{});
-            buf.deinit();
-            self.allocator.destroy(buf);
-        }
-
-        // Free texture image infos
-        const static_empty_infos = &[_]vk.DescriptorImageInfo{};
-        if (self.texture_image_infos.len > 0 and self.texture_image_infos.ptr != static_empty_infos.ptr) {
-            log(.DEBUG, "enhanced_scene", "Freeing texture_image_infos array", .{});
-            self.allocator.free(self.texture_image_infos);
-        }
-
-        // Clear materials
-        self.materials.clearRetainingCapacity();
-        self.materials.deinit(self.allocator);
-
-        // Deinit texture cache
-        self.texture_cache.deinit();
-        self.loading_textures.deinit();
 
         log(.INFO, "enhanced_scene", "EnhancedScene deinit complete", .{});
     }
@@ -185,55 +126,11 @@ pub const EnhancedScene = struct {
         return object;
     }
 
-    /// Legacy texture addition - automatically registers with Asset Manager
-    pub fn addTexture(self: *Self, texture: Texture) !usize {
-        try self.textures.append(self.allocator, texture);
-        const index = self.textures.items.len - 1;
-        self.texture_descriptors_dirty = true;
-        try self.updateTextureImageInfos();
-
-        // Register with Asset Manager (using a generated path)
-        const path_buffer = try std.fmt.allocPrint(self.allocator, "legacy_texture_{d}", .{index});
-        defer self.allocator.free(path_buffer);
-
-        const asset_id = try self.asset_manager.registerAsset(path_buffer, .texture);
-        try self.asset_manager.registerTextureMapping(asset_id, index);
-
-        log(.INFO, "enhanced_scene", "Added texture at index {d} with AssetId {d}", .{ index, asset_id.toU64() });
-        return index;
-    }
-
-    /// Legacy material addition - automatically registers with Asset Manager
-    pub fn addMaterial(self: *Self, material: Material) !usize {
-        try self.materials.append(self.allocator, material);
-        const index = self.materials.items.len - 1;
-        try self.updateMaterialBuffer(self.gc, self.allocator);
-
-        // Register with Asset Manager
-        const path_buffer = try std.fmt.allocPrint(self.allocator, "legacy_material_{d}", .{index});
-        defer self.allocator.free(path_buffer);
-
-        const asset_id = try self.asset_manager.registerAsset(path_buffer, .material);
-        try self.asset_manager.registerMaterialMapping(asset_id, index);
-
-        // Set up dependencies if material references a texture
-        if (material.albedo_texture_id > 0) {
-            const texture_index = material.albedo_texture_id - 1; // Assuming 1-based indexing
-            if (self.asset_manager.getTextureAssetId(texture_index)) |texture_asset_id| {
-                try self.asset_manager.addDependency(asset_id, texture_asset_id);
-                log(.DEBUG, "enhanced_scene", "Added dependency: material {d} -> texture {d}", .{ asset_id.toU64(), texture_asset_id.toU64() });
-            }
-        }
-
-        log(.INFO, "enhanced_scene", "Added material at index {d} with AssetId {d}", .{ index, asset_id.toU64() });
-        return index;
-    }
-
-    // New Asset Manager API
+    // Asset Manager API
 
     /// Load a texture using Asset Manager
-    pub fn loadTexture(self: *Self, path: []const u8, priority: LoadPriority) !AssetId {
-        const asset_id = try self.asset_manager.loadTexture(path, priority);
+    pub fn loadTexture(self: *Self, path: []const u8) !AssetId {
+        const asset_id = try self.asset_manager.loadTexture(path);
         self.asset_manager.addRef(asset_id);
 
         // If we need immediate compatibility with legacy system, we could load it into the texture array
@@ -243,8 +140,8 @@ pub const EnhancedScene = struct {
     }
 
     /// Load a mesh/model using Asset Manager
-    pub fn loadMesh(self: *Self, path: []const u8, priority: LoadPriority) !AssetId {
-        const asset_id = try self.asset_manager.loadMesh(path, priority);
+    pub fn loadMesh(self: *Self, path: []const u8) !AssetId {
+        const asset_id = try self.asset_manager.loadMesh(path);
         self.asset_manager.addRef(asset_id);
 
         log(.INFO, "enhanced_scene", "Loaded mesh asset: {s} -> {d}", .{ path, asset_id.toU64() });
@@ -253,30 +150,15 @@ pub const EnhancedScene = struct {
 
     /// Create a material with Asset Manager integration
     pub fn createMaterial(self: *Self, albedo_texture_id: AssetId) !AssetId {
-        // For now, we'll still create a legacy material but track it with Asset Manager
-        var material = Material{
-            .albedo_texture_id = 0, // Will be resolved when needed
-        };
-
-        // If the texture is in our legacy system, map it
-        if (self.asset_manager.getTextureIndex(albedo_texture_id)) |texture_index| {
-            material.albedo_texture_id = @intCast(texture_index + 1); // 1-based indexing
-        }
-
-        const material_index = try self.addMaterial(material);
-        const asset_id = self.asset_manager.getMaterialAssetId(material_index).?;
-
-        // Add dependency
-        try self.asset_manager.addDependency(asset_id, albedo_texture_id);
-
-        return asset_id;
+        // Use AssetManager to create materials properly
+        return try self.asset_manager.createMaterial(albedo_texture_id);
     }
 
     /// Add a model with Asset Manager workflow
-    pub fn addModelWithAssets(self: *Self, model_path: []const u8, texture_path: []const u8, priority: LoadPriority) !*GameObject {
+    pub fn addModelWithAssets(self: *Self, model_path: []const u8, texture_path: []const u8) !*GameObject {
         // Load assets through Asset Manager
-        const texture_asset_id = try self.loadTexture(texture_path, priority);
-        const mesh_asset_id = try self.loadMesh(model_path, priority);
+        const texture_asset_id = try self.loadTexture(texture_path);
+        const mesh_asset_id = try self.loadMesh(model_path);
         const material_asset_id = try self.createMaterial(texture_asset_id);
 
         // Log the asset IDs for debugging
@@ -291,78 +173,26 @@ pub const EnhancedScene = struct {
 
     // Legacy compatibility methods (unchanged)
 
-    pub fn updateMaterialBuffer(self: *Self, gc: *GraphicsContext, allocator: std.mem.Allocator) !void {
-        if (self.materials.items.len == 0) return;
-        if (self.material_buffer) |buf| {
-            buf.deinit();
-        }
-        const buf = try allocator.create(Buffer);
-        buf.* = try Buffer.init(
-            gc,
-            @sizeOf(Material),
-            @as(u32, @intCast(self.materials.items.len)),
-            .{
-                .storage_buffer_bit = true,
-            },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        try buf.map(@sizeOf(Material) * self.materials.items.len, 0);
-        log(.DEBUG, "enhanced_scene", "Updating material buffer with {d} materials", .{self.materials.items.len});
-        buf.writeToBuffer(
-            std.mem.sliceAsBytes(self.materials.items),
-            @sizeOf(Material) * self.materials.items.len,
-            0,
-        );
-        self.material_buffer = buf;
-    }
-
-    pub fn updateTextureImageInfos(self: *Self) !void {
+    /// Asset Manager texture descriptor updates
+    pub fn updateTextureImageInfos(self: *Self) !bool {
         // Get the current texture descriptor array from asset manager
-        self.texture_image_infos = self.asset_manager.getTextureDescriptorArray();
+        // Lazy initialization: build descriptor array if dirty flag is set
+        const is_dirty = self.asset_manager.texture_descriptors_dirty.load(.acquire);
+
+        if (is_dirty) {
+            self.asset_manager.texture_image_infos = self.asset_manager.buildTextureDescriptorArray(self.allocator) catch |err| blk: {
+                std.log.err("AssetManager: Failed to build texture descriptor array: {}", .{err});
+                break :blk &[_]vk.DescriptorImageInfo{};
+            };
+            // Clear the dirty flag after successful rebuild
+            self.asset_manager.texture_descriptors_dirty.store(false, .release);
+        }
 
         // Notify raytracing system that texture descriptors need to be updated
         if (self.raytracing_system) |rt_system| {
             rt_system.requestTextureDescriptorUpdate();
         }
-    }
-
-    /// Check if any assets are dirty and need updates
-    pub fn isDirty(self: *const Self) bool {
-        return self.textures_dirty or self.models_dirty or self.materials_dirty;
-    }
-
-    /// Check if specific asset types are dirty
-    pub fn areTexturesDirty(self: *const Self) bool {
-        return self.textures_dirty;
-    }
-
-    pub fn areModelsDirty(self: *const Self) bool {
-        return self.models_dirty;
-    }
-
-    pub fn areMaterialsDirty(self: *const Self) bool {
-        return self.materials_dirty;
-    }
-
-    /// Clear dirty flags after updates are processed
-    pub fn clearTexturesDirty(self: *Self) void {
-        self.textures_dirty = false;
-        self.texture_descriptors_dirty = false; // Legacy compatibility
-    }
-
-    pub fn clearModelsDirty(self: *Self) void {
-        self.models_dirty = false;
-    }
-
-    pub fn clearMaterialsDirty(self: *Self) void {
-        self.materials_dirty = false;
-    }
-
-    pub fn clearAllDirtyFlags(self: *Self) void {
-        self.textures_dirty = false;
-        self.models_dirty = false;
-        self.materials_dirty = false;
-        self.texture_descriptors_dirty = false;
+        return is_dirty;
     }
 
     pub fn render(self: Self, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
@@ -507,7 +337,7 @@ pub const EnhancedScene = struct {
         return obj;
     }
 
-    /// New minimal async add: register model + texture assets; object references only asset ids.
+    /// Simplified async add: store real asset IDs, use fallbacks at render time
     pub fn addModelAssetAsync(
         self: *Self,
         model_path: []const u8,
@@ -517,72 +347,30 @@ pub const EnhancedScene = struct {
     ) !*GameObject {
         log(.DEBUG, "enhanced_scene", "addModelAssetAsync: registering assets model={s} texture={s}", .{ model_path, texture_path });
 
-        // Create fallback cube model while assets load
-        const fallback_model_value = try FallbackMeshes.createCubeModel(self.allocator, self.gc, "fallback_cube");
-        const fallback_model = try self.allocator.create(Model);
-        fallback_model.* = fallback_model_value;
-
-        // Load fallback texture with fallback hierarchy
-        const fallback_texture = Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8) catch |err| blk: {
-            log(.WARN, "enhanced_scene", "Failed to load texture {s}: {}, using error.png", .{ texture_path, err });
-            const error_texture = Texture.initFromFile(self.gc, self.allocator, "textures/error.png", .rgba8) catch {
-                log(.ERROR, "enhanced_scene", "Failed to load error.png, using missing.png", .{});
-                break :blk try Texture.initFromFile(self.gc, self.allocator, "textures/missing.png", .rgba8);
-            };
-            break :blk error_texture;
-        };
-        const fallback_texture_index = try self.addTexture(fallback_texture);
-
-        // Create fallback material
-        const fallback_material = Material{ .albedo_texture_id = @intCast(fallback_texture_index + 1) }; // 1-based
-        const fallback_material_index = try self.addMaterial(fallback_material);
-
-        // Assign fallback material to fallback mesh
-        for (fallback_model.meshes.items) |*mesh_model| {
-            mesh_model.geometry.mesh.*.material_id = @intCast(fallback_material_index);
-        }
-
-        // Generate fallback AssetIDs that will be replaced when real assets load
-        const fallback_texture_asset_id = self.asset_manager.getTextureAssetId(fallback_texture_index).?;
-        const fallback_material_asset_id = self.asset_manager.getMaterialAssetId(fallback_material_index).?;
-
-        // Register fallback model as a temporary asset that will be replaced
-        const fallback_model_path = try std.fmt.allocPrint(self.allocator, "fallback_cube_for_{s}", .{model_path});
-        defer self.allocator.free(fallback_model_path);
-        const fallback_model_asset_id = try self.asset_manager.registerAsset(fallback_model_path, .mesh);
-
-        // Store the fallback model in asset manager for immediate access
-        try self.asset_manager.registerModelFallback(fallback_model_asset_id, fallback_model);
-
-        // Request async loads for real assets (high priority for demo)
-        const real_model_asset = try self.preloadModelAsync(model_path, .high);
-        const real_texture_asset = try self.preloadTextureAsync(texture_path, .high);
+        // Start async loads for real assets (high priority for demo)
+        const real_texture_asset = try self.preloadTextureAsync(texture_path);
+        const real_model_asset = try self.preloadModelAsync(model_path);
         const real_material_asset = try self.createMaterial(real_texture_asset);
 
-        // Set up asset replacement mapping: fallback -> real
-        try self.asset_manager.scheduleAssetReplacement(fallback_model_asset_id, real_model_asset);
-        try self.asset_manager.scheduleAssetReplacement(fallback_texture_asset_id, real_texture_asset);
-        try self.asset_manager.scheduleAssetReplacement(fallback_material_asset_id, real_material_asset);
-
-        // Create GameObject with FALLBACK asset IDs that will be replaced automatically
+        // Create GameObject with REAL asset IDs - fallbacks will be used automatically at render time
         const obj = try self.addEmpty();
         obj.transform.translate(transform);
         obj.transform.scale(scale);
-        obj.model_asset = fallback_model_asset_id; // Will be replaced by real_model_asset
-        obj.material_asset = fallback_material_asset_id; // Will be replaced by real_material_asset
-        obj.texture_asset = fallback_texture_asset_id; // Will be replaced by real_texture_asset
+        obj.model_asset = real_model_asset; // Always store the real asset ID
+        obj.material_asset = real_material_asset; // Always store the real asset ID
+        obj.texture_asset = real_texture_asset; // Always store the real asset ID
         obj.has_model = true;
 
-        log(.INFO, "enhanced_scene", "addModelAssetAsync created object with FALLBACK asset IDs: model={d}, material={d}, texture={d} -> REAL: model={d}, material={d}, texture={d}", .{ fallback_model_asset_id.toU64(), fallback_material_asset_id.toU64(), fallback_texture_asset_id.toU64(), real_model_asset.toU64(), real_material_asset.toU64(), real_texture_asset.toU64() });
+        log(.INFO, "enhanced_scene", "addModelAssetAsync created object with REAL asset IDs: model={d}, material={d}, texture={d}", .{ real_model_asset.toU64(), real_material_asset.toU64(), real_texture_asset.toU64() });
         return obj;
     }
 
     // Async Loading Features
 
     /// Request a texture to be loaded asynchronously
-    pub fn preloadTextureAsync(self: *Self, texture_path: []const u8, priority: LoadPriority) !AssetId {
+    pub fn preloadTextureAsync(self: *Self, texture_path: []const u8) !AssetId {
         log(.INFO, "enhanced_scene", "Requesting async texture preload: {s}", .{texture_path});
-        return try self.asset_manager.loadTexture(texture_path, priority);
+        return try self.asset_manager.loadTexture(texture_path);
     }
 
     /// Start loading a texture asynchronously using AssetManager
@@ -664,45 +452,41 @@ pub const EnhancedScene = struct {
     /// Update texture image infos when new textures are added asynchronously
     /// This must be called from the main thread for Vulkan descriptor updates
     pub fn updateAsyncTextures(self: *Self, allocator: std.mem.Allocator) !void {
+        _ = allocator; // Suppress unused parameter warning
         self.texture_mutex.lock();
         defer self.texture_mutex.unlock();
 
+        // DISABLED: Old texture system - now handled by asset manager
         // Only update if texture descriptors are actually dirty
-        if (self.texture_descriptors_dirty and self.textures.items.len > 0) {
-            try self.updateTextureImageInfos(allocator);
-            self.texture_descriptors_dirty = false; // Reset the flag
-        }
+        // if (self.texture_descriptors_dirty and self.textures.items.len > 0) {
+        //     try self.updateTextureImageInfos(allocator);
+        //     self.texture_descriptors_dirty = false; // Reset the flag
+        // }
+        std.log.info("updateAsyncTextures: DISABLED - using asset manager instead", .{});
     }
 
-    /// Process dirty assets and update the scene (callback-driven)
     pub fn updateAsyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
-        var resources_updated = false;
+        _ = allocator; // unused since AssetManager handles resource updates
+        var textures_updated = false;
+        var materials_updated = false;
+        const models_updated = false;
 
-        // Process dirty textures
-        if (self.areTexturesDirty()) {
-            try self.updateTextureImageInfos();
-            self.clearTexturesDirty();
-            resources_updated = true;
+        textures_updated = try self.updateTextureImageInfos();
+        if (textures_updated) {
             log(.DEBUG, "enhanced_scene", "Updated texture descriptors due to dirty flag", .{});
         }
 
-        // Process dirty models
-        if (self.areModelsDirty()) {
-            // Model updates are already handled in the completion callback
-            self.clearModelsDirty();
-            resources_updated = true;
-            log(.DEBUG, "enhanced_scene", "Cleared models dirty flag", .{});
+        // Check if materials are dirty and need updating
+        if (self.asset_manager.materials_dirty) {
+            log(.DEBUG, "enhanced_scene", "Materials are dirty, creating material buffer", .{});
+            try self.asset_manager.createMaterialBuffer(self.gc);
+            self.asset_manager.materials_dirty = false;
+            materials_updated = true;
         }
 
-        // Process dirty materials
-        if (self.areMaterialsDirty()) {
-            try self.updateMaterialBuffer(self.gc, allocator);
-            self.clearMaterialsDirty();
-            resources_updated = true;
-            log(.DEBUG, "enhanced_scene", "Updated materials due to dirty flag", .{});
-        }
+        // Model updates are now handled directly by AssetManager
 
-        return resources_updated;
+        return textures_updated or materials_updated or models_updated;
     }
 
     /// Update objects with completed async model loads
@@ -746,9 +530,9 @@ pub const EnhancedScene = struct {
     }
 
     /// Request a model to be loaded asynchronously
-    pub fn preloadModelAsync(self: *Self, model_path: []const u8, priority: LoadPriority) !AssetId {
+    pub fn preloadModelAsync(self: *Self, model_path: []const u8) !AssetId {
         log(.INFO, "enhanced_scene", "Requesting async model preload: {s}", .{model_path});
-        return try self.asset_manager.loadMesh(model_path, priority);
+        return try self.asset_manager.loadMesh(model_path);
     }
 
     /// Check if an asset is ready to use
@@ -843,7 +627,8 @@ pub const EnhancedScene = struct {
         log(.INFO, "enhanced_scene", "Texture hot reload completed: {s} (AssetId: {})", .{ file_path, asset_id });
 
         // Update texture descriptor infos to refresh raytracing system
-        self.updateTextureImageInfos() catch |err| {
+        std.log.info("HOT_RELOAD: About to call updateTextureImageInfos from hot reload callback", .{});
+        _ = self.updateTextureImageInfos() catch |err| {
             log(.ERROR, "enhanced_scene", "Failed to update texture descriptors after reload: {}", .{err});
         };
     }
@@ -901,14 +686,12 @@ pub const EnhancedScene = struct {
 
             // Asset-based approach: prioritize asset IDs
             if (obj.model_asset) |model_asset_id| {
-                // Use fallback-aware model getter that automatically handles replacement
-                if (self.asset_manager.getLoadedModelWithFallback(model_asset_id)) |loaded_model| {
+                // Get asset ID with fallback and then get the loaded model
+                const safe_asset_id = self.asset_manager.getAssetIdForRendering(model_asset_id);
+                if (self.asset_manager.getLoadedModelConst(safe_asset_id)) |loaded_model| {
                     model_opt = loaded_model;
                 }
-            } else if (obj.model) |direct_model| {
-                // Fallback: Use direct model pointer for procedural/legacy objects
-                model_opt = direct_model;
-                log(.DEBUG, "enhanced_scene", "Object {d}: Using direct model pointer (procedural/legacy)", .{obj_idx});
+                //log(.DEBUG, "enhanced_scene", "Object {d}: Using model asset ID {d} (safe ID {d})", .{ obj_idx, model_asset_id.toU64(), safe_asset_id.toU64() });
             }
 
             if (model_opt) |model| {
@@ -920,48 +703,20 @@ pub const EnhancedScene = struct {
                     }
 
                     var material_index: u32 = 0;
-                    var texture_index: u32 = 0;
 
-                    // Asset-based material resolution
+                    // Materials now come from AssetManager
                     if (obj.material_asset) |material_asset_id| {
-                        const current_material_id = self.asset_manager.getCurrentAssetId(material_asset_id);
-                        if (self.asset_manager.getMaterialIndex(current_material_id)) |mat_idx| {
+                        // Get material index from AssetManager
+                        if (self.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
                             material_index = @intCast(mat_idx);
                         }
-                    } else {
-                        // Fallback: Use mesh's material_id to index into materials array
-                        const mat_id = model_mesh.geometry.mesh.*.material_id;
-                        if (mat_id < self.materials.items.len) {
-                            material_index = @intCast(mat_id);
-                        }
                     }
-
-                    // Asset-based texture resolution
-                    if (obj.texture_asset) |texture_asset_id| {
-                        const current_texture_id = self.asset_manager.getCurrentAssetId(texture_asset_id);
-                        log(.INFO, "enhanced_scene", "Object {d}: Texture asset {d} -> current {d}", .{ obj_idx, texture_asset_id.toU64(), current_texture_id.toU64() });
-                        if (self.asset_manager.getTextureIndex(current_texture_id)) |tex_idx| {
-                            texture_index = @intCast(tex_idx);
-                            log(.INFO, "enhanced_scene", "Object {d}: Using texture index {d}", .{ obj_idx, texture_index });
-                        } else {
-                            log(.WARN, "enhanced_scene", "Object {d}: No texture index found for asset {d}", .{ obj_idx, current_texture_id.toU64() });
-                        }
-                    } else {
-                        // Fallback: Use material's texture reference
-                        if (material_index < self.materials.items.len) {
-                            const mat = self.materials.items[material_index];
-                            if (mat.albedo_texture_id > 0) {
-                                const tidx = mat.albedo_texture_id - 1; // legacy 1-based
-                                if (tidx < self.textures.items.len) texture_index = @intCast(tidx);
-                            }
-                        }
-                    }
+                    // Fallback: material index 0 (default)
 
                     renderable_objects[obj_count] = RasterizationData.RenderableObject{
                         .transform = obj.transform.local2world.data,
                         .mesh_handle = RasterizationData.RenderableObject.MeshHandle{ .mesh_ptr = model_mesh.geometry.mesh },
                         .material_index = material_index,
-                        .texture_index = texture_index,
                         .visible = true,
                     };
                     obj_count += 1;
@@ -971,32 +726,8 @@ pub const EnhancedScene = struct {
             }
         }
 
-        const mat_count = self.materials.items.len;
-        var material_data = allocator.alloc(RasterizationData.MaterialData, mat_count) catch @panic("OOM: material_data");
-        for (0..mat_count) |i| {
-            const mat = self.materials.items[i];
-            var tex_index: u32 = 0;
-            if (mat.albedo_texture_id > 0) {
-                const ti = mat.albedo_texture_id - 1; // convert 1-based to 0-based
-                if (ti < self.textures.items.len) tex_index = @intCast(ti);
-            }
-            material_data[i] = RasterizationData.MaterialData{
-                .base_color = .{ 1.0, 1.0, 1.0, 1.0 },
-                .metallic = mat.metallic,
-                .roughness = mat.roughness,
-                .emissive = mat.emissive,
-                .texture_index = tex_index,
-            };
-        }
-
-        const tex_count = self.textures.items.len;
-        var texture_ptrs = allocator.alloc(*const Texture, tex_count) catch @panic("OOM: texture_ptrs");
-        for (0..tex_count) |i| texture_ptrs[i] = &self.textures.items[i];
-
         return RasterizationData{
             .objects = renderable_objects[0..obj_count],
-            .materials = material_data[0..mat_count],
-            .textures = texture_ptrs[0..tex_count],
         };
     }
 
