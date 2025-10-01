@@ -16,21 +16,42 @@ const Texture = @import("../core/texture.zig").Texture;
 const log = @import("../utils/log.zig").log;
 const LogLevel = @import("../utils/log.zig").LogLevel;
 const deinitDescriptorResources = @import("../core/descriptors.zig").deinitDescriptorResources;
+const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+
+// Import the new multithreaded BVH builder
+const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
+const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
+const TlasResult = @import("multithreaded_bvh_builder.zig").TlasResult;
+const GeometryData = @import("multithreaded_bvh_builder.zig").GeometryData;
+const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
+const BvhBuildResult = @import("multithreaded_bvh_builder.zig").BvhBuildResult;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
 }
 
-/// Raytracing system for Vulkan: manages BLAS/TLAS, pipeline, shader table, output, and dispatch.
+/// Enhanced Raytracing system with multithreaded BVH building
 pub const RaytracingSystem = struct {
     gc: *GraphicsContext, // Use 'gc' for consistency with Swapchain
     pipeline: Pipeline = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
     output_texture: Texture = undefined,
+
+    // Legacy single AS support (for compatibility)
     blas: vk.AccelerationStructureKHR = undefined,
     tlas: vk.AccelerationStructureKHR = undefined,
     tlas_buffer: Buffer = undefined,
     tlas_buffer_initialized: bool = false,
+    tlas_instance_buffer: Buffer = undefined,
+    tlas_instance_buffer_initialized: bool = false,
+
+    // New multithreaded BVH system
+    bvh_builder: *MultithreadedBvhBuilder = undefined,
+    completed_blas_list: std.ArrayList(BlasResult) = undefined,
+    completed_tlas: ?TlasResult = null,
+    bvh_build_in_progress: bool = false,
+    bvh_rebuild_pending: bool = false,
+
     shader_binding_table: vk.Buffer = undefined,
     shader_binding_table_memory: vk.DeviceMemory = undefined,
     current_frame_index: usize = 0,
@@ -38,10 +59,10 @@ pub const RaytracingSystem = struct {
     descriptor_set: vk.DescriptorSet = undefined,
     descriptor_set_layout: *DescriptorSetLayout = undefined, // pointer, not value
     descriptor_pool: *DescriptorPool = undefined,
-    tlas_instance_buffer: Buffer = undefined,
-    tlas_instance_buffer_initialized: bool = false,
     width: u32 = 1280,
     height: u32 = 720,
+
+    // Legacy BLAS arrays (for compatibility)
     blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
     blas_buffers: std.ArrayList(Buffer) = undefined,
     allocator: std.mem.Allocator = undefined,
@@ -49,17 +70,18 @@ pub const RaytracingSystem = struct {
     // Texture update tracking
     descriptors_need_update: bool = false,
 
-    /// Idiomatic init, matching renderer.SimpleRenderer
+    /// Enhanced init with multithreaded BVH support
     pub fn init(
         gc: *GraphicsContext,
         render_pass: vk.RenderPass,
         shader_library: ShaderLibrary,
         allocator: std.mem.Allocator,
-        descriptor_set_layout: *DescriptorSetLayout, // now a pointer
+        descriptor_set_layout: *DescriptorSetLayout,
         descriptor_pool: *DescriptorPool,
         swapchain: *Swapchain,
         width: u32,
         height: u32,
+        thread_pool: *ThreadPool,
     ) !RaytracingSystem {
         const dsl = [_]vk.DescriptorSetLayout{descriptor_set_layout.descriptor_set_layout};
         const layout = try gc.*.vkd.createPipelineLayout(
@@ -74,16 +96,16 @@ pub const RaytracingSystem = struct {
             null,
         );
         const pipeline = try Pipeline.initRaytracing(gc.*, render_pass, shader_library, layout, Pipeline.defaultRaytracingLayout(layout), allocator);
+
         // Create output image using Texture abstraction
         std.debug.print("Swapchain surface format: {}\n", .{swapchain.surface_format.format});
-        // If the swapchain format is ARGB, use ABGR for the output image format, else use the swapchain format.
         var output_format = swapchain.surface_format.format;
         if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
             output_format = vk.Format.a2b10g10r10_unorm_pack32;
         }
         const output_texture = try Texture.init(
             gc,
-            output_format, // Use the swapchain format for output
+            output_format,
             .{ .width = width, .height = height, .depth = 1 },
             vk.ImageUsageFlags{
                 .storage_bit = true,
@@ -94,23 +116,445 @@ pub const RaytracingSystem = struct {
             vk.SampleCountFlags{ .@"1_bit" = true },
         );
 
+        // Initialize multithreaded BVH builder (heap allocated)
+        const bvh_builder = try allocator.create(MultithreadedBvhBuilder);
+        bvh_builder.* = try MultithreadedBvhBuilder.init(gc, thread_pool, allocator);
+
         return RaytracingSystem{
             .gc = gc,
             .pipeline = pipeline,
             .pipeline_layout = layout,
             .output_texture = output_texture,
-            .descriptor_set_layout = descriptor_set_layout, // store pointer
+            .bvh_builder = bvh_builder,
+            .completed_blas_list = std.ArrayList(BlasResult){},
+            .completed_tlas = null,
+            .bvh_build_in_progress = false,
+            .bvh_rebuild_pending = false,
+            .descriptor_set_layout = descriptor_set_layout,
             .descriptor_pool = descriptor_pool,
             .width = width,
             .height = height,
             .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 8),
             .blas_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 8),
             .allocator = allocator,
-            // ...existing code...
+            .descriptors_need_update = false,
+            .tlas_buffer_initialized = false,
+            .tlas_instance_buffer_initialized = false,
+            .current_frame_index = 0,
+            .frame_count = 0,
+            .blas = vk.AccelerationStructureKHR.null_handle,
+            .tlas = vk.AccelerationStructureKHR.null_handle,
+            .tlas_buffer = undefined,
+            .tlas_instance_buffer = undefined,
+            .shader_binding_table = vk.Buffer.null_handle,
+            .shader_binding_table_memory = vk.DeviceMemory.null_handle,
+            .descriptor_set = vk.DescriptorSet.null_handle,
         };
     }
 
-    /// Create BLAS for every mesh in every model in the scene
+    /// Create BLAS asynchronously using pre-computed raytracing data from SceneView
+    pub fn createBlasAsyncFromRtData(self: *RaytracingSystem, rt_data: @import("../rendering/scene_view.zig").RaytracingData, completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void, callback_context: ?*anyopaque) !void {
+        if (self.bvh_build_in_progress) {
+            log(.WARN, "RaytracingSystem", "BVH build in progress - superseding with new build for {} geometries", .{rt_data.geometries.len});
+            // Reset progress flag to allow new build to supersede
+            self.bvh_build_in_progress = false;
+        }
+
+        self.bvh_build_in_progress = true;
+        log(.INFO, "RaytracingSystem", "Starting async BLAS creation for {} geometries using pre-computed RT data with mesh pointers", .{rt_data.geometries.len});
+
+        try self.bvh_builder.buildRtDataBvhAsync(rt_data, completion_callback, callback_context);
+    }
+
+    /// Create BLAS asynchronously using the multithreaded builder (legacy)
+    pub fn createBlasAsync(self: *RaytracingSystem, scene: *Scene, completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void, callback_context: ?*anyopaque) !void {
+        if (self.bvh_build_in_progress) {
+            log(.WARN, "RaytracingSystem", "BVH build in progress - superseding with new build for {} objects (legacy)", .{scene.objects.items.len});
+            // Reset progress flag to allow new build to supersede
+            self.bvh_build_in_progress = false;
+        }
+
+        self.bvh_build_in_progress = true;
+        log(.INFO, "RaytracingSystem", "Starting async BLAS creation for {} objects (legacy)", .{scene.objects.items.len});
+
+        try self.bvh_builder.buildSceneBvhAsync(scene, completion_callback, callback_context);
+    }
+
+    /// Create TLAS asynchronously using pre-computed raytracing data from SceneView
+    pub fn createTlasAsyncFromRtData(self: *RaytracingSystem, rt_data: @import("../rendering/scene_view.zig").RaytracingData, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
+        // Wait for BLAS to complete first
+        // if (!self.bvh_builder.isWorkComplete()) {
+        //     log(.WARN, "RaytracingSystem", "BLAS builds still in progress, cannot create TLAS yet", .{});
+        //     return error.BlasNotReady;
+        // }
+
+        // Get completed BLAS results
+        const blas_results = try self.bvh_builder.getCompletedBlas(self.allocator);
+        defer self.allocator.free(blas_results);
+
+        if (blas_results.len == 0) {
+            log(.WARN, "RaytracingSystem", "No BLAS results available for TLAS creation", .{});
+            return error.NoBlasResults;
+        }
+
+        log(.DEBUG, "RaytracingSystem", "Creating TLAS instances from {} BLAS results and {} RT instances", .{ blas_results.len, rt_data.instances.len });
+
+        // Create instance data from RT data and BLAS results
+        var instances = std.ArrayList(InstanceData){};
+        defer instances.deinit(self.allocator);
+
+        // Match RT instances to BLAS results by geometry_id
+        for (rt_data.instances, 0..) |rt_instance, rt_index| {
+            // Find the corresponding BLAS result for this RT instance by geometry_id
+            var found_blas: ?BlasResult = null;
+            for (blas_results) |blas_result| {
+                // Match by geometry_id (which corresponds to the RT geometry index)
+                if (blas_result.geometry_id == rt_index) {
+                    found_blas = blas_result;
+                    break;
+                }
+            }
+
+            if (found_blas) |blas_result| {
+                const clamped_material_id = @min(rt_instance.material_index, 255); // Clamp to 8 bits for safety
+                log(.DEBUG, "RaytracingSystem", "RT instance {}: material_id={} -> clamped={}, blas_geometry_id={}", .{ rt_index, rt_instance.material_index, clamped_material_id, blas_result.geometry_id });
+
+                // Convert [12]f32 to [3][4]f32 matrix format
+                const transform_matrix: [3][4]f32 = .{
+                    .{ rt_instance.transform[0], rt_instance.transform[1], rt_instance.transform[2], rt_instance.transform[3] },
+                    .{ rt_instance.transform[4], rt_instance.transform[5], rt_instance.transform[6], rt_instance.transform[7] },
+                    .{ rt_instance.transform[8], rt_instance.transform[9], rt_instance.transform[10], rt_instance.transform[11] },
+                };
+
+                const instance_data = InstanceData{
+                    .blas_address = blas_result.device_address,
+                    .transform = transform_matrix,
+                    .custom_index = clamped_material_id,
+                    .mask = 0xFF,
+                    .sbt_offset = 0,
+                    .flags = 0,
+                };
+
+                try instances.append(self.allocator, instance_data);
+            } else {
+                log(.WARN, "RaytracingSystem", "No BLAS found for RT instance {} (geometry_id={})", .{ rt_index, rt_index });
+            }
+        }
+
+        log(.DEBUG, "RaytracingSystem", "RT data analysis: {} total instances, {} BLAS results, {} instances created", .{ rt_data.instances.len, blas_results.len, instances.items.len });
+
+        if (instances.items.len == 0) {
+            log(.ERROR, "RaytracingSystem", "No instances created for TLAS from RT data! Check if RT instances match BLAS count", .{});
+            return error.NoInstances;
+        }
+
+        log(.INFO, "RaytracingSystem", "Creating TLAS with {} instances from RT data", .{instances.items.len});
+        _ = try self.bvh_builder.buildTlasAsync(instances.items, .high, completion_callback, callback_context);
+    }
+
+    /// Create TLAS asynchronously after BLAS completion
+    pub fn createTlasAsync(self: *RaytracingSystem, scene: *Scene, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
+        // Wait for BLAS to complete first
+        if (!self.bvh_builder.isWorkComplete()) {
+            log(.WARN, "RaytracingSystem", "BLAS builds still in progress, cannot create TLAS yet", .{});
+            return error.BlasNotReady;
+        }
+
+        // Get completed BLAS results
+        const blas_results = try self.bvh_builder.getCompletedBlas(self.allocator);
+        defer self.allocator.free(blas_results);
+
+        if (blas_results.len == 0) {
+            log(.WARN, "RaytracingSystem", "No BLAS results available for TLAS creation", .{});
+            return error.NoBlasResults;
+        }
+
+        log(.DEBUG, "RaytracingSystem", "Creating TLAS instances from {} BLAS results and {} scene objects", .{ blas_results.len, scene.objects.items.len });
+
+        // Create instance data from scene and BLAS results
+        var instances = std.ArrayList(InstanceData){};
+        defer instances.deinit(self.allocator);
+
+        var blas_index: usize = 0;
+        var objects_with_model: u32 = 0;
+        for (scene.objects.items) |*object| {
+            // Check for both direct model pointers and asset-based models
+            const has_model = (object.model != null) or (object.has_model and object.model_asset != null);
+
+            if (has_model) {
+                objects_with_model += 1;
+
+                if (object.model) |model| {
+                    // Handle direct model pointers (legacy path)
+                    for (model.meshes.items) |*model_mesh| {
+                        if (blas_index >= blas_results.len) break;
+
+                        const blas_result = blas_results[blas_index];
+                        const clamped_material_id = @min(model_mesh.geometry.mesh.material_id, 255); // Clamp to 8 bits for safety
+                        log(.DEBUG, "RaytracingSystem", "Legacy object material_id: {} -> clamped: {}", .{ model_mesh.geometry.mesh.material_id, clamped_material_id });
+
+                        const instance_data = InstanceData{
+                            .blas_address = blas_result.device_address,
+                            .transform = object.transform.local2world.to_3x4(),
+                            .custom_index = clamped_material_id,
+                            .mask = 0xFF,
+                            .sbt_offset = 0,
+                            .flags = 0,
+                        };
+
+                        try instances.append(self.allocator, instance_data);
+                        blas_index += 1;
+                    }
+                } else if (object.model_asset) |model_asset_id| {
+                    // Handle asset-based models (new path)
+                    const resolved_asset_id = scene.asset_manager.getAssetIdForRendering(model_asset_id);
+
+                    // Get the model from asset manager to count meshes
+                    if (scene.asset_manager.getModel(resolved_asset_id)) |model| {
+                        if (model.meshes.items.len > 0) {
+                            for (model.meshes.items) |*model_mesh| {
+                                if (blas_index >= blas_results.len) break;
+
+                                const blas_result = blas_results[blas_index];
+                                const clamped_material_id = @min(model_mesh.geometry.mesh.material_id, 255); // Clamp to 8 bits for safety
+                                log(.DEBUG, "RaytracingSystem", "Object material_id: {} -> clamped: {}", .{ model_mesh.geometry.mesh.material_id, clamped_material_id });
+
+                                const instance_data = InstanceData{
+                                    .blas_address = blas_result.device_address,
+                                    .transform = object.transform.local2world.to_3x4(),
+                                    .custom_index = clamped_material_id,
+                                    .mask = 0xFF,
+                                    .sbt_offset = 0,
+                                    .flags = 0,
+                                };
+
+                                try instances.append(self.allocator, instance_data);
+                                blas_index += 1;
+                            }
+                        }
+                    } else {
+                        log(.WARN, "RaytracingSystem", "Asset-based object has unresolved model asset: {}", .{model_asset_id});
+                    }
+                }
+            }
+        }
+
+        log(.DEBUG, "RaytracingSystem", "Scene analysis: {} total objects, {} with models, {} instances created", .{ scene.objects.items.len, objects_with_model, instances.items.len });
+
+        if (instances.items.len == 0) {
+            log(.ERROR, "RaytracingSystem", "No instances created for TLAS! Check if scene objects have valid models with meshes", .{});
+            return error.NoInstances;
+        }
+
+        log(.INFO, "RaytracingSystem", "Creating TLAS with {} instances", .{instances.items.len});
+        _ = try self.bvh_builder.buildTlasAsync(instances.items, .high, completion_callback, callback_context);
+    }
+
+    /// Check if BVH build is complete and update internal state
+    pub fn updateBvhBuildStatus(self: *RaytracingSystem) !bool {
+        if (!self.bvh_build_in_progress) return true;
+
+        if (self.bvh_builder.isWorkComplete()) {
+            // Update our internal state with completed results
+            const blas_results = try self.bvh_builder.getCompletedBlas(self.allocator);
+
+            // Update legacy arrays for compatibility
+            self.blas_handles.clearRetainingCapacity();
+            self.blas_buffers.clearRetainingCapacity();
+
+            for (blas_results) |blas_result| {
+                try self.blas_handles.append(self.allocator, blas_result.acceleration_structure);
+                try self.blas_buffers.append(self.allocator, blas_result.buffer);
+            }
+
+            // Check if we should trigger TLAS creation now that BLAS is complete
+            const blas_count = blas_results.len;
+            self.allocator.free(blas_results);
+
+            // Update TLAS if available
+            if (self.bvh_builder.getCompletedTlas()) |tlas_result| {
+                self.tlas = tlas_result.acceleration_structure;
+                self.tlas_buffer = tlas_result.buffer;
+                self.tlas_instance_buffer = tlas_result.instance_buffer;
+                self.tlas_buffer_initialized = true;
+                self.tlas_instance_buffer_initialized = true;
+                self.completed_tlas = tlas_result;
+
+                // Mark descriptors as needing update since we have a new TLAS
+                self.descriptors_need_update = true;
+
+                log(.INFO, "RaytracingSystem", "TLAS completed and ready for rendering!", .{});
+            } else if (blas_count > 0) {
+                // BLAS is complete but no TLAS yet - we need a scene reference to build TLAS
+                // This will be handled by the scene view update mechanism
+                log(.INFO, "RaytracingSystem", "BLAS completed ({}), waiting for TLAS creation trigger from scene", .{blas_count});
+            }
+
+            self.bvh_build_in_progress = false;
+
+            // Check if there's a pending rebuild request
+            if (self.bvh_rebuild_pending) {
+                log(.INFO, "RaytracingSystem", "BVH build completed, but rebuild is pending due to scene changes during build", .{});
+                self.bvh_rebuild_pending = false;
+                // The next frame's updateBvhFromSceneView call will detect the changes and trigger a new rebuild
+            }
+
+            // Print performance metrics
+            const metrics = self.bvh_builder.getPerformanceMetrics();
+            log(.INFO, "RaytracingSystem", "BVH build completed: {} BLAS built in {d:.2}ms (avg: {d:.2}ms per BLAS)", .{
+                metrics.total_blas_built,
+                @as(f64, @floatFromInt(metrics.total_build_time_ns)) / 1_000_000.0,
+                @as(f64, @floatFromInt(metrics.average_build_time_ns)) / 1_000_000.0,
+            });
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Check if BVH needs updating using SceneView with simplified TLAS triggering logic
+    pub fn updateBvhFromSceneView(self: *RaytracingSystem, scene_view: *@import("../rendering/render_pass.zig").SceneView, resources_updated: bool) !bool {
+        // Check if there's a pending rebuild that can now be started (build completed)
+        if (self.bvh_rebuild_pending and !self.bvh_build_in_progress) {
+            log(.INFO, "raytracing", "🔄 Starting pending BVH rebuild after previous build completed", .{});
+            self.bvh_rebuild_pending = false;
+            // Force a rebuild by calling this function recursively with the current scene state
+            return try self.updateBvhFromSceneView(scene_view, true); // Force resources_updated=true
+        }
+
+        // Get SceneBridge from SceneView to access BVH change tracking
+        const scene_bridge = @as(*@import("../rendering/scene_bridge.zig").SceneBridge, @ptrCast(@alignCast(scene_view.scene_ptr)));
+
+        // Check if BVH rebuild is needed using SceneBridge's intelligent tracking
+        if (scene_bridge.checkBvhRebuildNeeded(resources_updated)) {
+            // Get current raytracing data (will be rebuilt if cache is dirty)
+            const rebuild_rt_data = scene_view.getRaytracingData();
+            log(.DEBUG, "raytracing", "SceneBridge detected BVH changes: {} instances, {} geometries", .{ rebuild_rt_data.instances.len, rebuild_rt_data.geometries.len });
+
+            // Debug the condition evaluation
+            self.blas_handles.clearRetainingCapacity();
+            self.blas_buffers.clearRetainingCapacity();
+
+            log(.DEBUG, "raytracing", "🔍 Condition check: bvh_build_in_progress={}, !bvh_build_in_progress={}, instances.len={}, has_instances={}, should_rebuild={}", .{ self.bvh_build_in_progress, !self.bvh_build_in_progress, rebuild_rt_data.instances.len, rebuild_rt_data.instances.len > 0, !self.bvh_build_in_progress and rebuild_rt_data.instances.len > 0 });
+
+            // Check if we can start rebuild immediately or need to queue it
+
+            log(.INFO, "raytracing", "🔄 BVH rebuild needed - starting rebuild", .{});
+            self.bvh_build_in_progress = true;
+
+            // Clear existing results to prevent accumulation from previous rebuilds
+            self.bvh_builder.clearResults();
+            log(.INFO, "raytracing", "Starting BVH rebuild for {} geometries and {} instances", .{ rebuild_rt_data.geometries.len, rebuild_rt_data.instances.len });
+            self.completed_tlas = null;
+            self.bvh_rebuild_pending = false; // Clear any pending flag since we're starting now
+
+            // Use the new RT data-based BVH building to ensure consistency with BLAS callback
+            self.createBlasAsyncFromRtData(rebuild_rt_data, blasCompletionCallback, self) catch |err| {
+                log(.ERROR, "raytracing", "Failed to start BVH rebuild from RT data: {}", .{err});
+                return false;
+            };
+            log(.INFO, "raytracing", "Started BVH rebuild for {} geometries using RT data", .{rebuild_rt_data.geometries.len});
+        }
+
+        // Get current raytracing data for checks (BLAS building creates raytracing cache)
+        const rt_data = scene_view.getRaytracingData();
+
+        // Simple TLAS creation check: BLAS count matches geometry count AND no TLAS exists
+        const blas_count = self.blas_handles.items.len;
+        const geometry_count = rt_data.geometries.len;
+        const has_tlas = self.completed_tlas != null;
+        const counts_match = blas_count == geometry_count;
+        const has_blas = blas_count > 0;
+        const should_create_tlas = counts_match and !has_tlas and has_blas;
+
+        //log(.DEBUG, "raytracing", "🔍 TLAS creation check: blas_count={}, geometry_count={}, counts_match={}, has_tlas={}, has_blas={}, should_create_tlas={}", .{ blas_count, geometry_count, counts_match, has_tlas, has_blas, should_create_tlas });
+
+        if (should_create_tlas) {
+            log(.INFO, "raytracing", "🚀 BLAS complete ({} BLAS for {} geometries), creating TLAS...", .{ self.blas_handles.items.len, rt_data.geometries.len });
+
+            // Use RT data-based TLAS creation for consistency with callback
+            self.createTlasAsyncFromRtData(rt_data, tlasCompletionCallback, self) catch |err| {
+                log(.ERROR, "raytracing", "Failed to start TLAS creation from RT data: {}", .{err});
+            };
+            return true; // TLAS creation started
+        }
+
+        return false; // No rebuild needed or already in progress
+    }
+
+    /// BLAS completion callback - called when BLAS builds finish
+    fn blasCompletionCallback(context: *anyopaque, blas_results: []const BlasResult, tlas_result: ?TlasResult) void {
+        const self = @as(*RaytracingSystem, @ptrCast(@alignCast(context)));
+
+        log(.INFO, "raytracing", "🎯 BLAS callback: {} BLAS builds completed", .{blas_results.len});
+
+        // Update legacy arrays for compatibility with existing conditional logic
+
+        for (blas_results) |blas_result| {
+            self.blas_handles.append(self.allocator, blas_result.acceleration_structure) catch |err| {
+                log(.ERROR, "raytracing", "Failed to append BLAS handle: {}", .{err});
+            };
+            self.blas_buffers.append(self.allocator, blas_result.buffer) catch |err| {
+                log(.ERROR, "raytracing", "Failed to append BLAS buffer: {}", .{err});
+            };
+        }
+
+        // Update TLAS if provided
+        if (tlas_result) |tlas| {
+            log(.INFO, "raytracing", "BLAS callback also received TLAS result with {} instances", .{tlas.instance_count});
+            self.tlas = tlas.acceleration_structure;
+            self.tlas_buffer = tlas.buffer;
+            self.tlas_instance_buffer = tlas.instance_buffer;
+            self.tlas_buffer_initialized = true;
+            self.tlas_instance_buffer_initialized = true;
+            self.completed_tlas = tlas;
+            self.descriptors_need_update = true;
+        }
+
+        // Mark BVH build as no longer in progress
+        self.bvh_build_in_progress = false;
+
+        log(.INFO, "raytracing", "✅ BLAS callback completed - {} BLAS ready, TLAS: {}", .{ blas_results.len, tlas_result != null });
+    }
+
+    /// TLAS completion callback - called when TLAS build finishes
+    fn tlasCompletionCallback(context: *anyopaque, result: @import("multithreaded_bvh_builder.zig").BvhBuildResult) void {
+        const self = @as(*RaytracingSystem, @ptrCast(@alignCast(context)));
+
+        switch (result) {
+            .build_tlas => |tlas_result| {
+                log(.INFO, "raytracing", "🎯 TLAS callback: Build completed with {} instances in {d:.2}ms", .{
+                    tlas_result.instance_count,
+                    @as(f64, @floatFromInt(tlas_result.build_time_ns)) / 1_000_000.0,
+                });
+
+                // Update raytracing system state with completed TLAS
+                self.tlas = tlas_result.acceleration_structure;
+                self.tlas_buffer = tlas_result.buffer;
+                self.tlas_instance_buffer = tlas_result.instance_buffer;
+                self.tlas_buffer_initialized = true;
+                self.tlas_instance_buffer_initialized = true;
+                self.completed_tlas = tlas_result;
+                self.bvh_build_in_progress = false;
+
+                // Mark descriptors as needing update since we have a new TLAS
+                self.descriptors_need_update = true;
+
+                log(.INFO, "raytracing", "✅ TLAS ready for rendering! Descriptors marked for update", .{});
+
+                // Check if there was a pending rebuild and trigger it
+                if (self.bvh_rebuild_pending) {
+                    log(.INFO, "raytracing", "🔄 TLAS completed - pending rebuild detected, will trigger on next frame", .{});
+                }
+            },
+            else => {
+                log(.WARN, "raytracing", "TLAS callback received unexpected result type", .{});
+            },
+        }
+    }
+
+    /// Legacy createBLAS method for compatibility
     pub fn createBLAS(self: *RaytracingSystem, scene: *Scene) !void {
         self.blas_handles.clearRetainingCapacity();
         self.blas_buffers.clearRetainingCapacity();
@@ -479,6 +923,7 @@ pub const RaytracingSystem = struct {
             const output_image_info = self.output_texture.getDescriptorInfo();
             var set_writer = DescriptorWriter.init(gc, self.descriptor_set_layout, self.descriptor_pool, self.allocator);
             const dummy_as_info = try self.getAccelerationStructureDescriptorInfo();
+            log(.DEBUG, "raytracing", "Updating descriptors with TLAS handle: {}", .{self.tlas});
             _ = set_writer.writeAccelerationStructure(0, @constCast(&dummy_as_info))
                 .writeImage(1, @constCast(&output_image_info))
                 .writeBuffer(2, @constCast(&global_ubo_buffer_info))
@@ -625,6 +1070,11 @@ pub const RaytracingSystem = struct {
         self.gc.vkd.deviceWaitIdle(self.gc.dev) catch |err| {
             log(.WARN, "RaytracingSystem", "Failed to wait for device idle during deinit: {}", .{err});
         };
+
+        // Deinit multithreaded BVH builder first (heap allocated)
+        self.bvh_builder.deinit();
+        self.allocator.destroy(self.bvh_builder);
+        self.completed_blas_list.deinit(self.allocator);
 
         if (self.tlas_instance_buffer_initialized) self.tlas_instance_buffer.deinit();
         // Deinit all BLAS buffers and destroy BLAS acceleration structures

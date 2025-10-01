@@ -338,7 +338,7 @@ pub const RenderPass = struct {
     }
 
     /// Get resource requirements
-    pub fn getResourceRequirements(self: *RenderPass) []const ResourceBinding {
+    pub fn getResourceRequirements(self: *const RenderPass) []const ResourceBinding {
         return self.vtable.getResourceRequirements(self.impl);
     }
 
@@ -366,16 +366,17 @@ pub const RenderPass = struct {
 
     /// Create a new render pass with the given implementation
     pub fn create(comptime T: type, impl: *T, config: PassConfig) RenderPass {
+        const wrapper = RenderPassImpl(T);
         const vtable = comptime blk: {
             break :blk &VTable{
-                .init = T.init,
-                .execute = T.execute,
-                .deinit = T.deinit,
-                .shouldExecute = if (@hasDecl(T, "shouldExecute")) T.shouldExecute else defaultShouldExecute,
-                .getResourceRequirements = if (@hasDecl(T, "getResourceRequirements")) T.getResourceRequirements else defaultGetResourceRequirements,
-                .getVulkanRenderPass = if (@hasDecl(T, "getVulkanRenderPass")) T.getVulkanRenderPass else null,
-                .beginPass = if (@hasDecl(T, "beginPass")) T.beginPass else null,
-                .endPass = if (@hasDecl(T, "endPass")) T.endPass else null,
+                .init = wrapper.init,
+                .execute = wrapper.execute,
+                .deinit = wrapper.deinit,
+                .shouldExecute = if (@hasDecl(T, "shouldExecute")) wrapper.shouldExecute else defaultShouldExecute,
+                .getResourceRequirements = if (@hasDecl(T, "getResourceRequirements")) wrapper.getResourceRequirements else defaultGetResourceRequirements,
+                .getVulkanRenderPass = if (@hasDecl(T, "getVulkanRenderPass")) wrapper.getVulkanRenderPass else null,
+                .beginPass = if (@hasDecl(T, "beginPass")) wrapper.beginPass else null,
+                .endPass = if (@hasDecl(T, "endPass")) wrapper.endPass else null,
             };
         };
 
@@ -438,6 +439,28 @@ pub fn RenderPassImpl(comptime T: type) type {
                 return self.getResourceRequirements();
             }
             return &[_]ResourceBinding{};
+        }
+
+        pub fn getVulkanRenderPass(impl: *anyopaque) ?vk.RenderPass {
+            const self: *T = @ptrCast(@alignCast(impl));
+            if (@hasDecl(T, "getVulkanRenderPass")) {
+                return self.getVulkanRenderPass();
+            }
+            return null;
+        }
+
+        pub fn beginPass(impl: *anyopaque, context: RenderContext) !void {
+            const self: *T = @ptrCast(@alignCast(impl));
+            if (@hasDecl(T, "beginPass")) {
+                return self.beginPass(context);
+            }
+        }
+
+        pub fn endPass(impl: *anyopaque, context: RenderContext) !void {
+            const self: *T = @ptrCast(@alignCast(impl));
+            if (@hasDecl(T, "endPass")) {
+                return self.endPass(context);
+            }
         }
     };
 }

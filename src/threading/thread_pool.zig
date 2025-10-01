@@ -25,6 +25,19 @@ pub const WorkPriority = enum(u8) {
     critical = 3,
 };
 
+/// BVH acceleration structure types
+pub const BvhAccelerationStructureType = enum {
+    blas, // Bottom Level Acceleration Structure - geometry data
+    tlas, // Top Level Acceleration Structure - instance data
+};
+
+/// BVH rebuild types
+pub const BvhRebuildType = enum {
+    full_rebuild,
+    partial_update,
+    instance_only,
+};
+
 /// Generic work item that can represent different types of work
 pub const WorkItem = struct {
     // Common fields
@@ -59,16 +72,9 @@ pub const WorkItem = struct {
     };
 
     const BvhBuildingData = struct {
-        scene_data: *anyopaque,
-        geometry_count: u32,
-        instance_count: u32,
+        as_type: BvhAccelerationStructureType,
+        work_data: *anyopaque, // For BLAS: points to GeometryData, For TLAS: points to BLASs array
         rebuild_type: BvhRebuildType,
-    };
-
-    const BvhRebuildType = enum {
-        full_rebuild,
-        partial_update,
-        instance_only,
     };
 
     const ComputeTaskData = struct {
@@ -688,10 +694,9 @@ pub fn createAssetLoadingWork(
 /// Create a BVH building work item
 pub fn createBvhBuildingWork(
     id: u64,
-    scene_data: *anyopaque,
-    geometry_count: u32,
-    instance_count: u32,
-    rebuild_type: WorkItem.WorkData.BvhBuildingData.BvhRebuildType,
+    as_type: BvhAccelerationStructureType,
+    work_data: *anyopaque,
+    rebuild_type: BvhRebuildType,
     priority: WorkPriority,
     worker_fn: *const fn (*anyopaque, WorkItem) void,
     context: *anyopaque,
@@ -701,9 +706,8 @@ pub fn createBvhBuildingWork(
         .item_type = .bvh_building,
         .priority = priority,
         .data = .{ .bvh_building = .{
-            .scene_data = scene_data,
-            .geometry_count = geometry_count,
-            .instance_count = instance_count,
+            .as_type = as_type,
+            .work_data = work_data,
             .rebuild_type = rebuild_type,
         } },
         .worker_fn = worker_fn,

@@ -38,6 +38,9 @@ pub const Scene = struct {
     // Raytracing system reference for descriptor updates
     raytracing_system: ?*@import("../systems/raytracing_system.zig").RaytracingSystem,
 
+    // Scene bridge for SceneView integration with BVH change tracking
+    scene_bridge: ?@import("../rendering/scene_bridge.zig").SceneBridge = null,
+
     // Core dependencies
     gc: *GraphicsContext,
     allocator: std.mem.Allocator,
@@ -270,18 +273,13 @@ pub const Scene = struct {
 
     /// Create scene view for rendering passes
     pub fn createSceneView(self: *Self) @import("../rendering/render_pass.zig").SceneView {
-        const SceneView = @import("../rendering/render_pass.zig").SceneView;
+        // Initialize SceneBridge if not already done
+        if (self.scene_bridge == null) {
+            self.scene_bridge = @import("../rendering/scene_bridge.zig").SceneBridge.init(self, self.allocator);
+        }
 
-        const vtable = &SceneView.SceneViewVTable{
-            .getRasterizationData = getRasterizationDataImpl,
-            .getRaytracingData = getRaytracingDataImpl,
-            .getComputeData = getComputeDataImpl,
-        };
-
-        return SceneView{
-            .scene_ptr = self,
-            .vtable = vtable,
-        };
+        // Use SceneBridge for better BVH change tracking and caching
+        return self.scene_bridge.?.createSceneView();
     }
 
     fn getRasterizationDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RasterizationData {
@@ -348,12 +346,93 @@ pub const Scene = struct {
 
     fn getRaytracingDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RaytracingData {
         const self: *Self = @ptrCast(@alignCast(scene_ptr));
-        _ = self;
-        // TODO: Implement raytracing data extraction
-        return @import("../rendering/scene_view.zig").RaytracingData{
-            .instances = &[_]@import("../rendering/scene_view.zig").RaytracingData.RTInstance{},
-            .geometries = &[_]@import("../rendering/scene_view.zig").RaytracingData.RTGeometry{},
-            .materials = &[_]@import("../rendering/scene_view.zig").RasterizationData.MaterialData{},
+        const RaytracingData = @import("../rendering/scene_view.zig").RaytracingData;
+        const allocator = std.heap.c_allocator;
+
+        // Count objects with models for raytracing
+        var rt_instance_count: usize = 0;
+        var rt_geometry_count: usize = 0;
+
+        for (self.objects.items) |*obj| {
+            if (obj.model != null) {
+                // Direct model pointer
+                if (obj.model) |model| {
+                    rt_geometry_count += model.meshes.items.len;
+                    rt_instance_count += model.meshes.items.len;
+                }
+            } else if (obj.has_model and obj.model_asset != null) {
+                // Asset-based model
+                if (obj.model_asset) |model_asset_id| {
+                    const resolved_asset_id = self.asset_manager.getAssetIdForRendering(model_asset_id);
+                    if (self.asset_manager.getModel(resolved_asset_id)) |model| {
+                        rt_geometry_count += model.meshes.items.len;
+                        rt_instance_count += model.meshes.items.len;
+                    }
+                }
+            }
+        }
+
+        // Allocate arrays for raytracing data
+        var rt_instances = allocator.alloc(RaytracingData.RTInstance, rt_instance_count) catch @panic("OOM: rt_instances");
+        var rt_geometries = allocator.alloc(RaytracingData.RTGeometry, rt_geometry_count) catch @panic("OOM: rt_geometries");
+
+        var instance_idx: usize = 0;
+        var geometry_idx: usize = 0;
+
+        // Extract raytracing data from scene objects
+        for (self.objects.items, 0..) |*obj, obj_idx| {
+            var model: ?*Model = null;
+
+            // Get model from either direct pointer or asset system
+            if (obj.model) |direct_model| {
+                model = direct_model;
+            } else if (obj.has_model and obj.model_asset != null) {
+                if (obj.model_asset) |model_asset_id| {
+                    const resolved_asset_id = self.asset_manager.getAssetIdForRendering(model_asset_id);
+                    model = self.asset_manager.getModel(resolved_asset_id);
+                }
+            }
+
+            if (model) |mdl| {
+                for (mdl.meshes.items) |*model_mesh| {
+                    if (instance_idx >= rt_instance_count or geometry_idx >= rt_geometry_count) break;
+
+                    const geometry = &model_mesh.geometry;
+
+                    // Create RT geometry description
+                    rt_geometries[geometry_idx] = RaytracingData.RTGeometry{
+                        .vertex_buffer = if (geometry.mesh.vertex_buffer) |buf| buf.buffer else @panic("Missing vertex buffer"),
+                        .vertex_offset = 0,
+                        .vertex_stride = @sizeOf(@import("../rendering/mesh.zig").Vertex),
+                        .vertex_count = @intCast(geometry.mesh.vertices.items.len),
+                        .index_buffer = if (geometry.mesh.index_buffer) |buf| buf.buffer else null,
+                        .index_offset = 0,
+                        .index_count = @intCast(geometry.mesh.indices.items.len),
+                        .blas = null, // Will be filled by BVH system
+                    };
+
+                    // Create RT instance
+                    const transform_3x4 = obj.transform.local2world.to_3x4();
+                    rt_instances[instance_idx] = RaytracingData.RTInstance{
+                        .transform = transform_3x4,
+                        .instance_id = @intCast(obj_idx),
+                        .mask = 0xFF,
+                        .geometry_index = @intCast(geometry_idx),
+                        .material_index = @min(geometry.mesh.material_id, 255), // Clamp for safety
+                    };
+
+                    instance_idx += 1;
+                    geometry_idx += 1;
+                }
+            }
+        }
+
+        // Create raytracing data with BVH tracking
+        return RaytracingData{
+            .instances = rt_instances[0..instance_idx],
+            .geometries = rt_geometries[0..geometry_idx],
+            .materials = &[_]@import("../rendering/scene_view.zig").RasterizationData.MaterialData{}, // Empty for now
+            .change_tracker = .{}, // Initialize with defaults
         };
     }
 

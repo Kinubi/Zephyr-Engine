@@ -651,7 +651,6 @@ pub const AssetManager = struct {
 
         self.texture_image_infos = image_infos;
         self.texture_descriptors_dirty = false;
-
     }
 
     /// Queue async texture descriptor array update

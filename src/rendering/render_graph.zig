@@ -43,10 +43,10 @@ pub const RenderGraph = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .passes = std.ArrayList(RenderPass).init(allocator),
-            .dependencies = std.ArrayList(PassDependency).init(allocator),
+            .passes = std.ArrayList(RenderPass){},
+            .dependencies = std.ArrayList(PassDependency){},
             .resource_usage = std.HashMap([]const u8, ResourceUsage, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .execution_order = std.ArrayList(PassHandle).init(allocator),
+            .execution_order = std.ArrayList(PassHandle){},
         };
     }
 
@@ -56,16 +56,16 @@ pub const RenderGraph = struct {
             pass.deinit();
         }
 
-        self.passes.deinit();
-        self.dependencies.deinit();
+        self.passes.deinit(self.allocator);
+        self.dependencies.deinit(self.allocator);
         self.resource_usage.deinit();
-        self.execution_order.deinit();
+        self.execution_order.deinit(self.allocator);
     }
 
     /// Add a render pass to the graph
     pub fn addPass(self: *Self, pass: RenderPass) !PassHandle {
         const handle = @as(PassHandle, @enumFromInt(@as(u32, @intCast(self.passes.items.len + 1))));
-        try self.passes.append(pass);
+        try self.passes.append(self.allocator, pass);
 
         // Register resource usage for this pass
         const resources = pass.getResourceRequirements();
@@ -107,7 +107,7 @@ pub const RenderGraph = struct {
             .resource_name = "", // Generic dependency
         };
 
-        try self.dependencies.append(dependency);
+        try self.dependencies.append(self.allocator, dependency);
 
         // Mark execution order as dirty
         self.execution_order.clearAndFree();
@@ -123,7 +123,7 @@ pub const RenderGraph = struct {
             .resource_name = resource_name,
         };
 
-        try self.dependencies.append(dependency);
+        try self.dependencies.append(self.allocator, dependency);
         self.execution_order.clearAndFree();
     }
 
@@ -137,8 +137,8 @@ pub const RenderGraph = struct {
         // Initialize arrays for topological sort
         var in_degree = try self.allocator.alloc(u32, pass_count);
         defer self.allocator.free(in_degree);
-        var queue = std.ArrayList(PassHandle).init(self.allocator);
-        defer queue.deinit();
+        var queue = std.ArrayList(PassHandle){};
+        defer queue.deinit(self.allocator);
 
         // Initialize in-degrees to 0
         for (in_degree) |*degree| {
@@ -155,7 +155,7 @@ pub const RenderGraph = struct {
         for (0..pass_count) |i| {
             if (in_degree[i] == 0) {
                 const handle = @as(PassHandle, @enumFromInt(@as(u32, @intCast(i + 1))));
-                try queue.append(handle);
+                try queue.append(self.allocator, handle);
             }
         }
 
@@ -165,7 +165,7 @@ pub const RenderGraph = struct {
         // Process passes in topological order
         while (queue.items.len > 0) {
             const current = queue.orderedRemove(0);
-            try self.execution_order.append(current);
+            try self.execution_order.append(self.allocator, current);
 
             // Reduce in-degree of dependent passes
             for (self.dependencies.items) |dep| {
@@ -182,7 +182,7 @@ pub const RenderGraph = struct {
                             }
                             insert_index += 1;
                         }
-                        try queue.insert(insert_index, dep.to);
+                        try queue.insert(self.allocator, insert_index, dep.to);
                     }
                 }
             }

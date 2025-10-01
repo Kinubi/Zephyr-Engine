@@ -57,25 +57,58 @@ pub const RaytracingData = struct {
 
     /// Raytracing geometry description
     pub const RTGeometry = struct {
-        vertex_buffer: vk.Buffer,
-        vertex_offset: u64 = 0,
-        vertex_stride: u32,
-        vertex_count: u32,
-        index_buffer: ?vk.Buffer = null,
-        index_offset: u64 = 0,
-        index_count: u32 = 0,
+        mesh_ptr: *@import("mesh.zig").Mesh,
         blas: ?vk.AccelerationStructureKHR = null,
+    };
+
+    /// BVH change tracking information
+    pub const BvhChangeTracker = struct {
+        last_object_count: usize = 0,
+        last_geometry_count: usize = 0,
+        last_instance_count: usize = 0,
+        resources_updated: bool = false,
+        force_rebuild: bool = false,
+
+        /// Check if BVH needs to be rebuilt
+        pub fn needsRebuild(self: *BvhChangeTracker, current_objects: usize, current_geometries: usize, current_instances: usize, resources_changed: bool) bool {
+            const needs_rebuild = self.force_rebuild or
+                (current_objects != self.last_object_count) or
+                (current_geometries != self.last_geometry_count) or
+                (current_instances != self.last_instance_count) or
+                resources_changed;
+
+            if (needs_rebuild) {
+                self.last_object_count = current_objects;
+                self.last_geometry_count = current_geometries;
+                self.last_instance_count = current_instances;
+                self.resources_updated = resources_changed;
+                self.force_rebuild = false;
+            }
+
+            return needs_rebuild;
+        }
+
+        /// Force a BVH rebuild on next check
+        pub fn forceRebuild(self: *BvhChangeTracker) void {
+            self.force_rebuild = true;
+        }
     };
 
     instances: []const RTInstance,
     geometries: []const RTGeometry,
     materials: []const RasterizationData.MaterialData, // Reuse material structure
 
-    /// Check if TLAS needs rebuilding
-    pub fn needsTLASRebuild(self: *const RaytracingData) bool {
-        _ = self;
-        // TODO: Track instance changes
-        return false;
+    // BVH change tracking (mutable for tracking state changes)
+    change_tracker: BvhChangeTracker = .{},
+
+    /// Check if TLAS needs rebuilding based on scene changes
+    pub fn needsTLASRebuild(self: *RaytracingData, resources_updated: bool) bool {
+        return self.change_tracker.needsRebuild(self.instances.len, self.geometries.len, self.instances.len, resources_updated);
+    }
+
+    /// Force a TLAS rebuild on next check
+    pub fn forceRebuild(self: *RaytracingData) void {
+        self.change_tracker.forceRebuild();
     }
 };
 

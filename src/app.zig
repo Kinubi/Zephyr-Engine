@@ -50,7 +50,7 @@ const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 const RenderPass = @import("rendering/render_pass.zig").RenderPass;
 const RenderContext = @import("rendering/render_pass.zig").RenderContext;
 const SceneView = @import("rendering/render_pass.zig").SceneView;
-const ForwardPass = @import("rendering/passes/forward_pass.zig").ForwardPass;
+const RenderPassManager = @import("rendering/render_pass_manager.zig").RenderPassManager;
 
 // Utility imports
 const Math = @import("utils/math.zig");
@@ -117,9 +117,7 @@ pub const App = struct {
     var scene: Scene = undefined;
     var thread_pool: *ThreadPool = undefined;
     var asset_manager: *AssetManager = undefined;
-    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
-
-    // Scheduled asset loading system
+    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats    // Scheduled asset loading system
     const ScheduledAsset = struct {
         frame: u64,
         model_path: []const u8,
@@ -135,9 +133,10 @@ pub const App = struct {
     var global_ubo_set: GlobalUboSet = undefined;
     var raytracing_descriptor_set: RaytracingDescriptorSet = undefined;
 
-    // Forward Pass System
-    var forward_pass: ForwardPass = undefined;
+    // Render Pass Manager (new system)
+    var render_pass_manager: RenderPassManager = undefined;
     var scene_view: SceneView = undefined;
+    // Render pass system is now the default and only rendering path
 
     pub fn init(self: *App) !void {
         std.debug.print("Initializing application...\n", .{});
@@ -218,11 +217,11 @@ pub const App = struct {
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
         log(.INFO, "scene", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
 
-        // Add another vase with a different texture (asset-based)
+        // // Add another vase with a different texture (asset-based)
         // const vase2_object = try scene.addModelAssetAsync("models/flat_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-1.4, -0.5, 0.5), // position
         //     Math.Vec3.init(0, 0, 0), // rotation
         //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        // log(.INFO, "scene", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase2_object.model_asset orelse @as(@TypeOf(vase2_object.model_asset.?), @enumFromInt(0)), vase2_object.material_asset orelse @as(@TypeOf(vase2_object.material_asset.?), @enumFromInt(0)), vase2_object.texture_asset orelse @as(@TypeOf(vase2_object.texture_asset.?), @enumFromInt(0)) });
+        // log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase2_object.model_asset orelse @as(@TypeOf(vase2_object.model_asset.?), @enumFromInt(0)), vase2_object.material_asset orelse @as(@TypeOf(vase2_object.material_asset.?), @enumFromInt(0)), vase2_object.texture_asset orelse @as(@TypeOf(vase2_object.texture_asset.?), @enumFromInt(0)) });
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -356,7 +355,12 @@ pub const App = struct {
             @max(scene.asset_manager.loaded_textures.items.len, 32), // Use AssetManager textures
         );
 
-        // --- RaytracingSystem init with pool/layout ---
+        // Create scene bridge for render pass system and raytracing
+        const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
+        var scene_bridge = try self.allocator.create(SceneBridge);
+        scene_bridge.* = SceneBridge.init(&scene, self.allocator);
+
+        // --- RaytracingSystem init with pool/layout and thread pool ---
         raytracing_system = try RaytracingSystem.init(
             &self.gc,
             swapchain.render_pass,
@@ -367,12 +371,13 @@ pub const App = struct {
             &swapchain,
             self.window.window_props.width,
             self.window.window_props.height,
+            thread_pool, // Pass thread pool for multithreaded BVH building
         );
 
-        log(.DEBUG, "raytracing", "Creating BLAS", .{});
-        try raytracing_system.createBLAS(scene.asScene());
-        log(.DEBUG, "raytracing", "Creating TLAS", .{});
-        try raytracing_system.createTLAS(scene.asScene());
+        log(.DEBUG, "raytracing", "Starting async BLAS creation with RT data", .{});
+        _ = try raytracing_system.updateBvhFromSceneView(@constCast(&scene_bridge.createSceneView()), true);
+
+        // Note: TLAS creation will be handled in the update loop once BLAS is complete
         log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
         try raytracing_system.createShaderBindingTable(3);
         // --- After RaytracingSystem has valid AS and image, create descriptor set ---
@@ -385,20 +390,10 @@ pub const App = struct {
             ubo_infos[i] = buf.descriptor_info;
         }
 
-        const pool_layout = try @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet.createPoolAndLayout(
-            &self.gc,
-            self.allocator,
-            rt_counts.ubo_count,
-            rt_counts.vertex_buffer_count,
-            rt_counts.index_buffer_count,
-            1, // Materials now handled by AssetManager - minimal count
-            @max(scene.asset_manager.loaded_textures.items.len, 32), // Use AssetManager textures
-        );
-
         const descriptor_set = try @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet.createDescriptorSet(
             &self.gc,
-            pool_layout.pool,
-            pool_layout.layout,
+            rt_pool_layout.pool,
+            rt_pool_layout.layout,
             self.allocator,
             @constCast(&as_info),
             @constCast(&image_info),
@@ -410,12 +405,10 @@ pub const App = struct {
         );
 
         raytracing_descriptor_set = @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet{
-            .pool = pool_layout.pool,
-            .layout = pool_layout.layout,
+            .pool = rt_pool_layout.pool,
+            .layout = rt_pool_layout.layout,
             .set = descriptor_set,
         };
-        raytracing_descriptor_set.pool = rt_pool_layout.pool;
-        raytracing_descriptor_set.layout = rt_pool_layout.layout;
         raytracing_system.descriptor_set = raytracing_descriptor_set.set;
         raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
         raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
@@ -468,17 +461,19 @@ pub const App = struct {
         );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
-        // Initialize Forward Pass System
+        // Initialize Render Pass System (now the only rendering path)
+        render_pass_manager = try RenderPassManager.init(&self.gc, &scene, self.allocator);
 
-        forward_pass = try ForwardPass.create(self.allocator);
-        try forward_pass.init(&self.gc);
-        forward_pass.setRenderers(&textured_renderer, &point_light_renderer);
+        // Register renderers with the render pass manager
+        try render_pass_manager.registerRenderer("textured", &textured_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.forward});
+        try render_pass_manager.registerRenderer("point_light", &point_light_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.forward});
+        // Future renderers can be registered here:
+        // try render_pass_manager.registerRenderer("particle", &particle_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.particles});
+        // try render_pass_manager.registerRenderer("shadow", &shadow_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.shadow});
 
-        // Create scene view
-        scene_view = scene.createSceneView();
-
-        log(.INFO, "ForwardPass", "Forward pass system initialized", .{});
-
+        try render_pass_manager.setupRenderPasses();
+        scene_view = render_pass_manager.getSceneView();
+        log(.INFO, "app", "Render pass manager system initialized", .{});
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
@@ -508,6 +503,16 @@ pub const App = struct {
         // Check for and update any newly loaded async resources (textures, models, materials)
         // Note: Asset completion is handled automatically by the asset manager's worker thread
         var resources_updated = try scene.updateAsyncResources(self.allocator);
+
+        // // Update BVH build status to detect completion and reset progress flag
+        // _ = raytracing_system.updateBvhBuildStatus() catch |err| {
+        //     log(.ERROR, "raytracing", "Failed to update BVH build status: {}", .{err});
+        // };
+
+        // Use SceneView-based BVH change detection and automatic rebuilding
+        _ = raytracing_system.updateBvhFromSceneView(&scene_view, resources_updated) catch |err| {
+            log(.ERROR, "raytracing", "Failed to update BVH from SceneView: {}", .{err});
+        };
 
         // Update textured renderer with any new material/texture data if resources changed
         if (resources_updated) {
@@ -599,7 +604,7 @@ pub const App = struct {
         // try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.update(frame_info.current_frame, &ubo);
 
-        // Execute Forward Pass - renders all objects in scene
+        // Execute render passes
         const render_context = RenderContext{
             .graphics_context = &self.gc,
             .frame_info = &frame_info,
@@ -607,20 +612,25 @@ pub const App = struct {
             .frame_index = frame_info.current_frame,
             .scene_view = &scene_view,
         };
-        try forward_pass.execute(render_context);
+
+        // Use render pass manager (now the only rendering path)
+        try render_pass_manager.executeRenderPasses(render_context);
 
         // Render particles separately for now
         try particle_renderer.render(frame_info);
 
         render_system.endRender(frame_info);
-        // try raytracing_system.recordCommandBuffer(
-        //     frame_info,
-        //     &swapchain,
-        //     3,
-        //     global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
-        //     scene.material_buffer.?.descriptor_info,
-        //     scene.texture_image_infos,
-        // );
+        // Only render raytracing if TLAS is ready
+        if (raytracing_system.completed_tlas != null) {
+            try raytracing_system.recordCommandBuffer(
+                frame_info,
+                &swapchain,
+                3,
+                global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
+                scene.asset_manager.material_buffer.?.descriptor_info,
+                scene.asset_manager.texture_image_infos,
+            );
+        }
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
 
@@ -638,7 +648,10 @@ pub const App = struct {
         scheduled_assets.deinit(self.allocator);
 
         global_ubo_set.deinit();
-        forward_pass.deinit();
+
+        // Cleanup render pass manager
+        render_pass_manager.deinit();
+
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
         textured_renderer.deinit();
