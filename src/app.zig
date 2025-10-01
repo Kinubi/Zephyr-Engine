@@ -28,14 +28,12 @@ const RaytracingDescriptorSet = @import("rendering/raytracing_descriptor_set.zig
 
 // Scene imports
 const Scene = @import("scene/scene.zig").Scene;
-const EnhancedScene = @import("scene/scene_enhanced.zig").EnhancedScene;
 const GameObject = @import("scene/game_object.zig").GameObject;
-const Material = @import("scene/scene.zig").Material;
+const Material = @import("assets/asset_manager.zig").Material;
 
 // Asset system imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
-const EnhancedAssetManager = @import("assets/enhanced_asset_manager.zig").EnhancedAssetManager;
-const EnhancedThreadPool = @import("threading/enhanced_thread_pool.zig").EnhancedThreadPool;
+const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
 
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
@@ -110,9 +108,9 @@ pub const App = struct {
 
     var frame_index: u32 = 0;
     var frame_counter: u64 = 0; // Global frame counter for scheduling
-    var scene: EnhancedScene = undefined;
-    var thread_pool: *EnhancedThreadPool = undefined;
-    var asset_manager: *EnhancedAssetManager = undefined;
+    var scene: Scene = undefined;
+    var thread_pool: *ThreadPool = undefined;
+    var asset_manager: *AssetManager = undefined;
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Scheduled asset loading system
@@ -158,9 +156,9 @@ pub const App = struct {
 
         std.debug.print("Creating command buffers\n", .{});
 
-        // Initialize Enhanced Thread Pool with dynamic scaling
-        thread_pool = try self.allocator.create(EnhancedThreadPool);
-        thread_pool.* = try EnhancedThreadPool.init(self.allocator, 16); // Max 16 workers
+        // Initialize Thread Pool with dynamic scaling
+        thread_pool = try self.allocator.create(ThreadPool);
+        thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
 
         // Register subsystems with thread pool
 
@@ -183,12 +181,11 @@ pub const App = struct {
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 4 workers
 
-        // Initialize Enhanced Asset Manager on heap for stable pointer address
-        asset_manager = try self.allocator.create(EnhancedAssetManager);
-        asset_manager = try EnhancedAssetManager.init(self.allocator, &self.gc, thread_pool);
+        // Initialize Asset Manager on heap for stable pointer address
+        asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
 
-        // Initialize Enhanced Scene with Enhanced Asset Manager integration
-        scene = EnhancedScene.init(&self.gc, self.allocator, asset_manager);
+        // Initialize Scene with Asset Manager integration
+        scene = Scene.init(&self.gc, self.allocator, asset_manager);
 
         // Enhanced Scene registers for asset completion callbacks during its init
 

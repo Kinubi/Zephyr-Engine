@@ -440,9 +440,7 @@ pub const GraphicsContext = struct {
             .p_signal_semaphores = null,
         };
         try self.vkd.queueSubmit(threaded_command_pool.*.single_time_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
-        if (self.main_thread_id == std.Thread.getCurrentId()) {
-            try self.vkd.queueWaitIdle(threaded_command_pool.*.single_time_queue.handle);
-        }
+        try self.vkd.queueWaitIdle(threaded_command_pool.*.single_time_queue.handle);
         self.vkd.freeCommandBuffers(self.dev, threaded_command_pool.*.pool, 1, @ptrCast(&threaded_command_pool.*.commandBuffer));
     }
 

@@ -8,195 +8,370 @@ const GameObject = @import("game_object.zig").GameObject;
 const PointLightComponent = @import("components.zig").PointLightComponent;
 const fromMesh = @import("../rendering/mesh.zig").fromMesh;
 const Texture = @import("../core/texture.zig").Texture;
+const FallbackMeshes = @import("../utils/fallback_meshes.zig").FallbackMeshes;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const loadFileAlloc = @import("../utils/file.zig").loadFileAlloc;
 const log = @import("../utils/log.zig").log;
 const LogLevel = @import("../utils/log.zig").LogLevel;
 
-pub const Material = extern struct {
-    albedo_texture_id: u32 = 0, // 4 bytes
-    roughness: f32 = 0.5, // 4 bytes
-    metallic: f32 = 1.0, // 4 bytes
-    emissive: f32 = 0.0, // 4 bytes
-    emissive_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 }, // 16 bytes (vec4, even if you only use 3)
-    // 32 bytes total, aligned to 16 bytes
-};
+// Asset management imports
+const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
+const AssetId = @import("../assets/asset_manager.zig").AssetId;
+const AssetType = @import("../assets/asset_manager.zig").AssetType;
+const LoadPriority = @import("../assets/asset_manager.zig").LoadPriority;
 
+/// Global mutex for texture loading to prevent zstbi init conflicts
+var texture_loading_mutex = std.Thread.Mutex{};
+
+/// Asset completion callback function type
+pub const AssetCompletionCallback = *const fn (asset_id: AssetId, asset_type: AssetType, user_data: ?*anyopaque) void;
+
+/// Enhanced Scene with Asset Manager integration (using existing AssetManager)
 pub const Scene = struct {
+    // Core scene data - only GameObjects with asset references
     objects: std.ArrayList(GameObject),
-    materials: std.ArrayList(Material),
-    textures: std.ArrayList(Texture),
-    material_buffer: ?*Buffer = null, // GPU buffer for materials
-    texture_image_infos: []const vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
-    gc: *GraphicsContext, // Store reference to GraphicsContext
-    allocator: std.mem.Allocator, // Store allocator
+    next_object_id: u64,
 
-    pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator) Scene {
-        return Scene{
+    // Asset Manager integration - all assets handled here
+    asset_manager: *AssetManager,
+
+    // Raytracing system reference for descriptor updates
+    raytracing_system: ?*@import("../systems/raytracing_system.zig").RaytracingSystem,
+
+    // Core dependencies
+    gc: *GraphicsContext,
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    /// Initialize the Scene
+    pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, asset_manager: *AssetManager) Self {
+        return Self{
             .objects = std.ArrayList(GameObject){},
-            .materials = std.ArrayList(Material){},
-            .textures = std.ArrayList(Texture){},
+            .next_object_id = 1,
+            .asset_manager = asset_manager,
+            .raytracing_system = null,
             .gc = gc,
             .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *Scene) void {
-        log(.INFO, "scene", "Deinitializing Scene with {d} objects", .{self.objects.items.len});
-        // Deinit all objects (models/meshes)
+    /// Deinitialize the Enhanced Scene
+    pub fn deinit(self: *Self) void {
+        log(.INFO, "enhanced_scene", "Deinitializing Enhanced Scene with {} objects", .{self.objects.items.len});
+
+        // Deinit GameObjects
         for (self.objects.items) |object| {
             object.deinit();
         }
         self.objects.deinit(self.allocator);
-        // Deinit all textures
-        log(.DEBUG, "scene", "Deinitializing {d} textures", .{self.textures.items.len});
-        for (self.textures.items) |*tex| {
-            tex.deinit();
-        }
-        self.textures.deinit(self.allocator);
-        // Deinit material buffer if present
-        if (self.material_buffer) |buf| {
-            log(.DEBUG, "scene", "Deinitializing material buffer", .{});
-            buf.deinit();
-            self.allocator.destroy(buf);
-            self.material_buffer = null;
-        }
-        // Free texture_image_infos if heap-allocated
-        const static_empty_infos = &[_]vk.DescriptorImageInfo{};
-        if (self.texture_image_infos.len > 0 and self.texture_image_infos.ptr != static_empty_infos.ptr) {
-            log(.DEBUG, "scene", "Freeing texture_image_infos array", .{});
-            self.allocator.free(self.texture_image_infos);
-            self.texture_image_infos = static_empty_infos;
-        }
-        // Clear and deinit materials
-        log(.DEBUG, "scene", "Clearing materials array", .{});
-        self.materials.clearRetainingCapacity();
-        self.materials.deinit(self.allocator);
-        log(.INFO, "scene", "Scene deinit complete", .{});
+
+        log(.INFO, "enhanced_scene", "Enhanced Scene deinit complete", .{});
     }
 
-    pub fn addEmpty(self: *Scene) !*GameObject {
-        try self.objects.append(self.allocator, .{ .model = null });
+    /// Convert Enhanced Scene to Scene for compatibility with legacy renderers
+    pub fn asScene(self: *Self) *Scene {
+        return @ptrCast(self);
+    }
+
+    // === Legacy API Compatibility ===
+
+    pub fn addEmpty(self: *Self) !*GameObject {
+        const object_id = self.next_object_id;
+        self.next_object_id += 1;
+        try self.objects.append(self.allocator, .{ .id = object_id, .model = null, .point_light = null });
         return &self.objects.items[self.objects.items.len - 1];
     }
 
-    pub fn addObject(self: *Scene, model: ?*Model, point_light: ?PointLightComponent) !*GameObject {
-        try self.objects.append(self.allocator, .{
-            .model = if (model) |m| m else null,
+    pub fn addObject(self: *Self, model: ?*Model, point_light: ?PointLightComponent) !*GameObject {
+        const object_id = self.next_object_id;
+        self.next_object_id += 1;
+        try self.objects.append(.{
+            .id = object_id,
+            .model = model,
             .point_light = point_light,
         });
         return &self.objects.items[self.objects.items.len - 1];
     }
 
-    pub fn addModelFromMesh(self: *Scene, mesh: Mesh, name: []const u8, transform: ?Math.Vec3) !*GameObject {
-        const model = try fromMesh(self.allocator, mesh, name);
-        const object = try self.addObject(model, null);
-        if (transform) |t| {
-            object.transform.translate(t);
+    /// Add model with async asset loading (API compatible method signature)
+    pub fn addModelAssetAsync(
+        self: *Self,
+        model_path: []const u8,
+        texture_path: []const u8,
+        position: Math.Vec3,
+        rotation: Math.Vec3,
+        scale: Math.Vec3,
+    ) !*GameObject {
+        _ = rotation; // TODO: Use rotation parameter in the future
+        log(.DEBUG, "enhanced_scene", "addModelAssetAsync: registering assets model={s} texture={s}", .{ model_path, texture_path });
+
+        // Calculate priority based on position (distance from origin)
+        const distance = position.length();
+        const priority = LoadPriority.fromDistance(distance);
+
+        // Start async loads using enhanced asset manager with priority
+        log(.INFO, "enhanced_scene", "Requesting async texture preload: {s}", .{texture_path});
+        const texture_asset_id = try self.asset_manager.loadAssetAsync(texture_path, .texture, priority);
+        const material_asset_id = try self.createMaterial(texture_asset_id);
+
+        log(.INFO, "enhanced_scene", "Requesting async model preload: {s}", .{model_path});
+        const model_asset_id = try self.asset_manager.loadAssetAsync(model_path, .mesh, priority);
+
+        // Create GameObject with asset IDs - fallbacks will be used automatically at render time
+        const obj = try self.addEmpty();
+        obj.transform.translate(position);
+        obj.transform.scale(scale);
+        obj.model_asset = model_asset_id;
+        obj.material_asset = material_asset_id;
+        obj.texture_asset = texture_asset_id;
+        obj.has_model = true;
+
+        log(.INFO, "enhanced_scene", "addModelAssetAsync created object with REAL asset IDs: model={}, material={}, texture={}", .{ model_asset_id, material_asset_id, texture_asset_id });
+
+        return obj;
+    }
+
+    /// Create a material with Enhanced Asset Manager integration
+    pub fn createMaterial(self: *Self, albedo_texture_id: AssetId) !AssetId {
+        // For now, we'll create a simple material reference
+        // This could be expanded to use the asset manager's material system
+        return try self.asset_manager.createMaterial(albedo_texture_id);
+    }
+
+    /// Load texture with priority
+    pub fn preloadTextureAsync(self: *Self, texture_path: []const u8) !AssetId {
+        return try self.asset_manager.loadAssetAsync(texture_path, .texture, .normal);
+    }
+
+    /// Load mesh with priority
+    pub fn preloadModelAsync(self: *Self, mesh_path: []const u8) !AssetId {
+        return try self.asset_manager.loadAssetAsync(mesh_path, .mesh, .normal);
+    }
+
+    /// Update async resources (required by app.zig) - now truly async!
+    pub fn updateAsyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
+        _ = allocator; // unused since AssetManager handles resource updates
+        var any_updates_queued = false;
+
+        // Check if texture descriptors need updating and queue async work
+        if (self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
+            try self.asset_manager.queueTextureDescriptorUpdate();
+            any_updates_queued = true;
         }
-        return object;
-    }
 
-    pub fn addModel(self: *Scene, model: Model, point_light: ?PointLightComponent) !*GameObject {
-        // Heap-allocate the model internally
-        const model_ptr = try self.allocator.create(Model);
-        model_ptr.* = model;
-        const object = try self.addObject(model_ptr, point_light);
-        return object;
-    }
-
-    pub fn addTexture(self: *Scene, texture: Texture) !usize {
-        try self.textures.append(self.allocator, texture);
-        const index = self.textures.items.len - 1;
-        try self.updateTextureImageInfos(self.allocator);
-        log(.INFO, "scene", "Added texture at index {d}", .{index});
-        return index;
-    }
-
-    pub fn addMaterial(self: *Scene, material: Material) !usize {
-        try self.materials.append(self.allocator, material);
-        const index = self.materials.items.len - 1;
-        try self.updateMaterialBuffer(self.gc, self.allocator);
-        log(.INFO, "scene", "Added material at index {d}", .{index});
-        return index;
-    }
-
-    pub fn updateMaterialBuffer(self: *Scene, gc: *GraphicsContext, allocator: std.mem.Allocator) !void {
-        if (self.materials.items.len == 0) return;
-        if (self.material_buffer) |buf| {
-            buf.deinit();
+        // Check if materials need updating and queue async work
+        if (self.asset_manager.materials_dirty and !self.asset_manager.material_buffer_updating.load(.acquire)) {
+            try self.asset_manager.queueMaterialBufferUpdate();
+            any_updates_queued = true;
         }
-        const buf = try allocator.create(Buffer);
-        buf.* = try Buffer.init(
-            gc,
-            @sizeOf(Material),
-            @as(u32, @intCast(self.materials.items.len)),
-            .{
-                .storage_buffer_bit = true,
-            },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        try buf.map(@sizeOf(Material) * self.materials.items.len, 0);
-        log(.DEBUG, "scene", "Updating material buffer with {d} materials", .{self.materials.items.len});
-        buf.writeToBuffer(
-            std.mem.sliceAsBytes(self.materials.items),
-            @sizeOf(Material) * self.materials.items.len,
-            0,
-        );
-        self.material_buffer = buf;
+
+        // Check if any async updates have completed (quick check, no heavy work)
+        var any_updates_completed = false;
+
+        // If texture descriptors were updating and are now done, mark for refresh
+        if (!self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
+            // Texture descriptors have been updated, refresh the array reference
+            self.asset_manager.texture_image_infos = self.getTextureDescriptorArray();
+            any_updates_completed = true;
+        }
+
+        // Material updates completion is handled in the worker function
+
+        // Return true if we queued work or completed work (for UI refresh)
+        return any_updates_queued or any_updates_completed;
     }
 
-    pub fn updateTextureImageInfos(self: *Scene, allocator: std.mem.Allocator) !void {
-        if (self.textures.items.len == 0) {
-            self.texture_image_infos = &[_]vk.DescriptorImageInfo{};
-            return;
+    /// Synchronous resource update - waits for all pending async operations to complete
+    /// Use this during initialization when you need guaranteed completion before proceeding
+    pub fn updateSyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
+        _ = allocator; // unused since AssetManager handles resource updates
+        var any_updates = false;
+
+        // Force update texture descriptors if dirty (synchronous)
+        if (self.asset_manager.texture_descriptors_dirty) {
+            try self.asset_manager.buildTextureDescriptorArray();
+            self.asset_manager.texture_descriptors_dirty = false;
+            any_updates = true;
+
+            // Notify raytracing system
+            if (self.raytracing_system) |rt_system| {
+                rt_system.requestTextureDescriptorUpdate();
+            }
         }
-        const infos = try allocator.alloc(vk.DescriptorImageInfo, self.textures.items.len);
-        for (self.textures.items, 0..) |tex, i| {
-            infos[i] = tex.descriptor;
+
+        // Force update materials if dirty (synchronous)
+        if (self.asset_manager.materials_dirty) {
+            try self.asset_manager.createMaterialBuffer(self.gc);
+            self.asset_manager.materials_dirty = false;
+            any_updates = true;
         }
-        self.texture_image_infos = infos;
+
+        // Wait for any pending async operations to complete
+        while (self.asset_manager.texture_descriptors_updating.load(.acquire) or 
+               self.asset_manager.material_buffer_updating.load(.acquire)) {
+            std.Thread.sleep(1_000_000); // Sleep 1ms
+        }
+
+        return any_updates;
     }
 
-    pub fn render(self: Scene, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
+    /// Enhanced texture descriptor updates for backward compatibility
+    pub fn updateTextureImageInfos(self: *Self) !bool {
+        // Enhanced asset manager handles this internally
+        const was_dirty = self.asset_manager.texture_descriptors_dirty;
+
+        if (was_dirty) {
+            try self.asset_manager.buildTextureDescriptorArray();
+
+            // Notify raytracing system
+            if (self.raytracing_system) |rt_system| {
+                rt_system.requestTextureDescriptorUpdate();
+            }
+
+            log(.DEBUG, "enhanced_scene", "Updated texture descriptors due to dirty flag", .{});
+        }
+
+        return was_dirty;
+    }
+
+    /// Register raytracing system for texture updates
+    pub fn setRaytracingSystem(self: *Self, rt_system: *@import("../systems/raytracing_system.zig").RaytracingSystem) void {
+        self.raytracing_system = rt_system;
+        log(.DEBUG, "enhanced_scene", "Raytracing system registered for texture updates", .{});
+    }
+
+    /// Enable hot reloading (API compatibility)
+    pub fn enableHotReload(self: *Self) !void {
+        try self.asset_manager.initHotReload();
+        log(.INFO, "enhanced_scene", "Hot reloading enabled for scene assets", .{});
+    }
+
+    /// Get texture descriptor array (API compatibility)
+    pub fn getTextureDescriptorArray(self: *Self) []const vk.DescriptorImageInfo {
+        return self.asset_manager.texture_image_infos;
+    }
+
+    /// Render the scene
+    pub fn render(self: Self, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
+        // Only render ready objects
         for (self.objects.items) |object| {
             try object.render(gc, cmdbuf);
         }
     }
 
-    pub fn addModelWithMaterial(
-        self: *Scene,
-        model_path: []const u8,
-        texture_path: []const u8,
-    ) !*GameObject {
-        log(.DEBUG, "scene", "Loading model from {s}", .{model_path});
-        const model_data = try loadFileAlloc(self.allocator, model_path, 10 * 1024 * 1024); // 10MB max
-        defer self.allocator.free(model_data);
-        const model = try Model.loadFromObj(self.allocator, self.gc, model_data, model_path);
-        log(.DEBUG, "scene", "Loading texture from {s}", .{texture_path});
-        const texture = try Texture.initFromFile(self.gc, self.allocator, texture_path, .rgba8);
-        const texture_id = try self.addTexture(texture);
-        const material = Material{ .albedo_texture_id = @intCast(texture_id) };
-        const material_id = try self.addMaterial(material);
-        for (model.meshes.items) |*mesh| {
-            mesh.geometry.mesh.*.material_id = @intCast(material_id);
-        }
-        log(.INFO, "scene", "Assigned material {d} to all meshes in model {s}", .{ material_id, model_path });
-        return try self.addModel(model, null);
+    /// Get scene statistics for debugging
+    pub fn getStatistics(self: *Self) struct {
+        objects: usize,
+        asset_manager_stats: @TypeOf(self.asset_manager.getStatistics()),
+    } {
+        return .{
+            .objects = self.objects.items.len,
+            .asset_manager_stats = self.asset_manager.getStatistics(),
+        };
     }
 
-    pub fn addModelWithMaterialAndTransform(
-        self: *Scene,
-        model_path: []const u8,
-        texture_path: []const u8,
-        transform: Math.Vec3,
-        scale: Math.Vec3,
-    ) !*GameObject {
-        const obj = try self.addModelWithMaterial(model_path, texture_path);
-        obj.transform.translate(transform);
-        obj.transform.scale(scale);
-        return obj;
+    /// Create scene view for rendering passes
+    pub fn createSceneView(self: *Self) @import("../rendering/render_pass.zig").SceneView {
+        const SceneView = @import("../rendering/render_pass.zig").SceneView;
+
+        const vtable = &SceneView.SceneViewVTable{
+            .getRasterizationData = getRasterizationDataImpl,
+            .getRaytracingData = getRaytracingDataImpl,
+            .getComputeData = getComputeDataImpl,
+        };
+
+        return SceneView{
+            .scene_ptr = self,
+            .vtable = vtable,
+        };
+    }
+
+    fn getRasterizationDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RasterizationData {
+        const self: *Self = @ptrCast(@alignCast(scene_ptr));
+        const RasterizationData = @import("../rendering/scene_view.zig").RasterizationData;
+        const allocator = std.heap.c_allocator;
+
+        // Allocate arrays on the heap
+        const max_objects = self.objects.items.len * 4; // rough upper bound
+        var renderable_objects = allocator.alloc(RasterizationData.RenderableObject, max_objects) catch @panic("OOM: renderable_objects");
+        var obj_count: usize = 0;
+
+        for (self.objects.items, 0..) |*obj, obj_idx| {
+            if (!obj.has_model) continue;
+            var model_opt: ?*const Model = null;
+
+            // Asset-based approach: prioritize asset IDs
+            if (obj.model_asset) |model_asset_id| {
+                // Get asset ID with fallback and then get the loaded model
+                const safe_asset_id = self.asset_manager.getAssetIdForRendering(model_asset_id);
+                if (self.asset_manager.getLoadedModelConst(safe_asset_id)) |loaded_model| {
+                    model_opt = loaded_model;
+                }
+                //log(.DEBUG, "enhanced_scene", "Object {d}: Using model asset ID {d} (safe ID {d})", .{ obj_idx, model_asset_id.toU64(), safe_asset_id.toU64() });
+            }
+
+            if (model_opt) |model| {
+                //log(.DEBUG, "enhanced_scene", "Object {d}: Resolving model for rendering with {} meshes", .{ obj_idx, model.meshes.items.len });
+                for (model.meshes.items, 0..) |model_mesh, mesh_idx| {
+                    // Skip meshes without valid buffers
+                    if (model_mesh.geometry.mesh.*.vertex_buffer == null or model_mesh.geometry.mesh.*.index_buffer == null) {
+                        log(.WARN, "enhanced_scene", "Object {d}, Mesh {d}: Skipping render - missing vertex/index buffers", .{ obj_idx, mesh_idx });
+                        continue;
+                    }
+
+                    var material_index: u32 = 0;
+
+                    // Materials now come from AssetManager
+                    if (obj.material_asset) |material_asset_id| {
+                        // Get material index from AssetManager
+                        if (self.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
+                            material_index = @intCast(mat_idx);
+                        }
+                    }
+                    // Fallback: material index 0 (default)
+
+                    renderable_objects[obj_count] = RasterizationData.RenderableObject{
+                        .transform = obj.transform.local2world.data,
+                        .mesh_handle = RasterizationData.RenderableObject.MeshHandle{ .mesh_ptr = model_mesh.geometry.mesh },
+                        .material_index = material_index,
+                        .visible = true,
+                    };
+                    obj_count += 1;
+                }
+            } else {
+                //log(.WARN, "enhanced_scene", "Object {d}: No valid model available (asset loading or resolution failed)", .{obj_idx});
+            }
+        }
+
+        return RasterizationData{
+            .objects = renderable_objects[0..obj_count],
+        };
+    }
+
+    fn getRaytracingDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RaytracingData {
+        const self: *Self = @ptrCast(@alignCast(scene_ptr));
+        _ = self;
+        // TODO: Implement raytracing data extraction
+        return @import("../rendering/scene_view.zig").RaytracingData{
+            .instances = &[_]@import("../rendering/scene_view.zig").RaytracingData.RTInstance{},
+            .geometries = &[_]@import("../rendering/scene_view.zig").RaytracingData.RTGeometry{},
+            .materials = &[_]@import("../rendering/scene_view.zig").RasterizationData.MaterialData{},
+        };
+    }
+
+    fn getComputeDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").ComputeData {
+        const self: *Self = @ptrCast(@alignCast(scene_ptr));
+        _ = self;
+        // TODO: Implement compute data extraction
+        return @import("../rendering/scene_view.zig").ComputeData{
+            .particle_systems = &[_]@import("../rendering/scene_view.zig").ComputeData.ParticleSystem{},
+            .compute_tasks = &[_]@import("../rendering/scene_view.zig").ComputeData.ComputeTask{},
+        };
+    }
+
+    /// Process pending hot reloads
+    pub fn processPendingReloads(self: *Self) void {
+        self.asset_manager.processPendingReloads();
     }
 };
-
-// No direct usage of mesh.vertex_buffer_descriptor or mesh.index_buffer_descriptor in this file, but if you add such usage, use mesh.vertex_buffer.?.descriptor_info and mesh.index_buffer.?.descriptor_info.

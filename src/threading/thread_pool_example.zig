@@ -1,25 +1,25 @@
 const std = @import("std");
-const EnhancedThreadPool = @import("enhanced_thread_pool.zig").EnhancedThreadPool;
-const WorkItem = @import("enhanced_thread_pool.zig").WorkItem;
-const WorkItemType = @import("enhanced_thread_pool.zig").WorkItemType;
-const WorkPriority = @import("enhanced_thread_pool.zig").WorkPriority;
-const SubsystemConfig = @import("enhanced_thread_pool.zig").SubsystemConfig;
-const createAssetLoadingWork = @import("enhanced_thread_pool.zig").createAssetLoadingWork;
-const createBvhBuildingWork = @import("enhanced_thread_pool.zig").createBvhBuildingWork;
-const createComputeWork = @import("enhanced_thread_pool.zig").createComputeWork;
+const ThreadPool = @import("thread_pool.zig").ThreadPool;
+const WorkItem = @import("thread_pool.zig").WorkItem;
+const WorkItemType = @import("thread_pool.zig").WorkItemType;
+const WorkPriority = @import("thread_pool.zig").WorkPriority;
+const SubsystemConfig = @import("thread_pool.zig").SubsystemConfig;
+const createAssetLoadingWork = @import("thread_pool.zig").createAssetLoadingWork;
+const createBvhBuildingWork = @import("thread_pool.zig").createBvhBuildingWork;
+const createComputeWork = @import("thread_pool.zig").createComputeWork;
 
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const log = @import("../utils/log.zig").log;
 
-/// Example usage of the EnhancedThreadPool for different subsystems
+/// Example usage of the ThreadPool for different subsystems
 pub const ThreadPoolExample = struct {
-    pool: *EnhancedThreadPool,
+    pool: *ThreadPool,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !ThreadPoolExample {
         // Create enhanced thread pool with max 16 workers
-        const pool = try allocator.create(EnhancedThreadPool);
-        pool.* = try EnhancedThreadPool.init(allocator, 16);
+        const pool = try allocator.create(ThreadPool);
+        pool.* = try ThreadPool.init(allocator, 16);
 
         // Register subsystems with their requirements
         try pool.registerSubsystem(SubsystemConfig{
