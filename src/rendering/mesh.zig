@@ -173,7 +173,7 @@ pub const Mesh = struct {
                         .normal = .{ model.normals[3 * index.normal.?], model.normals[3 * index.normal.? + 1], model.normals[3 * index.normal.? + 2] },
                         .uv = .{ model.tex_coords[2 * index.tex_coord.?], model.tex_coords[2 * index.tex_coord.? + 1] },
                     };
-                    
+
                     // Use HashMap for O(1) vertex lookup instead of O(n²) linear search
                     if (vertex_map.get(new_vertex)) |existing_index| {
                         try self.indices.append(allocator, existing_index);
@@ -209,9 +209,9 @@ const VertexContext = struct {
     pub fn eql(self: @This(), a: Vertex, b: Vertex) bool {
         _ = self;
         return std.mem.eql(f32, &a.pos, &b.pos) and
-               std.mem.eql(f32, &a.color, &b.color) and
-               std.mem.eql(f32, &a.normal, &b.normal) and
-               std.mem.eql(f32, &a.uv, &b.uv);
+            std.mem.eql(f32, &a.color, &b.color) and
+            std.mem.eql(f32, &a.normal, &b.normal) and
+            std.mem.eql(f32, &a.uv, &b.uv);
     }
 };
 
@@ -262,11 +262,11 @@ pub const Model = struct {
             mesh_ptr.* = Mesh.init(self.allocator);
             try mesh_ptr.vertices.ensureTotalCapacity(self.allocator, obj.vertices.len);
             try mesh_ptr.indices.ensureTotalCapacity(self.allocator, obj_mesh.indices.len);
-            
+
             // Use HashMap for O(1) vertex deduplication instead of O(n²) linear search
             var vertex_map = VertexHashMap.init(self.allocator);
             defer vertex_map.deinit();
-            
+
             var index_offset: usize = 0;
             for (obj_mesh.num_vertices) |face_vertex_count| {
                 // Compute face normal if any vertex is missing a normal
@@ -330,7 +330,7 @@ pub const Model = struct {
                         .normal = normal,
                         .uv = uv,
                     };
-                    
+
                     // Use HashMap for O(1) vertex lookup instead of O(n²) linear search
                     if (vertex_map.get(vertex)) |existing_index| {
                         try mesh_ptr.indices.append(self.allocator, existing_index);
@@ -368,11 +368,11 @@ pub const Model = struct {
             mesh_ptr.* = Mesh.init(allocator);
             try mesh_ptr.vertices.ensureTotalCapacity(allocator, obj.vertices.len);
             try mesh_ptr.indices.ensureTotalCapacity(allocator, obj_mesh.indices.len);
-            
+
             // Use HashMap for O(1) vertex deduplication instead of O(n²) linear search
             var vertex_map = VertexHashMap.init(allocator);
             defer vertex_map.deinit();
-            
+
             var index_offset: usize = 0;
             for (obj_mesh.num_vertices) |face_vertex_count| {
                 // Compute face normal if any vertex is missing a normal
@@ -434,7 +434,7 @@ pub const Model = struct {
                         .normal = normal,
                         .uv = uv,
                     };
-                    
+
                     // Use HashMap for O(1) vertex lookup instead of O(n²) linear search
                     if (vertex_map.get(vertex)) |existing_index| {
                         try mesh_ptr.indices.append(allocator, existing_index);
