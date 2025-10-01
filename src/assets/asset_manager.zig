@@ -26,10 +26,10 @@ const FallbackMeshes = @import("../utils/fallback_meshes.zig").FallbackMeshes;
 
 /// Material structure that matches the shader Material layout
 pub const Material = struct {
-    albedo_texture_id: u32 = 0,  // Matches shader: uint albedoTextureIndex  
-    roughness: f32 = 0.5,        // Matches shader: float roughness
-    metallic: f32 = 0.0,         // Matches shader: float metallic
-    emissive: f32 = 0.0,         // Matches shader: float emissive
+    albedo_texture_id: u32 = 0, // Matches shader: uint albedoTextureIndex
+    roughness: f32 = 0.5, // Matches shader: float roughness
+    metallic: f32 = 0.0, // Matches shader: float metallic
+    emissive: f32 = 0.0, // Matches shader: float emissive
     emissive_color: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 1.0 }, // Matches shader: vec4/float4 emissive_color
 };
 

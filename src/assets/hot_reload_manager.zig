@@ -353,25 +353,25 @@ pub const HotReloadManager = struct {
         if (self.reload_queue.items.len == 0) return;
 
         const now = std.time.milliTimestamp();
-        
+
         // Process items backwards to avoid index shifting issues
         var i = self.reload_queue.items.len;
         while (i > 0) {
             i -= 1; // Process from end to beginning
-            
+
             const request = &self.reload_queue.items[i];
             if (now - request.timestamp >= self.debounce_ms) {
                 // Make a copy of the request before removing it
                 const request_copy = request.*;
-                
+
                 // Remove the processed request from queue
                 _ = self.reload_queue.swapRemove(i);
-                
+
                 // Process the request outside of the mutex lock
                 self.queue_mutex.unlock();
                 self.processReloadRequest(request_copy);
                 self.queue_mutex.lock();
-                
+
                 // After unlocking/locking, the queue might have changed
                 // Adjust i to stay within bounds
                 if (i >= self.reload_queue.items.len) {

@@ -72,4 +72,10 @@ pub const Window = struct {
         c.glfwPollEvents();
         return self.window != null and c.glfwWindowShouldClose(self.window) == 0;
     }
+
+    pub fn setTitle(self: *Window, title: [*:0]const u8) void {
+        if (self.window) |win| {
+            c.glfwSetWindowTitle(win, title);
+        }
+    }
 };

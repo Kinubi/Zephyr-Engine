@@ -149,37 +149,33 @@ pub const Scene = struct {
         return try self.asset_manager.loadAssetAsync(mesh_path, .mesh, .normal);
     }
 
-    /// Update async resources (required by app.zig) - now truly async!
+    /// Update async resources (required by app.zig) - simplified to reduce false positives
     pub fn updateAsyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
         _ = allocator; // unused since AssetManager handles resource updates
-        var any_updates_queued = false;
+
+        // Only return true if work was actually completed (not just queued)
+        var work_completed = false;
 
         // Check if texture descriptors need updating and queue async work
         if (self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
             try self.asset_manager.queueTextureDescriptorUpdate();
-            any_updates_queued = true;
+            // Don't set work_completed here - wait for actual completion
         }
 
         // Check if materials need updating and queue async work
         if (self.asset_manager.materials_dirty and !self.asset_manager.material_buffer_updating.load(.acquire)) {
             try self.asset_manager.queueMaterialBufferUpdate();
-            any_updates_queued = true;
+            // Don't set work_completed here - wait for actual completion
         }
 
-        // Check if any async updates have completed (quick check, no heavy work)
-        var any_updates_completed = false;
+        // Only return true if async work has actually completed
+        // This reduces false positives that cause unnecessary descriptor updates
+        work_completed = (!self.asset_manager.texture_descriptors_dirty and
+            !self.asset_manager.texture_descriptors_updating.load(.acquire)) or
+            (!self.asset_manager.materials_dirty and
+                !self.asset_manager.material_buffer_updating.load(.acquire));
 
-        // If texture descriptors were updating and are now done, mark for refresh
-        if (!self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
-            // Texture descriptors have been updated, refresh the array reference
-            self.asset_manager.texture_image_infos = self.getTextureDescriptorArray();
-            any_updates_completed = true;
-        }
-
-        // Material updates completion is handled in the worker function
-
-        // Return true if we queued work or completed work (for UI refresh)
-        return any_updates_queued or any_updates_completed;
+        return work_completed;
     }
 
     /// Synchronous resource update - waits for all pending async operations to complete
@@ -208,8 +204,9 @@ pub const Scene = struct {
         }
 
         // Wait for any pending async operations to complete
-        while (self.asset_manager.texture_descriptors_updating.load(.acquire) or 
-               self.asset_manager.material_buffer_updating.load(.acquire)) {
+        while (self.asset_manager.texture_descriptors_updating.load(.acquire) or
+            self.asset_manager.material_buffer_updating.load(.acquire))
+        {
             std.Thread.sleep(1_000_000); // Sleep 1ms
         }
 

@@ -90,6 +90,12 @@ pub const App = struct {
     gc: GraphicsContext = undefined,
     allocator: std.mem.Allocator = undefined,
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
+
+    // FPS tracking variables (instance variables)
+    fps_frame_count: u32 = 0,
+    fps_last_time: f64 = 0.0,
+    current_fps: f32 = 0.0,
+
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
@@ -482,6 +488,7 @@ pub const App = struct {
         log(.INFO, "ForwardPass", "Forward pass system initialized", .{});
 
         last_frame_time = c.glfwGetTime();
+        self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
     }
 
@@ -543,6 +550,24 @@ pub const App = struct {
                 asset_manager.printPerformanceReport();
                 last_performance_report = current_time;
             }
+        }
+
+        // Update FPS in title bar every second
+        self.fps_frame_count += 1;
+        if (current_time - self.fps_last_time >= 1.0) {
+            self.current_fps = @as(f32, @floatFromInt(self.fps_frame_count)) / @as(f32, @floatCast(current_time - self.fps_last_time));
+
+            // Create title with FPS - use a stack buffer for the string
+            var title_buffer: [256:0]u8 = undefined;
+            const title_slice = std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine - FPS: {d:.1}", .{self.current_fps}) catch |err| blk: {
+                std.log.warn("Failed to format title: {}", .{err});
+                break :blk std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine", .{}) catch "ZulkanZengine";
+            };
+
+            self.window.setTitle(title_slice.ptr);
+
+            self.fps_frame_count = 0;
+            self.fps_last_time = current_time;
         }
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];

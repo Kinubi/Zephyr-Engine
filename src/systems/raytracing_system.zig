@@ -621,6 +621,11 @@ pub const RaytracingSystem = struct {
     }
 
     pub fn deinit(self: *RaytracingSystem) void {
+        // Wait for all GPU operations to complete before cleanup
+        self.gc.vkd.deviceWaitIdle(self.gc.dev) catch |err| {
+            log(.WARN, "RaytracingSystem", "Failed to wait for device idle during deinit: {}", .{err});
+        };
+
         if (self.tlas_instance_buffer_initialized) self.tlas_instance_buffer.deinit();
         // Deinit all BLAS buffers and destroy BLAS acceleration structures
         for (self.blas_buffers.items, self.blas_handles.items) |*buf, blas| {

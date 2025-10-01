@@ -55,6 +55,10 @@ pub const RenderPassDescriptorManager = struct {
     // Configuration
     set_configs: []const DescriptorSetConfig,
 
+    // Performance optimization: pre-allocated working memory
+    bindings_per_set: std.AutoHashMap(u32, std.ArrayList(ResourceBinding)),
+    descriptor_writer: ?*DescriptorWriter,
+
     pub fn init(
         gc: *GraphicsContext,
         allocator: std.mem.Allocator,
@@ -67,6 +71,8 @@ pub const RenderPassDescriptorManager = struct {
             .layouts = std.AutoHashMap(u32, *DescriptorSetLayout).init(allocator),
             .descriptor_sets = std.AutoHashMap(u32, []vk.DescriptorSet).init(allocator),
             .set_configs = set_configs,
+            .bindings_per_set = std.AutoHashMap(u32, std.ArrayList(ResourceBinding)).init(allocator),
+            .descriptor_writer = null,
         };
 
         // Create pools and layouts for each descriptor set
@@ -78,6 +84,18 @@ pub const RenderPassDescriptorManager = struct {
     }
 
     pub fn deinit(self: *RenderPassDescriptorManager) void {
+        // Deinit performance optimization data structures
+        var bindings_iter = self.bindings_per_set.iterator();
+        while (bindings_iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.bindings_per_set.deinit();
+
+        if (self.descriptor_writer) |writer| {
+            writer.deinit();
+            self.allocator.destroy(writer);
+        }
+
         // Deinit descriptor sets
         var set_iter = self.descriptor_sets.iterator();
         while (set_iter.next()) |entry| {
@@ -157,35 +175,46 @@ pub const RenderPassDescriptorManager = struct {
         try self.descriptor_sets.put(config.set_index, sets);
     }
 
-    /// Update descriptor set bindings
+    /// Update descriptor set bindings (optimized version)
     pub fn updateDescriptorSet(
         self: *RenderPassDescriptorManager,
         frame_index: u32,
         bindings: []const ResourceBinding,
     ) !void {
-        // Group bindings by set
-        var bindings_per_set = std.AutoHashMap(u32, std.ArrayList(ResourceBinding)).init(self.allocator);
-        defer {
-            var iter = bindings_per_set.iterator();
-            while (iter.next()) |entry| {
-                entry.value_ptr.deinit(self.allocator);
-            }
-            bindings_per_set.deinit();
+        // Clear existing bindings but keep allocated memory - only for sets being updated
+        var sets_to_update = std.AutoHashMap(u32, void).init(self.allocator);
+        defer sets_to_update.deinit();
+
+        // First pass: collect which sets we're updating
+        for (bindings) |binding| {
+            try sets_to_update.put(binding.set_index, {});
         }
 
-        for (bindings) |binding| {
-            if (!bindings_per_set.contains(binding.set_index)) {
-                const new_list = try std.ArrayList(ResourceBinding).initCapacity(self.allocator, 8);
-                try bindings_per_set.put(binding.set_index, new_list);
+        // Clear only the sets we're about to update
+        var sets_iter = sets_to_update.iterator();
+        while (sets_iter.next()) |entry| {
+            const set_index = entry.key_ptr.*;
+            if (self.bindings_per_set.getPtr(set_index)) |binding_list| {
+                binding_list.clearRetainingCapacity();
             }
-            try bindings_per_set.getPtr(binding.set_index).?.append(self.allocator, binding);
+        }
+
+        // Group bindings by set (reusing pre-allocated hash map)
+        for (bindings) |binding| {
+            const result = self.bindings_per_set.getOrPut(binding.set_index) catch unreachable;
+            if (!result.found_existing) {
+                result.value_ptr.* = std.ArrayList(ResourceBinding){};
+            }
+            result.value_ptr.append(self.allocator, binding) catch unreachable;
         }
 
         // Update each set
-        var set_iter = bindings_per_set.iterator();
+        var set_iter = self.bindings_per_set.iterator();
         while (set_iter.next()) |entry| {
             const set_index = entry.key_ptr.*;
             const set_bindings = entry.value_ptr.items;
+
+            if (set_bindings.len == 0) continue;
 
             const layout = self.layouts.get(set_index) orelse continue;
             const pool = self.pools.get(set_index) orelse continue;
@@ -193,8 +222,17 @@ pub const RenderPassDescriptorManager = struct {
 
             if (frame_index >= sets.len) continue;
 
-            var writer = DescriptorWriter.init(self.gc, layout, pool, self.allocator);
-            defer writer.deinit();
+            // Create descriptor writer if not cached, or reuse existing one
+            if (self.descriptor_writer == null) {
+                const writer = try self.allocator.create(DescriptorWriter);
+                writer.* = DescriptorWriter.init(self.gc, layout, pool, self.allocator);
+                self.descriptor_writer = writer;
+            }
+
+            const writer = self.descriptor_writer.?;
+
+            // Reset writer for new update (clear previous writes)
+            writer.writes.clearRetainingCapacity();
 
             for (set_bindings) |binding| {
                 switch (binding.resource) {
