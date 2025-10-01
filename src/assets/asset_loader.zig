@@ -105,8 +105,6 @@ pub const AssetLoader = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             try self.items.append(self.allocator, item);
-
-            log(.DEBUG, "enhanced_asset_loader", "Staged texture asset {} for GPU processing", .{item.asset_id.toU64()});
         }
 
         pub fn pop(self: *TextureStagingQueue) ?TextureStaging {
@@ -156,8 +154,6 @@ pub const AssetLoader = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             try self.items.append(self.allocator, item);
-
-            log(.DEBUG, "enhanced_asset_loader", "Staged mesh asset {} for GPU processing", .{item.asset_id.toU64()});
         }
 
         pub fn pop(self: *MeshStagingQueue) ?MeshStaging {
@@ -278,8 +274,7 @@ pub const AssetLoader = struct {
         };
 
         // Request workers from thread pool
-        const allocated_workers = self.thread_pool.requestWorkers(.asset_loading, requested_workers);
-        log(.DEBUG, "enhanced_asset_loader", "Requested {} workers for priority {s}, allocated {}", .{ requested_workers, @tagName(priority), allocated_workers });
+        _ = self.thread_pool.requestWorkers(.asset_loading, requested_workers);
 
         // Create work item
         const work_id = self.work_id_counter.fetchAdd(1, .monotonic);
@@ -348,7 +343,6 @@ pub const AssetLoader = struct {
 
         // Add to asset manager if available
 
-        log(.DEBUG, "enhanced_asset_loader", "Adding loaded texture asset {} to asset manager", .{staging.asset_id.toU64()});
         try self.asset_manager.addLoadedTexture(staging.asset_id, texture);
         self.registry.markAsLoaded(staging.asset_id, staging.image_data.len);
         self.asset_manager.texture_descriptors_dirty = true;
@@ -385,7 +379,6 @@ pub const AssetLoader = struct {
 
         // Add to asset manager if available
 
-        log(.DEBUG, "enhanced_asset_loader", "Adding loaded model asset {} to asset manager", .{staging.asset_id.toU64()});
         try self.asset_manager.addLoadedModel(staging.asset_id, model);
 
         // Mark asset as loaded
@@ -424,8 +417,6 @@ pub const AssetLoader = struct {
 
     /// Load texture asynchronously
     fn loadTextureAsync(self: *AssetLoader, asset_id: AssetId, path: []const u8, start_time: i64) !void {
-        log(.DEBUG, "enhanced_asset_loader", "Loading texture from file: {s}", .{path});
-
         // Read image file data
         const image_data = std.fs.cwd().readFileAlloc(self.allocator, path, 100 * 1024 * 1024) catch |err| {
             log(.ERROR, "enhanced_asset_loader", "Failed to read texture file {s}: {}", .{ path, err });
@@ -469,8 +460,6 @@ pub const AssetLoader = struct {
 
     /// Load mesh asynchronously
     fn loadMeshAsync(self: *AssetLoader, asset_id: AssetId, path: []const u8, start_time: i64) !void {
-        log(.DEBUG, "enhanced_asset_loader", "Loading mesh from file: {s}", .{path});
-
         // Read OBJ file data
         const obj_data = std.fs.cwd().readFileAlloc(self.allocator, path, 100 * 1024 * 1024) catch |err| {
             log(.ERROR, "enhanced_asset_loader", "Failed to read mesh file {s}: {}", .{ path, err });
@@ -552,7 +541,6 @@ fn gpuWorker(context: *anyopaque, work_item: WorkItem) void {
             processed_any = true;
         },
         .mesh => {
-            log(.DEBUG, "enhanced_asset_loader", "GPU worker processing mesh staging for asset {}", .{work_item.data.gpu_work.asset_id.toU64()});
             const staging: *AssetLoader.MeshStaging = @ptrCast(@alignCast(work_item.data.gpu_work.data));
             loader.processMeshStaging(staging) catch |err| {
                 log(.ERROR, "enhanced_asset_loader", "Failed to process mesh staging for asset {}: {}", .{ staging.asset_id.toU64(), err });

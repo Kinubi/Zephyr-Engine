@@ -201,28 +201,24 @@ pub const App = struct {
         };
 
         // --- Load cube mesh using asset-based enhanced scene system ---
-        log(.DEBUG, "scene", "Loading cube with asset-based approach", .{});
         const cube_object = try scene.addModelAssetAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, 0.5, 0.5), // position
             Math.Vec3.init(0, 0, 0), // rotation
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
         log(.INFO, "scene", "Added cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube_object.model_asset orelse @as(@TypeOf(cube_object.model_asset.?), @enumFromInt(0)), cube_object.material_asset orelse @as(@TypeOf(cube_object.material_asset.?), @enumFromInt(0)), cube_object.texture_asset orelse @as(@TypeOf(cube_object.texture_asset.?), @enumFromInt(0)) });
 
         // Create another textured cube with a different texture (asset-based)
-        log(.DEBUG, "scene", "Adding second cube with different texture (asset-based)", .{});
         const cube2_object = try scene.addModelAssetAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // position
             Math.Vec3.init(0, 0, 0), // rotation
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
         log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
 
         // Add another vase with a different texture (asset-based)
-        log(.DEBUG, "scene", "Adding first vase with error texture (asset-based)", .{});
         const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
             Math.Vec3.init(0, 0, 0), // rotation
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
         log(.INFO, "scene", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
 
         // Add another vase with a different texture (asset-based)
-        log(.DEBUG, "scene", "Adding first vase with error texture (asset-based)", .{});
         // const vase2_object = try scene.addModelAssetAsync("models/flat_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-1.4, -0.5, 0.5), // position
         //     Math.Vec3.init(0, 0, 0), // rotation
         //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
@@ -260,7 +256,6 @@ pub const App = struct {
             self.allocator,
         );
 
-        log(.DEBUG, "scene", "Adding viewer object and camera controller", .{});
         viewer_object = try scene.addEmpty();
         camera_controller = KeyboardMovementController.init();
 
@@ -269,7 +264,6 @@ pub const App = struct {
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
         // --- Use new GlobalUboSet abstraction ---
-        log(.DEBUG, "renderer", "Initializing GlobalUboSet", .{});
         global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
@@ -286,7 +280,6 @@ pub const App = struct {
             entry_point_definition{},
         });
         _ = try scene.updateSyncResources(self.allocator);
-        log(.DEBUG, "renderer", "Initializing textured renderer", .{});
         textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
         for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
             try textured_renderer.updateMaterialData(@intCast(FF_index), scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray());
@@ -303,7 +296,6 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-        log(.DEBUG, "renderer", "Initializing point light renderer", .{});
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
         // Use ShaderLibrary abstraction for shader loading
@@ -604,7 +596,7 @@ pub const App = struct {
             .projection = frame_info.camera.projectionMatrix,
             .dt = @floatCast(dt),
         };
-        try point_light_renderer.update_point_lights(&frame_info, &ubo);
+        // try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.update(frame_info.current_frame, &ubo);
 
         // Execute Forward Pass - renders all objects in scene

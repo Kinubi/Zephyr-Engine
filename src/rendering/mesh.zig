@@ -6,6 +6,7 @@ const Obj = @import("zig-obj");
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const Geometry = @import("geometry.zig").Geometry;
+const log = @import("../utils/log.zig").log;
 
 pub const Vertex = struct {
     pub const binding_description = vk.VertexInputBindingDescription{
@@ -187,8 +188,6 @@ pub const Mesh = struct {
                 i += 1;
             }
         }
-
-        std.debug.print("Vertices: {any}, Indices: {any}\n", .{ self.vertices.items.len, self.indices.items.len });
     }
 };
 
@@ -252,12 +251,6 @@ pub const Model = struct {
     fn loadFromObjInPlace(self: *Model, gc: *GraphicsContext, data: []const u8, name: []const u8) !void {
         const obj = try Obj.parseObj(self.allocator, data);
         for (obj.meshes) |obj_mesh| {
-            std.log.info("Loading mesh: vertex count = {}, index count = {}, face count = {}, Name = {s}", .{
-                obj.vertices.len / 3,
-                obj_mesh.indices.len,
-                obj_mesh.num_vertices.len,
-                name,
-            });
             var mesh_ptr = try self.allocator.create(Mesh);
             mesh_ptr.* = Mesh.init(self.allocator);
             try mesh_ptr.vertices.ensureTotalCapacity(self.allocator, obj.vertices.len);
@@ -343,10 +336,9 @@ pub const Model = struct {
                 }
                 index_offset += face_vertex_count;
             }
-            std.log.info("Mesh index buffer: {any}, vertex buffer: {any}, name: {s}", .{ mesh_ptr.vertices.items[0], mesh_ptr.indices.items.len, name });
             try mesh_ptr.createIndexBuffers(gc);
             try mesh_ptr.createVertexBuffers(gc);
-            std.log.info("Mesh vertex buffer: {any}, index buffer: {any}, name: {s}", .{ mesh_ptr.vertex_buffer.?.instance_count, mesh_ptr.index_buffer.?.instance_count, name });
+
             const geometry = Geometry{ .mesh = mesh_ptr, .name = name };
             try self.meshes.append(self.allocator, ModelMesh{
                 .geometry = geometry,
@@ -359,11 +351,6 @@ pub const Model = struct {
         const obj = try Obj.parseObj(allocator, data);
         var meshes = std.ArrayList(ModelMesh){};
         for (obj.meshes) |obj_mesh| {
-            std.log.info("Loading mesh: vertex count = {}, index count = {}, face count = {}", .{
-                obj.vertices.len / 3,
-                obj_mesh.indices.len,
-                obj_mesh.num_vertices.len,
-            });
             var mesh_ptr = try allocator.create(Mesh);
             mesh_ptr.* = Mesh.init(allocator);
             try mesh_ptr.vertices.ensureTotalCapacity(allocator, obj.vertices.len);
@@ -447,10 +434,9 @@ pub const Model = struct {
                 }
                 index_offset += face_vertex_count;
             }
-            std.log.info("Mesh index buffer: {any}, vertex buffer: {any}, name: {s}", .{ mesh_ptr.vertices.items[0], mesh_ptr.indices.items.len, name });
             try mesh_ptr.createIndexBuffers(gc);
             try mesh_ptr.createVertexBuffers(gc);
-            std.log.info("Mesh vertex buffer: {any}, index buffer: {any}, name: {s}", .{ mesh_ptr.vertex_buffer.?.instance_count, mesh_ptr.index_buffer.?.instance_count, name });
+            log(.INFO, "mesh", "Mesh vertex buffer: {any}, index buffer: {any}, name: {s}", .{ mesh_ptr.vertex_buffer.?.instance_count, mesh_ptr.index_buffer.?.instance_count, name });
             const geometry = Geometry{ .mesh = mesh_ptr, .name = name };
             try meshes.append(allocator, ModelMesh{
                 .geometry = geometry,

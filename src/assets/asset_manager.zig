@@ -309,7 +309,6 @@ pub const AssetManager = struct {
         const asset_id = try self.registry.registerAsset(path, .texture);
 
         // Load texture directly using the graphics context
-        log(.DEBUG, "enhanced_asset_manager", "Loading fallback texture: {s}", .{path});
         const texture = try self.allocator.create(Texture);
         texture.* = try Texture.initFromFile(self.loader.graphics_context, self.allocator, path, .rgba8);
         try self.loaded_textures.append(self.allocator, texture);
@@ -409,7 +408,6 @@ pub const AssetManager = struct {
         };
         try self.loader.requestLoad(asset_id, work_priority);
 
-        log(.DEBUG, "enhanced_asset_manager", "Queued async load for asset {} ({s}) with priority {}", .{ asset_id, file_path, priority });
         return asset_id;
     }
 
@@ -443,7 +441,6 @@ pub const AssetManager = struct {
         _ = try self.registry.registerAsset("fallback_model", .mesh);
         self.registry.markAsLoaded(asset_id, 0); // 0 file size for fallback
 
-        log(.DEBUG, "enhanced_asset_manager", "Added fallback model with asset ID {}", .{asset_id});
         return asset_id;
     }
 
@@ -461,8 +458,6 @@ pub const AssetManager = struct {
 
         // Complete the request
         self.completeRequest(asset_id, true);
-
-        log(.DEBUG, "enhanced_asset_manager", "addLoadedTexture: Adding texture asset {} at index {} (capacity: {})", .{ asset_id, index, self.loaded_textures.capacity });
     }
 
     /// Add loaded model to the manager
@@ -475,13 +470,10 @@ pub const AssetManager = struct {
         const safe_model = model;
 
         const index = self.loaded_models.items.len;
-        log(.DEBUG, "asset_manager", "addLoadedModel: Adding model asset {} at index {} (capacity: {})", .{ safe_asset_id.toU64(), index, self.loaded_models.capacity });
 
         // Verify model pointer is valid
         if (safe_model.meshes.items.len == 0) {
             log(.WARN, "asset_manager", "Adding model with no meshes for asset {}", .{safe_asset_id.toU64()});
-        } else {
-            log(.DEBUG, "asset_manager", "Model has {} meshes", .{safe_model.meshes.items.len});
         }
 
         // Append model to array first
@@ -644,9 +636,6 @@ pub const AssetManager = struct {
         self.textures_mutex.lock();
         defer self.textures_mutex.unlock();
 
-        // Build descriptor array from loaded_textures ArrayList
-        std.log.info("buildTextureDescriptorArray: Building from {} loaded textures", .{self.loaded_textures.items.len});
-
         if (self.loaded_textures.items.len == 0) {
             log(.WARN, "asset_manager", "No textures loaded - using empty descriptor array", .{});
             self.texture_image_infos = &[_]vk.DescriptorImageInfo{};
@@ -658,15 +647,11 @@ pub const AssetManager = struct {
 
         for (self.loaded_textures.items, 0..) |texture, i| {
             image_infos[i] = texture.getDescriptorInfo();
-            std.log.info("buildTextureDescriptorArray: Placed texture at descriptor index {}", .{i});
         }
-
-        log(.DEBUG, "asset_manager", "Built texture descriptor array: {} textures", .{self.loaded_textures.items.len});
 
         self.texture_image_infos = image_infos;
         self.texture_descriptors_dirty = false;
 
-        log(.DEBUG, "enhanced_asset_manager", "Built texture descriptor array: {} textures", .{self.loaded_textures.items.len});
     }
 
     /// Queue async texture descriptor array update
@@ -698,7 +683,6 @@ pub const AssetManager = struct {
         };
 
         try self.loader.thread_pool.submitWork(work_item);
-        log(.DEBUG, "enhanced_asset_manager", "Queued async texture descriptor update", .{});
     }
 
     /// Queue async material buffer update
@@ -730,7 +714,6 @@ pub const AssetManager = struct {
         };
 
         try self.loader.thread_pool.submitWork(work_item);
-        log(.DEBUG, "enhanced_asset_manager", "Queued async material buffer update", .{});
     }
 
     /// Get the current texture descriptor array for rendering
@@ -791,8 +774,6 @@ pub const AssetManager = struct {
         const material_index = self.loaded_materials.items.len - 1;
         const material_asset_id = asset_types.AssetId.fromU64(5); // ID 5 for default material
         try self.asset_to_material.put(material_asset_id, material_index);
-
-        log(.DEBUG, "enhanced_asset_manager", "Created fallback material with asset ID {}", .{material_asset_id});
     }
 
     /// Create material buffer from loaded materials
@@ -829,8 +810,6 @@ pub const AssetManager = struct {
             // Get the texture index from the resolved asset ID
             const texture_index = self.asset_to_texture.get(resolved_texture_id) orelse 0;
             material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
-
-            log(.DEBUG, "Enhanced asset_manager", "Material {}: resolved texture {} -> {} (index: {})", .{ i, texture_asset_id.toU64(), resolved_texture_id.toU64(), texture_index });
         }
 
         self.material_buffer.?.writeToBuffer(
@@ -839,7 +818,7 @@ pub const AssetManager = struct {
             0,
         );
 
-        log(.INFO, "Enhanced asset_manager", "Created material buffer with {d} materials (texture IDs resolved)", .{self.loaded_materials.items.len});
+        log(.INFO, "enhanced asset_manager", "Created material buffer with {d} materials (texture IDs resolved)", .{self.loaded_materials.items.len});
     }
 
     /// Check if asset is ready for use
@@ -886,7 +865,6 @@ fn textureDescriptorUpdateWorker(context: ?*anyopaque, work_item: WorkItem) void
 
     // Mark as no longer updating
     asset_manager.texture_descriptors_updating.store(false, .release);
-    log(.DEBUG, "enhanced_asset_manager", "Completed async texture descriptor update", .{});
 }
 
 /// Worker function for async material buffer updates
@@ -904,5 +882,4 @@ fn materialBufferUpdateWorker(context: ?*anyopaque, work_item: WorkItem) void {
     // Mark materials as no longer dirty and no longer updating
     asset_manager.materials_dirty = false;
     asset_manager.material_buffer_updating.store(false, .release);
-    log(.DEBUG, "enhanced_asset_manager", "Completed async material buffer update", .{});
 }

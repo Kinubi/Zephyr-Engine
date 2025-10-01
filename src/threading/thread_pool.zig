@@ -131,8 +131,6 @@ pub const WorkQueue = struct {
 
         try queue.append(self.allocator, item);
         _ = self.total_items.fetchAdd(1, .monotonic);
-
-        log(.DEBUG, "enhanced_thread_pool", "Pushed {s} priority work item (id: {}, total: {})", .{ @tagName(item.priority), item.id, self.total_items.load(.acquire) });
     }
 
     pub fn pop(self: *WorkQueue) ?WorkItem {
@@ -151,7 +149,6 @@ pub const WorkQueue = struct {
             if (queue.items.len > 0) {
                 const item = queue.orderedRemove(0);
                 _ = self.total_items.fetchSub(1, .monotonic);
-                log(.DEBUG, "enhanced_thread_pool", "Popped {s} priority work item (id: {}, remaining: {})", .{ @tagName(item.priority), item.id, self.total_items.load(.acquire) });
                 return item;
             }
         }
@@ -176,7 +173,6 @@ pub const WorkQueue = struct {
                 if (context.canProcess(item)) {
                     const work_item = queue.orderedRemove(i);
                     _ = self.total_items.fetchSub(1, .monotonic);
-                    log(.DEBUG, "enhanced_thread_pool", "Popped {s} priority work item (id: {}, remaining: {})", .{ @tagName(work_item.priority), work_item.id, self.total_items.load(.acquire) });
                     return work_item;
                 }
             }
@@ -399,10 +395,7 @@ pub const ThreadPool = struct {
                 log(.ERROR, "enhanced_thread_pool", "Failed to scale workers from {} to {}: {}", .{ current_total_workers, target_workers, err });
             };
             self.subsystems_mutex.lock();
-            log(.DEBUG, "enhanced_thread_pool", "Scaled workers from {} to {} due to demand", .{ current_total_workers, target_workers });
         }
-
-        log(.DEBUG, "enhanced_thread_pool", "Subsystem {} requested {} workers, can allocate {} (active: {}, max: {})", .{ subsystem_type, requested_count, allocated, current_active, max_allowed });
 
         return allocated;
     }
@@ -448,8 +441,7 @@ pub const ThreadPool = struct {
         const pool = worker_info.pool;
         worker_info.state.store(.idle, .release);
 
-        // Single debug log to confirm worker enters loop
-        std.debug.print("Worker {} entering main loop\n", .{worker_info.worker_id});
+        log(.INFO, "enhanced_thread_pool", "Worker {} started", .{worker_info.worker_id});
 
         while (pool.running) {
             // Try to get work
@@ -495,8 +487,6 @@ pub const ThreadPool = struct {
                 pool.stats.average_work_time_us.store(new_avg, .release);
 
                 worker_info.state.store(.idle, .release);
-
-                log(.DEBUG, "enhanced_thread_pool", "Worker {} completed work item {} in {}μs", .{ worker_info.worker_id, work_item.id, duration });
             } else {
                 // No work available, sleep briefly
                 worker_info.state.store(.idle, .release);
@@ -522,7 +512,6 @@ pub const ThreadPool = struct {
     fn scaleWorkers(self: *ThreadPool, target_count: u32) !void {
         const current_count = self.current_worker_count.load(.acquire);
         const actual_target = @min(target_count, self.max_workers);
-        log(.DEBUG, "enhanced_thread_pool", "Scaling workers from {} to {}", .{ current_count, actual_target });
         if (actual_target == current_count) return;
 
         if (actual_target > current_count) {

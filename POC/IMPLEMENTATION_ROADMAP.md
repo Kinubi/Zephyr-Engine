@@ -839,6 +839,85 @@ pub const App = struct {
 - [ ] Create render graph visualization tools for debugging
 - [x] ✅ **COMPLETED**: Optimize resource barriers and synchronization between passes
 
+#### 🔥 **RECENT ACHIEVEMENTS - October 2025**: Performance & Developer Experience Improvements ✅ **COMPLETED**
+
+##### FPS Display & Performance Monitoring ✅ **COMPLETED**
+- [x] ✅ **COMPLETED**: Real-time FPS display in window title bar (updates every second)
+- [x] ✅ **COMPLETED**: Frame timing tracking with proper instance variables
+- [x] ✅ **COMPLETED**: GLFW integration for dynamic window title updates
+- [x] ✅ **COMPLETED**: String handling optimization using bufPrintZ for null-terminated strings
+
+**Technical Implementation:**
+```zig
+// Added to App struct for proper FPS tracking
+fps_frame_count: u32 = 0,
+fps_last_time: f64 = 0,
+current_fps: f32 = 0,
+
+// Window title update every second
+const current_time = c.glfwGetTime();
+if (current_time - self.fps_last_time >= 1.0) {
+    self.current_fps = @as(f32, @floatFromInt(self.fps_frame_count)) / @as(f32, @floatCast(current_time - self.fps_last_time));
+    // Update window title with FPS
+    var title_buf: [256]u8 = undefined;
+    const title = try std.fmt.bufPrintZ(&title_buf, "ZulkanZengine - FPS: {d:.1}", .{self.current_fps});
+    self.window.setTitle(title);
+    // Reset counters
+    self.fps_frame_count = 0;
+    self.fps_last_time = current_time;
+}
+```
+
+##### Console Output Cleanup & Logging System Unification ✅ **COMPLETED**
+- [x] ✅ **COMPLETED**: Comprehensive debug log cleanup across all systems
+- [x] ✅ **COMPLETED**: Asset Manager verbose logging removal (20+ debug statements)
+- [x] ✅ **COMPLETED**: Thread Pool worker operation logging cleanup
+- [x] ✅ **COMPLETED**: Asset Registry state transition logging reduction
+- [x] ✅ **COMPLETED**: Asset Loader staging and processing log cleanup  
+- [x] ✅ **COMPLETED**: Forward Pass render system unified with custom logging
+- [x] ✅ **COMPLETED**: Application initialization verbose log reduction
+
+**Systems Cleaned Up:**
+```zig
+// Before: Console spam with every operation
+[DEBUG] [enhanced_asset_manager] Queued async load for texture.png
+[DEBUG] [enhanced_thread_pool] Pushed HIGH priority work item (id: 123, total: 5)
+[DEBUG] [asset_registry] Marking asset 10 as loaded
+[DEBUG] [enhanced_asset_loader] Staged texture asset 15 for GPU processing
+[INFO] ForwardPass: Initialized (using external renderers)
+[INFO] ForwardPass: Beginning pass setup
+
+// After: Clean console with only meaningful messages
+[INFO] [scene] Added cube object (asset-based) with asset IDs: model=8, material=9, texture=10
+[WARN] [enhanced_asset_manager] Failed to create material buffer: OutOfMemory
+[ERROR] [enhanced_asset_loader] Failed to read texture file missing.png: FileNotFound
+```
+
+**Production Benefits:**
+- 🎯 **Developer Experience**: Clean console output for easier debugging
+- ⚡ **Performance**: Reduced I/O overhead from excessive logging
+- 🛡️ **Maintainability**: Consistent logging patterns across all subsystems
+- 🔧 **Debugging**: Meaningful logs stand out without noise
+
+##### Forward Pass Integration with Custom Logging ✅ **COMPLETED**
+- [x] ✅ **COMPLETED**: Replaced `std.log` calls with unified `log(.LEVEL, "system", ...)` pattern
+- [x] ✅ **COMPLETED**: Removed verbose initialization and execution logging
+- [x] ✅ **COMPLETED**: Kept essential warning logs for configuration issues
+- [x] ✅ **COMPLETED**: Consistent error handling across all render passes
+
+**Code Quality Improvements:**
+```zig
+// Before: Inconsistent logging
+std.log.info("ForwardPass: Renderers set - TexturedRenderer and PointLightRenderer", .{});
+std.log.warn("  - PointLightRenderer not configured!", .{});
+
+// After: Unified logging system
+// Verbose logs removed, warnings use consistent format
+log(.WARN, "forward_pass", "PointLightRenderer not configured!", .{});
+```
+
+### 🎉 **Phase 1.5 Status Update - October 2025**: SOLID FOUNDATION ESTABLISHED! 🚀
+
 ### Key Architectural Benefits
 
 #### Vulkan-Style Subpass Dependencies

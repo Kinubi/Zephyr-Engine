@@ -10,6 +10,7 @@ const ResourceBinding = @import("../render_pass.zig").ResourceBinding;
 const VulkanRenderPassResources = @import("../render_pass.zig").VulkanRenderPassResources;
 const TexturedRenderer = @import("../../renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("../../renderers/point_light_renderer.zig").PointLightRenderer;
+const log = @import("../../utils/log.zig").log;
 
 /// Forward rendering pass - renders opaque geometry with lighting
 /// Uses existing swapchain render pass and integrates with existing renderers
@@ -28,7 +29,6 @@ pub const ForwardPass = struct {
         _ = graphics_context;
 
         self.initialized = true;
-        std.log.info("ForwardPass: Initialized (using external renderers)", .{});
     }
 
     /// Set external renderer references
@@ -36,7 +36,6 @@ pub const ForwardPass = struct {
         self.textured_renderer = textured_renderer;
         self.point_light_renderer = point_light_renderer;
         self.initialized = true;
-        std.log.info("ForwardPass: Renderers set - TexturedRenderer and PointLightRenderer", .{});
     }
 
     pub fn execute(self: *ForwardPass, context: RenderContext) !void {
@@ -58,7 +57,7 @@ pub const ForwardPass = struct {
             //std.log.info("  - Rendering point lights with PointLightRenderer", .{});
             try renderer.render(context.frame_info.*);
         } else {
-            std.log.warn("  - PointLightRenderer not configured!", .{});
+            log(.WARN, "forward_pass", "PointLightRenderer not configured!", .{});
         }
     }
 
@@ -67,7 +66,6 @@ pub const ForwardPass = struct {
             // Don't deinit renderers - they're owned externally
             self.initialized = false;
         }
-        std.log.info("ForwardPass: Deinitialized", .{});
     }
 
     pub fn getVulkanRenderPass(self: *ForwardPass) ?vk.RenderPass {
@@ -78,7 +76,6 @@ pub const ForwardPass = struct {
 
     pub fn beginPass(self: *ForwardPass, context: RenderContext) !void {
         _ = self;
-        std.log.info("ForwardPass: Beginning pass setup", .{});
 
         // Could set additional render state here
         // - Bind global descriptor sets
@@ -90,7 +87,6 @@ pub const ForwardPass = struct {
     pub fn endPass(self: *ForwardPass, context: RenderContext) !void {
         _ = self;
         _ = context;
-        std.log.info("ForwardPass: Ending pass cleanup", .{});
 
         // Could do cleanup here
         // - Unbind resources
