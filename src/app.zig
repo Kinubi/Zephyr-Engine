@@ -91,6 +91,7 @@ pub const App = struct {
 
     gc: GraphicsContext = undefined,
     allocator: std.mem.Allocator = undefined,
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
@@ -108,10 +109,23 @@ pub const App = struct {
     var frame_info: FrameInfo = FrameInfo{};
 
     var frame_index: u32 = 0;
+    var frame_counter: u64 = 0; // Global frame counter for scheduling
     var scene: EnhancedScene = undefined;
     var thread_pool: *EnhancedThreadPool = undefined;
     var asset_manager: *EnhancedAssetManager = undefined;
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
+
+    // Scheduled asset loading system
+    const ScheduledAsset = struct {
+        frame: u64,
+        model_path: []const u8,
+        texture_path: []const u8,
+        position: Math.Vec3,
+        rotation: Math.Vec3,
+        scale: Math.Vec3,
+        loaded: bool = false,
+    };
+    var scheduled_assets: std.ArrayList(ScheduledAsset) = undefined;
 
     // Raytracing system field
     var global_ubo_set: GlobalUboSet = undefined;
@@ -127,6 +141,10 @@ pub const App = struct {
         std.debug.print("Window created with title: {s}\n", .{self.window.window_props.title});
 
         self.allocator = std.heap.page_allocator;
+
+        // Initialize scheduled assets system
+        scheduled_assets = std.ArrayList(ScheduledAsset){};
+
         std.debug.print("Updating frame {s}\n", .{"ehho"});
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
         std.log.debug("Using device: {s}", .{self.gc.deviceName()});
@@ -156,14 +174,14 @@ pub const App = struct {
 
         try thread_pool.registerSubsystem(.{
             .name = "bvh_building",
-            .min_workers = 2,
+            .min_workers = 1,
             .max_workers = 4,
             .priority = .normal,
             .work_item_type = .bvh_building,
         });
 
         // Start the thread pool with initial workers
-        try thread_pool.start(4); // Start with 4 workers
+        try thread_pool.start(8); // Start with 4 workers
 
         // Initialize Enhanced Asset Manager on heap for stable pointer address
         asset_manager = try self.allocator.create(EnhancedAssetManager);
@@ -194,11 +212,29 @@ pub const App = struct {
         log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
 
         // Add another vase with a different texture (asset-based)
-        log(.DEBUG, "scene", "Adding second vase with error texture (asset-based)", .{});
-        const vase2_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
+        log(.DEBUG, "scene", "Adding first vase with error texture (asset-based)", .{});
+        const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
             Math.Vec3.init(0, 0, 0), // rotation
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase2_object.model_asset orelse @as(@TypeOf(vase2_object.model_asset.?), @enumFromInt(0)), vase2_object.material_asset orelse @as(@TypeOf(vase2_object.material_asset.?), @enumFromInt(0)), vase2_object.texture_asset orelse @as(@TypeOf(vase2_object.texture_asset.?), @enumFromInt(0)) });
+        log(.INFO, "scene", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
+
+        // Add another vase with a different texture (asset-based)
+        log(.DEBUG, "scene", "Adding first vase with error texture (asset-based)", .{});
+        // const vase2_object = try scene.addModelAssetAsync("models/flat_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-1.4, -0.5, 0.5), // position
+        //     Math.Vec3.init(0, 0, 0), // rotation
+        //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        // log(.INFO, "scene", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase2_object.model_asset orelse @as(@TypeOf(vase2_object.model_asset.?), @enumFromInt(0)), vase2_object.material_asset orelse @as(@TypeOf(vase2_object.material_asset.?), @enumFromInt(0)), vase2_object.texture_asset orelse @as(@TypeOf(vase2_object.texture_asset.?), @enumFromInt(0)) });
+
+        // Schedule the flat vase to be loaded at frame 1000
+        try scheduled_assets.append(self.allocator, ScheduledAsset{
+            .frame = 50000,
+            .model_path = "models/flat_vase.obj",
+            .texture_path = "textures/granitesmooth1-albedo.png",
+            .position = Math.Vec3.init(-1.4, -0.5, 0.5),
+            .rotation = Math.Vec3.init(0, 0, 0),
+            .scale = Math.Vec3.init(0.5, 0.5, 0.5),
+        });
+        log(.INFO, "app", "Scheduled flat vase to be loaded at frame 1000", .{});
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
@@ -246,7 +282,7 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-        _ = try scene.updateAsyncResources(self.allocator);
+        _ = try scene.updateSyncResources(self.allocator);
         log(.DEBUG, "renderer", "Initializing textured renderer", .{});
         textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
         for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
@@ -453,27 +489,52 @@ pub const App = struct {
     }
 
     pub fn onUpdate(self: *App) !bool {
+        // Increment frame counter for scheduling
+        frame_counter += 1;
+
+        // Check for scheduled asset loads
+        for (scheduled_assets.items) |*scheduled_asset| {
+            if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
+                log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
+
+                const loaded_object = try scene.addModelAssetAsync(scheduled_asset.model_path, scheduled_asset.texture_path, scheduled_asset.position, scheduled_asset.rotation, scheduled_asset.scale);
+
+                log(.INFO, "app", "Successfully queued scheduled asset for loading with IDs: model={}, material={}, texture={}", .{ loaded_object.model_asset orelse @as(@TypeOf(loaded_object.model_asset.?), @enumFromInt(0)), loaded_object.material_asset orelse @as(@TypeOf(loaded_object.material_asset.?), @enumFromInt(0)), loaded_object.texture_asset orelse @as(@TypeOf(loaded_object.texture_asset.?), @enumFromInt(0)) });
+
+                log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
+
+                scheduled_asset.loaded = true;
+            }
+        }
+
         // Process any pending hot reloads first
-        scene.processPendingReloads();
 
         // Check for and update any newly loaded async resources (textures, models, materials)
         // Note: Asset completion is handled automatically by the asset manager's worker thread
-        const resources_updated = try scene.updateAsyncResources(self.allocator);
+        var resources_updated = try scene.updateAsyncResources(self.allocator);
 
         // Update textured renderer with any new material/texture data if resources changed
         if (resources_updated) {
-            // Wait for GPU to finish using any pending descriptor sets before updating
-            // This prevents the validation error: VUID-vkUpdateDescriptorSets-None-03047
-            try self.gc.vkd.deviceWaitIdle(self.gc.dev);
-            
-            // Update all frame indices when texture descriptors change
-            for (0..MAX_FRAMES_IN_FLIGHT) |ff_index| {
-                try textured_renderer.updateMaterialData(
-                    @intCast(ff_index),
-                    scene.asset_manager.material_buffer.?.descriptor_info,
-                    scene.asset_manager.getTextureDescriptorArray(),
-                );
+            // Instead of deviceWaitIdle, just mark all frames as needing updates
+            for (&self.descriptor_dirty_flags) |*flag| {
+                flag.* = true;
             }
+
+            // Clear the global flag since we've handled it
+            resources_updated = false;
+        }
+
+        // Before rendering each frame, check if descriptors need updating
+        if (self.descriptor_dirty_flags[current_frame]) {
+            // Only update descriptors for the current frame
+            try textured_renderer.updateMaterialData(
+                current_frame,
+                scene.asset_manager.material_buffer.?.descriptor_info,
+                scene.asset_manager.getTextureDescriptorArray(),
+            );
+
+            // Mark this frame as updated
+            self.descriptor_dirty_flags[current_frame] = false;
         }
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
@@ -550,6 +611,7 @@ pub const App = struct {
         last_frame_time = current_time;
 
         //log(.TRACE, "app", "Frame end", .{});
+
         return self.window.isRunning();
     }
 
@@ -557,6 +619,10 @@ pub const App = struct {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
         swapchain.waitForAllFences() catch unreachable;
+
+        // Clean up scheduled assets list
+        scheduled_assets.deinit(self.allocator);
+
         global_ubo_set.deinit();
         forward_pass.deinit();
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);

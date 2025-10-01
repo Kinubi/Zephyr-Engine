@@ -159,6 +159,32 @@ pub const WorkQueue = struct {
         return null;
     }
 
+    pub fn popIf(self: *WorkQueue, context: anytype) ?WorkItem {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Try critical first, then high, normal, low
+        const queues = [_]*std.ArrayList(WorkItem){
+            &self.critical_queue,
+            &self.high_queue,
+            &self.normal_queue,
+            &self.low_queue,
+        };
+
+        for (queues) |queue| {
+            for (queue.items, 0..) |*item, i| {
+                if (context.canProcess(item)) {
+                    const work_item = queue.orderedRemove(i);
+                    _ = self.total_items.fetchSub(1, .monotonic);
+                    log(.DEBUG, "enhanced_thread_pool", "Popped {s} priority work item (id: {}, remaining: {})", .{ @tagName(work_item.priority), work_item.id, self.total_items.load(.acquire) });
+                    return work_item;
+                }
+            }
+        }
+
+        return null;
+    }
+
     pub fn size(self: *WorkQueue) u32 {
         return self.total_items.load(.acquire);
     }
@@ -234,6 +260,7 @@ pub const EnhancedThreadPool = struct {
     // Subsystem management
     registered_subsystems: std.HashMap(WorkItemType, SubsystemConfig, std.hash_map.AutoContext(WorkItemType), 80),
     subsystem_demands: std.HashMap(WorkItemType, u32, std.hash_map.AutoContext(WorkItemType), 80), // Current demand per subsystem
+    active_workers_per_subsystem: std.HashMap(WorkItemType, u32, std.hash_map.AutoContext(WorkItemType), 80), // Currently active workers per subsystem
     subsystems_mutex: std.Thread.Mutex = .{}, // Protects HashMap operations
 
     // Statistics and monitoring
@@ -290,6 +317,7 @@ pub const EnhancedThreadPool = struct {
             .shutting_down = std.atomic.Value(bool).init(false),
             .registered_subsystems = std.HashMap(WorkItemType, SubsystemConfig, std.hash_map.AutoContext(WorkItemType), 80).init(allocator),
             .subsystem_demands = std.HashMap(WorkItemType, u32, std.hash_map.AutoContext(WorkItemType), 80).init(allocator),
+            .active_workers_per_subsystem = std.HashMap(WorkItemType, u32, std.hash_map.AutoContext(WorkItemType), 80).init(allocator),
             .stats = PoolStatistics.init(),
             .last_scale_check = std.atomic.Value(i64).init(0),
         };
@@ -304,6 +332,7 @@ pub const EnhancedThreadPool = struct {
         self.work_queue.deinit();
         self.registered_subsystems.deinit();
         self.subsystem_demands.deinit();
+        self.active_workers_per_subsystem.deinit();
         self.allocator.free(self.workers);
 
         log(.INFO, "enhanced_thread_pool", "EnhancedThreadPool deinitialized", .{});
@@ -313,6 +342,7 @@ pub const EnhancedThreadPool = struct {
     pub fn registerSubsystem(self: *EnhancedThreadPool, config: SubsystemConfig) !void {
         try self.registered_subsystems.put(config.work_item_type, config);
         try self.subsystem_demands.put(config.work_item_type, 0);
+        try self.active_workers_per_subsystem.put(config.work_item_type, 0);
 
         log(.INFO, "enhanced_thread_pool", "Registered subsystem '{s}' (min: {}, max: {})", .{ config.name, config.min_workers, config.max_workers });
     }
@@ -341,24 +371,40 @@ pub const EnhancedThreadPool = struct {
         self.subsystems_mutex.lock();
         defer self.subsystems_mutex.unlock();
 
-        const total_demand = self.calculateTotalDemand();
-        const current_count = self.current_worker_count.load(.acquire);
-
-        // Determine how many workers to allocate to this subsystem
+        // Get subsystem configuration
         const subsystem_config = self.registered_subsystems.get(subsystem_type) orelse return 0;
-        const max_for_subsystem = @min(requested_count, subsystem_config.max_workers);
 
-        // Scale up if needed and possible
-        if (total_demand > current_count and current_count < self.max_workers) {
-            const new_worker_count = @min(total_demand, self.max_workers);
-            self.scaleWorkers(new_worker_count) catch |err| {
-                log(.ERROR, "enhanced_thread_pool", "Failed to scale workers: {}", .{err});
+        // Update demand tracking for this subsystem
+        self.subsystem_demands.put(subsystem_type, requested_count) catch {};
+
+        // Calculate actual allocation based on subsystem limits and current usage
+        const current_active = self.active_workers_per_subsystem.get(subsystem_type) orelse 0;
+        const max_allowed = subsystem_config.max_workers;
+        const can_allocate = if (max_allowed > current_active) max_allowed - current_active else 0;
+        const allocated = @min(@min(requested_count, can_allocate), max_allowed);
+
+        // Check if we need to scale up the total worker pool
+        const current_total_workers = self.current_worker_count.load(.acquire);
+        const total_demand = self.calculateTotalDemandLocked();
+        const minimum_needed = self.calculateMinimumWorkersLocked();
+
+        // Determine target worker count (ensure we meet minimum requirements)
+        const target_workers = @max(@min(total_demand, self.max_workers), minimum_needed);
+
+        // Scale up if needed
+        if (target_workers > current_total_workers) {
+            // Release lock temporarily for scaling operation to avoid deadlock
+            self.subsystems_mutex.unlock();
+            self.scaleWorkers(target_workers) catch |err| {
+                log(.ERROR, "enhanced_thread_pool", "Failed to scale workers from {} to {}: {}", .{ current_total_workers, target_workers, err });
             };
-            log(.INFO, "enhanced_thread_pool", "Scaled up from {} to {} workers", .{ current_count, new_worker_count });
+            self.subsystems_mutex.lock();
+            log(.DEBUG, "enhanced_thread_pool", "Scaled workers from {} to {} due to demand", .{ current_total_workers, target_workers });
         }
 
-        log(.DEBUG, "enhanced_thread_pool", "Subsystem {} requested {} workers, allocated {}", .{ subsystem_type, requested_count, max_for_subsystem });
-        return max_for_subsystem;
+        log(.DEBUG, "enhanced_thread_pool", "Subsystem {} requested {} workers, can allocate {} (active: {}, max: {})", .{ subsystem_type, requested_count, allocated, current_active, max_allowed });
+
+        return allocated;
     }
 
     /// Submit work to the pool
@@ -371,12 +417,30 @@ pub const EnhancedThreadPool = struct {
         self.stats.current_queue_size.store(self.work_queue.size(), .release);
 
         // Check if we need to scale up
-        self.checkScaling();
+        //self.checkScaling();
+    }
+
+    /// Check if a subsystem can accept another worker
+    fn canSubsystemAcceptWorker(self: *EnhancedThreadPool, work_item_type: WorkItemType) bool {
+        self.subsystems_mutex.lock();
+        defer self.subsystems_mutex.unlock();
+
+        const config = self.registered_subsystems.get(work_item_type) orelse return false;
+        const active_workers = self.active_workers_per_subsystem.get(work_item_type) orelse 0;
+
+        return active_workers < config.max_workers;
     }
 
     /// Get work from the queue (called by worker threads)
     pub fn getWork(self: *EnhancedThreadPool) ?WorkItem {
-        return self.work_queue.pop();
+        // Try to get work that can be processed by available subsystem workers
+        return self.work_queue.popIf(struct {
+            pool: *EnhancedThreadPool,
+
+            pub fn canProcess(ctx: @This(), work_item: *const WorkItem) bool {
+                return ctx.pool.canSubsystemAcceptWorker(work_item.item_type);
+            }
+        }{ .pool = self });
     }
 
     /// Worker thread main loop
@@ -392,6 +456,15 @@ pub const EnhancedThreadPool = struct {
             if (pool.getWork()) |work_item| {
                 worker_info.state.store(.working, .release);
 
+                // Increment active worker count for this subsystem
+                {
+                    pool.subsystems_mutex.lock();
+                    defer pool.subsystems_mutex.unlock();
+
+                    const current_workers = pool.active_workers_per_subsystem.get(work_item.item_type) orelse 0;
+                    pool.active_workers_per_subsystem.put(work_item.item_type, current_workers + 1) catch {};
+                }
+
                 const start_time = std.time.microTimestamp();
 
                 // Execute the work item
@@ -404,6 +477,17 @@ pub const EnhancedThreadPool = struct {
                 _ = worker_info.work_items_completed.fetchAdd(1, .monotonic);
                 _ = pool.stats.total_work_items_processed.fetchAdd(1, .monotonic);
                 worker_info.last_work_time.store(std.time.milliTimestamp(), .release);
+
+                // Decrement active worker count for this subsystem
+                {
+                    pool.subsystems_mutex.lock();
+                    defer pool.subsystems_mutex.unlock();
+
+                    const current_workers = pool.active_workers_per_subsystem.get(work_item.item_type) orelse 0;
+                    if (current_workers > 0) {
+                        pool.active_workers_per_subsystem.put(work_item.item_type, current_workers - 1) catch {};
+                    }
+                }
 
                 // Update average work time (simple moving average)
                 const current_avg = pool.stats.average_work_time_us.load(.acquire);
@@ -420,6 +504,10 @@ pub const EnhancedThreadPool = struct {
 
                 // Check if we should shut down due to being idle too long (only when no work available)
                 if (pool.shouldShutdownWorker(worker_info)) {
+                    log(.INFO, "enhanced_thread_pool", "Worker {} shutting down due to idle timeout", .{worker_info.worker_id});
+
+                    // Decrement the worker count since this worker is shutting down
+                    _ = pool.current_worker_count.fetchSub(1, .acq_rel);
                     break;
                 }
             }
@@ -434,7 +522,7 @@ pub const EnhancedThreadPool = struct {
     fn scaleWorkers(self: *EnhancedThreadPool, target_count: u32) !void {
         const current_count = self.current_worker_count.load(.acquire);
         const actual_target = @min(target_count, self.max_workers);
-
+        log(.DEBUG, "enhanced_thread_pool", "Scaling workers from {} to {}", .{ current_count, actual_target });
         if (actual_target == current_count) return;
 
         if (actual_target > current_count) {
@@ -445,7 +533,6 @@ pub const EnhancedThreadPool = struct {
             for (current_count..actual_target) |i| {
                 const worker = &self.workers[i];
                 worker.pool = self;
-                log(.DEBUG, "enhanced_thread_pool", "Running is: {}", .{worker.pool.running});
                 worker.thread = try std.Thread.spawn(.{}, workerThreadMain, .{worker});
             }
             log(.INFO, "enhanced_thread_pool", "Scaled up from {} to {} workers", .{ current_count, actual_target });
@@ -480,6 +567,16 @@ pub const EnhancedThreadPool = struct {
         const queue_size = self.work_queue.size();
         const current_workers = self.current_worker_count.load(.acquire);
 
+        // If we have work but no workers, we need to spawn at least one worker
+        if (queue_size > 0) {
+            const min_workers = self.calculateMinimumWorkers();
+            const target_workers = @max(1, min_workers); // At least 1 worker if there's work
+            self.scaleWorkers(target_workers) catch |err| {
+                log(.WARN, "enhanced_thread_pool", "Failed to scale up from 0 workers: {}", .{err});
+            };
+            return;
+        }
+
         if (current_workers == 0) return;
 
         const utilization = @as(f32, @floatFromInt(queue_size)) / @as(f32, @floatFromInt(current_workers));
@@ -503,13 +600,11 @@ pub const EnhancedThreadPool = struct {
 
         const current_workers = self.current_worker_count.load(.acquire);
         const minimum_workers = self.calculateMinimumWorkersLocked(); // Use locked version
-
         // Never shut down if we're at or below minimum
         if (current_workers <= minimum_workers) return false;
 
         // Check if idle too long
         const idle_time = worker_info.getIdleTime();
-        log(.TRACE, "enhanced_thread_pool", "Worker {} idle for {}ms", .{ worker_info.worker_id, idle_time });
         return idle_time > self.idle_timeout_ms;
     }
 
@@ -532,6 +627,13 @@ pub const EnhancedThreadPool = struct {
 
     /// Calculate total demand from all subsystems
     fn calculateTotalDemand(self: *EnhancedThreadPool) u32 {
+        self.subsystems_mutex.lock();
+        defer self.subsystems_mutex.unlock();
+        return self.calculateTotalDemandLocked();
+    }
+
+    /// Calculate total demand - internal version that assumes mutex is already held
+    fn calculateTotalDemandLocked(self: *EnhancedThreadPool) u32 {
         var total: u32 = 0;
         var iter = self.subsystem_demands.valueIterator();
         while (iter.next()) |demand| {

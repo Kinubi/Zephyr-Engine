@@ -326,7 +326,6 @@ pub const AssetManager = struct {
         defer self.textures_mutex.unlock();
 
         const index = self.loaded_textures.items.len;
-        log(.DEBUG, "asset_manager", "addLoadedTexture: Adding texture asset {} at index {} (capacity: {})", .{ asset_id.toU64(), index, self.loaded_textures.capacity });
         try self.loaded_textures.append(self.allocator, texture);
         try self.asset_to_texture.put(asset_id, index);
         self.materials_dirty = true; // Mark materials as dirty when textures change
@@ -344,14 +343,6 @@ pub const AssetManager = struct {
         const safe_model = model;
 
         const index = self.loaded_models.items.len;
-        log(.DEBUG, "asset_manager", "addLoadedModel: Adding model asset {} at index {} (capacity: {})", .{ safe_asset_id.toU64(), index, self.loaded_models.capacity });
-
-        // Verify model pointer is valid
-        if (safe_model.meshes.items.len == 0) {
-            log(.WARN, "asset_manager", "Adding model with no meshes for asset {}", .{safe_asset_id.toU64()});
-        } else {
-            log(.DEBUG, "asset_manager", "Model has {} meshes", .{safe_model.meshes.items.len});
-        }
 
         // Append and update mapping atomically
         try self.loaded_models.append(self.allocator, safe_model);

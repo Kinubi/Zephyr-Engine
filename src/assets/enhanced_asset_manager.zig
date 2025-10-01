@@ -10,7 +10,9 @@ const Texture = @import("../core/texture.zig").Texture;
 const Material = @import("../scene/scene.zig").Material;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const EnhancedThreadPool = @import("../threading/enhanced_thread_pool.zig").EnhancedThreadPool;
+const WorkItem = @import("../threading/enhanced_thread_pool.zig").WorkItem;
 const WorkPriority = @import("../threading/enhanced_thread_pool.zig").WorkPriority;
+const GPUWork = @import("../threading/enhanced_thread_pool.zig").GPUWork;
 const log = @import("../utils/log.zig").log;
 
 // Re-export key types for convenience
@@ -201,6 +203,10 @@ pub const EnhancedAssetManager = struct {
     // Dirty flags for resource updates
     materials_dirty: bool = true,
 
+    // Async update flags to track pending work
+    material_buffer_updating: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    texture_descriptors_updating: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     // Thread safety for concurrent asset loading
     models_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     textures_mutex: std.Thread.Mutex = std.Thread.Mutex{},
@@ -365,7 +371,7 @@ pub const EnhancedAssetManager = struct {
 
         // Check if already loaded
         if (self.registry.getAsset(asset_id)) |metadata| {
-            if (metadata.state == .loaded) {
+            if (metadata.state == .loaded or metadata.state == .staged or metadata.state == .loading) {
                 _ = self.stats.cache_hits.fetchAdd(1, .monotonic);
                 return asset_id;
             }
@@ -655,6 +661,70 @@ pub const EnhancedAssetManager = struct {
         log(.DEBUG, "enhanced_asset_manager", "Built texture descriptor array: {} textures", .{self.loaded_textures.items.len});
     }
 
+    /// Queue async texture descriptor array update
+    pub fn queueTextureDescriptorUpdate(self: *Self) !void {
+        // Check if we're already updating
+        if (self.texture_descriptors_updating.load(.acquire)) {
+            return; // Already updating, skip
+        }
+
+        // Try to mark as updating (atomic compare-and-swap)
+        if (self.texture_descriptors_updating.cmpxchgWeak(false, true, .acquire, .acquire)) |_| {
+            return; // Another thread beat us to it
+        }
+
+        // Queue the work
+        const work_item = WorkItem{
+            .id = self.loader.work_id_counter.fetchAdd(1, .monotonic),
+            .priority = .high,
+            .item_type = .gpu_work,
+            .data = .{
+                .gpu_work = .{
+                    .staging_type = .texture,
+                    .asset_id = AssetId.fromU64(0), // Dummy asset ID
+                    .data = self,
+                },
+            },
+            .worker_fn = textureDescriptorUpdateWorker,
+            .context = self,
+        };
+
+        try self.loader.thread_pool.submitWork(work_item);
+        log(.DEBUG, "enhanced_asset_manager", "Queued async texture descriptor update", .{});
+    }
+
+    /// Queue async material buffer update
+    pub fn queueMaterialBufferUpdate(self: *Self) !void {
+        // Check if we're already updating
+        if (self.material_buffer_updating.load(.acquire)) {
+            return; // Already updating, skip
+        }
+
+        // Try to mark as updating (atomic compare-and-swap)
+        if (self.material_buffer_updating.cmpxchgWeak(false, true, .acquire, .acquire)) |_| {
+            return; // Another thread beat us to it
+        }
+
+        // Queue the work
+        const work_item = WorkItem{
+            .id = self.loader.work_id_counter.fetchAdd(1, .monotonic),
+            .priority = .high,
+            .item_type = .gpu_work,
+            .data = .{
+                .gpu_work = .{
+                    .staging_type = .mesh, // Using mesh for materials
+                    .asset_id = AssetId.fromU64(0), // Dummy asset ID
+                    .data = self,
+                },
+            },
+            .worker_fn = materialBufferUpdateWorker,
+            .context = self,
+        };
+
+        try self.loader.thread_pool.submitWork(work_item);
+        log(.DEBUG, "enhanced_asset_manager", "Queued async material buffer update", .{});
+    }
+
     /// Get the current texture descriptor array for rendering
     pub fn getTextureDescriptorArray(self: *Self) []const vk.DescriptorImageInfo {
         return self.texture_image_infos;
@@ -796,3 +866,35 @@ pub const EnhancedAssetManager = struct {
         }
     }
 };
+
+/// Worker function for async texture descriptor updates
+fn textureDescriptorUpdateWorker(context: ?*anyopaque, work_item: WorkItem) void {
+    _ = work_item;
+    const asset_manager = @as(*EnhancedAssetManager, @ptrCast(@alignCast(context)));
+
+    asset_manager.buildTextureDescriptorArray() catch |err| {
+        log(.WARN, "enhanced_asset_manager", "Failed to build texture descriptor array: {}", .{err});
+    };
+
+    // Mark as no longer updating
+    asset_manager.texture_descriptors_updating.store(false, .release);
+    log(.DEBUG, "enhanced_asset_manager", "Completed async texture descriptor update", .{});
+}
+
+/// Worker function for async material buffer updates
+fn materialBufferUpdateWorker(context: ?*anyopaque, work_item: WorkItem) void {
+    _ = work_item;
+    const asset_manager = @as(*EnhancedAssetManager, @ptrCast(@alignCast(context)));
+
+    asset_manager.createMaterialBuffer(asset_manager.loader.graphics_context) catch |err| {
+        log(.WARN, "enhanced_asset_manager", "Failed to create material buffer: {}", .{err});
+        // Don't mark materials_dirty as false if creation failed
+        asset_manager.material_buffer_updating.store(false, .release);
+        return;
+    };
+
+    // Mark materials as no longer dirty and no longer updating
+    asset_manager.materials_dirty = false;
+    asset_manager.material_buffer_updating.store(false, .release);
+    log(.DEBUG, "enhanced_asset_manager", "Completed async material buffer update", .{});
+}

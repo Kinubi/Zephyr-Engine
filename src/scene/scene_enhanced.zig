@@ -117,11 +117,10 @@ pub const EnhancedScene = struct {
         // Start async loads using enhanced asset manager with priority
         log(.INFO, "enhanced_scene", "Requesting async texture preload: {s}", .{texture_path});
         const texture_asset_id = try self.asset_manager.loadAssetAsync(texture_path, .texture, priority);
+        const material_asset_id = try self.createMaterial(texture_asset_id);
 
         log(.INFO, "enhanced_scene", "Requesting async model preload: {s}", .{model_path});
         const model_asset_id = try self.asset_manager.loadAssetAsync(model_path, .mesh, priority);
-
-        const material_asset_id = try self.createMaterial(texture_asset_id);
 
         // Create GameObject with asset IDs - fallbacks will be used automatically at render time
         const obj = try self.addEmpty();
@@ -154,30 +153,71 @@ pub const EnhancedScene = struct {
         return try self.asset_manager.loadAssetAsync(mesh_path, .mesh, .normal);
     }
 
-    /// Update async resources (required by app.zig)
+    /// Update async resources (required by app.zig) - now truly async!
     pub fn updateAsyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
         _ = allocator; // unused since AssetManager handles resource updates
-        var textures_updated = false;
-        var materials_updated = false;
-        const models_updated = false;
+        var any_updates_queued = false;
 
-        textures_updated = try self.updateTextureImageInfos();
-        if (textures_updated) {
+        // Check if texture descriptors need updating and queue async work
+        if (self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
+            try self.asset_manager.queueTextureDescriptorUpdate();
+            any_updates_queued = true;
+        }
+
+        // Check if materials need updating and queue async work
+        if (self.asset_manager.materials_dirty and !self.asset_manager.material_buffer_updating.load(.acquire)) {
+            try self.asset_manager.queueMaterialBufferUpdate();
+            any_updates_queued = true;
+        }
+
+        // Check if any async updates have completed (quick check, no heavy work)
+        var any_updates_completed = false;
+
+        // If texture descriptors were updating and are now done, mark for refresh
+        if (!self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
+            // Texture descriptors have been updated, refresh the array reference
             self.asset_manager.texture_image_infos = self.getTextureDescriptorArray();
-            log(.DEBUG, "enhanced_scene", "Updated texture descriptors due to dirty flag", .{});
+            any_updates_completed = true;
         }
 
-        // Check if materials are dirty and need updating
+        // Material updates completion is handled in the worker function
+
+        // Return true if we queued work or completed work (for UI refresh)
+        return any_updates_queued or any_updates_completed;
+    }
+
+    /// Synchronous resource update - waits for all pending async operations to complete
+    /// Use this during initialization when you need guaranteed completion before proceeding
+    pub fn updateSyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
+        _ = allocator; // unused since AssetManager handles resource updates
+        var any_updates = false;
+
+        // Force update texture descriptors if dirty (synchronous)
+        if (self.asset_manager.texture_descriptors_dirty) {
+            try self.asset_manager.buildTextureDescriptorArray();
+            self.asset_manager.texture_descriptors_dirty = false;
+            any_updates = true;
+
+            // Notify raytracing system
+            if (self.raytracing_system) |rt_system| {
+                rt_system.requestTextureDescriptorUpdate();
+            }
+        }
+
+        // Force update materials if dirty (synchronous)
         if (self.asset_manager.materials_dirty) {
-            log(.DEBUG, "enhanced_scene", "Materials are dirty, creating material buffer", .{});
-            try self.asset_manager.createMaterialBuffer(self.asset_manager.loader.graphics_context);
+            try self.asset_manager.createMaterialBuffer(self.gc);
             self.asset_manager.materials_dirty = false;
-            materials_updated = true;
+            any_updates = true;
         }
 
-        // Model updates are now handled directly by AssetManager
+        // Wait for any pending async operations to complete
+        while (self.asset_manager.texture_descriptors_updating.load(.acquire) or 
+               self.asset_manager.material_buffer_updating.load(.acquire)) {
+            std.Thread.sleep(1_000_000); // Sleep 1ms
+        }
 
-        return textures_updated or materials_updated or models_updated;
+        return any_updates;
     }
 
     /// Enhanced texture descriptor updates for backward compatibility

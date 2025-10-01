@@ -175,6 +175,34 @@ pub const AssetRegistry = struct {
         }
     }
 
+    /// Atomically mark an asset as loading if not already loading/loaded
+    /// Returns true if successfully marked as loading, false if already in progress
+    pub fn markAsLoadingAtomic(self: *Self, asset_id: AssetId) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.assets.get(asset_id)) |asset| {
+            // Check if asset is already being processed
+            switch (asset.state) {
+                .loading, .staged, .loaded => {
+                    log(.DEBUG, "asset_registry", "Asset {} already in state {s}, skipping", .{ asset_id.toU64(), @tagName(asset.state) });
+                    return false;
+                },
+                .unloaded, .failed => {
+                    // Safe to start loading
+                    var mutable_asset = asset;
+                    mutable_asset.state = .loading;
+                    self.assets.put(asset_id, mutable_asset) catch return false;
+                    log(.DEBUG, "asset_registry", "Atomically marked asset {} as loading", .{asset_id.toU64()});
+                    return true;
+                },
+            }
+        }
+
+        log(.DEBUG, "asset_registry", "Asset {} not found in registry, cannot mark as loading", .{asset_id.toU64()});
+        return false;
+    }
+
     /// Mark an asset as staged (loaded from disk but not yet processed)
     pub fn markAsStaged(self: *Self, asset_id: AssetId, file_size: u64) void {
         log(.DEBUG, "asset_registry", "Marking asset {d} as staged", .{asset_id.toU64()});

@@ -207,7 +207,7 @@ pub const EnhancedAssetLoader = struct {
         // Register asset loading subsystem with thread pool (for file I/O)
         try thread_pool.registerSubsystem(SubsystemConfig{
             .name = "Enhanced Asset Loading",
-            .min_workers = 2, // Always keep 2 workers ready for asset loading
+            .min_workers = 1, // Always keep 2 workers ready for asset loading
             .max_workers = 6, // Can scale up to 6 workers during heavy loading
             .priority = .normal, // Normal priority by default
             .work_item_type = .asset_loading,
@@ -217,7 +217,7 @@ pub const EnhancedAssetLoader = struct {
         try thread_pool.registerSubsystem(SubsystemConfig{
             .name = "GPU Asset Processing",
             .min_workers = 1, // Single worker for GPU queue serialization
-            .max_workers = 1, // Only one worker for GPU operations
+            .max_workers = 4, // Only one worker for GPU operations
             .priority = .high, // High priority for GPU work
             .work_item_type = .gpu_work,
         });
@@ -257,12 +257,10 @@ pub const EnhancedAssetLoader = struct {
 
     /// Request async loading of an asset with specified priority
     pub fn requestLoad(self: *Self, asset_id: AssetId, priority: WorkPriority) !void {
-        // Check if asset is already loaded or loading
-        if (self.registry.getAsset(asset_id)) |metadata| {
-            if (metadata.state == .loaded or metadata.state == .loading or metadata.state == .staged) {
-                log(.DEBUG, "enhanced_asset_loader", "Asset {} already loaded/loading, skipping", .{asset_id.toU64()});
-                return;
-            }
+        // Atomically check and mark as loading to prevent race conditions
+        if (!self.registry.markAsLoadingAtomic(asset_id)) {
+            // Asset is already being processed by another thread
+            return;
         }
 
         // Get asset path from registry (validate asset exists)
@@ -285,7 +283,6 @@ pub const EnhancedAssetLoader = struct {
 
         // Create work item
         const work_id = self.work_id_counter.fetchAdd(1, .monotonic);
-        log(.DEBUG, "enhanced_asset_loader", "asset_manager: {}", .{self.asset_manager});
         const work_item = createAssetLoadingWork(
             work_id,
             asset_id,
@@ -340,8 +337,9 @@ pub const EnhancedAssetLoader = struct {
         // Note: Reduced logging to avoid thread safety issues with debug output
         // log(.DEBUG, "enhanced_asset_loader", "Processing texture staging for asset {} ({s})", .{ staging.asset_id.toU64(), staging.path });
 
-        // Create Vulkan texture from image data
-        var texture = try Texture.initFromMemory(
+        // Create Vulkan texture from image data (heap-allocated)
+        const texture = try self.allocator.create(Texture);
+        texture.* = try Texture.initFromMemory(
             self.graphics_context,
             self.allocator,
             staging.image_data,
@@ -351,9 +349,17 @@ pub const EnhancedAssetLoader = struct {
         // Add to asset manager if available
 
         log(.DEBUG, "enhanced_asset_loader", "Adding loaded texture asset {} to asset manager", .{staging.asset_id.toU64()});
-        try self.asset_manager.addLoadedTexture(staging.asset_id, &texture);
+        try self.asset_manager.addLoadedTexture(staging.asset_id, texture);
         self.asset_manager.texture_descriptors_dirty = true;
         self.asset_manager.materials_dirty = true;
+
+        // Immediately trigger async updates for faster texture appearance
+        self.asset_manager.queueTextureDescriptorUpdate() catch |err| {
+            log(.WARN, "enhanced_asset_loader", "Failed to queue texture descriptor update: {}", .{err});
+        };
+        self.asset_manager.queueMaterialBufferUpdate() catch |err| {
+            log(.WARN, "enhanced_asset_loader", "Failed to queue material buffer update: {}", .{err});
+        };
 
         // Mark asset as loaded
         self.registry.markAsLoaded(staging.asset_id, staging.image_data.len);
@@ -453,7 +459,7 @@ pub const EnhancedAssetLoader = struct {
             .texture,
             asset_id,
             @as(*anyopaque, @ptrCast(staging)),
-            .high, // GPU work should have high priority
+            .critical, // GPU work should have high priority
             gpuWorker,
             @as(*anyopaque, @ptrCast(self)),
         );
@@ -461,7 +467,7 @@ pub const EnhancedAssetLoader = struct {
         self.registry.markAsStaged(asset_id, image_data.len);
 
         // Request GPU worker from thread pool
-        _ = self.thread_pool.requestWorkers(.gpu_work, 1);
+        _ = self.thread_pool.requestWorkers(.gpu_work, 2);
 
         // Submit to thread pool
         try self.thread_pool.submitWork(gpu_work_item);
@@ -498,13 +504,13 @@ pub const EnhancedAssetLoader = struct {
             .mesh,
             asset_id,
             @as(*anyopaque, @ptrCast(staging)),
-            .high, // GPU work should have high priority
+            .critical, // GPU work should have high priority
             gpuWorker,
             @as(*anyopaque, @ptrCast(self)),
         );
 
         // Request GPU worker from thread pool
-        _ = self.thread_pool.requestWorkers(.gpu_work, 1);
+        _ = self.thread_pool.requestWorkers(.gpu_work, 2);
 
         // Submit to thread pool
         try self.thread_pool.submitWork(gpu_work_item);
@@ -522,8 +528,7 @@ fn assetLoadingWorker(context: *anyopaque, work_item: WorkItem) void {
     // Note: Reduced logging to avoid thread safety issues
     // log(.DEBUG, "enhanced_asset_loader", "Worker processing asset {} (priority: {s}, work_id: {})", .{ asset_data.asset_id.toU64(), @tagName(work_item.priority), work_item.id });
 
-    // Perform the actual loading
-    loader.registry.markAsLoading(asset_data.asset_id);
+    // Asset is already marked as loading atomically in requestLoad, so we can proceed directly
     loader.performAsyncLoad(asset_data.asset_id, start_time) catch |err| {
         log(.ERROR, "enhanced_asset_loader", "Failed to load asset {}: {}", .{ asset_data.asset_id.toU64(), err });
 
@@ -539,14 +544,9 @@ fn assetLoadingWorker(context: *anyopaque, work_item: WorkItem) void {
 }
 
 fn gpuWorker(context: *anyopaque, work_item: WorkItem) void {
-    log(.INFO, "enhanced_asset_loader", "GPU worker thread started", .{});
-
+    // Reduced logging to prevent spam - only log when we actually process work
     var processed_any = false;
     const loader: *EnhancedAssetLoader = @ptrCast(@alignCast(context));
-
-    // Serialize GPU operations to prevent concurrent VkQueue access
-    loader.gpu_queue_mutex.lock();
-    defer loader.gpu_queue_mutex.unlock();
 
     // Process texture staging
     switch (work_item.data.gpu_work.staging_type) {
@@ -560,6 +560,7 @@ fn gpuWorker(context: *anyopaque, work_item: WorkItem) void {
             processed_any = true;
         },
         .mesh => {
+            log(.DEBUG, "enhanced_asset_loader", "GPU worker processing mesh staging for asset {}", .{work_item.data.gpu_work.asset_id.toU64()});
             const staging: *EnhancedAssetLoader.MeshStaging = @ptrCast(@alignCast(work_item.data.gpu_work.data));
             loader.processMeshStaging(staging) catch |err| {
                 log(.ERROR, "enhanced_asset_loader", "Failed to process mesh staging for asset {}: {}", .{ staging.asset_id.toU64(), err });

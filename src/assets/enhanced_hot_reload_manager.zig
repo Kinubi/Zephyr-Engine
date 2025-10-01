@@ -96,10 +96,10 @@ pub const EnhancedHotReloadManager = struct {
         // Set up file watcher callback
         manager.file_watcher.setCallback(globalFileEventCallback);
 
-        // Start batch processing timer
-        manager.batch_timer = try std.Thread.spawn(.{}, batchProcessingWorker, .{&manager});
+        // Start batch processing timer - DISABLED to fix crashes
+        // manager.batch_timer = try std.Thread.spawn(.{}, batchProcessingWorker, .{&manager});
 
-        log(.INFO, "enhanced_hot_reload", "Enhanced hot reload manager initialized", .{});
+        log(.INFO, "enhanced_hot_reload", "Enhanced hot reload manager initialized (hot reload disabled)", .{});
         return manager;
     }
 
@@ -346,34 +346,38 @@ pub const EnhancedHotReloadManager = struct {
 
     /// Process pending reload requests
     fn processPendingReloads(self: *Self) void {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+
+        // Early return if no pending reloads
+        if (self.reload_queue.items.len == 0) return;
+
         const now = std.time.milliTimestamp();
-        var requests_to_process = std.ArrayList(ReloadRequest){};
-        defer requests_to_process.deinit(self.allocator);
-
-        // Extract requests ready for processing
-        {
-            self.queue_mutex.lock();
-            defer self.queue_mutex.unlock();
-
-            var i: usize = 0;
-            while (i < self.reload_queue.items.len) {
-                const request = &self.reload_queue.items[i];
-                if (now - request.timestamp >= self.debounce_ms) {
-                    requests_to_process.append(self.allocator, self.reload_queue.swapRemove(i)) catch continue;
-                } else {
-                    i += 1;
+        
+        // Process items backwards to avoid index shifting issues
+        var i = self.reload_queue.items.len;
+        while (i > 0) {
+            i -= 1; // Process from end to beginning
+            
+            const request = &self.reload_queue.items[i];
+            if (now - request.timestamp >= self.debounce_ms) {
+                // Make a copy of the request before removing it
+                const request_copy = request.*;
+                
+                // Remove the processed request from queue
+                _ = self.reload_queue.swapRemove(i);
+                
+                // Process the request outside of the mutex lock
+                self.queue_mutex.unlock();
+                self.processReloadRequest(request_copy);
+                self.queue_mutex.lock();
+                
+                // After unlocking/locking, the queue might have changed
+                // Adjust i to stay within bounds
+                if (i >= self.reload_queue.items.len) {
+                    i = self.reload_queue.items.len;
                 }
             }
-        }
-
-        // Process requests
-        for (requests_to_process.items) |request| {
-            self.processReloadRequest(request);
-        }
-
-        // Update batch statistics
-        if (requests_to_process.items.len > 0) {
-            _ = self.stats.batched_reloads.fetchAdd(@intCast(requests_to_process.items.len), .monotonic);
         }
     }
 

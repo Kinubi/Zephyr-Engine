@@ -154,9 +154,13 @@ pub const Mesh = struct {
 
     pub fn loadFromObj(self: *Mesh, allocator: std.mem.Allocator, data: []const u8) !void {
         const model = try Obj.parseObj(allocator, data);
-        std.debug.print("Loadin model with {any} meshes and {any} distinct vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
+        std.debug.print("Loading model with {any} meshes and {any} distinct vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
         try self.vertices.ensureTotalCapacity(allocator, model.vertices.len);
         try self.indices.ensureTotalCapacity(allocator, model.meshes[0].indices.len);
+
+        // Use HashMap for O(1) vertex deduplication instead of O(n²) linear search
+        var vertex_map = VertexHashMap.init(allocator);
+        defer vertex_map.deinit();
 
         for (model.meshes) |mesh| {
             var i: u32 = 0;
@@ -169,12 +173,15 @@ pub const Mesh = struct {
                         .normal = .{ model.normals[3 * index.normal.?], model.normals[3 * index.normal.? + 1], model.normals[3 * index.normal.? + 2] },
                         .uv = .{ model.tex_coords[2 * index.tex_coord.?], model.tex_coords[2 * index.tex_coord.? + 1] },
                     };
-                    const vertex_index = vertex_list_contains(self.vertices, new_vertex);
-                    if (vertex_index == -1) {
-                        try self.vertices.append(allocator, new_vertex);
-                        try self.indices.append(allocator, @as(u32, @intCast(self.vertices.items.len - 1)));
+                    
+                    // Use HashMap for O(1) vertex lookup instead of O(n²) linear search
+                    if (vertex_map.get(new_vertex)) |existing_index| {
+                        try self.indices.append(allocator, existing_index);
                     } else {
-                        try self.indices.append(allocator, @as(u32, @intCast(vertex_index)));
+                        const new_index = @as(u32, @intCast(self.vertices.items.len));
+                        try self.vertices.append(allocator, new_vertex);
+                        try vertex_map.put(new_vertex, new_index);
+                        try self.indices.append(allocator, new_index);
                     }
                 }
                 i += 1;
@@ -182,6 +189,29 @@ pub const Mesh = struct {
         }
 
         std.debug.print("Vertices: {any}, Indices: {any}\n", .{ self.vertices.items.len, self.indices.items.len });
+    }
+};
+
+// Fast vertex lookup using HashMap for O(1) deduplication
+const VertexHashMap = std.HashMap(Vertex, u32, VertexContext, std.hash_map.default_max_load_percentage);
+
+const VertexContext = struct {
+    pub fn hash(self: @This(), v: Vertex) u64 {
+        _ = self;
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&v.pos));
+        hasher.update(std.mem.asBytes(&v.color));
+        hasher.update(std.mem.asBytes(&v.normal));
+        hasher.update(std.mem.asBytes(&v.uv));
+        return hasher.final();
+    }
+
+    pub fn eql(self: @This(), a: Vertex, b: Vertex) bool {
+        _ = self;
+        return std.mem.eql(f32, &a.pos, &b.pos) and
+               std.mem.eql(f32, &a.color, &b.color) and
+               std.mem.eql(f32, &a.normal, &b.normal) and
+               std.mem.eql(f32, &a.uv, &b.uv);
     }
 };
 
@@ -222,15 +252,21 @@ pub const Model = struct {
     fn loadFromObjInPlace(self: *Model, gc: *GraphicsContext, data: []const u8, name: []const u8) !void {
         const obj = try Obj.parseObj(self.allocator, data);
         for (obj.meshes) |obj_mesh| {
-            std.log.info("Loading mesh: vertex count = {}, index count = {}, face count = {}", .{
+            std.log.info("Loading mesh: vertex count = {}, index count = {}, face count = {}, Name = {s}", .{
                 obj.vertices.len / 3,
                 obj_mesh.indices.len,
                 obj_mesh.num_vertices.len,
+                name,
             });
             var mesh_ptr = try self.allocator.create(Mesh);
             mesh_ptr.* = Mesh.init(self.allocator);
             try mesh_ptr.vertices.ensureTotalCapacity(self.allocator, obj.vertices.len);
             try mesh_ptr.indices.ensureTotalCapacity(self.allocator, obj_mesh.indices.len);
+            
+            // Use HashMap for O(1) vertex deduplication instead of O(n²) linear search
+            var vertex_map = VertexHashMap.init(self.allocator);
+            defer vertex_map.deinit();
+            
             var index_offset: usize = 0;
             for (obj_mesh.num_vertices) |face_vertex_count| {
                 // Compute face normal if any vertex is missing a normal
@@ -294,12 +330,15 @@ pub const Model = struct {
                         .normal = normal,
                         .uv = uv,
                     };
-                    const vertex_index = vertex_list_contains(mesh_ptr.vertices, vertex);
-                    if (vertex_index == -1) {
-                        try mesh_ptr.vertices.append(self.allocator, vertex);
-                        try mesh_ptr.indices.append(self.allocator, @as(u32, @intCast(mesh_ptr.vertices.items.len - 1)));
+                    
+                    // Use HashMap for O(1) vertex lookup instead of O(n²) linear search
+                    if (vertex_map.get(vertex)) |existing_index| {
+                        try mesh_ptr.indices.append(self.allocator, existing_index);
                     } else {
-                        try mesh_ptr.indices.append(self.allocator, @as(u32, @intCast(vertex_index)));
+                        const new_index = @as(u32, @intCast(mesh_ptr.vertices.items.len));
+                        try mesh_ptr.vertices.append(self.allocator, vertex);
+                        try vertex_map.put(vertex, new_index);
+                        try mesh_ptr.indices.append(self.allocator, new_index);
                     }
                 }
                 index_offset += face_vertex_count;
@@ -329,6 +368,11 @@ pub const Model = struct {
             mesh_ptr.* = Mesh.init(allocator);
             try mesh_ptr.vertices.ensureTotalCapacity(allocator, obj.vertices.len);
             try mesh_ptr.indices.ensureTotalCapacity(allocator, obj_mesh.indices.len);
+            
+            // Use HashMap for O(1) vertex deduplication instead of O(n²) linear search
+            var vertex_map = VertexHashMap.init(allocator);
+            defer vertex_map.deinit();
+            
             var index_offset: usize = 0;
             for (obj_mesh.num_vertices) |face_vertex_count| {
                 // Compute face normal if any vertex is missing a normal
@@ -390,12 +434,15 @@ pub const Model = struct {
                         .normal = normal,
                         .uv = uv,
                     };
-                    const vertex_index = vertex_list_contains(mesh_ptr.vertices, vertex);
-                    if (vertex_index == -1) {
-                        try mesh_ptr.vertices.append(allocator, vertex);
-                        try mesh_ptr.indices.append(allocator, @as(u32, @intCast(mesh_ptr.vertices.items.len - 1)));
+                    
+                    // Use HashMap for O(1) vertex lookup instead of O(n²) linear search
+                    if (vertex_map.get(vertex)) |existing_index| {
+                        try mesh_ptr.indices.append(allocator, existing_index);
                     } else {
-                        try mesh_ptr.indices.append(allocator, @as(u32, @intCast(vertex_index)));
+                        const new_index = @as(u32, @intCast(mesh_ptr.vertices.items.len));
+                        try mesh_ptr.vertices.append(allocator, vertex);
+                        try vertex_map.put(vertex, new_index);
+                        try mesh_ptr.indices.append(allocator, new_index);
                     }
                 }
                 index_offset += face_vertex_count;
