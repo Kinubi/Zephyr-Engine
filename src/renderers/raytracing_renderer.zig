@@ -248,6 +248,8 @@ pub const RaytracingRenderer = struct {
         material_buffer_info: vk.DescriptorBufferInfo,
         texture_image_infos: []const vk.DescriptorImageInfo,
         rt_data: anytype, // SceneView.RaytracingData
+        tlas_dirty: bool,
+        material_buffer_dirty: bool,
     ) !void {
         if (!self.tlas_valid) {
             log(.WARN, "raytracing_renderer", "Cannot update from scene view: TLAS not valid", .{});
@@ -263,10 +265,11 @@ pub const RaytracingRenderer = struct {
         const needs_resize = self.descriptors.needsResize(new_vertex_count, new_index_count, new_texture_count);
 
         // Only resize if actually needed
-        if (needs_resize) {
-            log(.INFO, "raytracing_renderer", "Resizing raytracing descriptors: vertex_buffers={}, index_buffers={}, textures={}", .{ new_vertex_count, new_index_count, new_texture_count });
-            try self.resizeDescriptors(new_vertex_count, new_index_count, new_texture_count);
-
+        if (tlas_dirty or material_buffer_dirty) {
+            if (needs_resize) {
+                log(.INFO, "raytracing_renderer", "Resizing raytracing descriptors: vertex_buffers={}, index_buffers={}, textures={}", .{ new_vertex_count, new_index_count, new_texture_count });
+                try self.resizeDescriptors(new_vertex_count, new_index_count, new_texture_count);
+            }
             // After resizing, we need to update all descriptors
             const as_info = vk.WriteDescriptorSetAccelerationStructureKHR{
                 .s_type = vk.StructureType.write_descriptor_set_acceleration_structure_khr,
@@ -287,6 +290,7 @@ pub const RaytracingRenderer = struct {
                 rt_data,
             );
         }
+
         // If no resize needed, we can skip the expensive update since descriptors are already current
         // Only update when actually needed (like after TLAS rebuild or material changes)
     }

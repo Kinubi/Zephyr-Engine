@@ -228,7 +228,7 @@ pub const App = struct {
         try scheduled_assets.append(self.allocator, ScheduledAsset{
             .frame = 50000,
             .model_path = "models/flat_vase.obj",
-            .texture_path = "textures/granitesmooth1-albedo.png",
+            .texture_path = "textures/granitesmooth1-albedo3.png",
             .position = Math.Vec3.init(-1.4, -0.5, 0.5),
             .rotation = Math.Vec3.init(0, 0, 0),
             .scale = Math.Vec3.init(0.5, 0.5, 0.5),
@@ -444,6 +444,8 @@ pub const App = struct {
             log(.ERROR, "raytracing", "Failed to update BVH from SceneView: {}", .{err});
         };
         // Update textured renderer with any new material/texture data if resources changed
+        var material_buffer_dirty = false;
+        var tlas_dirty = false;
         if (resources_updated) {
             // Instead of deviceWaitIdle, just mark all frames as needing updates
             for (&self.descriptor_dirty_flags) |*flag| {
@@ -470,13 +472,15 @@ pub const App = struct {
             // Mark this frame as updated
             self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT] = false;
             log(.DEBUG, "app", "The descriptor flags are: {any}, resources_updates: {any}", .{ self.descriptor_dirty_flags, resources_updated });
+            material_buffer_dirty = true; // Indicate material buffer was updated
         }
 
         if (raytracing_renderer.rt_system.tlas_dirty) {
 
             // Update raytracing renderer's TLAS reference only when AS changes
             raytracing_renderer.updateTLAS(raytracing_renderer.rt_system.tlas);
-            raytracing_renderer.rt_system.tlas_dirty = false;
+            raytracing_renderer.rt_system.tlas_dirty = false; // Reset dirty flag after update
+            tlas_dirty = true; // Indicate TLAS was updated
         }
 
         // Create/update raytracing acceleration structure descriptors when TLAS is ready
@@ -547,7 +551,7 @@ pub const App = struct {
         // try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
-        // Execute render passes
+        // // Execute render passes
         // const render_context = RenderContext{
         //     .graphics_context = &self.gc,
         //     .frame_info = &frame_info,
@@ -581,6 +585,8 @@ pub const App = struct {
                 material_buffer_info,
                 scene.asset_manager.getTextureDescriptorArray(),
                 rt_data,
+                tlas_dirty,
+                material_buffer_dirty,
             );
 
             // Now render with updated descriptors (SBT is managed internally by the renderer)
