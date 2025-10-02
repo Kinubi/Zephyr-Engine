@@ -48,7 +48,7 @@ pub const RasterizationData = struct {
 pub const RaytracingData = struct {
     /// Geometry instance for raytracing
     pub const RTInstance = struct {
-        transform: [12]f32, // 3x4 transform matrix
+        transform: [3][4]f32, // 3x4 transform matrix
         instance_id: u32,
         mask: u8 = 0xFF,
         geometry_index: u32,

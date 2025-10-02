@@ -156,12 +156,12 @@ pub const SceneBridge = struct {
 
     /// Get rasterization data from scene
     fn getRasterizationData(self: *Self) RasterizationData {
-        if (self.rasterization_cache == null and self.cache_dirty) {
-            self.buildRasterizationCache() catch |err| {
-                log(.ERROR, "scene_bridge", "Failed to build rasterization cache: {}", .{err});
-                return RasterizationData{ .objects = &[_]RasterizationData.RenderableObject{} };
+        self.buildRasterizationCache() catch |err| {
+            log(.ERROR, "scene_bridge", "Failed to build rasterization cache: {}", .{err});
+            return RasterizationData{
+                .objects = &[_]RasterizationData.RenderableObject{},
             };
-        }
+        };
         return self.rasterization_cache.?;
     }
 
@@ -270,10 +270,8 @@ pub const SceneBridge = struct {
             if (obj.model_asset) |model_asset_id| {
                 // Get asset ID with fallback and then get the loaded model
                 const safe_asset_id = self.scene.asset_manager.getAssetIdForRendering(model_asset_id);
-                log(.DEBUG, "scene_bridge", "Object {}: model_asset={}, safe_asset_id={}", .{ obj_idx, model_asset_id, safe_asset_id });
                 if (self.scene.asset_manager.getLoadedModelConst(safe_asset_id)) |loaded_model| {
                     model_opt = loaded_model;
-                    log(.DEBUG, "scene_bridge", "Object {}: Found loaded model with {} meshes", .{ obj_idx, loaded_model.meshes.items.len });
                 } else {
                     log(.DEBUG, "scene_bridge", "Object {}: No loaded model found for safe_asset_id={}", .{ obj_idx, safe_asset_id });
                 }
@@ -287,29 +285,20 @@ pub const SceneBridge = struct {
                         continue;
                     }
 
-                    // Create RT instance
-                    var transform_3x4: [12]f32 = undefined;
-                    // Convert 4x4 matrix to 3x4 for raytracing
-                    const mat = obj.transform.local2world;
-                    transform_3x4[0] = mat.data[0];
-                    transform_3x4[1] = mat.data[1];
-                    transform_3x4[2] = mat.data[2];
-                    transform_3x4[3] = mat.data[3];
-                    transform_3x4[4] = mat.data[4];
-                    transform_3x4[5] = mat.data[5];
-                    transform_3x4[6] = mat.data[6];
-                    transform_3x4[7] = mat.data[7];
-                    transform_3x4[8] = mat.data[8];
-                    transform_3x4[9] = mat.data[9];
-                    transform_3x4[10] = mat.data[10];
-                    transform_3x4[11] = mat.data[11];
+                    var material_index: u32 = 0;
+                    // Get material index from AssetManager
+                    if (obj.material_asset) |material_asset_id| {
+                        if (self.scene.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
+                            material_index = @intCast(mat_idx);
+                        }
+                    }
 
                     const instance = RaytracingData.RTInstance{
-                        .transform = transform_3x4,
+                        .transform = obj.transform.local2world.to_3x4(),
                         .instance_id = @intCast(instances.items.len),
                         .mask = 0xFF,
                         .geometry_index = @intCast(geometries.items.len + mesh_idx),
-                        .material_index = 0,
+                        .material_index = material_index,
                     };
                     try instances.append(self.allocator, instance);
 
@@ -319,19 +308,10 @@ pub const SceneBridge = struct {
                         .blas = null, // Will be built by raytracing pass
                     };
 
-                    // Debug: Log mesh buffer handles at cache build time
-                    if (mesh.geometry.mesh.vertex_buffer) |vb| {
-                        log(.DEBUG, "scene_bridge", "Object {}, Mesh {}: Adding RT geometry with vertex_buffer: {} (0x{x})", .{ obj_idx, mesh_idx, vb.buffer, @intFromEnum(vb.buffer) });
-                    } else {
-                        log(.DEBUG, "scene_bridge", "Object {}, Mesh {}: Adding RT geometry with NULL vertex_buffer", .{ obj_idx, mesh_idx });
-                    }
-
                     try geometries.append(self.allocator, geometry);
                 }
             }
         }
-
-        log(.DEBUG, "scene_bridge", "Built raytracing cache: {} instances, {} geometries", .{ instances.items.len, geometries.items.len });
 
         // Store caches
         const instances_slice = try self.allocator.dupe(RaytracingData.RTInstance, instances.items);
@@ -350,7 +330,6 @@ pub const SceneBridge = struct {
             },
         };
         self.cache_dirty = false; // Clear dirty flag after rebuilding
-        log(.DEBUG, "scene_bridge", "Raytracing cache has {} instances and {} geometries", .{ self.raytracing_cache.?.instances.len, self.raytracing_cache.?.geometries.len });
     }
 
     /// Build compute cache from scene objects

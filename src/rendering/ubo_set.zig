@@ -8,6 +8,7 @@ const GlobalUbo = @import("frameinfo.zig").GlobalUbo;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const deinitDescriptorResources = @import("../core/descriptors.zig").deinitDescriptorResources;
+const log = @import("../utils/log.zig").log;
 
 pub const GlobalUboSet = struct {
     pool: *DescriptorPool,
@@ -77,6 +78,7 @@ pub const GlobalUboSet = struct {
                 .{ .host_visible_bit = true, .host_coherent_bit = true },
             );
             try buffers[i].map(vk.WHOLE_SIZE, 0);
+            // Debug log removed to reduce spam
         }
         const pool_layout = try GlobalUboSet.createPoolAndLayout(gc, allocator, MAX_FRAMES_IN_FLIGHT);
         const sets = try GlobalUboSet.createDescriptorSets(gc, pool_layout.pool, pool_layout.layout, allocator, buffers);

@@ -450,6 +450,7 @@ pub const AssetManager = struct {
         defer self.textures_mutex.unlock();
 
         try self.loaded_textures.append(self.allocator, texture);
+        log(.INFO, "enhanced_asset_manager", "Added texture asset {} at index {}", .{ asset_id.toU64(), self.loaded_textures.items.len - 1 });
         const index = self.loaded_textures.items.len - 1;
         try self.asset_to_texture.put(asset_id, index);
 
@@ -804,10 +805,16 @@ pub const AssetManager = struct {
 
             // Resolve the albedo_texture_id to an actual texture index
             const texture_asset_id = AssetId.fromU64(@as(u64, @intCast(material_ptr.albedo_texture_id)));
+
             const resolved_texture_id = self.getAssetIdForRendering(texture_asset_id);
+            if (texture_asset_id == AssetId.fromU64(11)) {
+                // Use default texture if albedo_texture_id is 0
+                log(.DEBUG, "asset_manager", "Material {} has albedo_texture_id 0, using default texture: {}", .{ i, resolved_texture_id.toU64() });
+            }
 
             // Get the texture index from the resolved asset ID
             const texture_index = self.asset_to_texture.get(resolved_texture_id) orelse 0;
+            log(.DEBUG, "asset_manager", "Material {} resolved texture asset ID {} to texture index {}", .{ i, resolved_texture_id.toU64(), texture_index });
             material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
         }
 

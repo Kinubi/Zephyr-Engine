@@ -39,10 +39,9 @@ pub const RaytracingDescriptorSet = struct {
             .setMaxSets(1000)
             .addPoolSize(.storage_image, 1000)
             .addPoolSize(.acceleration_structure_khr, 1000)
-            .addPoolSize(.uniform_buffer, @intCast(ubo_count))
-            .addPoolSize(.storage_buffer, @intCast(vertex_buffer_count + index_buffer_count))
-            .addPoolSize(.storage_buffer, @intCast(material_count))
-            .addPoolSize(.combined_image_sampler, @intCast(texture_count))
+            .addPoolSize(.uniform_buffer, @intCast(@max(ubo_count, 1))) // Global UBO
+            .addPoolSize(.storage_buffer, @intCast(@max(vertex_buffer_count + index_buffer_count + material_count, 1))) // All storage buffers combined
+            .addPoolSize(.combined_image_sampler, @intCast(@max(texture_count, 1))) // Textures
             .build();
 
         var layout_builder = DescriptorSetLayout.Builder{
@@ -54,10 +53,10 @@ pub const RaytracingDescriptorSet = struct {
             .addBinding(0, .acceleration_structure_khr, .{ .raygen_bit_khr = true }, 1)
             .addBinding(1, .storage_image, .{ .raygen_bit_khr = true }, 1)
             .addBinding(2, .uniform_buffer, .{ .raygen_bit_khr = true }, 1)
-            .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, @intCast(vertex_buffer_count))
-            .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, @intCast(index_buffer_count))
+            .addBinding(3, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, @intCast(@max(vertex_buffer_count, 1))) // Ensure at least 1 for runtime array
+            .addBinding(4, .storage_buffer, .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true }, @intCast(@max(index_buffer_count, 1))) // Ensure at least 1 for runtime array
             .addBinding(5, .storage_buffer, .{ .closest_hit_bit_khr = true }, 1)
-            .addBinding(6, .combined_image_sampler, .{ .closest_hit_bit_khr = true }, @intCast(texture_count))
+            .addBinding(6, .combined_image_sampler, .{ .closest_hit_bit_khr = true }, 1) // Ensure at least 1 for runtime array
             .build();
         return .{ .pool = pool, .layout = layout };
     }

@@ -8,6 +8,7 @@ const Camera = @import("../rendering/camera.zig").Camera;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const ForwardRenderPassDescriptors = @import("../rendering/render_pass_descriptors.zig").ForwardRenderPassDescriptors;
 const RasterizationData = @import("../rendering/scene_view.zig").RasterizationData;
+const log = @import("../utils/log.zig").log;
 
 const TexturedPushConstantData = extern struct {
     transform: [16]f32 = Math.Mat4x4.identity().data,

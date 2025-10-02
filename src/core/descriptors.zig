@@ -1,6 +1,7 @@
 const std = @import("std");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const vk = @import("vulkan");
+const log = @import("../utils/log.zig").log;
 
 pub const DescriptorSetLayout = struct {
     gc: *GraphicsContext,
@@ -138,12 +139,17 @@ pub const DescriptorWriter = struct {
     writes: std.ArrayList(vk.WriteDescriptorSet),
     gc: *GraphicsContext,
     allocator: std.mem.Allocator,
+    // Storage for buffer and image infos to avoid pointer aliasing
+    buffer_infos: std.ArrayList(vk.DescriptorBufferInfo),
+    image_infos: std.ArrayList(vk.DescriptorImageInfo),
 
     pub fn init(gc: *GraphicsContext, setLayout: *DescriptorSetLayout, pool: *DescriptorPool, allocator: std.mem.Allocator) DescriptorWriter {
         return DescriptorWriter{
             .setLayout = setLayout,
             .pool = pool,
             .writes = std.ArrayList(vk.WriteDescriptorSet){},
+            .buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){},
+            .image_infos = std.ArrayList(vk.DescriptorImageInfo){},
             .gc = gc,
             .allocator = allocator,
         };
@@ -151,14 +157,22 @@ pub const DescriptorWriter = struct {
 
     pub fn deinit(self: *DescriptorWriter) void {
         self.writes.deinit(self.allocator);
+        self.buffer_infos.deinit(self.allocator);
+        self.image_infos.deinit(self.allocator);
     }
 
     pub fn writeBuffer(self: *DescriptorWriter, binding: u32, bufferInfo: *vk.DescriptorBufferInfo) *DescriptorWriter {
+        log(.DEBUG, "descriptor_writer", "Writing buffer to binding {}: buffer handle=0x{X}, offset={}, range={}", .{ binding, @intFromEnum(bufferInfo.buffer), bufferInfo.offset, bufferInfo.range });
         const bindingDescription = self.setLayout.bindings.get(binding).?;
+
+        // Store a copy of the buffer info to avoid pointer aliasing issues
+        self.buffer_infos.append(self.allocator, bufferInfo.*) catch unreachable;
+        const stored_buffer_info = &self.buffer_infos.items[self.buffer_infos.items.len - 1];
+
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
             .dst_binding = binding,
-            .p_buffer_info = @ptrCast(bufferInfo),
+            .p_buffer_info = @ptrCast(stored_buffer_info),
             .descriptor_count = 1,
             .dst_set = undefined,
             .dst_array_element = 0,
@@ -166,18 +180,28 @@ pub const DescriptorWriter = struct {
             .p_texel_buffer_view = undefined,
         };
         self.writes.append(self.allocator, write) catch unreachable;
+
+        // DEBUG: Log what we just stored in the writes array
+        const stored_write = &self.writes.items[self.writes.items.len - 1];
+        std.log.info("[writeBuffer-STORED] binding={}, type={}, buffer=0x{X}", .{ stored_write.dst_binding, stored_write.descriptor_type, @intFromEnum(stored_write.p_buffer_info[0].buffer) });
+
         return self;
     }
 
     pub fn writeImage(self: *DescriptorWriter, binding: u32, imageInfo: *vk.DescriptorImageInfo) *DescriptorWriter {
         const bindingDescription = self.setLayout.bindings.get(binding).?;
+
+        // Store a copy of the image info to avoid pointer aliasing issues
+        self.image_infos.append(self.allocator, imageInfo.*) catch unreachable;
+        const stored_image_info = &self.image_infos.items[self.image_infos.items.len - 1];
+
         const write = vk.WriteDescriptorSet{
             .descriptor_type = bindingDescription.descriptor_type,
             .dst_binding = binding,
             .descriptor_count = 1,
             .dst_array_element = 0,
             .dst_set = undefined,
-            .p_image_info = @ptrCast(imageInfo),
+            .p_image_info = @ptrCast(stored_image_info),
             .p_texel_buffer_view = undefined,
             .p_buffer_info = undefined,
         };
@@ -238,9 +262,18 @@ pub const DescriptorWriter = struct {
 
     pub fn build(self: *DescriptorWriter, set: *vk.DescriptorSet) !void {
         self.pool.allocateDescriptor(self.setLayout.descriptor_set_layout, set) catch unreachable;
+        log(.DEBUG, "descriptor_set", "Allocated descriptor set: {}, with write count: {d}\n", .{ set.*, self.writes.items.len });
         for (0..self.writes.items.len) |i| {
             self.writes.items[i].dst_set = set.*;
         }
+
+        // DEBUG: Log exactly what we're about to submit to Vulkan
+        for (self.writes.items, 0..) |write, i| {
+            if (write.descriptor_type == .uniform_buffer or write.descriptor_type == .storage_buffer) {
+                std.log.info("[vkUpdateDescriptorSets] Write[{}]: binding={}, type={}, buffer=0x{X}", .{ i, write.dst_binding, write.descriptor_type, @intFromEnum(write.p_buffer_info[0].buffer) });
+            }
+        }
+
         self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
     }
 
@@ -249,6 +282,14 @@ pub const DescriptorWriter = struct {
         for (0..self.writes.items.len) |i| {
             self.writes.items[i].dst_set = set;
         }
+
+        // DEBUG: Log exactly what we're about to submit to Vulkan (update path)
+        for (self.writes.items, 0..) |write, i| {
+            if (write.descriptor_type == .uniform_buffer or write.descriptor_type == .storage_buffer) {
+                std.log.info("[vkUpdateDescriptorSets-UPDATE] Write[{}]: binding={}, type={}, buffer=0x{X}", .{ i, write.dst_binding, write.descriptor_type, @intFromEnum(write.p_buffer_info[0].buffer) });
+            }
+        }
+
         self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
     }
 };

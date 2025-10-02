@@ -40,9 +40,10 @@ const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
 const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
+const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
 
 // System imports
-const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
+// RaytracingSystem is now integrated into RaytracingRenderer
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 
@@ -90,6 +91,7 @@ pub const App = struct {
     gc: GraphicsContext = undefined,
     allocator: std.mem.Allocator = undefined,
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
+    as_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
 
     // FPS tracking variables (instance variables)
     fps_frame_count: u32 = 0,
@@ -101,7 +103,7 @@ pub const App = struct {
     var cmdbufs: []vk.CommandBuffer = undefined;
     var textured_renderer: TexturedRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
-    var raytracing_system: RaytracingSystem = undefined;
+    var raytracing_renderer: RaytracingRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
     var compute_shader_system: ComputeShaderSystem = undefined;
     var render_system: RenderSystem = undefined;
@@ -130,8 +132,7 @@ pub const App = struct {
     var scheduled_assets: std.ArrayList(ScheduledAsset) = undefined;
 
     // Raytracing system field
-    var global_ubo_set: GlobalUboSet = undefined;
-    var raytracing_descriptor_set: RaytracingDescriptorSet = undefined;
+    var global_ubo_set: *GlobalUboSet = undefined;
 
     // Render Pass Manager (new system)
     var render_pass_manager: RenderPassManager = undefined;
@@ -171,7 +172,7 @@ pub const App = struct {
             .name = "hot_reload",
             .min_workers = 1,
             .max_workers = 2,
-            .priority = .high,
+            .priority = .low,
             .work_item_type = .hot_reload,
         });
 
@@ -179,7 +180,7 @@ pub const App = struct {
             .name = "bvh_building",
             .min_workers = 1,
             .max_workers = 4,
-            .priority = .normal,
+            .priority = .critical,
             .work_item_type = .bvh_building,
         });
 
@@ -263,7 +264,8 @@ pub const App = struct {
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
         // --- Use new GlobalUboSet abstraction ---
-        global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
@@ -283,6 +285,7 @@ pub const App = struct {
         for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
             try textured_renderer.updateMaterialData(@intCast(FF_index), scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray());
         }
+
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
         try shader_library_point_light.add(&.{
@@ -297,7 +300,7 @@ pub const App = struct {
         });
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
-        // Use ShaderLibrary abstraction for shader loading
+        // Use ShaderLibrary abstraction for shader loading - heap allocate for proper lifetime
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
         const rgen_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rgen.hlsl.spv", 10 * 1024 * 1024);
         const rmiss_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rmiss.hlsl.spv", 10 * 1024 * 1024);
@@ -316,106 +319,23 @@ pub const App = struct {
             },
         );
 
+        // Initialize raytracing renderer with the correct shader library
+        raytracing_renderer = try RaytracingRenderer.init(@constCast(&self.gc), self.allocator, swapchain.render_pass, shader_library_raytracing, &swapchain, thread_pool);
+
         // --- Raytracing pipeline setup ---
         // Use the same global descriptor set and layout as the renderer
-
-        // Initialize RaytracingSystem with the created resources
-        // --- Raytracing pool and layout creation (before RaytracingSystem.init) ---
-        // --- Collect buffer infos for raytracing descriptors before pool/layout creation ---
-        // Use abstractions for buffer and descriptor management
-        var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){};
-        var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){};
-        defer index_buffer_infos.deinit(self.allocator);
-        defer vertex_buffer_infos.deinit(self.allocator);
-        for (scene.objects.items) |*obj| {
-            if (obj.model) |mdl| {
-                for (mdl.meshes.items) |model_mesh| {
-                    const geometry = model_mesh.geometry;
-                    if (geometry.mesh.vertex_buffer) |buf| {
-                        try vertex_buffer_infos.append(self.allocator, buf.descriptor_info);
-                    }
-                    if (geometry.mesh.index_buffer) |buf| {
-                        try index_buffer_infos.append(self.allocator, buf.descriptor_info);
-                    }
-                }
-            }
-        }
-        const rt_counts = .{
-            .ubo_count = global_ubo_set.buffers.len,
-            .vertex_buffer_count = vertex_buffer_infos.items.len,
-            .index_buffer_count = index_buffer_infos.items.len,
-        };
-        const rt_pool_layout = try RaytracingDescriptorSet.createPoolAndLayout(
-            &self.gc,
-            self.allocator,
-            rt_counts.ubo_count,
-            rt_counts.vertex_buffer_count,
-            rt_counts.index_buffer_count,
-            scene.asset_manager.loaded_materials.items.len, // Materials now handled by AssetManager - minimal count
-            @max(scene.asset_manager.loaded_textures.items.len, 32), // Use AssetManager textures
-        );
 
         // Create scene bridge for render pass system and raytracing
         const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
         var scene_bridge = try self.allocator.create(SceneBridge);
         scene_bridge.* = SceneBridge.init(&scene, self.allocator);
 
-        // --- RaytracingSystem init with pool/layout and thread pool ---
-        raytracing_system = try RaytracingSystem.init(
-            &self.gc,
-            swapchain.render_pass,
-            shader_library_raytracing,
-            self.allocator,
-            rt_pool_layout.layout,
-            rt_pool_layout.pool,
-            &swapchain,
-            self.window.window_props.width,
-            self.window.window_props.height,
-            thread_pool, // Pass thread pool for multithreaded BVH building
-        );
-
+        // Raytracing system is now integrated into the raytracing renderer
         log(.DEBUG, "raytracing", "Starting async BLAS creation with RT data", .{});
-        _ = try raytracing_system.updateBvhFromSceneView(@constCast(&scene_bridge.createSceneView()), true);
+        _ = try raytracing_renderer.rt_system.updateBvhFromSceneView(@constCast(&scene_bridge.createSceneView()), true);
 
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
-        log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
-        try raytracing_system.createShaderBindingTable(3);
-        // --- After RaytracingSystem has valid AS and image, create descriptor set ---
-        log(.DEBUG, "raytracing", "Creating raytracing descriptor set", .{});
-        const as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
-        const image_info = try raytracing_system.getOutputImageDescriptorInfo();
-        var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
-        defer self.allocator.free(ubo_infos);
-        for (global_ubo_set.buffers, 0..) |buf, i| {
-            ubo_infos[i] = buf.descriptor_info;
-        }
-
-        const descriptor_set = try @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet.createDescriptorSet(
-            &self.gc,
-            rt_pool_layout.pool,
-            rt_pool_layout.layout,
-            self.allocator,
-            @constCast(&as_info),
-            @constCast(&image_info),
-            ubo_infos,
-            vertex_buffer_infos.items,
-            index_buffer_infos.items,
-            scene.asset_manager.material_buffer.?.descriptor_info,
-            scene.asset_manager.texture_image_infos,
-        );
-
-        raytracing_descriptor_set = @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet{
-            .pool = rt_pool_layout.pool,
-            .layout = rt_pool_layout.layout,
-            .set = descriptor_set,
-        };
-        raytracing_system.descriptor_set = raytracing_descriptor_set.set;
-        raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
-        raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
-        log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
-
-        // Register raytracing system with enhanced scene for texture updates
-        scene.setRaytracingSystem(&raytracing_system);
+        // SBT will be created by raytracing renderer when pipeline is ready
 
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
@@ -450,6 +370,13 @@ pub const App = struct {
             },
         );
 
+        // Create UBO infos for particle renderer
+        var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
+        defer self.allocator.free(ubo_infos);
+        for (global_ubo_set.buffers, 0..) |buf, i| {
+            ubo_infos[i] = buf.descriptor_info;
+        }
+
         particle_renderer = try ParticleRenderer.init(
             &self.gc,
             swapchain.render_pass,
@@ -477,6 +404,10 @@ pub const App = struct {
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
+        // // Legacy initialization removed - descriptors updated via updateFromSceneView during rendering
+        // raytracing_renderer.updateFromSceneView(0, ubo_infos[0], scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray(), &scene_view.getRaytracingData()) catch |err| {
+        //     log(.ERROR, "raytracing", "Failed to update raytracing renderer descriptors from SceneView: {}", .{err});
+        // };
     }
 
     pub fn onUpdate(self: *App) !bool {
@@ -503,17 +434,15 @@ pub const App = struct {
         // Check for and update any newly loaded async resources (textures, models, materials)
         // Note: Asset completion is handled automatically by the asset manager's worker thread
         var resources_updated = try scene.updateAsyncResources(self.allocator);
-
         // // Update BVH build status to detect completion and reset progress flag
         // _ = raytracing_system.updateBvhBuildStatus() catch |err| {
         //     log(.ERROR, "raytracing", "Failed to update BVH build status: {}", .{err});
         // };
 
         // Use SceneView-based BVH change detection and automatic rebuilding
-        _ = raytracing_system.updateBvhFromSceneView(&scene_view, resources_updated) catch |err| {
+        _ = raytracing_renderer.rt_system.updateBvhFromSceneView(&scene_view, resources_updated) catch |err| {
             log(.ERROR, "raytracing", "Failed to update BVH from SceneView: {}", .{err});
         };
-
         // Update textured renderer with any new material/texture data if resources changed
         if (resources_updated) {
             // Instead of deviceWaitIdle, just mark all frames as needing updates
@@ -526,17 +455,31 @@ pub const App = struct {
         }
 
         // Before rendering each frame, check if descriptors need updating
-        if (self.descriptor_dirty_flags[current_frame]) {
-            // Only update descriptors for the current frame
+        if (self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT]) {
+            log(.DEBUG, "app", "Updating descriptors for frame {d}", .{(current_frame + 1) % MAX_FRAMES_IN_FLIGHT});
+            // Update descriptors for the next frame (prepare resources ahead of time)
             try textured_renderer.updateMaterialData(
-                current_frame,
+                (current_frame + 1) % MAX_FRAMES_IN_FLIGHT,
                 scene.asset_manager.material_buffer.?.descriptor_info,
                 scene.asset_manager.getTextureDescriptorArray(),
             );
 
+            // Note: raytracing_renderer descriptors are updated in updateFromSceneView() during rendering
+            // No need to call updateMaterialData() here as it would be redundant
+
             // Mark this frame as updated
-            self.descriptor_dirty_flags[current_frame] = false;
+            self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT] = false;
+            log(.DEBUG, "app", "The descriptor flags are: {any}, resources_updates: {any}", .{ self.descriptor_dirty_flags, resources_updated });
         }
+
+        if (raytracing_renderer.rt_system.tlas_dirty) {
+
+            // Update raytracing renderer's TLAS reference only when AS changes
+            raytracing_renderer.updateTLAS(raytracing_renderer.rt_system.tlas);
+            raytracing_renderer.rt_system.tlas_dirty = false;
+        }
+
+        // Create/update raytracing acceleration structure descriptors when TLAS is ready
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
@@ -602,34 +545,46 @@ pub const App = struct {
             .dt = @floatCast(dt),
         };
         // try point_light_renderer.update_point_lights(&frame_info, &ubo);
-        global_ubo_set.update(frame_info.current_frame, &ubo);
+        global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Execute render passes
-        const render_context = RenderContext{
-            .graphics_context = &self.gc,
-            .frame_info = &frame_info,
-            .command_buffer = frame_info.command_buffer,
-            .frame_index = frame_info.current_frame,
-            .scene_view = &scene_view,
-        };
+        // const render_context = RenderContext{
+        //     .graphics_context = &self.gc,
+        //     .frame_info = &frame_info,
+        //     .command_buffer = frame_info.command_buffer,
+        //     .frame_index = frame_info.current_frame,
+        //     .scene_view = &scene_view,
+        // };
 
-        // Use render pass manager (now the only rendering path)
-        try render_pass_manager.executeRenderPasses(render_context);
+        // // Use render pass manager (now the only rendering path)
+        // try render_pass_manager.executeRenderPasses(render_context);
 
         // Render particles separately for now
         try particle_renderer.render(frame_info);
 
         render_system.endRender(frame_info);
+
         // Only render raytracing if TLAS is ready
-        if (raytracing_system.completed_tlas != null) {
-            try raytracing_system.recordCommandBuffer(
-                frame_info,
-                &swapchain,
-                3,
-                global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
-                scene.asset_manager.material_buffer.?.descriptor_info,
-                scene.asset_manager.texture_image_infos,
+        if (raytracing_renderer.rt_system.completed_tlas != null) {
+            //Update raytracing renderer descriptors from scene view BEFORE rendering
+            const rt_data = scene_view.getRaytracingData();
+            // // Debug log the buffer handles being passed
+            const ubo_buffer_info = global_ubo_set.*.buffers[frame_info.current_frame].descriptor_info;
+            const material_buffer_info = scene.asset_manager.material_buffer.?.descriptor_info;
+
+            // // DEBUG: Check what buffers we're actually passing from app.zig
+            // std.log.info("[app.zig] UBO buffer: 0x{X}, Material buffer: 0x{X}", .{ @intFromEnum(ubo_buffer_info.buffer), @intFromEnum(material_buffer_info.buffer) });
+
+            try raytracing_renderer.updateFromSceneView(
+                frame_info.current_frame,
+                ubo_buffer_info,
+                material_buffer_info,
+                scene.asset_manager.getTextureDescriptorArray(),
+                rt_data,
             );
+
+            // Now render with updated descriptors (SBT is managed internally by the renderer)
+            try raytracing_renderer.render(frame_info, &swapchain, raytracing_renderer.rt_system.shader_binding_table);
         }
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
@@ -652,10 +607,17 @@ pub const App = struct {
         // Cleanup render pass manager
         render_pass_manager.deinit();
 
+        // Shutdown thread pool first to prevent threading conflicts
+        thread_pool.deinit();
+        self.allocator.destroy(thread_pool);
+
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
         textured_renderer.deinit();
-        raytracing_system.deinit();
+        raytracing_renderer.deinit(); // This handles the integrated raytracing system cleanup
+
+        // Cleanup heap-allocated shader library
+
         particle_renderer.deinit();
         scene.deinit();
         asset_manager.deinit();

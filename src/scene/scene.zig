@@ -152,33 +152,45 @@ pub const Scene = struct {
         return try self.asset_manager.loadAssetAsync(mesh_path, .mesh, .normal);
     }
 
-    /// Update async resources (required by app.zig) - simplified to reduce false positives
+    /// Update async resources (required by app.zig) - detects when dirty flags transition to clean
     pub fn updateAsyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
         _ = allocator; // unused since AssetManager handles resource updates
 
-        // Only return true if work was actually completed (not just queued)
-        var work_completed = false;
+        // Track dirty states to detect when work completes
+        const prev_tex_dirty = self.asset_manager.texture_descriptors_dirty;
+        const prev_mat_dirty = self.asset_manager.materials_dirty;
+        var work_started = false;
 
         // Check if texture descriptors need updating and queue async work
         if (self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
             try self.asset_manager.queueTextureDescriptorUpdate();
-            // Don't set work_completed here - wait for actual completion
+            log(.DEBUG, "enhanced_scene", "Queued texture descriptor update", .{});
+            work_started = true;
         }
 
         // Check if materials need updating and queue async work
         if (self.asset_manager.materials_dirty and !self.asset_manager.material_buffer_updating.load(.acquire)) {
             try self.asset_manager.queueMaterialBufferUpdate();
-            // Don't set work_completed here - wait for actual completion
+            log(.DEBUG, "enhanced_scene", "Queued material buffer update", .{});
+            work_started = true;
         }
 
-        // Only return true if async work has actually completed
-        // This reduces false positives that cause unnecessary descriptor updates
-        work_completed = (!self.asset_manager.texture_descriptors_dirty and
-            !self.asset_manager.texture_descriptors_updating.load(.acquire)) or
-            (!self.asset_manager.materials_dirty and
-                !self.asset_manager.material_buffer_updating.load(.acquire));
+        // Check current dirty states after potential work completion
+        const curr_tex_dirty = self.asset_manager.texture_descriptors_dirty;
+        const curr_mat_dirty = self.asset_manager.materials_dirty;
 
-        return work_completed;
+        // Work completed if dirty flag transitions from true to false
+        const texture_work_completed = prev_tex_dirty and !curr_tex_dirty;
+        const material_work_completed = prev_mat_dirty and !curr_mat_dirty;
+
+        const work_completed = texture_work_completed or material_work_completed;
+
+        // Add debug logging to understand what's happening
+        if (work_completed) {
+            log(.DEBUG, "enhanced_scene", "Work completed: tex_completed={}, mat_completed={}, prev_tex_dirty={}, curr_tex_dirty={}, prev_mat_dirty={}, curr_mat_dirty={}", .{ texture_work_completed, material_work_completed, prev_tex_dirty, curr_tex_dirty, prev_mat_dirty, curr_mat_dirty });
+        }
+
+        return work_started or (self.asset_manager.material_buffer_updating.load(.acquire) or self.asset_manager.texture_descriptors_updating.load(.acquire) == false and work_completed);
     }
 
     /// Synchronous resource update - waits for all pending async operations to complete

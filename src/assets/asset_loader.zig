@@ -348,6 +348,8 @@ pub const AssetLoader = struct {
         self.asset_manager.texture_descriptors_dirty = true;
         self.asset_manager.materials_dirty = true;
 
+        log(.DEBUG, "enhanced_asset_loader", "Marked texture and materials as dirty due to new texture: path: {s}, asset_id: {}", .{ staging.path, staging.asset_id.toU64() });
+
         // Mark asset as loaded
 
         // Update average load time

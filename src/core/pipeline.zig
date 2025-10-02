@@ -130,7 +130,7 @@ pub const Pipeline = struct {
             self.pipeline_layout = .null_handle;
         }
         // Destroy all shader modules in the owned shader library
-        self.shader_library.deinit();
+        //self.shader_library.deinit();
     }
 
     pub fn defaultLayout(layout: vk.PipelineLayout) !vk.GraphicsPipelineCreateInfo {
@@ -273,6 +273,12 @@ pub const Pipeline = struct {
         rpcik: vk.RayTracingPipelineCreateInfoKHR,
         alloc: std.mem.Allocator,
     ) !Pipeline {
+        // Safety check for shader library
+        if (shader_library.shaders.items.len == 0) {
+            std.log.err("Pipeline.initRaytracing: Invalid shader library - len={}", .{shader_library.shaders.items.len});
+            return error.InvalidShaderLibrary;
+        }
+
         var pssci = std.ArrayList(vk.PipelineShaderStageCreateInfo){};
         for (shader_library.shaders.items) |shader| {
             try pssci.append(alloc, vk.PipelineShaderStageCreateInfo{

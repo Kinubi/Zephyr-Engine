@@ -639,12 +639,12 @@ pub const ThreadPool = struct {
 
     /// Gracefully shutdown the thread pool
     pub fn shutdown(self: *ThreadPool) void {
-        if (!self.running.load(.acquire)) return;
+        if (!self.running) return;
 
         log(.INFO, "enhanced_thread_pool", "SHUTDOWN CALLED - Shutting down thread pool...", .{});
 
         self.shutting_down.store(true, .release);
-        self.running.store(false, .release);
+        self.running = false;
 
         // Wait for all active workers to finish
         const current_count = self.current_worker_count.load(.acquire);
