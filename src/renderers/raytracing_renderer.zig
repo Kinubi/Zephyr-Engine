@@ -46,6 +46,8 @@ pub const RaytracingRenderer = struct {
     // Raytracing state
     tlas: vk.AccelerationStructureKHR = undefined,
     tlas_valid: bool = false,
+    descriptors_initialized: bool = false,
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
 
     pub fn init(
         gc: *GraphicsContext,
@@ -169,6 +171,22 @@ pub const RaytracingRenderer = struct {
     pub fn updateTLAS(self: *RaytracingRenderer, tlas: vk.AccelerationStructureKHR) void {
         self.tlas = tlas;
         self.tlas_valid = (tlas != vk.AccelerationStructureKHR.null_handle);
+        // Reset descriptor initialization flag since TLAS changed
+        self.descriptors_initialized = false;
+        // Mark all frames as needing descriptor updates
+        self.markAllFramesDirty();
+    }
+
+    /// Mark all frames in flight as needing descriptor updates
+    pub fn markAllFramesDirty(self: *RaytracingRenderer) void {
+        for (&self.descriptor_dirty_flags) |*flag| {
+            flag.* = true;
+        }
+    }
+
+    /// Mark descriptors as needing updates due to material changes
+    pub fn markMaterialsDirty(self: *RaytracingRenderer) void {
+        self.markAllFramesDirty();
     }
 
     /// Update descriptors with current frame data
@@ -247,8 +265,7 @@ pub const RaytracingRenderer = struct {
         material_buffer_info: vk.DescriptorBufferInfo,
         texture_image_infos: []const vk.DescriptorImageInfo,
         rt_data: anytype, // SceneView.RaytracingData
-        tlas_dirty: bool,
-        material_buffer_dirty: bool,
+        rt_system: *RaytracingSystem, // Reference to reset descriptor update flag
     ) !void {
         if (!self.tlas_valid) {
             log(.WARN, "raytracing_renderer", "Cannot update from scene view: TLAS not valid", .{});
@@ -263,12 +280,16 @@ pub const RaytracingRenderer = struct {
         // Check if we need to resize descriptors based on new buffer counts
         const needs_resize = self.descriptors.needsResize(new_vertex_count, new_index_count, new_texture_count);
 
-        // Only resize if actually needed
-        if (tlas_dirty or material_buffer_dirty) {
+        // Update descriptors if: 1) Never initialized, 2) Per-frame dirty flag set, 3) Resize needed
+        const frame_needs_update = self.descriptor_dirty_flags[frame_index];
+        const needs_update = !self.descriptors_initialized or frame_needs_update or needs_resize;
+        
+        if (needs_update) {
             if (needs_resize) {
                 try self.resizeDescriptors(new_vertex_count, new_index_count, new_texture_count);
             }
-            // After resizing, we need to update all descriptors
+            
+            // Update all descriptors
             const as_info = vk.WriteDescriptorSetAccelerationStructureKHR{
                 .s_type = vk.StructureType.write_descriptor_set_acceleration_structure_khr,
                 .p_next = null,
@@ -277,7 +298,7 @@ pub const RaytracingRenderer = struct {
             };
 
             const output_image_info = self.output_texture.getDescriptorInfo();
-            // Update using scene view data after resize
+            
             try self.descriptors.updateFromSceneViewData(
                 frame_index,
                 @constCast(&as_info),
@@ -287,10 +308,16 @@ pub const RaytracingRenderer = struct {
                 texture_image_infos,
                 rt_data,
             );
+            
+            // Mark descriptors as initialized
+            self.descriptors_initialized = true;
+            
+            // Clear the per-frame dirty flag
+            self.descriptor_dirty_flags[frame_index] = false;
+            
+            // Reset the descriptor update flag in the raytracing system
+            rt_system.descriptors_need_update = false;
         }
-
-        // If no resize needed, we can skip the expensive update since descriptors are already current
-        // Only update when actually needed (like after TLAS rebuild or material changes)
     }
 
     /// Resize descriptor sets when buffer counts change
@@ -367,6 +394,9 @@ pub const RaytracingRenderer = struct {
 
         // CRITICAL: When descriptor set layout changes, we must recreate pipeline layout and pipeline
         try self.recreatePipelineLayoutAndPipeline();
+        
+        // Reset descriptor initialization flag since we've recreated them
+        self.descriptors_initialized = false;
     }
 
     /// Recreate pipeline layout and pipeline after descriptor layout changes

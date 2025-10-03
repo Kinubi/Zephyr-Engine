@@ -540,8 +540,7 @@ pub const RayTracingRenderPassDescriptors = struct {
             .resource = .{ .image = output_image_info },
         });
 
-        // UBO - Debug: Let's check what buffer is actually being passed
-        log(.INFO, "raytracing_descriptors", "BINDING 2 (UBO): buffer=0x{X}, range={}, should be uniform buffer", .{ @intFromEnum(ubo_info.buffer), ubo_info.range });
+        // UBO
         try bindings.append(self.manager.allocator, .{
             .set_index = 0,
             .binding = 2,
@@ -567,8 +566,7 @@ pub const RayTracingRenderPassDescriptors = struct {
         }
 
         // Material buffer
-        // Material buffer - Debug: Let's check what buffer is actually being passed
-        log(.INFO, "raytracing_descriptors", "BINDING 5 (Material): buffer=0x{X}, range={}, should be storage buffer", .{ @intFromEnum(material_buffer_info.buffer), material_buffer_info.range });
+        // Material buffer
         try bindings.append(self.manager.allocator, .{
             .set_index = 0,
             .binding = 5,

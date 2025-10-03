@@ -110,7 +110,6 @@ pub const Scene = struct {
         scale: Math.Vec3,
     ) !*GameObject {
         _ = rotation; // TODO: Use rotation parameter in the future
-        log(.DEBUG, "enhanced_scene", "addModelAssetAsync: registering assets model={s} texture={s}", .{ model_path, texture_path });
 
         // Calculate priority based on position (distance from origin)
         const distance = position.length();

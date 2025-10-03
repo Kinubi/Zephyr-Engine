@@ -140,27 +140,22 @@ pub const App = struct {
     // Render pass system is now the default and only rendering path
 
     pub fn init(self: *App) !void {
-        std.debug.print("Initializing application...\n", .{});
+        log(.INFO, "app", "Initializing ZulkanZengine...", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
-        std.debug.print("Window created with title: {s}\n", .{self.window.window_props.title});
 
         self.allocator = std.heap.page_allocator;
 
         // Initialize scheduled assets system
         scheduled_assets = std.ArrayList(ScheduledAsset){};
 
-        std.debug.print("Updating frame {s}\n", .{"ehho"});
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
-        log(.DEBUG, "app", "Using device: {s}", .{self.gc.deviceName()});
+        log(.INFO, "app", "Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
-        std.debug.print("Updating frame {s}\n", .{"ehho"});
         try swapchain.createRenderPass();
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
         render_system = RenderSystem.init(&self.gc, &swapchain);
-
-        std.debug.print("Creating command buffers\n", .{});
 
         // Initialize Thread Pool with dynamic scaling
         thread_pool = try self.allocator.create(ThreadPool);
@@ -251,7 +246,6 @@ pub const App = struct {
         // object6.transform.translate(Math.Vec3.init(0, -1, 0.5));
         // object6.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
-        log(.DEBUG, "renderer", "Creating command buffers", .{});
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
@@ -331,7 +325,6 @@ pub const App = struct {
         scene_bridge.* = SceneBridge.init(&scene, self.allocator);
 
         // Raytracing system is now integrated into the raytracing renderer
-        log(.DEBUG, "raytracing", "Starting async BLAS creation with RT data", .{});
         _ = try raytracing_renderer.rt_system.updateBvhFromSceneView(@constCast(&scene_bridge.createSceneView()), true);
 
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
@@ -444,8 +437,6 @@ pub const App = struct {
             log(.ERROR, "raytracing", "Failed to update BVH from SceneView: {}", .{err});
         };
         // Update textured renderer with any new material/texture data if resources changed
-        var material_buffer_dirty = false;
-        var tlas_dirty = false;
         if (resources_updated) {
             // Instead of deviceWaitIdle, just mark all frames as needing updates
             for (&self.descriptor_dirty_flags) |*flag| {
@@ -472,15 +463,22 @@ pub const App = struct {
             // Mark this frame as updated
             self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT] = false;
             log(.DEBUG, "app", "The descriptor flags are: {any}, resources_updates: {any}", .{ self.descriptor_dirty_flags, resources_updated });
-            material_buffer_dirty = true; // Indicate material buffer was updated
+            
+            // Mark raytracing renderer materials as dirty for all frames
+            raytracing_renderer.markMaterialsDirty();
         }
 
         if (raytracing_renderer.rt_system.tlas_dirty) {
-
             // Update raytracing renderer's TLAS reference only when AS changes
+            // Note: updateTLAS automatically marks all frames as dirty
             raytracing_renderer.updateTLAS(raytracing_renderer.rt_system.tlas);
             raytracing_renderer.rt_system.tlas_dirty = false; // Reset dirty flag after update
-            tlas_dirty = true; // Indicate TLAS was updated
+        }
+
+        // Check if descriptors need updating (separate from TLAS dirty flag)
+        const descriptors_need_update = raytracing_renderer.rt_system.descriptors_need_update;
+        if (descriptors_need_update) {
+            raytracing_renderer.markAllFramesDirty(); // Mark all frames as needing descriptor updates
         }
 
         // Create/update raytracing acceleration structure descriptors when TLAS is ready
@@ -585,8 +583,7 @@ pub const App = struct {
                 material_buffer_info,
                 scene.asset_manager.getTextureDescriptorArray(),
                 rt_data,
-                tlas_dirty,
-                material_buffer_dirty,
+                raytracing_renderer.rt_system,
             );
 
             // Now render with updated descriptors (SBT is managed internally by the renderer)

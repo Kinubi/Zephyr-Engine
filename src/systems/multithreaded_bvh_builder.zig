@@ -310,7 +310,6 @@ pub const MultithreadedBvhBuilder = struct {
             );
             _ = self.thread_pool.requestWorkers(.gpu_work, 2);
             try self.thread_pool.submitWork(work_item);
-            log(.DEBUG, "bvh_builder", "Queued BLAS build work {} for geometry {}", .{ work_id, geom_idx });
         }
     }
 
@@ -503,8 +502,6 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
             builder.completed_tlas = final_result;
             _ = builder.pending_work.fetchSub(1, .monotonic);
 
-            log(.INFO, "bvh_builder", "TLAS build completed (ID: {}) in {d:.2}ms with {} instances", .{ work_data.work_id, @as(f64, @floatFromInt(build_time)) / 1_000_000.0, final_result.instance_count });
-
             // Call completion callback if provided
             if (work_data.completion_callback) |callback| {
                 if (work_data.callback_context) |cb_context| {
@@ -662,7 +659,6 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
     // Convert to Vulkan instance format
     var vk_instances = try builder.allocator.alloc(vk.AccelerationStructureInstanceKHR, instances.len);
     defer builder.allocator.free(vk_instances);
-    log(.DEBUG, "bvh_builder", "Building TLAS with {} instances", .{instances.len});
     for (instances, 0..) |inst_data, i| {
         vk_instances[i] = vk.AccelerationStructureInstanceKHR{
             .transform = .{ .matrix = inst_data.transform },
