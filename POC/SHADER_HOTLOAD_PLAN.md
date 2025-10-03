@@ -624,7 +624,7 @@ pub const AssetData = union(AssetType) {
 
 #### **Day 4: Build System Integration**
 ```zig
-// Update build.zig to link SPIRV-Cross
+// Update build.zig to build and link SPIRV-Cross from submodule
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -633,29 +633,56 @@ pub fn build(b: *std.Build) void {
 
     // ... existing build setup ...
 
-    // Add SPIRV-Cross dependency
-    const spirv_cross_dep = b.dependency("spirv_cross", .{
+    // Build SPIRV-Cross from submodule
+    const spirv_cross = b.addStaticLibrary(.{
+        .name = "spirv-cross",
         .target = target,
         .optimize = optimize,
     });
     
-    exe.addIncludePath(.{ .path = "third_party/spirv_cross" });
-    exe.linkLibrary(spirv_cross_dep.artifact("spirv-cross-c"));
-    exe.linkLibrary(spirv_cross_dep.artifact("spirv-cross-core"));
-    exe.linkLibrary(spirv_cross_dep.artifact("spirv-cross-glsl"));
+    // Add SPIRV-Cross source files
+    spirv_cross.addCSourceFiles(.{
+        .root = .{ .path = "third-party/SPIRV-Cross" },
+        .files = &.{
+            "spirv_cross_c.cpp",
+            "spirv_cross.cpp", 
+            "spirv_cross_cfg.cpp",
+            "spirv_cross_parsed_ir.cpp",
+            "spirv_cross_parser.cpp",
+            "spirv_cross_util.cpp",
+            "spirv_glsl.cpp",
+            "spirv_hlsl.cpp",
+            "spirv_reflect.cpp",
+        },
+        .flags = &.{
+            "-std=c++17",
+            "-fno-exceptions",
+            "-fno-rtti",
+        },
+    });
+    
+    // Add include paths
+    spirv_cross.addIncludePath(.{ .path = "third-party/SPIRV-Cross" });
+    spirv_cross.linkLibCpp();
+    
+    // Link SPIRV-Cross to main executable
+    exe.linkLibrary(spirv_cross);
+    exe.addIncludePath(.{ .path = "third-party/SPIRV-Cross" });
     
     // Link system libraries
-    exe.linkSystemLibrary("c++");
-    if (target.isLinux()) {
+    exe.linkLibCpp();
+    if (target.result.os.tag == .linux) {
         exe.linkSystemLibrary("stdc++");
     }
 }
 ```
 
-```toml
-# Add to build.zig.zon dependencies
-[dependencies]
-spirv_cross = { url = "https://github.com/KhronosGroup/SPIRV-Cross/archive/main.tar.gz", hash = "..." }
+```bash
+# Initialize submodules for new clones
+git submodule update --init --recursive
+
+# Submodule already added via:
+# git submodule add https://github.com/KhronosGroup/SPIRV-Cross.git third-party/SPIRV-Cross
 ```
 
 ### **Phase 2: Hot Reload Integration** (1-2 days) 
