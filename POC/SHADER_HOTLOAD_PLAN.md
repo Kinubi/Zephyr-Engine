@@ -644,15 +644,15 @@ pub fn build(b: *std.Build) void {
     spirv_cross.addCSourceFiles(.{
         .root = .{ .path = "third-party/SPIRV-Cross" },
         .files = &.{
-            "spirv_cross_c.cpp",
-            "spirv_cross.cpp", 
-            "spirv_cross_cfg.cpp",
-            "spirv_cross_parsed_ir.cpp",
-            "spirv_cross_parser.cpp",
-            "spirv_cross_util.cpp",
-            "spirv_glsl.cpp",
-            "spirv_hlsl.cpp",
-            "spirv_reflect.cpp",
+            "spirv_cross_c.cpp",           // C API wrapper (main interface)
+            "spirv_cross.cpp",             // Core SPIRV-Cross functionality
+            "spirv_cfg.cpp",               // Control flow graph analysis
+            "spirv_cross_parsed_ir.cpp",   // Intermediate representation parsing
+            "spirv_parser.cpp",            // SPIR-V parsing
+            "spirv_cross_util.cpp",        // Utility functions
+            "spirv_glsl.cpp",              // GLSL backend
+            "spirv_hlsl.cpp",              // HLSL backend  
+            "spirv_reflect.cpp",           // Reflection functionality
         },
         .flags = &.{
             "-std=c++17",

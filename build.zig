@@ -75,6 +75,36 @@ pub fn build(b: *std.Build) !void {
     const zstbi = b.dependency("zstbi", .{});
     exe.root_module.addImport("zstbi", zstbi.module("root"));
 
+    // Build SPIRV-Cross as a static library with C API
+    const spirv_cross_sources = [_][]const u8{
+        "third-party/SPIRV-Cross/spirv_cross.cpp",
+        "third-party/SPIRV-Cross/spirv_parser.cpp",
+        "third-party/SPIRV-Cross/spirv_cross_parsed_ir.cpp",
+        "third-party/SPIRV-Cross/spirv_cfg.cpp",
+        "third-party/SPIRV-Cross/spirv_cross_c.cpp", // C API wrapper
+        "third-party/SPIRV-Cross/spirv_glsl.cpp",
+        "third-party/SPIRV-Cross/spirv_hlsl.cpp",
+        "third-party/SPIRV-Cross/spirv_reflect.cpp",
+        "third-party/SPIRV-Cross/spirv_cross_util.cpp",
+    };
+
+    // Add SPIRV-Cross C++ source files directly to the executable
+    exe.addCSourceFiles(.{
+        .files = &spirv_cross_sources,
+        .flags = &[_][]const u8{
+            "-std=c++11",
+            "-DSPIRV_CROSS_C_API_GLSL=1",
+            "-DSPIRV_CROSS_C_API_HLSL=1",
+            "-DSPIRV_CROSS_C_API_REFLECT=1",
+        },
+    });
+
+    // Add SPIRV-Cross include directory
+    exe.addIncludePath(b.path("third-party/SPIRV-Cross"));
+
+    // Link C++ standard library
+    exe.linkLibCpp();
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
@@ -199,6 +229,41 @@ pub fn build(b: *std.Build) !void {
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
+    // SPIRV-Cross test module and executable
+    const spirv_test_mod = b.createModule(.{
+        .root_source_file = b.path("test_spirv_cross.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const spirv_test = b.addExecutable(.{
+        .name = "test_spirv_cross",
+        .root_module = spirv_test_mod,
+    });
+
+    // Add SPIRV-Cross sources to the test
+    spirv_test.addCSourceFiles(.{
+        .files = &spirv_cross_sources,
+        .flags = &[_][]const u8{
+            "-std=c++11",
+            "-DSPIRV_CROSS_C_API_GLSL=1",
+            "-DSPIRV_CROSS_C_API_HLSL=1",
+            "-DSPIRV_CROSS_C_API_REFLECT=1",
+        },
+    });
+    spirv_test.addIncludePath(b.path("third-party/SPIRV-Cross"));
+    spirv_test.linkLibCpp();
+    spirv_test.linkSystemLibrary("c");
+
+    // Install and run the SPIRV-Cross test
+    const install_spirv_test = b.addInstallArtifact(spirv_test, .{});
+    const run_spirv_test = b.addRunArtifact(spirv_test);
+    run_spirv_test.step.dependOn(&install_spirv_test.step);
+
+    const spirv_test_step = b.step("test-spirv", "Test SPIRV-Cross integration");
+    spirv_test_step.dependOn(&run_spirv_test.step);
+
     const test_step = b.step("test", "Run unit tests");
     //test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
