@@ -43,6 +43,9 @@ pub const RaytracingRenderer = struct {
     // Raytracing system instance
     rt_system: *RaytracingSystem = undefined,
 
+    // Swapchain reference for copying output
+    swapchain: *Swapchain = undefined,
+
     // Raytracing state
     tlas: vk.AccelerationStructureKHR = undefined,
     tlas_valid: bool = false,
@@ -132,6 +135,7 @@ pub const RaytracingRenderer = struct {
             .render_pass = render_pass,
             .shader_library = shader_library,
             .rt_system = rt_system,
+            .swapchain = swapchain,
             .output_texture = output_texture,
             .width = swapchain.extent.width,
             .height = swapchain.extent.height,
@@ -492,8 +496,6 @@ pub const RaytracingRenderer = struct {
     pub fn render(
         self: *RaytracingRenderer,
         frame_info: FrameInfo,
-        swapchain: *Swapchain,
-        shader_binding_table: vk.Buffer,
     ) !void {
         if (!self.tlas_valid) {
             log(.WARN, "raytracing_renderer", "Cannot render: TLAS not valid", .{});
@@ -503,7 +505,7 @@ pub const RaytracingRenderer = struct {
         const gc = self.gc;
 
         // Check if we need to resize
-        try self.resizeOutput(swapchain);
+        try self.resizeOutput(self.swapchain);
 
         // Bind pipeline
         gc.vkd.cmdBindPipeline(frame_info.command_buffer, vk.PipelineBindPoint.ray_tracing_khr, self.pipeline.pipeline);
@@ -551,7 +553,7 @@ pub const RaytracingRenderer = struct {
 
         const sbt_addr_info = vk.BufferDeviceAddressInfo{
             .s_type = vk.StructureType.buffer_device_address_info,
-            .buffer = shader_binding_table,
+            .buffer = self.rt_system.shader_binding_table,
         };
         const sbt_addr = gc.vkd.getBufferDeviceAddress(gc.dev, &sbt_addr_info);
 
@@ -589,7 +591,7 @@ pub const RaytracingRenderer = struct {
         );
 
         // Image layout transitions and copy to swapchain
-        try self.copyOutputToSwapchain(frame_info.command_buffer, swapchain);
+        try self.copyOutputToSwapchain(frame_info.command_buffer, self.swapchain);
     }
 
     /// Copy raytracing output to swapchain image

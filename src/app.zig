@@ -52,6 +52,9 @@ const RenderPass = @import("rendering/render_pass.zig").RenderPass;
 const RenderContext = @import("rendering/render_pass.zig").RenderContext;
 const SceneView = @import("rendering/render_pass.zig").SceneView;
 const RenderPassManager = @import("rendering/render_pass_manager.zig").RenderPassManager;
+const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
+const RendererType = @import("rendering/generic_renderer.zig").RendererType;
+const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
 
 // Utility imports
 const Math = @import("utils/math.zig");
@@ -101,10 +104,16 @@ pub const App = struct {
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
+
+    // Individual renderers (still needed for initialization)
     var textured_renderer: TexturedRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_renderer: RaytracingRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
+
+    // Generic forward renderer that orchestrates all renderers
+    var forward_renderer: GenericRenderer = undefined;
+
     var compute_shader_system: ComputeShaderSystem = undefined;
     var render_system: RenderSystem = undefined;
     var last_frame_time: f64 = undefined;
@@ -134,10 +143,10 @@ pub const App = struct {
     // Raytracing system field
     var global_ubo_set: *GlobalUboSet = undefined;
 
-    // Render Pass Manager (new system)
-    var render_pass_manager: RenderPassManager = undefined;
+    // Scene bridge and view for rendering
+    var scene_bridge: SceneBridge = undefined;
     var scene_view: SceneView = undefined;
-    // Render pass system is now the default and only rendering path
+    // Generic renderer system is now the default rendering path
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -320,9 +329,7 @@ pub const App = struct {
         // Use the same global descriptor set and layout as the renderer
 
         // Create scene bridge for render pass system and raytracing
-        const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
-        var scene_bridge = try self.allocator.create(SceneBridge);
-        scene_bridge.* = SceneBridge.init(&scene, self.allocator);
+        scene_bridge = SceneBridge.init(&scene, self.allocator);
 
         // Raytracing system is now integrated into the raytracing renderer
         _ = try raytracing_renderer.rt_system.updateBvhFromSceneView(@constCast(&scene_bridge.createSceneView()), true);
@@ -381,18 +388,25 @@ pub const App = struct {
         );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
-        // Initialize Render Pass System (now the only rendering path)
-        render_pass_manager = try RenderPassManager.init(&self.gc, &scene, self.allocator);
+        // Initialize Generic Forward Renderer (replaces render pass manager)
+        forward_renderer = GenericRenderer.init(self.allocator);
 
-        // Register renderers with the render pass manager
-        try render_pass_manager.registerRenderer("textured", &textured_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.forward});
-        try render_pass_manager.registerRenderer("point_light", &point_light_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.forward});
-        // Future renderers can be registered here:
-        // try render_pass_manager.registerRenderer("particle", &particle_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.particles});
-        // try render_pass_manager.registerRenderer("shadow", &shadow_renderer, &[_]@import("rendering/render_pass_manager.zig").RendererEntry.PassType{.shadow});
+        // Set the scene bridge for renderers that need scene data
+        forward_renderer.setSceneBridge(&scene_bridge);
 
-        try render_pass_manager.setupRenderPasses();
-        scene_view = render_pass_manager.getSceneView();
+        // Set the swapchain for renderers that need it (like raytracing)
+        forward_renderer.setSwapchain(&swapchain);
+
+        // Add renderers to the generic forward renderer by type
+        try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
+        try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
+        try forward_renderer.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+        // Future renderers can be added here:
+        // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
+        // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
+
+        // Initialize scene view using the existing SceneBridge
+        scene_view = scene_bridge.createSceneView();
         log(.INFO, "app", "Render pass manager system initialized", .{});
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
@@ -463,7 +477,7 @@ pub const App = struct {
             // Mark this frame as updated
             self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT] = false;
             log(.DEBUG, "app", "The descriptor flags are: {any}, resources_updates: {any}", .{ self.descriptor_dirty_flags, resources_updated });
-            
+
             // Mark raytracing renderer materials as dirty for all frames
             raytracing_renderer.markMaterialsDirty();
         }
@@ -561,21 +575,11 @@ pub const App = struct {
         // // Use render pass manager (now the only rendering path)
         // try render_pass_manager.executeRenderPasses(render_context);
 
-        // Render particles separately for now
-        try particle_renderer.render(frame_info);
-
-        render_system.endRender(frame_info);
-
-        // Only render raytracing if TLAS is ready
+        // Update raytracing descriptors if TLAS is ready (before forward renderer execution)
         if (raytracing_renderer.rt_system.completed_tlas != null) {
-            //Update raytracing renderer descriptors from scene view BEFORE rendering
             const rt_data = scene_view.getRaytracingData();
-            // // Debug log the buffer handles being passed
             const ubo_buffer_info = global_ubo_set.*.buffers[frame_info.current_frame].descriptor_info;
             const material_buffer_info = scene.asset_manager.material_buffer.?.descriptor_info;
-
-            // // DEBUG: Check what buffers we're actually passing from app.zig
-            // std.log.info("[app.zig] UBO buffer: 0x{X}, Material buffer: 0x{X}", .{ @intFromEnum(ubo_buffer_info.buffer), @intFromEnum(material_buffer_info.buffer) });
 
             try raytracing_renderer.updateFromSceneView(
                 frame_info.current_frame,
@@ -585,10 +589,14 @@ pub const App = struct {
                 rt_data,
                 raytracing_renderer.rt_system,
             );
-
-            // Now render with updated descriptors (SBT is managed internally by the renderer)
-            try raytracing_renderer.render(frame_info, &swapchain, raytracing_renderer.rt_system.shader_binding_table);
         }
+        // Render particles separately for now (TODO: add to forward renderer)
+        try particle_renderer.render(frame_info);
+
+        // Execute all renderers through the generic forward renderer
+        try forward_renderer.render(frame_info);
+
+        render_system.endRender(frame_info);
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
 
@@ -607,8 +615,8 @@ pub const App = struct {
 
         global_ubo_set.deinit();
 
-        // Cleanup render pass manager
-        render_pass_manager.deinit();
+        // Cleanup generic renderer
+        forward_renderer.deinit();
 
         // Shutdown thread pool first to prevent threading conflicts
         thread_pool.deinit();
