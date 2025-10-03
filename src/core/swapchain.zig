@@ -13,7 +13,7 @@ pub const Swapchain = struct {
         suboptimal,
     };
 
-    gc: *const GraphicsContext,
+    gc: *GraphicsContext,
     allocator: Allocator,
 
     surface_format: vk.SurfaceFormatKHR,
@@ -31,7 +31,7 @@ pub const Swapchain = struct {
     swap_images: []SwapImage,
     image_index: u32 = 0,
     compute: bool = false, // Whether to use compute shaders in the swapchain
-    pub fn init(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
+    pub fn init(gc: *GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
         var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
         var image_acquired = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
         var render_finished = try allocator.alloc(vk.Semaphore, swapchain.swap_images.len);
@@ -65,7 +65,7 @@ pub const Swapchain = struct {
         return swapchain;
     }
 
-    pub fn initRecycle(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR, old_render_pass: vk.RenderPass) !Swapchain {
+    pub fn initRecycle(gc: *GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR, old_render_pass: vk.RenderPass) !Swapchain {
         const caps = try gc.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(gc.pdev, gc.surface);
         const actual_extent = findActualExtent(caps, extent);
         if (actual_extent.width == 0 or actual_extent.height == 0) {
@@ -470,6 +470,9 @@ pub const Swapchain = struct {
     }
 
     pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
+        // Execute all pending secondary command buffers from worker threads
+        try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
+        
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             std.debug.print("Error ending command buffer: {any}\n", .{err});
         };

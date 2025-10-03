@@ -758,12 +758,12 @@ pub const RaytracingSystem = struct {
                     const scratch_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &scratch_address_info);
                     build_info.scratch_data.device_address = scratch_device_address;
                     build_info.dst_acceleration_structure = blas;
-                    // Record build command
-                    var threaded_command_pool = try self.gc.beginSingleTimeCommands();
+                    // Record build command using secondary command buffer (no queue submission)
+                    var secondary_cmd = try self.gc.beginWorkerCommandBuffer();
                     const p_range_info = &range_info;
-                    self.gc.vkd.cmdBuildAccelerationStructuresKHR(threaded_command_pool.commandBuffer, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
-                    // BLAS build command
-                    try self.gc.endSingleTimeCommands(&threaded_command_pool);
+                    self.gc.vkd.cmdBuildAccelerationStructuresKHR(secondary_cmd.command_buffer, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
+                    // End secondary command buffer and add to pending collection
+                    try self.gc.endWorkerCommandBuffer(&secondary_cmd);
                     scratch_buffer.deinit();
                     try self.blas_handles.append(self.allocator, blas);
                     try self.blas_buffers.append(self.allocator, blas_buffer);
@@ -905,12 +905,12 @@ pub const RaytracingSystem = struct {
         const tlas_scratch_device_address = self.gc.vkd.getBufferDeviceAddress(self.gc.dev, &tlas_scratch_addr_info);
         tlas_build_info.scratch_data.device_address = tlas_scratch_device_address;
         tlas_build_info.dst_acceleration_structure = tlas;
-        // 5. Record build command
-        var threaded_command_pool = try self.gc.beginSingleTimeCommands();
+        // 5. Record build command using secondary command buffer
+        var secondary_cmd = try self.gc.beginWorkerCommandBuffer();
         const tlas_p_range_info = &tlas_range_info;
-        self.gc.vkd.cmdBuildAccelerationStructuresKHR(threaded_command_pool.commandBuffer, 1, @ptrCast(&tlas_build_info), @ptrCast(&tlas_p_range_info));
-        // TLAS build command
-        try self.gc.endSingleTimeCommands(&threaded_command_pool);
+        self.gc.vkd.cmdBuildAccelerationStructuresKHR(secondary_cmd.command_buffer, 1, @ptrCast(&tlas_build_info), @ptrCast(&tlas_p_range_info));
+        // End secondary command buffer and add to pending collection
+        try self.gc.endWorkerCommandBuffer(&secondary_cmd);
         tlas_scratch_buffer.deinit();
         log(.INFO, "RaytracingSystem", "TLAS created with number of instances: {}", .{instances.items.len});
         // Store instance buffer for later deinit

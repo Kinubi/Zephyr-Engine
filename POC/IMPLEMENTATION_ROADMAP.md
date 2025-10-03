@@ -270,6 +270,86 @@ if (self.hasFileChanged(file_path)) {  // Compare stored vs current metadata
 
 ---
 
+### 🛠️ **CRITICAL BUG FIX**: Vulkan Validation Error Resolution - October 2024 ✅ **RESOLVED**
+
+**Issue**: Critical validation error blocking raytracing system operation
+```
+VUID-VkWriteDescriptorSet-descriptorType-00330: pDescriptorWrites[2].pBufferInfo[0].buffer was created with VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT, but descriptorType is VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+```
+
+**Root Cause Discovered**: Pointer aliasing bug in `DescriptorWriter` where `WriteDescriptorSet` structures stored pointers to temporary `DescriptorBufferInfo` variables that were overwritten during subsequent binding operations.
+
+**Technical Fix Applied**:
+```zig
+// Problem: Temporary buffer info pointers getting corrupted
+.p_buffer_info = @ptrCast(bufferInfo), // ❌ Points to temporary that gets overwritten
+
+// Solution: Store permanent copies in DescriptorWriter
+pub const DescriptorWriter = struct {
+    buffer_infos: std.ArrayList(vk.DescriptorBufferInfo), // ✅ Permanent storage
+    image_infos: std.ArrayList(vk.DescriptorImageInfo),   // ✅ Permanent storage
+    
+    pub fn writeBuffer(self: *DescriptorWriter, binding: u32, bufferInfo: *vk.DescriptorBufferInfo) {
+        self.buffer_infos.append(self.allocator, bufferInfo.*) catch unreachable; // ✅ Store copy
+        const stored_buffer_info = &self.buffer_infos.items[self.buffer_infos.items.len - 1];
+        // Use pointer to stored copy instead of temporary
+        .p_buffer_info = @ptrCast(stored_buffer_info), // ✅ Points to permanent storage
+    }
+};
+```
+
+**Debugging Process**:
+- ✅ **Systematic Logging**: Traced buffer handles through entire call chain (app.zig → raytracing_renderer.zig → render_pass_descriptors.zig → descriptors.zig)
+- ✅ **Validation Analysis**: Used Vulkan validation layer to pinpoint exact problematic buffer handles
+- ✅ **Memory Corruption Detection**: Identified discrepancy between logged buffer handles and actual submitted handles
+- ✅ **Pointer Aliasing Discovery**: Found that buffer `0x540000000054` (UBO) was being overwritten by `0x17C000000017C` (material buffer)
+- ✅ **Loop Bug Fix**: Also fixed iteration bug in `render_pass_descriptors.zig` using wrong array (`bindings` instead of `set_bindings`)
+
+**Impact**: 
+- 🎯 **Raytracing System Operational**: Vulkan validation errors eliminated, raytracing pipeline working correctly
+- 🛡️ **Memory Safety**: Fixed fundamental pointer aliasing issue that could have caused crashes
+- ⚡ **Performance**: Eliminated validation layer overhead from constant error reporting
+- 🔧 **Developer Experience**: Clean validation output enables easier debugging of future issues
+
+**Files Modified**:
+- `src/core/descriptors.zig` - Added buffer/image storage arrays and fixed memory management
+- `src/rendering/render_pass_descriptors.zig` - Fixed loop iteration bug and added cleanup
+
+---
+
+### 🔄 **CURRENT WORK**: Multi-threaded Command Buffer Architecture - October 3, 2025
+
+**Objective**: Implement thread-safe Vulkan command buffer submission using secondary command buffers
+
+**Implementation Progress**:
+- ✅ **Secondary Command Buffer System**: Created SecondaryCommandBuffer struct with proper inheritance info
+- ✅ **Thread-Safe API**: Implemented beginWorkerCommandBuffer() and endWorkerCommandBuffer() for worker threads
+- ✅ **Collection Architecture**: Added executeCollectedSecondaryBuffers() for main thread execution
+- ✅ **BVH Integration**: Converted raytracing BLAS/TLAS building to use secondary command buffers
+- ✅ **Swapchain Integration**: Modified frame end to execute collected secondary command buffers
+
+**Current Issue - Resource Lifetime Management**: ⚠️ **BLOCKING**
+```
+vkCmdExecuteCommands(): pCommandBuffers[0] was called in VkCommandBuffer 0x7f71c0003820 
+which is invalid because the bound VkBuffer 0x460000000046 was destroyed.
+```
+
+**Root Cause**: Secondary command buffers are collected and executed at frame end, but staging buffers referenced in the commands are destroyed immediately after recording.
+
+**Technical Challenge**: Need to extend buffer lifetime management to ensure resources persist until secondary command buffer execution completes.
+
+**Files Modified**:
+- `src/core/graphics_context.zig` - Secondary command buffer architecture
+- `src/systems/raytracing_system.zig` - BVH building conversion  
+- `src/core/swapchain.zig` - Frame end execution integration
+
+**Next Steps**:
+1. Implement deferred buffer cleanup system
+2. Add buffer lifetime tracking for secondary command buffers
+3. Ensure staging buffers persist until execution completion
+
+---
+
 ## Phase 1.5: Modular Render Pass Architecture & Dynamic Asset Integration 🎯 **CRITICAL PRIORITY**
 
 ### Goals
