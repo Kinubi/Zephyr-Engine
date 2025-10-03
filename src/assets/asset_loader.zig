@@ -1,492 +1,550 @@
 const std = @import("std");
-const asset_types = @import("asset_types.zig");
-const asset_registry = @import("asset_registry.zig");
-const log = @import("../utils/log.zig").log;
+const vk = @import("vulkan");
 
-const AssetId = asset_types.AssetId;
-const AssetType = asset_types.AssetType;
-const AssetState = asset_types.AssetState;
-const LoadPriority = asset_types.LoadPriority;
-const LoadRequest = asset_types.LoadRequest;
-const LoadResult = asset_types.LoadResult;
-const AssetRegistry = asset_registry.AssetRegistry;
+// Core imports
+const AssetId = @import("asset_types.zig").AssetId;
+const AssetRegistry = @import("asset_registry.zig").AssetRegistry;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const Texture = @import("../core/texture.zig").Texture;
+const Model = @import("../rendering/mesh.zig").Model;
+const Mesh = @import("../rendering/mesh.zig").Mesh;
 
-// Import the new ThreadPool implementation
+// Thread pool
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
+const WorkItemType = @import("../threading/thread_pool.zig").WorkItemType;
+const WorkPriority = @import("../threading/thread_pool.zig").WorkPriority;
+const SubsystemConfig = @import("../threading/thread_pool.zig").SubsystemConfig;
+const createAssetLoadingWork = @import("../threading/thread_pool.zig").createAssetLoadingWork;
+const createGPUWork = @import("../threading/thread_pool.zig").createGPUWork;
 
-// Worker function for the ThreadPool
-fn assetWorkerThread(pool: *ThreadPool, worker_id: usize) void {
-    // Mark this thread as ready
-    pool.markThreadReady(worker_id);
+// Logging
+const log = @import("../utils/log.zig").log;
+const LogLevel = @import("../utils/log.zig").LogLevel;
 
-    while (pool.running) {
-        // Try to get a job
-        if (pool.getWork()) |work_item| {
-            // Cast the loader pointer back to AssetLoader
-            const loader: *AssetLoader = @ptrCast(@alignCast(work_item.loader));
+/// Forward declaration for AssetManager integration
+const AssetManager = @import("asset_manager.zig").AssetManager;
 
-            log(.DEBUG, "asset_loader", "Worker {d} processing asset {d}", .{ worker_id, work_item.asset_id });
-
-            // Execute job
-            loader.performLoadAsync(work_item.asset_id) catch |err| {
-                // Log error and mark asset as failed
-                log(.ERROR, "asset_loader", "Worker {d} failed to load asset {d}: {}", .{ worker_id, work_item.asset_id, err });
-
-                // Convert error to string for registry
-                var error_buf: [256]u8 = undefined;
-                const error_msg = std.fmt.bufPrint(&error_buf, "Async loading error: {}", .{err}) catch "Unknown async loading error";
-                loader.registry.markAsFailed(work_item.asset_id, error_msg);
-
-                // Update failed loads counter
-                _ = @atomicRmw(u32, &loader.failed_loads, .Add, 1, .monotonic);
-            };
-
-            log(.DEBUG, "asset_loader", "Worker {d} completed asset {d}", .{ worker_id, work_item.asset_id });
-        } else {
-            // No job available, sleep briefly to avoid busy waiting
-            std.Thread.sleep(std.time.ns_per_ms * 1); // 1ms sleep
-        }
-    }
-
-    // Mark this thread as shutting down
-    pool.markThreadShuttingDown(worker_id);
-}
-
-/// Asset loader that manages the loading pipeline
-/// Supports priority queues, dependency resolution, sync loading, and async loading with thread pool
+/// Enhanced asset loader using the new thread pool system
 pub const AssetLoader = struct {
     // Core components
-    registry: *AssetRegistry,
     allocator: std.mem.Allocator,
+    registry: *AssetRegistry,
+    graphics_context: *GraphicsContext,
 
-    // Priority queues for load requests
-    high_priority_queue: RequestQueue,
-    medium_priority_queue: RequestQueue,
-    low_priority_queue: RequestQueue,
+    // Enhanced thread pool integration
+    thread_pool: *ThreadPool,
+    work_id_counter: std.atomic.Value(u64),
 
-    // Async loading thread pool (heap allocated to prevent move corruption)
-    thread_pool: ?*ThreadPool = null,
-    async_enabled: bool = false,
+    // Asset staging queues (thread-safe)
+    texture_staging_queue: TextureStagingQueue,
+    mesh_staging_queue: MeshStagingQueue,
 
-    // Statistics
-    active_loads: u32 = 0,
-    completed_loads: u32 = 0,
-    failed_loads: u32 = 0,
+    // Statistics and monitoring
+    stats: LoaderStatistics,
+
+    // GPU worker thread for processing staged assets
+    gpu_worker_thread: ?std.Thread = null,
+    gpu_worker_running: std.atomic.Value(bool),
+
+    // GPU work serialization (prevent concurrent VkQueue access)
+    gpu_queue_mutex: std.Thread.Mutex = .{},
+
+    // Integration with asset manager
+    asset_manager: *AssetManager,
 
     const Self = @This();
 
-    /// Queue for managing load requests with thread-safe access
-    const RequestQueue = struct {
-        items: std.ArrayList(LoadRequest),
-        mutex: std.Thread.Mutex = .{},
+    /// Statistics for monitoring loader performance
+    pub const LoaderStatistics = struct {
+        total_requests: std.atomic.Value(u64),
+        completed_loads: std.atomic.Value(u64),
+        failed_loads: std.atomic.Value(u64),
+        average_load_time_us: std.atomic.Value(u64),
+        active_workers: std.atomic.Value(u32),
+        queue_size: std.atomic.Value(u32),
 
-        pub fn init(allocator: std.mem.Allocator) RequestQueue {
-            _ = allocator; // Will be used when we implement proper initialization
-            return RequestQueue{
-                .items = std.ArrayList(LoadRequest){},
+        pub fn init() LoaderStatistics {
+            return .{
+                .total_requests = std.atomic.Value(u64).init(0),
+                .completed_loads = std.atomic.Value(u64).init(0),
+                .failed_loads = std.atomic.Value(u64).init(0),
+                .average_load_time_us = std.atomic.Value(u64).init(0),
+                .active_workers = std.atomic.Value(u32).init(0),
+                .queue_size = std.atomic.Value(u32).init(0),
             };
-        }
-
-        pub fn deinit(self: *RequestQueue, allocator: std.mem.Allocator) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            self.items.deinit(allocator);
-        }
-
-        pub fn push(self: *RequestQueue, request: LoadRequest, allocator: std.mem.Allocator) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            try self.items.append(allocator, request);
-        }
-
-        pub fn pop(self: *RequestQueue, allocator: std.mem.Allocator) ?LoadRequest {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            _ = allocator; // Not needed for pop
-            return self.items.popOrNull();
-        }
-
-        pub fn len(self: *const RequestQueue) usize {
-            // Note: This is a simple approximation for const access
-            // In a real implementation, we might want to avoid mutex operations for const methods
-            return self.items.items.len;
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, registry: *AssetRegistry, max_threads: u32) !Self {
-        // Allocate ThreadPool on heap if needed
-        const thread_pool = if (max_threads > 0) blk: {
-            const pool_ptr = try allocator.create(ThreadPool);
-            pool_ptr.* = try ThreadPool.init(allocator, max_threads, assetWorkerThread);
-            // Start the ThreadPool after initialization
-            try pool_ptr.start();
-            break :blk pool_ptr;
-        } else null;
+    /// Thread-safe staging queue for textures
+    const TextureStagingQueue = struct {
+        items: std.ArrayList(TextureStaging),
+        mutex: std.Thread.Mutex = .{},
+        allocator: std.mem.Allocator,
 
-        return Self{
-            .registry = registry,
-            .allocator = allocator,
-            .high_priority_queue = RequestQueue.init(allocator),
-            .medium_priority_queue = RequestQueue.init(allocator),
-            .low_priority_queue = RequestQueue.init(allocator),
-            .thread_pool = thread_pool,
-            .async_enabled = max_threads > 0,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        log(.ERROR, "asset_loader", "AssetLoader deinit called, cleaning up resources", .{});
-        // Clean up thread pool first
-        if (self.thread_pool) |pool| {
-            pool.deinit();
-            self.allocator.destroy(pool);
-        }
-
-        // Clean up queues
-        self.high_priority_queue.deinit(self.allocator);
-        self.medium_priority_queue.deinit(self.allocator);
-        self.low_priority_queue.deinit(self.allocator);
-    }
-
-    /// Set callback for ThreadPool running status changes
-    pub fn setThreadPoolCallback(self: *Self, callback: *const fn (bool) void) void {
-        if (self.thread_pool) |pool| {
-            pool.setOnRunningChangedCallback(callback);
-        }
-    }
-
-    /// Request an asset to be loaded with the given priority
-    pub fn requestLoad(self: *Self, asset_id: AssetId, priority: LoadPriority) !void {
-        // Check if asset exists in registry
-        const asset = self.registry.getAsset(asset_id) orelse return error.AssetNotRegistered;
-
-        // Skip if already loaded or loading
-        switch (asset.state) {
-            .loaded => return,
-            .loading => return,
-            .unloaded, .failed => {},
-        }
-
-        // Mark as loading
-        self.registry.markAsLoading(asset_id);
-
-        // Create load request
-        const request = LoadRequest{
-            .asset_id = asset_id,
-            .asset_type = asset.asset_type,
-            .path = asset.path,
-            .priority = priority,
-        };
-
-        // Add to appropriate queue
-        switch (priority) {
-            .high, .critical => try self.high_priority_queue.push(request, self.allocator),
-            .normal => try self.medium_priority_queue.push(request, self.allocator),
-            .low => try self.low_priority_queue.push(request, self.allocator),
-        }
-
-        // Use async loading if available, otherwise process synchronously
-        if (self.async_enabled and self.thread_pool != null) {
-            // Check if thread pool has available workers
-            if (!self.thread_pool.?.hasAvailableWorkers()) {
-                log(.WARN, "asset_loader", "No worker threads available, falling back to sync load for asset {d}", .{asset_id});
-                try self.performLoad(asset_id);
-                return;
-            }
-
-            // Submit to thread pool, with fallback to sync loading on error
-            const work_item = WorkItem{ .asset_id = asset_id, .loader = self };
-            self.thread_pool.?.submitWork(work_item) catch |err| switch (err) {
-                error.ThreadPoolNotRunning, error.NoWorkerThreadsAvailable => {
-                    log(.WARN, "asset_loader", "Thread pool unavailable ({any}), falling back to sync load for asset {d}", .{ err, asset_id });
-                    try self.performLoad(asset_id);
-                },
-                else => return err,
+        pub fn init(allocator: std.mem.Allocator) TextureStagingQueue {
+            return .{
+                .items = std.ArrayList(TextureStaging){},
+                .allocator = allocator,
             };
-        } else {
-            try self.performLoad(asset_id);
-        }
-    }
-
-    /// Load an asset synchronously (blocks until complete)
-    pub fn loadSync(self: *Self, asset_id: AssetId) !void {
-        const asset = self.registry.getAsset(asset_id) orelse return error.AssetNotRegistered;
-
-        // Skip if already loaded
-        if (asset.state == .loaded) return;
-
-        // Perform the actual load
-        try self.performLoad(asset_id);
-    }
-
-    /// Request an asset to be loaded asynchronously (non-blocking)
-    pub fn loadAsync(self: *Self, asset_id: AssetId, priority: LoadPriority) !void {
-        return self.requestLoad(asset_id, priority);
-    }
-
-    /// Wait for an asset to finish loading (blocks until complete)
-    pub fn waitForAsset(self: *Self, asset_id: AssetId) void {
-        const asset = self.registry.getAsset(asset_id) orelse return;
-
-        // Poll until asset is loaded or failed
-        while (asset.state == .loading) {
-            std.Thread.sleep(1_000_000); // 1ms
-        }
-    }
-
-    /// Check if async loading is enabled
-    pub fn isAsyncEnabled(self: *const Self) bool {
-        return self.async_enabled;
-    }
-
-    /// Check if async loading is available and ready
-    pub fn isAsyncReady(self: *const Self) bool {
-        if (!self.async_enabled or self.thread_pool == null) return false;
-        return self.thread_pool.?.hasAvailableWorkers();
-    }
-
-    /// Get current loading statistics
-    pub fn getLoadingStats(self: *const Self) struct {
-        active_loads: u32,
-        completed_loads: u32,
-        failed_loads: u32,
-        queue_lengths: struct {
-            high_priority: usize,
-            medium_priority: usize,
-            low_priority: usize,
-        },
-    } {
-        return .{
-            .active_loads = @atomicLoad(u32, &self.active_loads, .monotonic),
-            .completed_loads = @atomicLoad(u32, &self.completed_loads, .monotonic),
-            .failed_loads = @atomicLoad(u32, &self.failed_loads, .monotonic),
-            .queue_lengths = .{
-                .high_priority = self.high_priority_queue.len(),
-                .medium_priority = self.medium_priority_queue.len(),
-                .low_priority = self.low_priority_queue.len(),
-            },
-        };
-    }
-
-    /// Get the next load request from queues (prioritized)
-    fn getNextRequest(self: *Self) ?LoadRequest {
-        // Try high priority first
-        if (self.high_priority_queue.pop(self.allocator)) |request| {
-            return request;
         }
 
-        // Then medium priority
-        if (self.medium_priority_queue.pop(self.allocator)) |request| {
-            return request;
-        }
+        pub fn deinit(self: *TextureStagingQueue) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        // Finally low priority
-        if (self.low_priority_queue.pop(self.allocator)) |request| {
-            return request;
-        }
-
-        return null;
-    }
-
-    /// Perform the actual asset loading (synchronous)
-    fn performLoad(self: *Self, asset_id: AssetId) !void {
-        self.active_loads += 1;
-        defer self.active_loads -= 1;
-
-        const asset = self.registry.getAsset(asset_id) orelse return error.AssetNotFound;
-
-        // Load dependencies first
-        for (asset.dependencies.items) |dep_id| {
-            const dependency = self.registry.getAsset(dep_id) orelse continue;
-            if (dependency.state != .loaded) {
-                try self.performLoad(dep_id);
+            // Free image data for any remaining items
+            for (self.items.items) |item| {
+                self.allocator.free(item.image_data);
+                self.allocator.free(item.path);
             }
+            self.items.deinit(self.allocator);
         }
 
-        // Simulate actual file loading based on asset type
-        const file_size = try self.loadAssetFromDisk(asset);
-
-        // Mark as loaded
-        self.registry.markAsLoaded(asset_id, file_size);
-        self.completed_loads += 1;
-    }
-
-    /// Perform the actual asset loading (asynchronous - called from worker threads)
-    fn performLoadAsync(self: *Self, asset_id: AssetId) !void {
-        // Use atomic increment for thread safety
-        _ = @atomicRmw(u32, &self.active_loads, .Add, 1, .monotonic);
-        defer _ = @atomicRmw(u32, &self.active_loads, .Sub, 1, .monotonic);
-
-        const asset = self.registry.getAsset(asset_id) orelse return error.AssetNotFound;
-
-        // Load dependencies first (async)
-        for (asset.dependencies.items) |dep_id| {
-            const dependency = self.registry.getAsset(dep_id) orelse continue;
-            if (dependency.state != .loaded and dependency.state != .loading) {
-                // Submit dependency for async loading and wait
-                if (self.thread_pool) |pool| {
-                    try pool.submitWork(.{ .asset_id = dep_id, .loader = self });
-                }
-            }
+        pub fn push(self: *TextureStagingQueue, item: TextureStaging) !void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            try self.items.append(self.allocator, item);
         }
 
-        // Wait for dependencies to load (simple polling for now)
-        for (asset.dependencies.items) |dep_id| {
-            const dependency = self.registry.getAsset(dep_id) orelse continue;
-            while (dependency.state == .loading) {
-                std.Thread.sleep(1_000_000); // 1ms
+        pub fn pop(self: *TextureStagingQueue) ?TextureStaging {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.items.items.len > 0) {
+                return self.items.orderedRemove(0);
             }
-            if (dependency.state != .loaded) {
-                return error.DependencyLoadFailed;
-            }
+            return null;
         }
 
-        // Simulate actual file loading based on asset type
-        const file_size = try self.loadAssetFromDisk(asset);
+        pub fn size(self: *TextureStagingQueue) u32 {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const len = self.items.items.len;
+            return if (len > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(len);
+        }
+    };
 
-        // Mark as loaded (thread-safe)
-        self.registry.markAsLoaded(asset_id, file_size);
-        _ = @atomicRmw(u32, &self.completed_loads, .Add, 1, .monotonic);
-    }
+    /// Thread-safe staging queue for meshes
+    const MeshStagingQueue = struct {
+        items: std.ArrayList(MeshStaging),
+        mutex: std.Thread.Mutex = .{},
+        allocator: std.mem.Allocator,
 
-    /// Mock implementation of disk loading (replace with real file I/O)
-    fn loadAssetFromDisk(self: *Self, asset: *const asset_types.AssetMetadata) !u64 {
-        _ = self; // Unused in mock
+        pub fn init(allocator: std.mem.Allocator) MeshStagingQueue {
+            return .{
+                .items = std.ArrayList(MeshStaging){},
+                .allocator = allocator,
+            };
+        }
 
-        // Simulate loading time based on asset type
-        const load_time_ms: u64 = switch (asset.asset_type) {
-            .texture => 50,
-            .mesh => 100,
-            .material => 25,
-            .shader => 75,
-            .audio => 200,
-            .scene => 150,
-            .animation => 120,
+        pub fn deinit(self: *MeshStagingQueue) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Free mesh data for any remaining items
+            for (self.items.items) |item| {
+                self.allocator.free(item.obj_data);
+                self.allocator.free(item.path);
+            }
+            self.items.deinit(self.allocator);
+        }
+
+        pub fn push(self: *MeshStagingQueue, item: MeshStaging) !void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            try self.items.append(self.allocator, item);
+        }
+
+        pub fn pop(self: *MeshStagingQueue) ?MeshStaging {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.items.items.len > 0) {
+                return self.items.orderedRemove(0);
+            }
+            return null;
+        }
+
+        pub fn size(self: *MeshStagingQueue) u32 {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const len = self.items.items.len;
+            return if (len > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(len);
+        }
+    };
+
+    /// Staging data for textures loaded by worker threads
+    const TextureStaging = struct {
+        asset_id: AssetId,
+        path: []const u8, // Owned by staging queue
+        image_data: []u8, // Owned by staging queue
+        load_time_us: u64,
+    };
+
+    /// Staging data for meshes loaded by worker threads
+    const MeshStaging = struct {
+        asset_id: AssetId,
+        path: []const u8, // Owned by staging queue
+        obj_data: []u8, // Owned by staging queue
+        load_time_us: u64,
+    };
+
+    /// Initialize the enhanced asset loader
+    pub fn init(
+        allocator: std.mem.Allocator,
+        registry: *AssetRegistry,
+        graphics_context: *GraphicsContext,
+        thread_pool: *ThreadPool,
+        asset_manager: *AssetManager,
+    ) !AssetLoader {
+        log(.INFO, "enhanced_asset_loader", "Initializing AssetLoader", .{});
+
+        // Register asset loading subsystem with thread pool (for file I/O)
+        try thread_pool.registerSubsystem(SubsystemConfig{
+            .name = "Enhanced Asset Loading",
+            .min_workers = 1, // Always keep 2 workers ready for asset loading
+            .max_workers = 6, // Can scale up to 6 workers during heavy loading
+            .priority = .normal, // Normal priority by default
+            .work_item_type = .asset_loading,
+        });
+
+        // Register GPU work subsystem (for GPU resource creation)
+        try thread_pool.registerSubsystem(SubsystemConfig{
+            .name = "GPU Asset Processing",
+            .min_workers = 1, // Single worker for GPU queue serialization
+            .max_workers = 4, // Only one worker for GPU operations
+            .priority = .high, // High priority for GPU work
+            .work_item_type = .gpu_work,
+        });
+
+        const loader = AssetLoader{
+            .allocator = allocator,
+            .registry = registry,
+            .graphics_context = graphics_context,
+            .thread_pool = thread_pool,
+            .work_id_counter = std.atomic.Value(u64).init(0),
+            .texture_staging_queue = TextureStagingQueue.init(allocator),
+            .mesh_staging_queue = MeshStagingQueue.init(allocator),
+            .stats = LoaderStatistics.init(),
+            .gpu_worker_running = std.atomic.Value(bool).init(false),
+            .asset_manager = asset_manager,
         };
 
-        // Simulate loading delay
-        std.Thread.sleep(load_time_ms * 1_000_000); // Convert ms to ns
-
-        // Return mock file size
-        return switch (asset.asset_type) {
-            .texture => 1024 * 1024, // 1MB
-            .mesh => 512 * 1024, // 512KB
-            .material => 4 * 1024, // 4KB
-            .shader => 16 * 1024, // 16KB
-            .audio => 2 * 1024 * 1024, // 2MB
-            .scene => 256 * 1024, // 256KB
-            .animation => 128 * 1024, // 128KB
-        };
+        log(.INFO, "enhanced_asset_loader", "AssetLoader initialized successfully", .{});
+        return loader;
     }
 
-    /// Get current loading statistics
+    /// Deinitialize the loader
+    pub fn deinit(self: *Self) void {
+        log(.INFO, "enhanced_asset_loader", "Shutting down AssetLoader", .{});
+
+        // Clean up staging queues
+        self.texture_staging_queue.deinit();
+        self.mesh_staging_queue.deinit();
+
+        log(.INFO, "enhanced_asset_loader", "AssetLoader shutdown complete", .{});
+    }
+
+    /// Set the asset manager for integration
+    pub fn setAssetManager(self: *Self, asset_manager: *AssetManager) void {
+        self.asset_manager = asset_manager;
+    }
+
+    /// Request async loading of an asset with specified priority
+    pub fn requestLoad(self: *Self, asset_id: AssetId, priority: WorkPriority) !void {
+        // Atomically check and mark as loading to prevent race conditions
+        if (!self.registry.markAsLoadingAtomic(asset_id)) {
+            // Asset is already being processed by another thread
+            return;
+        }
+
+        // Get asset path from registry (validate asset exists)
+        _ = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else {
+            log(.ERROR, "enhanced_asset_loader", "No path found for asset {}", .{asset_id.toU64()});
+            return error.AssetNotFound;
+        };
+
+        // Determine requested workers based on priority and current load
+        const requested_workers: u32 = switch (priority) {
+            .critical => 6, // Use maximum workers for critical assets
+            .high => 4, // Use more workers for high priority
+            .normal => 2, // Use normal allocation
+            .low => 1, // Use minimal workers for low priority
+        };
+
+        // Request workers from thread pool
+        _ = self.thread_pool.requestWorkers(.asset_loading, requested_workers);
+
+        // Create work item
+        const work_id = self.work_id_counter.fetchAdd(1, .monotonic);
+        const work_item = createAssetLoadingWork(
+            work_id,
+            asset_id,
+            @as(*anyopaque, @ptrCast(self)),
+            priority,
+            assetLoadingWorker,
+        );
+
+        // // Mark asset as loading
+        // self.registry.markAsLoading(asset_id);
+
+        // Submit work to thread pool
+        try self.thread_pool.submitWork(work_item);
+
+        // Update statistics
+        _ = self.stats.total_requests.fetchAdd(1, .monotonic);
+        self.stats.queue_size.store(self.thread_pool.work_queue.size(), .release);
+
+        log(.INFO, "enhanced_asset_loader", "Submitted {s} priority load request for asset {} (work_id: {})", .{ @tagName(priority), asset_id.toU64(), work_id });
+    }
+
+    /// Request high-priority loading (for critical assets)
+    pub fn requestHighPriorityLoad(self: *Self, asset_id: AssetId) !void {
+        try self.requestLoad(asset_id, .high);
+    }
+
+    /// Request critical loading (for frame-critical assets)
+    pub fn requestCriticalLoad(self: *Self, asset_id: AssetId) !void {
+        try self.requestLoad(asset_id, .critical);
+    }
+
+    /// Get current loader statistics
     pub fn getStatistics(self: *Self) LoaderStatistics {
-        return LoaderStatistics{
-            .active_loads = self.active_loads,
-            .completed_loads = self.completed_loads,
-            .failed_loads = self.failed_loads,
-            .queued_high = self.high_priority_queue.len(),
-            .queued_medium = self.medium_priority_queue.len(),
-            .queued_low = self.low_priority_queue.len(),
+        // Update queue size
+        self.stats.queue_size.store(self.thread_pool.work_queue.size(), .release);
+
+        // Update active workers (simplified - could query thread pool for actual count)
+        _ = self.thread_pool.getStatistics();
+        self.stats.active_workers.store(self.thread_pool.current_worker_count.load(.acquire), .release);
+
+        return self.stats;
+    }
+
+    /// Process texture staging on GPU thread
+    fn processTextureStaging(self: *Self, staging: *TextureStaging) !void {
+        defer {
+            self.allocator.free(staging.image_data);
+            self.allocator.free(staging.path);
+            self.allocator.destroy(staging);
+        }
+
+        // Note: Reduced logging to avoid thread safety issues with debug output
+
+        // Create Vulkan texture from image data (heap-allocated)
+        const texture = try self.allocator.create(Texture);
+        texture.* = try Texture.initFromMemory(
+            self.graphics_context,
+            self.allocator,
+            staging.image_data,
+            .rgba8, // Assume RGBA8 for now
+        );
+
+        // Add to asset manager if available
+
+        try self.asset_manager.addLoadedTexture(staging.asset_id, texture);
+        self.registry.markAsLoaded(staging.asset_id, staging.image_data.len);
+        self.asset_manager.texture_descriptors_dirty = true;
+        self.asset_manager.materials_dirty = true;
+
+        // Mark asset as loaded
+
+        // Update average load time
+        const current_avg = self.stats.average_load_time_us.load(.acquire);
+        const new_avg = if (current_avg == 0) staging.load_time_us else (current_avg + staging.load_time_us) / 2;
+        self.stats.average_load_time_us.store(new_avg, .release);
+
+        log(.INFO, "enhanced_asset_loader", "Successfully processed texture asset {} in {}μs", .{ staging.asset_id.toU64(), staging.load_time_us });
+    }
+
+    /// Process mesh staging on GPU thread
+    fn processMeshStaging(self: *Self, staging: *MeshStaging) !void {
+        defer {
+            self.allocator.free(staging.obj_data);
+            self.allocator.free(staging.path);
+            self.allocator.destroy(staging);
+        }
+
+        // Note: Reduced logging to avoid thread safety issues with debug output
+
+        // Parse OBJ data and create Model
+        const model = try Model.create(
+            self.allocator,
+            self.graphics_context,
+            staging.obj_data,
+            staging.path,
+        );
+
+        // Add to asset manager if available
+
+        try self.asset_manager.addLoadedModel(staging.asset_id, model);
+
+        // Mark asset as loaded
+        self.registry.markAsLoaded(staging.asset_id, staging.obj_data.len);
+
+        // Update average load time
+        const current_avg = self.stats.average_load_time_us.load(.acquire);
+        const new_avg = if (current_avg == 0) staging.load_time_us else (current_avg + staging.load_time_us) / 2;
+        self.stats.average_load_time_us.store(new_avg, .release);
+
+        log(.INFO, "enhanced_asset_loader", "Successfully processed mesh asset {} in {}μs", .{ staging.asset_id.toU64(), staging.load_time_us });
+    }
+
+    /// Implementation of async loading logic
+    pub fn performAsyncLoad(self: *AssetLoader, asset_id: AssetId, start_time: i64) !void {
+        // Get asset path
+        const asset_path = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else {
+            return error.AssetNotFound;
         };
+
+        // Determine asset type from file extension
+        if (std.mem.endsWith(u8, asset_path, ".png") or
+            std.mem.endsWith(u8, asset_path, ".jpg") or
+            std.mem.endsWith(u8, asset_path, ".jpeg"))
+        {
+            try self.loadTextureAsync(asset_id, asset_path, start_time);
+        } else if (std.mem.endsWith(u8, asset_path, ".obj") or
+            std.mem.endsWith(u8, asset_path, ".gltf"))
+        {
+            try self.loadMeshAsync(asset_id, asset_path, start_time);
+        } else {
+            log(.ERROR, "enhanced_asset_loader", "Unknown asset type for path: {s}", .{asset_path});
+            return error.UnsupportedAssetType;
+        }
     }
 
-    /// Wait for all pending loads to complete (simplified for sync version)
-    pub fn waitForCompletion(self: *Self) void {
-        // In synchronous mode, everything is already complete when this is called
-        _ = self;
+    /// Load texture asynchronously
+    fn loadTextureAsync(self: *AssetLoader, asset_id: AssetId, path: []const u8, start_time: i64) !void {
+        // Read image file data
+        const image_data = std.fs.cwd().readFileAlloc(self.allocator, path, 100 * 1024 * 1024) catch |err| {
+            log(.ERROR, "enhanced_asset_loader", "Failed to read texture file {s}: {}", .{ path, err });
+            return err;
+        };
+
+        const end_time = std.time.microTimestamp();
+        const load_time = if (end_time >= start_time) @as(u64, @intCast(end_time - start_time)) else 0;
+
+        // Create staging entry
+        const staging = try self.allocator.create(TextureStaging);
+        staging.* = TextureStaging{
+            .asset_id = asset_id,
+            .path = try self.allocator.dupe(u8, path),
+            .image_data = image_data,
+            .load_time_us = load_time,
+        };
+
+        // Submit GPU work to thread pool instead of staging queue
+        const work_id = self.work_id_counter.fetchAdd(1, .monotonic);
+        const gpu_work_item = createGPUWork(
+            work_id,
+            .texture,
+            asset_id,
+            @as(*anyopaque, @ptrCast(staging)),
+            .critical, // GPU work should have high priority
+            gpuWorker,
+            @as(*anyopaque, @ptrCast(self)),
+        );
+
+        self.registry.markAsStaged(asset_id, image_data.len);
+
+        // Request GPU worker from thread pool
+        _ = self.thread_pool.requestWorkers(.gpu_work, 2);
+
+        // Submit to thread pool
+        try self.thread_pool.submitWork(gpu_work_item);
+
+        log(.INFO, "enhanced_asset_loader", "Loaded texture data for asset {} in {}μs, submitted for GPU processing", .{ asset_id.toU64(), load_time });
+    }
+
+    /// Load mesh asynchronously
+    fn loadMeshAsync(self: *AssetLoader, asset_id: AssetId, path: []const u8, start_time: i64) !void {
+        // Read OBJ file data
+        const obj_data = std.fs.cwd().readFileAlloc(self.allocator, path, 100 * 1024 * 1024) catch |err| {
+            log(.ERROR, "enhanced_asset_loader", "Failed to read mesh file {s}: {}", .{ path, err });
+            return err;
+        };
+
+        const end_time = std.time.microTimestamp();
+        const load_time = if (end_time >= start_time) @as(u64, @intCast(end_time - start_time)) else 0;
+
+        // Create staging entry
+        const staging = try self.allocator.create(MeshStaging);
+        staging.* = MeshStaging{
+            .asset_id = asset_id,
+            .path = try self.allocator.dupe(u8, path),
+            .obj_data = obj_data,
+            .load_time_us = load_time,
+        };
+
+        // Submit GPU work to thread pool instead of staging queue
+        const work_id = self.work_id_counter.fetchAdd(1, .monotonic);
+        const gpu_work_item = createGPUWork(
+            work_id,
+            .mesh,
+            asset_id,
+            @as(*anyopaque, @ptrCast(staging)),
+            .critical, // GPU work should have high priority
+            gpuWorker,
+            @as(*anyopaque, @ptrCast(self)),
+        );
+
+        // Request GPU worker from thread pool
+        _ = self.thread_pool.requestWorkers(.gpu_work, 2);
+
+        // Submit to thread pool
+        try self.thread_pool.submitWork(gpu_work_item);
+
+        log(.INFO, "enhanced_asset_loader", "Loaded mesh data for asset {} in {}μs, submitted for GPU processing", .{ asset_id.toU64(), load_time });
     }
 };
 
-/// Statistics for the asset loader
-pub const LoaderStatistics = struct {
-    active_loads: u32,
-    completed_loads: u32,
-    failed_loads: u32,
-    queued_high: usize,
-    queued_medium: usize,
-    queued_low: usize,
+/// Worker function called by enhanced thread pool
+fn assetLoadingWorker(context: *anyopaque, work_item: WorkItem) void {
+    const loader: *AssetLoader = @ptrCast(@alignCast(context));
+    const asset_data = work_item.data.asset_loading;
+    const start_time = std.time.microTimestamp();
 
-    pub fn getTotalQueued(self: LoaderStatistics) usize {
-        return self.queued_high + self.queued_medium + self.queued_low;
-    }
+    // Note: Reduced logging to avoid thread safety issues
 
-    pub fn getTotalProcessed(self: LoaderStatistics) u32 {
-        return self.completed_loads + self.failed_loads;
-    }
-};
+    // Asset is already marked as loading atomically in requestLoad, so we can proceed directly
+    loader.performAsyncLoad(asset_data.asset_id, start_time) catch |err| {
+        log(.ERROR, "enhanced_asset_loader", "Failed to load asset {}: {}", .{ asset_data.asset_id.toU64(), err });
 
-// Tests
-test "AssetLoader basic functionality" {
-    var registry = AssetRegistry.init(std.testing.allocator);
-    defer registry.deinit();
+        loader.registry.markAsFailed(asset_data.asset_id, @errorName(err));
+        _ = loader.stats.failed_loads.fetchAdd(1, .monotonic);
+        return;
+    };
 
-    // Register a test asset (using actual file)
-    const texture_id = try registry.registerAsset("missing.png", .texture);
+    const end_time = std.time.microTimestamp();
+    const duration = if (end_time >= start_time) @as(u64, @intCast(end_time - start_time)) else 0;
 
-    // Create loader
-    var loader = try AssetLoader.init(std.testing.allocator, &registry, 2);
-    defer loader.deinit();
-
-    // Load synchronously
-    try loader.loadSync(texture_id);
-
-    // Check that asset is loaded
-    const asset = registry.getAsset(texture_id).?;
-    try std.testing.expectEqual(AssetState.loaded, asset.state);
-    try std.testing.expect(asset.file_size > 0);
+    log(.INFO, "enhanced_asset_loader", "Worker completed asset {} in {}μs", .{ asset_data.asset_id.toU64(), duration });
 }
 
-test "AssetLoader async loading" {
-    var registry = AssetRegistry.init(std.testing.allocator);
-    defer registry.deinit();
+fn gpuWorker(context: *anyopaque, work_item: WorkItem) void {
+    // Reduced logging to prevent spam - only log when we actually process work
+    var processed_any = false;
+    const loader: *AssetLoader = @ptrCast(@alignCast(context));
 
-    // Register test assets (using actual files)
-    const texture_id = try registry.registerAsset("granitesmooth1-albedo.png", .texture);
-    const mesh_id = try registry.registerAsset("cube.obj", .mesh);
-
-    // Create loader
-    var loader = try AssetLoader.init(std.testing.allocator, &registry, 2);
-    defer loader.deinit();
-
-    // Request async loads
-    try loader.requestLoad(texture_id, .high);
-    try loader.requestLoad(mesh_id, .normal);
-
-    // Wait for completion
-    loader.waitForCompletion();
-
-    // Check results
-    const texture = registry.getAsset(texture_id).?;
-    const mesh = registry.getAsset(mesh_id).?;
-
-    try std.testing.expectEqual(AssetState.loaded, texture.state);
-    try std.testing.expectEqual(AssetState.loaded, mesh.state);
-}
-
-test "AssetLoader dependency resolution" {
-    var registry = AssetRegistry.init(std.testing.allocator);
-    defer registry.deinit();
-
-    // Register assets with dependencies (using actual files and shader instead of material)
-    const texture_id = try registry.registerAsset("missing.png", .texture);
-    const shader_id = try registry.registerAsset("simple.vert", .shader);
-    const mesh_id = try registry.registerAsset("smooth_vase.obj", .mesh);
-
-    // Set up dependencies: mesh -> shader -> texture
-    try registry.addDependency(shader_id, texture_id);
-    try registry.addDependency(mesh_id, shader_id);
-
-    // Create loader
-    var loader = try AssetLoader.init(std.testing.allocator, &registry, 2);
-    defer loader.deinit();
-
-    // Load only the mesh (should load dependencies automatically)
-    try loader.loadSync(mesh_id);
-
-    // All assets should be loaded
-    try std.testing.expectEqual(AssetState.loaded, registry.getAsset(texture_id).?.state);
-    try std.testing.expectEqual(AssetState.loaded, registry.getAsset(shader_id).?.state);
-    try std.testing.expectEqual(AssetState.loaded, registry.getAsset(mesh_id).?.state);
+    // Process texture staging
+    switch (work_item.data.gpu_work.staging_type) {
+        .texture => {
+            const staging: *AssetLoader.TextureStaging = @ptrCast(@alignCast(work_item.data.gpu_work.data));
+            loader.processTextureStaging(staging) catch |err| {
+                log(.ERROR, "enhanced_asset_loader", "Failed to process texture staging for asset {}: {}", .{ staging.asset_id.toU64(), err });
+                loader.registry.markAsFailed(staging.asset_id, @errorName(err));
+                _ = loader.stats.failed_loads.fetchAdd(1, .monotonic);
+            };
+            processed_any = true;
+        },
+        .mesh => {
+            const staging: *AssetLoader.MeshStaging = @ptrCast(@alignCast(work_item.data.gpu_work.data));
+            loader.processMeshStaging(staging) catch |err| {
+                log(.ERROR, "enhanced_asset_loader", "Failed to process mesh staging for asset {}: {}", .{ staging.asset_id.toU64(), err });
+                loader.registry.markAsFailed(staging.asset_id, @errorName(err));
+                _ = loader.stats.failed_loads.fetchAdd(1, .monotonic);
+            };
+            processed_any = true;
+        },
+    }
 }

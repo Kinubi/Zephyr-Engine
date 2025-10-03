@@ -58,6 +58,7 @@ pub const AssetType = enum(u8) {
 pub const AssetState = enum(u8) {
     unloaded,
     loading,
+    staged,  // Loaded from disk but not yet processed for GPU/final form
     loaded,
     failed,
 
@@ -65,6 +66,7 @@ pub const AssetState = enum(u8) {
         return switch (self) {
             .unloaded => "unloaded",
             .loading => "loading",
+            .staged => "staged",
             .loaded => "loaded",
             .failed => "failed",
         };

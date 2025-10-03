@@ -6,6 +6,7 @@ const AssetType = asset_types.AssetType;
 const AssetState = asset_types.AssetState;
 const AssetMetadata = asset_types.AssetMetadata;
 const LoadPriority = asset_types.LoadPriority;
+const log = @import("../utils/log.zig").log;
 
 /// Central registry for all assets in the system
 /// Manages metadata, dependencies, and reference counting
@@ -19,6 +20,9 @@ pub const AssetRegistry = struct {
 
     // Allocator for registry operations
     allocator: std.mem.Allocator,
+
+    // Thread safety
+    mutex: std.Thread.Mutex = .{},
 
     // Statistics
     total_assets: u32 = 0,
@@ -51,6 +55,9 @@ pub const AssetRegistry = struct {
     /// Register a new asset with the given path and type
     /// Returns existing asset ID if path is already registered
     pub fn registerAsset(self: *Self, path: []const u8, asset_type: AssetType) !AssetId {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // Check if already registered
         if (self.path_to_id.get(path)) |existing_id| {
             return existing_id;
@@ -73,6 +80,8 @@ pub const AssetRegistry = struct {
 
     /// Get asset metadata by ID
     pub fn getAsset(self: *Self, asset_id: AssetId) ?*AssetMetadata {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.assets.getPtr(asset_id);
     }
 
@@ -165,6 +174,39 @@ pub const AssetRegistry = struct {
         }
     }
 
+    /// Atomically mark an asset as loading if not already loading/loaded
+    /// Returns true if successfully marked as loading, false if already in progress
+    pub fn markAsLoadingAtomic(self: *Self, asset_id: AssetId) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.assets.get(asset_id)) |asset| {
+            // Check if asset is already being processed
+            switch (asset.state) {
+                .loading, .staged, .loaded => {
+                    return false;
+                },
+                .unloaded, .failed => {
+                    // Safe to start loading
+                    var mutable_asset = asset;
+                    mutable_asset.state = .loading;
+                    self.assets.put(asset_id, mutable_asset) catch return false;
+                    return true;
+                },
+            }
+        }
+
+        return false;
+    }
+
+    /// Mark an asset as staged (loaded from disk but not yet processed)
+    pub fn markAsStaged(self: *Self, asset_id: AssetId, file_size: u64) void {
+        if (self.getAsset(asset_id)) |asset| {
+            asset.state = .staged;
+            asset.file_size = file_size;
+        }
+    }
+
     /// Get all assets of a specific type
     pub fn getAssetsByType(self: *Self, asset_type: AssetType, allocator: std.mem.Allocator) ![]AssetId {
         var result = std.ArrayList(AssetId){};
@@ -220,11 +262,15 @@ pub const AssetRegistry = struct {
 
     /// Get statistics about the asset registry
     pub fn getStatistics(self: *Self) AssetStatistics {
+        // Prevent integer underflow by ensuring loading_assets is never negative
+        const completed_assets = self.loaded_assets + self.failed_assets;
+        const loading_assets = if (completed_assets > self.total_assets) 0 else self.total_assets - completed_assets;
+
         return AssetStatistics{
             .total_assets = self.total_assets,
             .loaded_assets = self.loaded_assets,
             .failed_assets = self.failed_assets,
-            .loading_assets = self.total_assets - self.loaded_assets - self.failed_assets,
+            .loading_assets = loading_assets,
         };
     }
 };

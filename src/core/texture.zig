@@ -334,6 +334,172 @@ pub const Texture = struct {
         };
     }
 
+    pub fn initFromMemory(
+        gc: *GraphicsContext,
+        allocator: std.mem.Allocator,
+        img_data: []const u8,
+        image_format: ImageFormat,
+    ) !Texture {
+        // // Convert filepath to null-terminated string for zstbi
+        // const filepath_z = try std.mem.concatWithSentinel(allocator, u8, @ptrCast(&filepath), 0);
+        // defer allocator.free(filepath_z);
+
+        // Ensure zstbi is initialized (thread-safe, once per application)
+        ensureZstbiInit(allocator);
+
+        var image = try zstbi.Image.loadFromMemory(img_data, switch (image_format) {
+            .rgba8 => 4,
+            .rgb8 => 3,
+            .gray8 => 1,
+        });
+        defer image.deinit();
+
+        const mip_levels: u32 = std.math.log2_int(u32, @max(image.width, image.height)) + 1;
+        const extent = vk.Extent3D{
+            .width = image.width,
+            .height = image.height,
+            .depth = 1,
+        };
+        const vk_format = switch (image_format) {
+            .rgba8 => vk.Format.r8g8b8a8_srgb,
+            .rgb8 => vk.Format.r8g8b8_srgb,
+            .gray8 => vk.Format.r8_srgb,
+        };
+        // 1. Create staging buffer and upload pixels using Buffer abstraction
+        const pixel_count = image.width * image.height * image.num_components;
+        const buffer_size = pixel_count * image.bytes_per_component;
+        var staging_buffer = try Buffer.init(
+            gc,
+            1, // stride (byte-wise)
+            buffer_size,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        defer staging_buffer.deinit();
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(image.data, buffer_size, 0);
+
+        // 2. Create image
+        const image_info = vk.ImageCreateInfo{
+            .s_type = vk.StructureType.image_create_info,
+            .image_type = vk.ImageType.@"2d",
+            .format = vk_format,
+            .extent = extent,
+            .mip_levels = mip_levels,
+            .array_layers = 1,
+            .samples = vk.SampleCountFlags{ .@"1_bit" = true },
+            .tiling = vk.ImageTiling.optimal,
+            .usage = vk.ImageUsageFlags{
+                .transfer_src_bit = true,
+                .transfer_dst_bit = true,
+                .sampled_bit = true,
+            },
+            .initial_layout = vk.ImageLayout.undefined,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .flags = .{},
+            .p_next = null,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        };
+        var image_handle: vk.Image = undefined;
+        var memory: vk.DeviceMemory = undefined;
+        try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image_handle, &memory);
+        // 3. Transition image to TRANSFER_DST_OPTIMAL
+        try gc.transitionImageLayoutSingleTime(
+            image_handle,
+            vk.ImageLayout.undefined,
+            vk.ImageLayout.transfer_dst_optimal,
+            .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = mip_levels,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+
+        // 4. Copy buffer to image
+        try gc.copyBufferToImageSingleTime(
+            staging_buffer.buffer,
+            image_handle,
+            image.width,
+            image.height,
+        );
+
+        // 5. Generate mipmaps
+        try gc.generateMipmapsSingleTime(
+            image_handle,
+            image.width,
+            image.height,
+            mip_levels,
+        );
+
+        // 6. Transition image to SHADER_READ_ONLY_OPTIMAL
+        // (Handled by generateMipmapsSingleTime for all mips)
+        // Create image view
+        var view_info = vk.ImageViewCreateInfo{
+            .s_type = vk.StructureType.image_view_create_info,
+            .view_type = vk.ImageViewType.@"2d",
+            .format = vk_format,
+            .subresource_range = .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = mip_levels,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image = image_handle,
+            .components = .{
+                .r = vk.ComponentSwizzle.identity,
+                .g = vk.ComponentSwizzle.identity,
+                .b = vk.ComponentSwizzle.identity,
+                .a = vk.ComponentSwizzle.identity,
+            },
+            .flags = .{},
+            .p_next = null,
+        };
+
+        // Zig Vulkan bindings: createImageView returns the image view directly (not via out param)
+        const image_view = gc.vkd.createImageView(gc.dev, &view_info, null) catch return error.FailedToCreateImageView;
+        // Create sampler
+        var sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = vk.Filter.linear,
+            .min_filter = vk.Filter.linear,
+            .mipmap_mode = vk.SamplerMipmapMode.linear,
+            .address_mode_u = vk.SamplerAddressMode.repeat,
+            .address_mode_v = vk.SamplerAddressMode.repeat,
+            .address_mode_w = vk.SamplerAddressMode.repeat,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = 16.0,
+            .min_lod = 0.0,
+            .max_lod = @floatFromInt(mip_levels),
+            .border_color = vk.BorderColor.int_opaque_black,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = .false,
+            .compare_op = vk.CompareOp.always,
+            .anisotropy_enable = .false,
+        };
+        const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
+        return Texture{
+            .image = image_handle,
+            .image_view = image_view,
+            .memory = memory,
+            .sampler = sampler,
+            .mip_levels = mip_levels,
+            .extent = extent,
+            .format = vk_format,
+            .descriptor = vk.DescriptorImageInfo{
+                .sampler = sampler,
+                .image_view = image_view,
+                .image_layout = vk.ImageLayout.shader_read_only_optimal,
+            },
+            .gc = gc,
+        };
+    }
+
     pub fn transitionImageLayout(
         self: *Texture,
         cmd_buf: vk.CommandBuffer,

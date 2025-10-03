@@ -24,13 +24,10 @@ pub const Window = struct {
     }
 
     pub fn init(windowProps: WindowProps) !Window {
-        std.debug.print("Initializing GLFW...\n", .{});
         _ = c.glfwSetErrorCallback(errorCallback);
         if (c.glfwInit() != c.GLFW_TRUE) {
             return error.GlfwInitFailed;
         }
-
-        std.debug.print("GLFW initialized successfully.\n", .{});
 
         var monitor: ?*c.GLFWmonitor = null;
         var mode: ?*const c.GLFWvidmode = null;
@@ -71,5 +68,11 @@ pub const Window = struct {
     pub fn isRunning(self: @This()) bool {
         c.glfwPollEvents();
         return self.window != null and c.glfwWindowShouldClose(self.window) == 0;
+    }
+
+    pub fn setTitle(self: *Window, title: [*:0]const u8) void {
+        if (self.window) |win| {
+            c.glfwSetWindowTitle(win, title);
+        }
     }
 };

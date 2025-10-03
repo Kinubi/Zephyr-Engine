@@ -3,6 +3,7 @@ const std = @import("std");
 // Core graphics imports
 const Window = @import("window.zig").Window;
 const Pipeline = @import("core/pipeline.zig").Pipeline;
+
 const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
 const Swapchain = @import("core/swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -27,22 +28,33 @@ const RaytracingDescriptorSet = @import("rendering/raytracing_descriptor_set.zig
 
 // Scene imports
 const Scene = @import("scene/scene.zig").Scene;
-const EnhancedScene = @import("scene/scene_enhanced.zig").EnhancedScene;
 const GameObject = @import("scene/game_object.zig").GameObject;
-const Material = @import("scene/scene.zig").Material;
+const Material = @import("assets/asset_manager.zig").Material;
 
 // Asset system imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
+const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
 
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
+const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
+const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
 
 // System imports
-const RaytracingSystem = @import("systems/raytracing_system.zig").RaytracingSystem;
+// RaytracingSystem is now integrated into RaytracingRenderer
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 const RenderSystem = @import("systems/render_system.zig").RenderSystem;
+
+// Render Pass System imports
+const RenderPass = @import("rendering/render_pass.zig").RenderPass;
+const RenderContext = @import("rendering/render_pass.zig").RenderContext;
+const SceneView = @import("rendering/render_pass.zig").SceneView;
+const RenderPassManager = @import("rendering/render_pass_manager.zig").RenderPassManager;
+const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
+const RendererType = @import("rendering/generic_renderer.zig").RendererType;
+const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
 
 // Utility imports
 const Math = @import("utils/math.zig");
@@ -62,6 +74,8 @@ const c = @cImport({
 // Embedded shaders
 const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
 const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
+const textured_vert align(@alignOf(u32)) = @embedFile("textured_vert").*;
+const textured_frag align(@alignOf(u32)) = @embedFile("textured_frag").*;
 const point_light_vert align(@alignOf(u32)) = @embedFile("point_light_vert").*;
 const point_light_frag align(@alignOf(u32)) = @embedFile("point_light_frag").*;
 
@@ -79,13 +93,27 @@ pub const App = struct {
 
     gc: GraphicsContext = undefined,
     allocator: std.mem.Allocator = undefined,
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
+    as_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
+
+    // FPS tracking variables (instance variables)
+    fps_frame_count: u32 = 0,
+    fps_last_time: f64 = 0.0,
+    current_fps: f32 = 0.0,
+
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
-    var simple_renderer: SimpleRenderer = undefined;
+
+    // Individual renderers (still needed for initialization)
+    var textured_renderer: TexturedRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
-    var raytracing_system: RaytracingSystem = undefined;
+    var raytracing_renderer: RaytracingRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
+
+    // Generic forward renderer that orchestrates all renderers
+    var forward_renderer: GenericRenderer = undefined;
+
     var compute_shader_system: ComputeShaderSystem = undefined;
     var render_system: RenderSystem = undefined;
     var last_frame_time: f64 = undefined;
@@ -96,163 +124,141 @@ pub const App = struct {
     var frame_info: FrameInfo = FrameInfo{};
 
     var frame_index: u32 = 0;
-    var scene: EnhancedScene = undefined;
-    var asset_manager: AssetManager = undefined;
-    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
+    var frame_counter: u64 = 0; // Global frame counter for scheduling
+    var scene: Scene = undefined;
+    var thread_pool: *ThreadPool = undefined;
+    var asset_manager: *AssetManager = undefined;
+    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats    // Scheduled asset loading system
+    const ScheduledAsset = struct {
+        frame: u64,
+        model_path: []const u8,
+        texture_path: []const u8,
+        position: Math.Vec3,
+        rotation: Math.Vec3,
+        scale: Math.Vec3,
+        loaded: bool = false,
+    };
+    var scheduled_assets: std.ArrayList(ScheduledAsset) = undefined;
 
     // Raytracing system field
-    var global_ubo_set: GlobalUboSet = undefined;
-    var raytracing_descriptor_set: RaytracingDescriptorSet = undefined;
+    var global_ubo_set: *GlobalUboSet = undefined;
+
+    // Scene bridge and view for rendering
+    var scene_bridge: SceneBridge = undefined;
+    var scene_view: SceneView = undefined;
+    // Generic renderer system is now the default rendering path
 
     pub fn init(self: *App) !void {
-        std.debug.print("Initializing application...\n", .{});
+        log(.INFO, "app", "Initializing ZulkanZengine...", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
-        std.debug.print("Window created with title: {s}\n", .{self.window.window_props.title});
 
         self.allocator = std.heap.page_allocator;
-        std.debug.print("Updating frame {s}\n", .{"ehho"});
+
+        // Initialize scheduled assets system
+        scheduled_assets = std.ArrayList(ScheduledAsset){};
+
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
-        std.log.debug("Using device: {s}", .{self.gc.deviceName()});
+        log(.INFO, "app", "Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
-        std.debug.print("Updating frame {s}\n", .{"ehho"});
         try swapchain.createRenderPass();
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
         render_system = RenderSystem.init(&self.gc, &swapchain);
 
-        std.debug.print("Creating command buffers\n", .{});
+        // Initialize Thread Pool with dynamic scaling
+        thread_pool = try self.allocator.create(ThreadPool);
+        thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
 
-        // Initialize Asset Manager
-        asset_manager = try AssetManager.init(self.allocator);
+        // Register subsystems with thread pool
 
-        // Set up ThreadPool callback to monitor running status
-        asset_manager.setThreadPoolCallback(onThreadPoolRunningChanged);
+        try thread_pool.registerSubsystem(.{
+            .name = "hot_reload",
+            .min_workers = 1,
+            .max_workers = 2,
+            .priority = .low,
+            .work_item_type = .hot_reload,
+        });
 
-        // Initialize Enhanced Scene with Asset Manager integration
-        scene = EnhancedScene.init(&self.gc, self.allocator, &asset_manager);
+        try thread_pool.registerSubsystem(.{
+            .name = "bvh_building",
+            .min_workers = 1,
+            .max_workers = 4,
+            .priority = .critical,
+            .work_item_type = .bvh_building,
+        });
+
+        // Start the thread pool with initial workers
+        try thread_pool.start(8); // Start with 4 workers
+
+        // Initialize Asset Manager on heap for stable pointer address
+        asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
+
+        // Initialize Scene with Asset Manager integration
+        scene = Scene.init(&self.gc, self.allocator, asset_manager);
+
+        // Enhanced Scene registers for asset completion callbacks during its init
 
         // Enable hot reloading for development BEFORE loading assets
         scene.enableHotReload() catch |err| {
             log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
         };
 
-        // Register scene for hot reload callbacks and set up texture reload callback
-        scene.registerForHotReloadCallbacks();
-        if (scene.asset_manager.hot_reload_manager) |*hr_manager| {
-            hr_manager.setTextureReloadCallback(EnhancedScene.textureReloadCallbackWrapper);
-        }
+        // --- Load cube mesh using asset-based enhanced scene system ---
+        const cube_object = try scene.addModelAssetAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, 0.5, 0.5), // position
+            Math.Vec3.init(0, 0, 0), // rotation
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        log(.INFO, "scene", "Added cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube_object.model_asset orelse @as(@TypeOf(cube_object.model_asset.?), @enumFromInt(0)), cube_object.material_asset orelse @as(@TypeOf(cube_object.material_asset.?), @enumFromInt(0)), cube_object.texture_asset orelse @as(@TypeOf(cube_object.texture_asset.?), @enumFromInt(0)) });
 
-        // Preload textures
-        if (comptime std.debug.runtime_safety) {
-            scene.startAsyncTextureLoad("textures/granitesmooth1-albedo.png") catch |err| {
-                log(.WARN, "app", "Failed to start async texture preload: {}", .{err});
-            };
+        // Create another textured cube with a different texture (asset-based)
+        const cube2_object = try scene.addModelAssetAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // position
+            Math.Vec3.init(0, 0, 0), // rotation
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        log(.INFO, "scene", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
 
-            // Show loading stats
-            const stats = scene.getLoadingStats();
-            log(.DEBUG, "app", "Loading stats: active={d}, completed={d}, failed={d}", .{ stats.active_loads, stats.completed_loads, stats.failed_loads });
-        }
+        // Add another vase with a different texture (asset-based)
+        const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
+            Math.Vec3.init(0, 0, 0), // rotation
+            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        log(.INFO, "scene", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
 
-        var mesh = Mesh.init(self.allocator);
+        // // Add another vase with a different texture (asset-based)
+        // const vase2_object = try scene.addModelAssetAsync("models/flat_vase.obj", "textures/granitesmooth1-albedo.png", Math.Vec3.init(-1.4, -0.5, 0.5), // position
+        //     Math.Vec3.init(0, 0, 0), // rotation
+        //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        // log(.INFO, "scene", "Added second vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase2_object.model_asset orelse @as(@TypeOf(vase2_object.model_asset.?), @enumFromInt(0)), vase2_object.material_asset orelse @as(@TypeOf(vase2_object.material_asset.?), @enumFromInt(0)), vase2_object.texture_asset orelse @as(@TypeOf(vase2_object.texture_asset.?), @enumFromInt(0)) });
 
-        // --- Load texture through enhanced scene system ---
-        // Pre-load the texture asynchronously (if needed)
-        try scene.startAsyncTextureLoad("textures/missing.png");
-
-        // Wait a moment for async loading then use the texture
-        std.Thread.sleep(50_000_000); // 50ms
-
-        // Update material and texture buffers after all materials/textures are added
-
-        try mesh.vertices.appendSlice(self.allocator, &.{
-            // Left Face
-            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.9, 0.9, 0.9 } },
-
-            // Right face (yellow)
-            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.8, 0.1 } },
-
-            // Top face (orange, remember y axis points down)
-            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.9, 0.6, 0.1 } },
-
-            // Bottom face (red)
-            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.8, 0.1, 0.1 } },
-
-            // Front Face
-            Vertex{ .pos = .{ -0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-            Vertex{ .pos = .{ -0.5, 0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-            Vertex{ .pos = .{ 0.5, -0.5, 0.5 }, .color = .{ 0.1, 0.8, 0.1 } },
-
-            // Back Face
-            Vertex{ .pos = .{ -0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-            Vertex{ .pos = .{ 0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-            Vertex{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
-            Vertex{ .pos = .{ 0.5, -0.5, -0.5 }, .color = .{ 0.1, 0.1, 0.8 } },
+        // Schedule the flat vase to be loaded at frame 1000
+        try scheduled_assets.append(self.allocator, ScheduledAsset{
+            .frame = 50000,
+            .model_path = "models/flat_vase.obj",
+            .texture_path = "textures/granitesmooth1-albedo3.png",
+            .position = Math.Vec3.init(-1.4, -0.5, 0.5),
+            .rotation = Math.Vec3.init(0, 0, 0),
+            .scale = Math.Vec3.init(0.5, 0.5, 0.5),
         });
-        try mesh.indices.appendSlice(self.allocator, &.{ 0, 1, 2, 0, 3, 1, 4, 5, 6, 4, 7, 5, 8, 9, 10, 8, 11, 9, 12, 13, 14, 12, 15, 13, 16, 17, 18, 16, 19, 17, 20, 21, 22, 20, 23, 21 });
-        try mesh.createVertexBuffers(&self.gc);
-        try mesh.createIndexBuffers(&self.gc);
-
-        // --- Load cube mesh using non-blocking enhanced scene system ---
-        log(.DEBUG, "scene", "Loading cube with fallback through enhanced scene", .{});
-        const cube_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, -0.5, 0.5), // position
-            Math.Vec3.init(0.5, 0.001, 0.5) // scale
-        );
-        log(.INFO, "scene", "Added cube object (fallback) with {d} meshes", .{if (cube_object.model) |m| m.meshes.items.len else 0});
+        log(.INFO, "app", "Scheduled flat vase to be loaded at frame 1000", .{});
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
 
-        // Update async textures for Vulkan descriptors (must be done on main thread)
-        try scene.updateAsyncTextures(self.allocator);
+        // log(.DEBUG, "scene", "Adding point light objects", .{});
+        // const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
+        // object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
+        // object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
 
-        // Create another textured cube with a different texture (non-blocking)
-        log(.DEBUG, "scene", "Adding second cube with different texture (fallback)", .{});
-        const cube2_object = try scene.addModelWithMaterialAndTransformAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(1.0, -0.5, 0.5), // Different position
-            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
-        );
-        log(.INFO, "scene", "Added second cube object (fallback) with {d} meshes", .{if (cube2_object.model) |m| m.meshes.items.len else 0});
+        // const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
+        // object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
+        // object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
-        // Create a procedural mesh using the manual mesh (for demonstration)
-        log(.DEBUG, "scene", "Adding procedural mesh as object5", .{});
-        const object5 = try scene.addModelFromMesh(mesh, "procedural_mesh", null);
-        log(.INFO, "scene", "Added procedural object with {d} meshes", .{if (object5.model) |m| m.meshes.items.len else 0});
+        // const object6 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
+        // object6.transform.translate(Math.Vec3.init(0, -1, 0.5));
+        // object6.transform.scale(Math.Vec3.init(0.05, 0, 0));
 
-        // Add another vase with a different texture (non-blocking fallback)
-        log(.DEBUG, "scene", "Adding second vase with error texture (fallback)", .{});
-        const vase2_object = try scene.addModelWithMaterialAndTransformAsync("models/smooth_vase.obj", "textures/deah.png", Math.Vec3.init(-1.0, -1.5, 0.5), // Different position
-            Math.Vec3.init(0.3, 0.3, 0.3) // Different scale
-        );
-        log(.INFO, "scene", "Added second vase object (fallback) with {d} meshes", .{if (vase2_object.model) |m| m.meshes.items.len else 0});
-
-        log(.DEBUG, "scene", "Adding point light objects", .{});
-        const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
-        object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
-        object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-
-        const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
-        object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
-        object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
-
-        log(.DEBUG, "renderer", "Creating command buffers", .{});
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
 
-        log(.DEBUG, "scene", "Adding viewer object and camera controller", .{});
         viewer_object = try scene.addEmpty();
         camera_controller = KeyboardMovementController.init();
 
@@ -261,15 +267,15 @@ pub const App = struct {
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
         // --- Use new GlobalUboSet abstraction ---
-        log(.DEBUG, "renderer", "Initializing GlobalUboSet", .{});
-        global_ubo_set = try GlobalUboSet.init(&self.gc, self.allocator);
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
 
         try shader_library.add(&.{
-            &simple_frag,
-            &simple_vert,
+            &textured_frag,
+            &textured_vert,
         }, &.{
             vk.ShaderStageFlags{ .fragment_bit = true },
             vk.ShaderStageFlags{ .vertex_bit = true },
@@ -277,8 +283,11 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-        log(.DEBUG, "renderer", "Initializing simple renderer", .{});
-        simple_renderer = try SimpleRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        _ = try scene.updateSyncResources(self.allocator);
+        textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
+        for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
+            try textured_renderer.updateMaterialData(@intCast(FF_index), scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray());
+        }
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -292,10 +301,9 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-        log(.DEBUG, "renderer", "Initializing point light renderer", .{});
         point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
 
-        // Use ShaderLibrary abstraction for shader loading
+        // Use ShaderLibrary abstraction for shader loading - heap allocate for proper lifetime
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
         const rgen_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rgen.hlsl.spv", 10 * 1024 * 1024);
         const rmiss_code = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/RayTracingTriangle.rmiss.hlsl.spv", 10 * 1024 * 1024);
@@ -314,95 +322,20 @@ pub const App = struct {
             },
         );
 
+        // Initialize raytracing renderer with the correct shader library
+        raytracing_renderer = try RaytracingRenderer.init(@constCast(&self.gc), self.allocator, swapchain.render_pass, shader_library_raytracing, &swapchain, thread_pool);
+
         // --- Raytracing pipeline setup ---
         // Use the same global descriptor set and layout as the renderer
 
-        // Initialize RaytracingSystem with the created resources
-        // --- Raytracing pool and layout creation (before RaytracingSystem.init) ---
-        // --- Collect buffer infos for raytracing descriptors before pool/layout creation ---
-        // Use abstractions for buffer and descriptor management
-        var index_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){};
-        var vertex_buffer_infos = std.ArrayList(vk.DescriptorBufferInfo){};
-        defer index_buffer_infos.deinit(self.allocator);
-        defer vertex_buffer_infos.deinit(self.allocator);
-        for (scene.objects.items) |*obj| {
-            if (obj.model) |mdl| {
-                for (mdl.meshes.items) |model_mesh| {
-                    const geometry = model_mesh.geometry;
-                    if (geometry.mesh.vertex_buffer) |buf| {
-                        try vertex_buffer_infos.append(self.allocator, buf.descriptor_info);
-                    }
-                    if (geometry.mesh.index_buffer) |buf| {
-                        try index_buffer_infos.append(self.allocator, buf.descriptor_info);
-                    }
-                }
-            }
-        }
-        const rt_counts = .{
-            .ubo_count = global_ubo_set.buffers.len,
-            .vertex_buffer_count = vertex_buffer_infos.items.len,
-            .index_buffer_count = index_buffer_infos.items.len,
-        };
-        const rt_pool_layout = try RaytracingDescriptorSet.createPoolAndLayout(
-            &self.gc,
-            self.allocator,
-            rt_counts.ubo_count,
-            rt_counts.vertex_buffer_count,
-            rt_counts.index_buffer_count,
-            scene.materials.items.len,
-            scene.textures.items.len,
-        );
+        // Create scene bridge for render pass system and raytracing
+        scene_bridge = SceneBridge.init(&scene, self.allocator);
 
-        // --- RaytracingSystem init with pool/layout ---
-        raytracing_system = try RaytracingSystem.init(
-            &self.gc,
-            swapchain.render_pass,
-            shader_library_raytracing,
-            self.allocator,
-            rt_pool_layout.layout,
-            rt_pool_layout.pool,
-            &swapchain,
-            self.window.window_props.width,
-            self.window.window_props.height,
-        );
+        // Raytracing system is now integrated into the raytracing renderer
+        _ = try raytracing_renderer.rt_system.updateBvhFromSceneView(@constCast(&scene_bridge.createSceneView()), true);
 
-        log(.DEBUG, "raytracing", "Creating BLAS", .{});
-        try raytracing_system.createBLAS(scene.asScene());
-        log(.DEBUG, "raytracing", "Creating TLAS", .{});
-        try raytracing_system.createTLAS(scene.asScene());
-        log(.DEBUG, "raytracing", "Creating Shader Binding Table", .{});
-        try raytracing_system.createShaderBindingTable(3);
-        // --- After RaytracingSystem has valid AS and image, create descriptor set ---
-        log(.DEBUG, "raytracing", "Creating raytracing descriptor set", .{});
-        const as_info = try raytracing_system.getAccelerationStructureDescriptorInfo();
-        const image_info = try raytracing_system.getOutputImageDescriptorInfo();
-        var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
-        defer self.allocator.free(ubo_infos);
-        for (global_ubo_set.buffers, 0..) |buf, i| {
-            ubo_infos[i] = buf.descriptor_info;
-        }
-        raytracing_descriptor_set.set = try RaytracingDescriptorSet.createDescriptorSet(
-            &self.gc,
-            rt_pool_layout.pool,
-            rt_pool_layout.layout,
-            self.allocator,
-            @constCast(&as_info),
-            @constCast(&image_info),
-            ubo_infos,
-            vertex_buffer_infos.items,
-            index_buffer_infos.items,
-            scene.material_buffer.?.descriptor_info,
-            scene.texture_image_infos,
-        );
-        raytracing_descriptor_set.pool = rt_pool_layout.pool;
-        raytracing_descriptor_set.layout = rt_pool_layout.layout;
-        raytracing_system.descriptor_set = raytracing_descriptor_set.set;
-        raytracing_system.descriptor_set_layout = raytracing_descriptor_set.layout;
-        raytracing_system.descriptor_pool = raytracing_descriptor_set.pool;
-        log(.INFO, "RaytracingSysem", "Raytracing system fully initialized", .{});
-
-        // Register raytracing system with enhanced scene for texture updates
-        scene.setRaytracingSystem(&raytracing_system);
+        // Note: TLAS creation will be handled in the update loop once BLAS is complete
+        // SBT will be created by raytracing renderer when pipeline is ready
 
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
@@ -437,6 +370,13 @@ pub const App = struct {
             },
         );
 
+        // Create UBO infos for particle renderer
+        var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
+        defer self.allocator.free(ubo_infos);
+        for (global_ubo_set.buffers, 0..) |buf, i| {
+            ubo_infos[i] = buf.descriptor_info;
+        }
+
         particle_renderer = try ParticleRenderer.init(
             &self.gc,
             swapchain.render_pass,
@@ -447,13 +387,115 @@ pub const App = struct {
             ubo_infos,
         );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
+
+        // Initialize Generic Forward Renderer (replaces render pass manager)
+        forward_renderer = GenericRenderer.init(self.allocator);
+
+        // Set the scene bridge for renderers that need scene data
+        forward_renderer.setSceneBridge(&scene_bridge);
+
+        // Set the swapchain for renderers that need it (like raytracing)
+        forward_renderer.setSwapchain(&swapchain);
+
+        // Add renderers to the generic forward renderer by type
+        try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
+        try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
+        try forward_renderer.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+        // Future renderers can be added here:
+        // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
+        // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
+
+        // Initialize scene view using the existing SceneBridge
+        scene_view = scene_bridge.createSceneView();
+        log(.INFO, "app", "Render pass manager system initialized", .{});
         last_frame_time = c.glfwGetTime();
+        self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
+        // // Legacy initialization removed - descriptors updated via updateFromSceneView during rendering
+        // raytracing_renderer.updateFromSceneView(0, ubo_infos[0], scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray(), &scene_view.getRaytracingData()) catch |err| {
+        //     log(.ERROR, "raytracing", "Failed to update raytracing renderer descriptors from SceneView: {}", .{err});
+        // };
     }
 
     pub fn onUpdate(self: *App) !bool {
+        // Increment frame counter for scheduling
+        frame_counter += 1;
+
+        // Check for scheduled asset loads
+        for (scheduled_assets.items) |*scheduled_asset| {
+            if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
+                log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
+
+                const loaded_object = try scene.addModelAssetAsync(scheduled_asset.model_path, scheduled_asset.texture_path, scheduled_asset.position, scheduled_asset.rotation, scheduled_asset.scale);
+
+                log(.INFO, "app", "Successfully queued scheduled asset for loading with IDs: model={}, material={}, texture={}", .{ loaded_object.model_asset orelse @as(@TypeOf(loaded_object.model_asset.?), @enumFromInt(0)), loaded_object.material_asset orelse @as(@TypeOf(loaded_object.material_asset.?), @enumFromInt(0)), loaded_object.texture_asset orelse @as(@TypeOf(loaded_object.texture_asset.?), @enumFromInt(0)) });
+
+                log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
+
+                scheduled_asset.loaded = true;
+            }
+        }
+
         // Process any pending hot reloads first
-        scene.processPendingReloads();
+
+        // Check for and update any newly loaded async resources (textures, models, materials)
+        // Note: Asset completion is handled automatically by the asset manager's worker thread
+        var resources_updated = try scene.updateAsyncResources(self.allocator);
+        // // Update BVH build status to detect completion and reset progress flag
+        // _ = raytracing_system.updateBvhBuildStatus() catch |err| {
+        //     log(.ERROR, "raytracing", "Failed to update BVH build status: {}", .{err});
+        // };
+
+        // Use SceneView-based BVH change detection and automatic rebuilding
+        _ = raytracing_renderer.rt_system.updateBvhFromSceneView(&scene_view, resources_updated) catch |err| {
+            log(.ERROR, "raytracing", "Failed to update BVH from SceneView: {}", .{err});
+        };
+        // Update textured renderer with any new material/texture data if resources changed
+        if (resources_updated) {
+            // Instead of deviceWaitIdle, just mark all frames as needing updates
+            for (&self.descriptor_dirty_flags) |*flag| {
+                flag.* = true;
+            }
+
+            // Clear the global flag since we've handled it
+            resources_updated = false;
+        }
+
+        // Before rendering each frame, check if descriptors need updating
+        if (self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT]) {
+            log(.DEBUG, "app", "Updating descriptors for frame {d}", .{(current_frame + 1) % MAX_FRAMES_IN_FLIGHT});
+            // Update descriptors for the next frame (prepare resources ahead of time)
+            try textured_renderer.updateMaterialData(
+                (current_frame + 1) % MAX_FRAMES_IN_FLIGHT,
+                scene.asset_manager.material_buffer.?.descriptor_info,
+                scene.asset_manager.getTextureDescriptorArray(),
+            );
+
+            // Note: raytracing_renderer descriptors are updated in updateFromSceneView() during rendering
+            // No need to call updateMaterialData() here as it would be redundant
+
+            // Mark this frame as updated
+            self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT] = false;
+            log(.DEBUG, "app", "The descriptor flags are: {any}, resources_updates: {any}", .{ self.descriptor_dirty_flags, resources_updated });
+
+            // Mark raytracing renderer materials as dirty for all frames
+            raytracing_renderer.markMaterialsDirty();
+        }
+
+        if (raytracing_renderer.rt_system.tlas_dirty) {
+            // Update raytracing renderer's TLAS reference only when AS changes
+            // Note: updateTLAS automatically marks all frames as dirty
+            raytracing_renderer.updateTLAS(raytracing_renderer.rt_system.tlas);
+            raytracing_renderer.rt_system.tlas_dirty = false; // Reset dirty flag after update
+        }
+
+        // Check if descriptors need updating (separate from TLAS dirty flag)
+        const descriptors_need_update = raytracing_renderer.rt_system.descriptors_need_update;
+        if (descriptors_need_update) {
+            raytracing_renderer.markAllFramesDirty(); // Mark all frames as needing descriptor updates
+        }
+
+        // Create/update raytracing acceleration structure descriptors when TLAS is ready
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
@@ -464,6 +506,24 @@ pub const App = struct {
                 asset_manager.printPerformanceReport();
                 last_performance_report = current_time;
             }
+        }
+
+        // Update FPS in title bar every second
+        self.fps_frame_count += 1;
+        if (current_time - self.fps_last_time >= 1.0) {
+            self.current_fps = @as(f32, @floatFromInt(self.fps_frame_count)) / @as(f32, @floatCast(current_time - self.fps_last_time));
+
+            // Create title with FPS - use a stack buffer for the string
+            var title_buffer: [256:0]u8 = undefined;
+            const title_slice = std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine - FPS: {d:.1}", .{self.current_fps}) catch |err| blk: {
+                log(.WARN, "app", "Failed to format title: {}", .{err});
+                break :blk std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine", .{}) catch "ZulkanZengine";
+            };
+
+            self.window.setTitle(title_slice.ptr);
+
+            self.fps_frame_count = 0;
+            self.fps_last_time = current_time;
         }
         const dt = current_time - last_frame_time;
         const cmdbuf = cmdbufs[current_frame];
@@ -500,23 +560,48 @@ pub const App = struct {
             .projection = frame_info.camera.projectionMatrix,
             .dt = @floatCast(dt),
         };
-        try point_light_renderer.update_point_lights(&frame_info, &ubo);
-        global_ubo_set.update(frame_info.current_frame, &ubo);
-        //try simple_renderer.render(frame_info);
-        //try point_light_renderer.render(frame_info);
-        //try particle_renderer.render(frame_info);
+        // try point_light_renderer.update_point_lights(&frame_info, &ubo);
+        global_ubo_set.*.update(frame_info.current_frame, &ubo);
+
+        // // Execute render passes
+        // const render_context = RenderContext{
+        //     .graphics_context = &self.gc,
+        //     .frame_info = &frame_info,
+        //     .command_buffer = frame_info.command_buffer,
+        //     .frame_index = frame_info.current_frame,
+        //     .scene_view = &scene_view,
+        // };
+
+        // // Use render pass manager (now the only rendering path)
+        // try render_pass_manager.executeRenderPasses(render_context);
+
+        // Update raytracing descriptors if TLAS is ready (before forward renderer execution)
+        if (raytracing_renderer.rt_system.completed_tlas != null) {
+            const rt_data = scene_view.getRaytracingData();
+            const ubo_buffer_info = global_ubo_set.*.buffers[frame_info.current_frame].descriptor_info;
+            const material_buffer_info = scene.asset_manager.material_buffer.?.descriptor_info;
+
+            try raytracing_renderer.updateFromSceneView(
+                frame_info.current_frame,
+                ubo_buffer_info,
+                material_buffer_info,
+                scene.asset_manager.getTextureDescriptorArray(),
+                rt_data,
+                raytracing_renderer.rt_system,
+            );
+        }
+        // Render particles separately for now (TODO: add to forward renderer)
+        try particle_renderer.render(frame_info);
+
+        // Execute all renderers through the generic forward renderer
+        try forward_renderer.render(frame_info);
+
         render_system.endRender(frame_info);
-        try raytracing_system.recordCommandBuffer(
-            frame_info,
-            &swapchain,
-            3,
-            global_ubo_set.buffers[frame_info.current_frame].descriptor_info,
-            scene.material_buffer.?.descriptor_info,
-            scene.texture_image_infos,
-        );
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
+
         //log(.TRACE, "app", "Frame end", .{});
+
         return self.window.isRunning();
     }
 
@@ -524,11 +609,26 @@ pub const App = struct {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
         swapchain.waitForAllFences() catch unreachable;
+
+        // Clean up scheduled assets list
+        scheduled_assets.deinit(self.allocator);
+
         global_ubo_set.deinit();
+
+        // Cleanup generic renderer
+        forward_renderer.deinit();
+
+        // Shutdown thread pool first to prevent threading conflicts
+        thread_pool.deinit();
+        self.allocator.destroy(thread_pool);
+
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
         point_light_renderer.deinit();
-        simple_renderer.deinit();
-        raytracing_system.deinit();
+        textured_renderer.deinit();
+        raytracing_renderer.deinit(); // This handles the integrated raytracing system cleanup
+
+        // Cleanup heap-allocated shader library
+
         particle_renderer.deinit();
         scene.deinit();
         asset_manager.deinit();
