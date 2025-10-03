@@ -287,12 +287,12 @@ pub const RaytracingRenderer = struct {
         // Update descriptors if: 1) Never initialized, 2) Per-frame dirty flag set, 3) Resize needed
         const frame_needs_update = self.descriptor_dirty_flags[frame_index];
         const needs_update = !self.descriptors_initialized or frame_needs_update or needs_resize;
-        
+
         if (needs_update) {
             if (needs_resize) {
                 try self.resizeDescriptors(new_vertex_count, new_index_count, new_texture_count);
             }
-            
+
             // Update all descriptors
             const as_info = vk.WriteDescriptorSetAccelerationStructureKHR{
                 .s_type = vk.StructureType.write_descriptor_set_acceleration_structure_khr,
@@ -302,7 +302,7 @@ pub const RaytracingRenderer = struct {
             };
 
             const output_image_info = self.output_texture.getDescriptorInfo();
-            
+
             try self.descriptors.updateFromSceneViewData(
                 frame_index,
                 @constCast(&as_info),
@@ -312,13 +312,13 @@ pub const RaytracingRenderer = struct {
                 texture_image_infos,
                 rt_data,
             );
-            
+
             // Mark descriptors as initialized
             self.descriptors_initialized = true;
-            
+
             // Clear the per-frame dirty flag
             self.descriptor_dirty_flags[frame_index] = false;
-            
+
             // Reset the descriptor update flag in the raytracing system
             rt_system.descriptors_need_update = false;
         }
@@ -398,7 +398,7 @@ pub const RaytracingRenderer = struct {
 
         // CRITICAL: When descriptor set layout changes, we must recreate pipeline layout and pipeline
         try self.recreatePipelineLayoutAndPipeline();
-        
+
         // Reset descriptor initialization flag since we've recreated them
         self.descriptors_initialized = false;
     }

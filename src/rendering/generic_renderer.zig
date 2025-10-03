@@ -5,11 +5,11 @@ const RenderContext = @import("render_pass.zig").RenderContext;
 
 /// Renderer execution type classification
 pub const RendererType = enum {
-    raster,       // Traditional rasterization (TexturedRenderer, etc.)
-    compute,      // Compute shaders (ParticleRenderer, etc.)
-    raytracing,   // Ray tracing shaders
-    lighting,     // Light rendering (PointLightRenderer, etc.)
-    postprocess,  // Post-processing effects
+    raster, // Traditional rasterization (TexturedRenderer, etc.)
+    compute, // Compute shaders (ParticleRenderer, etc.)
+    raytracing, // Ray tracing shaders
+    lighting, // Light rendering (PointLightRenderer, etc.)
+    postprocess, // Post-processing effects
 };
 
 /// Individual renderer entry
@@ -30,15 +30,15 @@ pub const RendererEntry = struct {
 pub const GenericRenderer = struct {
     renderers: std.ArrayList(RendererEntry),
     allocator: std.mem.Allocator,
-    scene_bridge_ptr: ?*anyopaque = null,  // Store scene bridge for renderers that need scene data
-    swapchain_ptr: ?*anyopaque = null,     // Store swapchain for renderers that need it (like raytracing)
-    
+    scene_bridge_ptr: ?*anyopaque = null, // Store scene bridge for renderers that need scene data
+    swapchain_ptr: ?*anyopaque = null, // Store swapchain for renderers that need it (like raytracing)
+
     // Execution order for renderer types
     execution_order: []const RendererType = &[_]RendererType{
-        .raster,      // First render rasterized geometry
-        .lighting,    // Then lighting passes
-        .compute,     // Then compute effects  
-        .raytracing,  // Then raytracing
+        .raster, // First render rasterized geometry
+        .lighting, // Then lighting passes
+        .compute, // Then compute effects
+        .raytracing, // Then raytracing
         .postprocess, // Finally post-processing
     },
 
@@ -76,21 +76,21 @@ pub const GenericRenderer = struct {
                 .render = struct {
                     fn render(ptr: *anyopaque, frame_info: FrameInfo, scene_data_ptr: *anyopaque) !void {
                         const renderer: *RendererT = @ptrCast(@alignCast(ptr));
-                        
+
                         // Handle different renderer signatures based on the renderer type
                         // This is determined by the renderer type stored in the entry
                         if (@hasDecl(RendererT, "render")) {
                             const render_fn = @field(RendererT, "render");
                             const render_info = @typeInfo(@TypeOf(render_fn));
-                            
+
                             if (render_info == .@"fn") {
                                 const params = render_info.@"fn".params;
-                                
+
                                 // Handle render(self, frame_info) - most renderers (PointLightRenderer, RaytracingRenderer, etc)
                                 if (params.len == 2) {
                                     return renderer.render(frame_info);
                                 }
-                                
+
                                 // Handle render(self, frame_info, raster_data) - TexturedRenderer
                                 if (params.len == 3) {
                                     const RasterizationData = @import("scene_view.zig").RasterizationData;
@@ -99,7 +99,7 @@ pub const GenericRenderer = struct {
                                 }
                             }
                         }
-                        
+
                         return error.UnsupportedRenderSignature;
                     }
                 }.render,
@@ -111,7 +111,7 @@ pub const GenericRenderer = struct {
                 }.shouldExecute else null,
             },
         };
-        
+
         try self.renderers.append(self.allocator, entry);
     }
 
@@ -121,7 +121,7 @@ pub const GenericRenderer = struct {
         const SceneBridge = @import("scene_bridge.zig").SceneBridge;
         const scene_bridge: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr orelse return error.NoSceneBridge));
         var scene_view = scene_bridge.createSceneView();
-        
+
         for (self.execution_order) |renderer_type| {
             for (self.renderers.items) |*renderer| {
                 if (renderer.renderer_type == renderer_type) {
@@ -132,7 +132,7 @@ pub const GenericRenderer = struct {
                             continue;
                         }
                     }
-                    
+
                     // Get appropriate scene data based on renderer type
                     const scene_data_ptr: *anyopaque = switch (renderer_type) {
                         .raster => blk: {
@@ -149,15 +149,15 @@ pub const GenericRenderer = struct {
                             break :blk @ptrCast(&dummy_data);
                         },
                         .lighting => blk: {
-                            var raster_data = scene_view.getRasterizationData();  // Lighting uses raster data for lights
+                            var raster_data = scene_view.getRasterizationData(); // Lighting uses raster data for lights
                             break :blk @ptrCast(&raster_data);
                         },
                         .postprocess => blk: {
-                            var raster_data = scene_view.getRasterizationData();  // Post-process typically uses raster data
+                            var raster_data = scene_view.getRasterizationData(); // Post-process typically uses raster data
                             break :blk @ptrCast(&raster_data);
                         },
                     };
-                    
+
                     // Execute the renderer
                     renderer.vtable.render(renderer.renderer_ptr, frame_info, scene_data_ptr) catch |err| {
                         std.log.err("GenericRenderer: Failed to render with '{s}': {}", .{ renderer.name, err });
