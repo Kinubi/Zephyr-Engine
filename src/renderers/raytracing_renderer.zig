@@ -321,6 +321,7 @@ pub const RaytracingRenderer = struct {
 
             // Reset the descriptor update flag in the raytracing system
             rt_system.descriptors_need_update = false;
+            log(.INFO, "raytracing_renderer", "Updated descriptors for frame {}", .{frame_index});
         }
     }
 

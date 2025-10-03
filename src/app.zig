@@ -54,6 +54,7 @@ const SceneView = @import("rendering/render_pass.zig").SceneView;
 const RenderPassManager = @import("rendering/render_pass_manager.zig").RenderPassManager;
 const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
 const RendererType = @import("rendering/generic_renderer.zig").RendererType;
+const RendererEntry = @import("rendering/generic_renderer.zig").RendererEntry;
 const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
 
 // Utility imports
@@ -111,8 +112,11 @@ pub const App = struct {
     var raytracing_renderer: RaytracingRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
 
-    // Generic forward renderer that orchestrates all renderers
+    // Generic forward renderer that orchestrates rasterization renderers
     var forward_renderer: GenericRenderer = undefined;
+
+    // Raytracing render pass (separate from forward renderer)
+    var rt_render_pass: GenericRenderer = undefined;
 
     var compute_shader_system: ComputeShaderSystem = undefined;
     var render_system: RenderSystem = undefined;
@@ -388,19 +392,29 @@ pub const App = struct {
         );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
-        // Initialize Generic Forward Renderer (replaces render pass manager)
+        // Initialize Generic Forward Renderer (rasterization only)
         forward_renderer = GenericRenderer.init(self.allocator);
 
         // Set the scene bridge for renderers that need scene data
         forward_renderer.setSceneBridge(&scene_bridge);
 
-        // Set the swapchain for renderers that need it (like raytracing)
+        // Set the swapchain for renderers that need it
         forward_renderer.setSwapchain(&swapchain);
 
-        // Add renderers to the generic forward renderer by type
+        // Add rasterization renderers to the forward renderer
         try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
         try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
-        try forward_renderer.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+
+        // Initialize Raytracing Render Pass (separate from forward renderer)
+        rt_render_pass = GenericRenderer.init(self.allocator);
+
+        // Set the scene bridge and swapchain for raytracing
+        rt_render_pass.setSceneBridge(&scene_bridge);
+        rt_render_pass.setSwapchain(&swapchain);
+
+        // Add raytracing renderer to its own render pass
+        try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+
         // Future renderers can be added here:
         // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
         // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
@@ -551,6 +565,8 @@ pub const App = struct {
 
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
+
+        // NOW begin the rasterization render pass
         render_system.beginRender(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
@@ -563,19 +579,15 @@ pub const App = struct {
         // try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
-        // // Execute render passes
-        // const render_context = RenderContext{
-        //     .graphics_context = &self.gc,
-        //     .frame_info = &frame_info,
-        //     .command_buffer = frame_info.command_buffer,
-        //     .frame_index = frame_info.current_frame,
-        //     .scene_view = &scene_view,
-        // };
+        // Render particles separately for now (TODO: add to appropriate render pass)
+        try particle_renderer.render(frame_info);
 
-        // // Use render pass manager (now the only rendering path)
-        // try render_pass_manager.executeRenderPasses(render_context);
+        // Execute rasterization renderers through the forward renderer
+        try forward_renderer.render(frame_info);
 
-        // Update raytracing descriptors if TLAS is ready (before forward renderer execution)
+        render_system.endRender(frame_info);
+
+        // Update raytracing descriptors if TLAS is ready (before raytracing execution)
         if (raytracing_renderer.rt_system.completed_tlas != null) {
             const rt_data = scene_view.getRaytracingData();
             const ubo_buffer_info = global_ubo_set.*.buffers[frame_info.current_frame].descriptor_info;
@@ -590,13 +602,10 @@ pub const App = struct {
                 raytracing_renderer.rt_system,
             );
         }
-        // Render particles separately for now (TODO: add to forward renderer)
-        try particle_renderer.render(frame_info);
 
-        // Execute all renderers through the generic forward renderer
-        try forward_renderer.render(frame_info);
+        // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
+        try rt_render_pass.render(frame_info);
 
-        render_system.endRender(frame_info);
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
 
