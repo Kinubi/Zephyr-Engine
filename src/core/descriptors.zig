@@ -92,7 +92,6 @@ pub const DescriptorPool = struct {
         };
 
         self.gc.vkd.allocateDescriptorSets(self.gc.dev, &allocInfo, @ptrCast(descriptor_set)) catch |err| {
-            std.debug.print("Failed to allocate descriptor set: {any}\n", .{err});
             return err;
         };
     }
@@ -162,7 +161,6 @@ pub const DescriptorWriter = struct {
     }
 
     pub fn writeBuffer(self: *DescriptorWriter, binding: u32, bufferInfo: *vk.DescriptorBufferInfo) *DescriptorWriter {
-        log(.DEBUG, "descriptor_writer", "Writing buffer to binding {}: buffer handle=0x{X}, offset={}, range={}", .{ binding, @intFromEnum(bufferInfo.buffer), bufferInfo.offset, bufferInfo.range });
         const bindingDescription = self.setLayout.bindings.get(binding).?;
 
         // Store a copy of the buffer info to avoid pointer aliasing issues
@@ -180,10 +178,6 @@ pub const DescriptorWriter = struct {
             .p_texel_buffer_view = undefined,
         };
         self.writes.append(self.allocator, write) catch unreachable;
-
-        // DEBUG: Log what we just stored in the writes array
-        const stored_write = &self.writes.items[self.writes.items.len - 1];
-        std.log.info("[writeBuffer-STORED] binding={}, type={}, buffer=0x{X}", .{ stored_write.dst_binding, stored_write.descriptor_type, @intFromEnum(stored_write.p_buffer_info[0].buffer) });
 
         return self;
     }
@@ -262,16 +256,8 @@ pub const DescriptorWriter = struct {
 
     pub fn build(self: *DescriptorWriter, set: *vk.DescriptorSet) !void {
         self.pool.allocateDescriptor(self.setLayout.descriptor_set_layout, set) catch unreachable;
-        log(.DEBUG, "descriptor_set", "Allocated descriptor set: {}, with write count: {d}\n", .{ set.*, self.writes.items.len });
         for (0..self.writes.items.len) |i| {
             self.writes.items[i].dst_set = set.*;
-        }
-
-        // DEBUG: Log exactly what we're about to submit to Vulkan
-        for (self.writes.items, 0..) |write, i| {
-            if (write.descriptor_type == .uniform_buffer or write.descriptor_type == .storage_buffer) {
-                std.log.info("[vkUpdateDescriptorSets] Write[{}]: binding={}, type={}, buffer=0x{X}", .{ i, write.dst_binding, write.descriptor_type, @intFromEnum(write.p_buffer_info[0].buffer) });
-            }
         }
 
         self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);
@@ -281,13 +267,6 @@ pub const DescriptorWriter = struct {
     pub fn update(self: *DescriptorWriter, set: vk.DescriptorSet) void {
         for (0..self.writes.items.len) |i| {
             self.writes.items[i].dst_set = set;
-        }
-
-        // DEBUG: Log exactly what we're about to submit to Vulkan (update path)
-        for (self.writes.items, 0..) |write, i| {
-            if (write.descriptor_type == .uniform_buffer or write.descriptor_type == .storage_buffer) {
-                std.log.info("[vkUpdateDescriptorSets-UPDATE] Write[{}]: binding={}, type={}, buffer=0x{X}", .{ i, write.dst_binding, write.descriptor_type, @intFromEnum(write.p_buffer_info[0].buffer) });
-            }
         }
 
         self.gc.vkd.updateDescriptorSets(self.gc.dev, @intCast(self.writes.items.len), @ptrCast(self.writes.items.ptr), 0, null);

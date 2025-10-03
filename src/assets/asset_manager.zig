@@ -88,22 +88,22 @@ pub const FallbackAssets = struct {
 
         // Try to load each fallback texture, but don't fail if missing
         fallbacks.missing_texture = asset_manager.loadTextureSync("textures/missing.png") catch |err| blk: {
-            std.log.warn("Could not load missing.png fallback: {}", .{err});
+            log(.WARN, "asset_manager", "Could not load missing.png fallback: {}", .{err});
             break :blk null;
         };
 
         fallbacks.loading_texture = asset_manager.loadTextureSync("textures/loading.png") catch |err| blk: {
-            std.log.warn("Could not load loading.png fallback: {}", .{err});
+            log(.WARN, "asset_manager", "Could not load loading.png fallback: {}", .{err});
             break :blk null;
         };
 
         fallbacks.failed_texture = asset_manager.loadTextureSync("textures/error.png") catch |err| blk: {
-            std.log.warn("Could not load error.png fallback: {}", .{err});
+            log(.WARN, "asset_manager", "Could not load error.png fallback: {}", .{err});
             break :blk null;
         };
 
         fallbacks.default_texture = asset_manager.loadTextureSync("textures/default.png") catch |err| blk: {
-            std.log.warn("Could not load default.png fallback: {}", .{err});
+            log(.WARN, "asset_manager", "Could not load default.png fallback: {}", .{err});
             break :blk null;
         };
 
@@ -111,19 +111,19 @@ pub const FallbackAssets = struct {
         fallbacks.missing_model = blk: {
             // Register a fake asset for the fallback model
             const asset_id = asset_manager.registry.registerAsset("fallback://missing_model", .mesh) catch |err| {
-                std.log.warn("Failed to register missing model fallback asset: {}", .{err});
+                log(.WARN, "asset_manager", "Failed to register missing model fallback asset: {}", .{err});
                 break :blk null;
             };
 
             // Create the cube model directly
             var cube_model = FallbackMeshes.createCubeModel(asset_manager.allocator, asset_manager.loader.graphics_context, "fallback_cube") catch |err| {
-                std.log.warn("Failed to create cube model fallback: {}", .{err});
+                log(.WARN, "asset_manager", "Failed to create cube model fallback: {}", .{err});
                 break :blk null;
             };
 
             // Allocate on heap and add to AssetManager properly
             const model_ptr = asset_manager.allocator.create(Model) catch |err| {
-                std.log.warn("Failed to allocate memory for fallback model: {}", .{err});
+                log(.WARN, "asset_manager", "Failed to allocate memory for fallback model: {}", .{err});
                 cube_model.deinit();
                 break :blk null;
             };
@@ -131,7 +131,7 @@ pub const FallbackAssets = struct {
 
             // Use AssetManager's addLoadedModel to ensure proper mapping
             asset_manager.addLoadedModel(asset_id, model_ptr) catch |err| {
-                std.log.warn("Failed to add fallback model to AssetManager: {}", .{err});
+                log(.WARN, "asset_manager", "Failed to add fallback model to AssetManager: {}", .{err});
                 asset_manager.allocator.destroy(model_ptr);
                 break :blk null;
             };
@@ -139,7 +139,7 @@ pub const FallbackAssets = struct {
             // Mark as loaded in registry
             asset_manager.registry.markAsLoaded(asset_id, 1024); // Fake size
 
-            std.log.info("Created fallback cube model with asset ID {}", .{asset_id.toU64()});
+            log(.INFO, "asset_manager", "Created fallback cube model with asset ID {}", .{asset_id.toU64()});
             break :blk asset_id;
         };
 
@@ -148,7 +148,8 @@ pub const FallbackAssets = struct {
         fallbacks.default_model = fallbacks.missing_model;
 
         log(.INFO, "enhanced_asset_manager", "Fallback assets initialized: missing_texture={?}, missing_model={?}", .{ fallbacks.missing_texture, fallbacks.missing_model });
-
+        try asset_manager.buildTextureDescriptorArray();
+        try asset_manager.createMaterialBuffer(asset_manager.loader.graphics_context);
         return fallbacks;
     }
 
@@ -295,7 +296,7 @@ pub const AssetManager = struct {
         try self.loaded_materials.append(self.allocator, material);
         try self.asset_to_material.put(asset_id, index);
         self.materials_dirty = true; // Mark materials as dirty when added
-        std.log.info("AssetManager: Added material asset {} at index {}", .{ asset_id.toU64(), index });
+        log(.INFO, "asset_manager", "Added material asset {} at index {}", .{ asset_id.toU64(), index });
     }
 
     /// Create a material asset asynchronously
@@ -573,7 +574,6 @@ pub const AssetManager = struct {
                 }
                 // Fallback to missing if no loading asset
                 const missing_fallback = self.fallbacks.getFallback(.missing, asset.?.asset_type);
-                std.log.info("getAssetIdForRendering: no staging fallback, using missing fallback {?}", .{if (missing_fallback) |id| id.toU64() else null});
                 return missing_fallback orelse asset_id;
             },
             .loading => {
@@ -584,28 +584,23 @@ pub const AssetManager = struct {
                 }
                 // Fallback to missing if no loading asset
                 const missing_fallback = self.fallbacks.getFallback(.missing, asset.?.asset_type);
-                std.log.info("getAssetIdForRendering: no loading fallback, using missing fallback {?}", .{if (missing_fallback) |id| id.toU64() else null});
                 return missing_fallback orelse asset_id;
             },
             .failed => {
                 // Show error asset for failed loads
-                std.log.warn("getAssetIdForRendering: asset {} ({s}) FAILED to load, using error fallback", .{ asset_id.toU64(), asset.?.path });
+                log(.WARN, "asset_manager", "Asset {} ({s}) FAILED to load, using error fallback", .{ asset_id.toU64(), asset.?.path });
                 const fallback_id = self.fallbacks.getFallback(.failed, asset.?.asset_type);
                 if (fallback_id) |fb_id| {
-                    std.log.info("getAssetIdForRendering: returning error fallback asset {}", .{fb_id.toU64()});
                     return fb_id;
                 }
                 // Fallback to missing if no error asset
                 const missing_fallback = self.fallbacks.getFallback(.missing, asset.?.asset_type);
-                std.log.info("getAssetIdForRendering: no error fallback, using missing fallback {?}", .{if (missing_fallback) |id| id.toU64() else null});
                 return missing_fallback orelse asset_id;
             },
             .unloaded => {
                 // Start loading and show missing asset
-                std.log.info("getAssetIdForRendering: asset {} ({s}) is unloaded, starting load and using missing fallback", .{ asset_id.toU64(), asset.?.path });
                 self.loader.requestLoad(asset_id, .critical) catch {};
                 const missing_fallback = self.fallbacks.getFallback(.missing, asset.?.asset_type);
-                std.log.info("getAssetIdForRendering: returning missing fallback {?}", .{if (missing_fallback) |id| id.toU64() else null});
                 return missing_fallback orelse asset_id;
             },
         }
@@ -618,7 +613,6 @@ pub const AssetManager = struct {
         defer self.models_mutex.unlock();
 
         if (self.asset_to_model.get(asset_id)) |index| {
-            //log(.DEBUG, "Asset Manager", "Found model index {} for asset ID {}", .{ index, asset_id.toU64() });
             if (index < self.loaded_models.items.len) {
                 return self.loaded_models.items[index];
             }
@@ -809,12 +803,10 @@ pub const AssetManager = struct {
             const resolved_texture_id = self.getAssetIdForRendering(texture_asset_id);
             if (texture_asset_id == AssetId.fromU64(11)) {
                 // Use default texture if albedo_texture_id is 0
-                log(.DEBUG, "asset_manager", "Material {} has albedo_texture_id 0, using default texture: {}", .{ i, resolved_texture_id.toU64() });
             }
 
             // Get the texture index from the resolved asset ID
             const texture_index = self.asset_to_texture.get(resolved_texture_id) orelse 0;
-            log(.DEBUG, "asset_manager", "Material {} resolved texture asset ID {} to texture index {}", .{ i, resolved_texture_id.toU64(), texture_index });
             material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
         }
 

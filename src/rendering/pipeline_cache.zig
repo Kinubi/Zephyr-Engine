@@ -2,6 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const PipelineBuilder = @import("pipeline_builder.zig").PipelineBuilder;
+const log = @import("../utils/logger.zig").log;
 
 /// Pipeline cache entry for storing built pipelines
 const PipelineCacheEntry = struct {
@@ -277,17 +278,17 @@ pub const PipelineCache = struct {
     /// Print debug information
     pub fn printDebugInfo(self: *const Self) void {
         const stats = self.getStatistics();
-        std.log.info("=== Pipeline Cache Debug Info ===", .{});
-        std.log.info("Total Pipelines: {d}", .{stats.total_pipelines});
-        std.log.info("Cache Hits: {d}", .{stats.cache_hits});
-        std.log.info("Cache Misses: {d}", .{stats.cache_misses});
-        std.log.info("Hit Ratio: {d:.2}%", .{stats.hit_ratio * 100.0});
+        log(.DEBUG, "pipeline_cache", "=== Pipeline Cache Debug Info ===", .{});
+        log(.DEBUG, "pipeline_cache", "Total Pipelines: {d}", .{stats.total_pipelines});
+        log(.DEBUG, "pipeline_cache", "Cache Hits: {d}", .{stats.cache_hits});
+        log(.DEBUG, "pipeline_cache", "Cache Misses: {d}", .{stats.cache_misses});
+        log(.DEBUG, "pipeline_cache", "Hit Ratio: {d:.2}%", .{stats.hit_ratio * 100.0});
 
-        std.log.info("Pipeline Details:", .{});
+        log(.DEBUG, "pipeline_cache", "Pipeline Details:", .{});
         var iterator = self.cache.iterator();
         while (iterator.next()) |entry| {
             const pipeline_entry = entry.value_ptr.*;
-            std.log.info("  Hash: 0x{X}, Usage: {d}, Last Frame: {d}", .{
+            log(.DEBUG, "pipeline_cache", "  Hash: 0x{X}, Usage: {d}, Last Frame: {d}", .{
                 pipeline_entry.hash,
                 pipeline_entry.usage_count,
                 pipeline_entry.last_used_frame,

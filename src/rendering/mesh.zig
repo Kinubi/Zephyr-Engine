@@ -92,10 +92,8 @@ pub const Mesh = struct {
             .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
             .{ .device_local_bit = true },
         );
-        // Copy from staging to device-local
-        try gc.copyBuffer(self.vertex_buffer.?.buffer, staging_buffer.buffer, buffer_size);
-
-        staging_buffer.deinit();
+        // Copy from staging to device-local (handles staging buffer lifetime)
+        try gc.copyFromStagingBuffer(self.vertex_buffer.?.buffer, &staging_buffer, buffer_size);
     }
 
     pub fn createIndexBuffers(self: *Mesh, gc: *GraphicsContext) !void {
@@ -125,10 +123,8 @@ pub const Mesh = struct {
             .{ .storage_buffer_bit = true, .index_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
             .{ .device_local_bit = true },
         );
-        // Copy from staging to device-local
-        try gc.copyBuffer(self.index_buffer.?.buffer, staging_buffer.buffer, buffer_size);
-
-        staging_buffer.deinit();
+        // Copy from staging to device-local (handles staging buffer lifetime)
+        try gc.copyFromStagingBuffer(self.index_buffer.?.buffer, &staging_buffer, buffer_size);
     }
 
     pub fn deinit(self: *Mesh, allocator: std.mem.Allocator) void {
@@ -155,7 +151,6 @@ pub const Mesh = struct {
 
     pub fn loadFromObj(self: *Mesh, allocator: std.mem.Allocator, data: []const u8) !void {
         const model = try Obj.parseObj(allocator, data);
-        std.debug.print("Loading model with {any} meshes and {any} distinct vertices and {any} indices\n", .{ model.meshes.len, model.vertices.len / 3, model.meshes[0].indices.len });
         try self.vertices.ensureTotalCapacity(allocator, model.vertices.len);
         try self.indices.ensureTotalCapacity(allocator, model.meshes[0].indices.len);
 
@@ -471,7 +466,7 @@ pub const Model = struct {
 
     pub fn addTextures(self: *Model, textures: []const *Texture) void {
         if (self.meshes.items.len != textures.len) {
-            std.debug.print("Error: Model has {any} meshes, but {any} textures were provided.\n", .{ self.meshes.items.len, textures.len });
+            log(.ERROR, "Error: Model has {any} meshes, but {any} textures were provided.", .{ self.meshes.items.len, textures.len });
             return;
         }
         for (self.meshes.items, 0..) |model_mesh, i| {
@@ -483,14 +478,7 @@ pub const Model = struct {
 
     // Debug print to dump vertex colors for all meshes in the model
     pub fn dumpVertexColors(self: Model) void {
-        std.debug.print("[Model] Dumping vertex colors for all meshes in model:\n", .{});
-        for (self.meshes.items, 0..) |model_mesh, mesh_idx| {
-            const mesh = model_mesh.geometry.mesh;
-            std.debug.print("  Mesh {d}:\n", .{mesh_idx});
-            for (mesh.vertices.items, 0..) |v, i| {
-                std.debug.print("    Vertex {d}: color = ({any}, {any}, {any})\n", .{ i, v.color[0], v.color[1], v.color[2] });
-            }
-        }
+        _ = self;
     }
 };
 

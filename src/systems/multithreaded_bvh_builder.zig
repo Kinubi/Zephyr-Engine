@@ -308,7 +308,7 @@ pub const MultithreadedBvhBuilder = struct {
                 bvhWorkerFunction,
                 self,
             );
-
+            _ = self.thread_pool.requestWorkers(.gpu_work, 2);
             try self.thread_pool.submitWork(work_item);
             log(.DEBUG, "bvh_builder", "Queued BLAS build work {} for geometry {}", .{ work_id, geom_idx });
         }
@@ -387,7 +387,6 @@ pub const MultithreadedBvhBuilder = struct {
         defer self.blas_mutex.unlock();
 
         const results = try allocator.alloc(BlasResult, self.completed_blas.items.len);
-        log(.DEBUG, "bvh_builder", "Retrieving {} completed BLAS results", .{self.completed_blas.items.len});
         @memcpy(results, self.completed_blas.items);
         return results;
     }
@@ -478,6 +477,7 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
         },
         .tlas => {
             const work_data = @as(*BvhWorkData, @ptrCast(@alignCast(work_item.data.bvh_building.work_data)));
+
             defer {
                 // Free the heap-allocated instances copy
                 if (work_data.instance_data) |instances| {
@@ -609,14 +609,13 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
     const blas = try builder.gc.vkd.createAccelerationStructureKHR(builder.gc.dev, &as_create_info, null);
 
     // Create scratch buffer
-    var scratch_buffer = try Buffer.init(
+    const scratch_buffer = try Buffer.init(
         builder.gc,
         size_info.build_scratch_size,
         1,
         .{ .storage_buffer_bit = true, .shader_device_address_bit = true },
         .{ .device_local_bit = true },
     );
-    defer scratch_buffer.deinit();
 
     // Get scratch buffer device address
     var scratch_address_info = vk.BufferDeviceAddressInfo{
@@ -629,14 +628,14 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
     build_info.scratch_data.device_address = scratch_device_address;
     build_info.dst_acceleration_structure = blas;
 
-    // Record and execute build command (with queue synchronization)
-    builder.queue_mutex.lock();
-    defer builder.queue_mutex.unlock();
-
-    var threaded_command_pool = try builder.gc.beginSingleTimeCommands();
+    // Use secondary command buffer approach for worker threads
+    var secondary_cmd = try builder.gc.beginWorkerCommandBuffer();
     const p_range_info = &range_info;
-    builder.gc.vkd.cmdBuildAccelerationStructuresKHR(threaded_command_pool.commandBuffer, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
-    try builder.gc.endSingleTimeCommands(&threaded_command_pool);
+    builder.gc.vkd.cmdBuildAccelerationStructuresKHR(secondary_cmd.command_buffer, 1, @ptrCast(&build_info), @ptrCast(&p_range_info));
+
+    // Add scratch buffer to pending resources for cleanup after command execution
+    try secondary_cmd.addPendingResource(scratch_buffer.buffer, scratch_buffer.memory);
+    try builder.gc.endWorkerCommandBuffer(&secondary_cmd);
 
     // Get BLAS device address
     var blas_address_info = vk.AccelerationStructureDeviceAddressInfoKHR{
@@ -767,14 +766,13 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
     const tlas = try builder.gc.vkd.createAccelerationStructureKHR(builder.gc.dev, &tlas_create_info, null);
 
     // Create scratch buffer
-    var tlas_scratch_buffer = try Buffer.init(
+    const tlas_scratch_buffer = try Buffer.init(
         builder.gc,
         tlas_size_info.build_scratch_size,
         1,
         .{ .storage_buffer_bit = true, .shader_device_address_bit = true },
         .{ .device_local_bit = true },
     );
-    defer tlas_scratch_buffer.deinit();
 
     // Get scratch buffer device address
     var scratch_address_info = vk.BufferDeviceAddressInfo{
@@ -787,14 +785,14 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
     tlas_build_info.scratch_data.device_address = scratch_device_address;
     tlas_build_info.dst_acceleration_structure = tlas;
 
-    // Record and execute build command (with queue synchronization)
-    builder.queue_mutex.lock();
-    defer builder.queue_mutex.unlock();
-
-    var threaded_command_pool = try builder.gc.beginSingleTimeCommands();
+    // Use secondary command buffer approach for worker threads
+    var secondary_cmd = try builder.gc.beginWorkerCommandBuffer();
     const p_tlas_range_info = &tlas_range_info;
-    builder.gc.vkd.cmdBuildAccelerationStructuresKHR(threaded_command_pool.commandBuffer, 1, @ptrCast(&tlas_build_info), @ptrCast(&p_tlas_range_info));
-    try builder.gc.endSingleTimeCommands(&threaded_command_pool);
+    builder.gc.vkd.cmdBuildAccelerationStructuresKHR(secondary_cmd.command_buffer, 1, @ptrCast(&tlas_build_info), @ptrCast(&p_tlas_range_info));
+
+    // Add scratch buffer to pending resources for cleanup after command execution
+    try secondary_cmd.addPendingResource(tlas_scratch_buffer.buffer, tlas_scratch_buffer.memory);
+    try builder.gc.endWorkerCommandBuffer(&secondary_cmd);
 
     // Get TLAS device address
     var tlas_address_info = vk.AccelerationStructureDeviceAddressInfoKHR{

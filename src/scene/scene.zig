@@ -20,6 +20,9 @@ const AssetId = @import("../assets/asset_manager.zig").AssetId;
 const AssetType = @import("../assets/asset_manager.zig").AssetType;
 const LoadPriority = @import("../assets/asset_manager.zig").LoadPriority;
 
+const RaytracingData = @import("../rendering/scene_bridge.zig").RaytracingData;
+const RasterizationData = @import("../rendering/scene_bridge.zig").RasterizationData;
+const ComputeData = @import("../rendering/scene_bridge.zig").ComputeData;
 /// Global mutex for texture loading to prevent zstbi init conflicts
 var texture_loading_mutex = std.Thread.Mutex{};
 
@@ -164,14 +167,12 @@ pub const Scene = struct {
         // Check if texture descriptors need updating and queue async work
         if (self.asset_manager.texture_descriptors_dirty and !self.asset_manager.texture_descriptors_updating.load(.acquire)) {
             try self.asset_manager.queueTextureDescriptorUpdate();
-            log(.DEBUG, "enhanced_scene", "Queued texture descriptor update", .{});
             work_started = true;
         }
 
         // Check if materials need updating and queue async work
         if (self.asset_manager.materials_dirty and !self.asset_manager.material_buffer_updating.load(.acquire)) {
             try self.asset_manager.queueMaterialBufferUpdate();
-            log(.DEBUG, "enhanced_scene", "Queued material buffer update", .{});
             work_started = true;
         }
 
@@ -184,11 +185,6 @@ pub const Scene = struct {
         const material_work_completed = prev_mat_dirty and !curr_mat_dirty;
 
         const work_completed = texture_work_completed or material_work_completed;
-
-        // Add debug logging to understand what's happening
-        if (work_completed) {
-            log(.DEBUG, "enhanced_scene", "Work completed: tex_completed={}, mat_completed={}, prev_tex_dirty={}, curr_tex_dirty={}, prev_mat_dirty={}, curr_mat_dirty={}", .{ texture_work_completed, material_work_completed, prev_tex_dirty, curr_tex_dirty, prev_mat_dirty, curr_mat_dirty });
-        }
 
         return work_started or (self.asset_manager.material_buffer_updating.load(.acquire) or self.asset_manager.texture_descriptors_updating.load(.acquire) == false and work_completed);
     }
@@ -250,7 +246,6 @@ pub const Scene = struct {
     /// Register raytracing system for texture updates
     pub fn setRaytracingSystem(self: *Self, rt_system: *@import("../systems/raytracing_system.zig").RaytracingSystem) void {
         self.raytracing_system = rt_system;
-        log(.DEBUG, "enhanced_scene", "Raytracing system registered for texture updates", .{});
     }
 
     /// Enable hot reloading (API compatibility)
@@ -294,9 +289,8 @@ pub const Scene = struct {
         return self.scene_bridge.?.createSceneView();
     }
 
-    fn getRasterizationDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RasterizationData {
+    fn getRasterizationDataImpl(scene_ptr: *anyopaque) RasterizationData {
         const self: *Self = @ptrCast(@alignCast(scene_ptr));
-        const RasterizationData = @import("../rendering/scene_view.zig").RasterizationData;
         const allocator = std.heap.c_allocator;
 
         // Allocate arrays on the heap
@@ -358,7 +352,7 @@ pub const Scene = struct {
 
     fn getRaytracingDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RaytracingData {
         const self: *Self = @ptrCast(@alignCast(scene_ptr));
-        const RaytracingData = @import("../rendering/scene_view.zig").RaytracingData;
+
         const allocator = std.heap.c_allocator;
 
         // Count objects with models for raytracing
@@ -448,13 +442,13 @@ pub const Scene = struct {
         };
     }
 
-    fn getComputeDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").ComputeData {
+    fn getComputeDataImpl(scene_ptr: *anyopaque) ComputeData {
         const self: *Self = @ptrCast(@alignCast(scene_ptr));
         _ = self;
         // TODO: Implement compute data extraction
-        return @import("../rendering/scene_view.zig").ComputeData{
-            .particle_systems = &[_]@import("../rendering/scene_view.zig").ComputeData.ParticleSystem{},
-            .compute_tasks = &[_]@import("../rendering/scene_view.zig").ComputeData.ComputeTask{},
+        return ComputeData{
+            .particle_systems = &[_]ComputeData.ParticleSystem{},
+            .compute_tasks = &[_]ComputeData.ComputeTask{},
         };
     }
 

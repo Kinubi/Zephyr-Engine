@@ -4,6 +4,7 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Allocator = std.mem.Allocator;
 const glfw = @import("glfw");
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const log = @import("../utils/log.zig").log;
 
 pub const MAX_FRAMES_IN_FLIGHT = 3;
 
@@ -169,7 +170,6 @@ pub const Swapchain = struct {
         const allocator = self.allocator;
         const old_handle = self.handle;
         self.deinitExceptSwapchain();
-        std.debug.print("Extent: {d} {d}\n", .{ new_extent.width, new_extent.height });
         const old_acquire = self.image_acquired;
         const old_finished = self.render_finished;
         const old_fence = self.frame_fence;
@@ -215,7 +215,7 @@ pub const Swapchain = struct {
         // Step 2: Submit the command buffer
         if (self.compute) {
             const wait_stage = [_]vk.PipelineStageFlags{ .{ .color_attachment_output_bit = true }, .{ .compute_shader_bit = true } };
-            try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
+            try self.gc.submitToGraphicsQueue(1, &[_]vk.SubmitInfo{.{
                 .wait_semaphore_count = 2,
                 .p_wait_semaphores = &.{ self.image_acquired[current_frame], self.compute_finished[current_frame] },
                 .p_wait_dst_stage_mask = &wait_stage,
@@ -228,7 +228,7 @@ pub const Swapchain = struct {
             const wait_stage = [_]vk.PipelineStageFlags{
                 .{ .color_attachment_output_bit = true },
             };
-            try self.gc.vkd.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
+            try self.gc.submitToGraphicsQueue(1, &[_]vk.SubmitInfo{.{
                 .wait_semaphore_count = 1,
                 .p_wait_semaphores = &.{self.image_acquired[current_frame]},
                 .p_wait_dst_stage_mask = &wait_stage,
@@ -240,7 +240,7 @@ pub const Swapchain = struct {
         }
 
         // Step 3: Present the current frame
-        const present_result = self.gc.vkd.queuePresentKHR(self.gc.present_queue.handle, &vk.PresentInfoKHR{
+        const present_result = self.gc.submitToPresentQueue(&vk.PresentInfoKHR{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = @ptrCast(&self.render_finished[self.image_index]),
             .swapchain_count = 1,
@@ -255,7 +255,7 @@ pub const Swapchain = struct {
         if (present_result == .error_out_of_date_khr or present_result == .suboptimal_khr) {
             self.extent = extent;
             self.recreate(extent) catch |err| {
-                std.debug.print("Error recreating swapchain: {any}\n", .{err});
+                log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
             };
             try self.createFramebuffers();
         } else if (present_result != .success) {
@@ -336,7 +336,6 @@ pub const Swapchain = struct {
     }
 
     pub fn createFramebuffers(self: *Swapchain) !void {
-        std.debug.print("Creating\n", .{});
         const framebuffers = try self.allocator.alloc(vk.Framebuffer, self.swap_images.len);
         errdefer self.allocator.free(framebuffers);
 
@@ -437,12 +436,15 @@ pub const Swapchain = struct {
     pub fn beginFrame(self: *Swapchain, frame_info: FrameInfo) !void {
         if (self.image_acquired[frame_info.current_frame] != .null_handle) {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), .true, std.math.maxInt(u64));
+
+            // Now that GPU has finished executing the previous frame, cleanup secondary command buffers
+            self.gc.cleanupSubmittedSecondaryBuffers();
         }
 
         if (frame_info.extent.width != self.extent.width or frame_info.extent.height != self.extent.height) {
             self.extent = frame_info.extent;
             self.recreate(self.extent) catch |err| {
-                std.debug.print("Error recreating swapchain: {any}\n", .{err});
+                log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
             };
             try self.createFramebuffers();
         }
@@ -455,7 +457,7 @@ pub const Swapchain = struct {
         if (result == .suboptimal) {
             self.extent = frame_info.extent;
             self.recreate(self.extent) catch |err| {
-                std.debug.print("Error recreating swapchain: {any}\n", .{err});
+                log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
             };
             try self.createFramebuffers();
         }
@@ -472,12 +474,12 @@ pub const Swapchain = struct {
     pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
         // Execute all pending secondary command buffers from worker threads
         try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
-        
+
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
-            std.debug.print("Error ending command buffer: {any}\n", .{err});
+            log(.ERROR, "swapchain", "Error ending command buffer: {any}", .{err});
         };
         self.present(frame_info.command_buffer, current_frame.*, frame_info.extent) catch |err| {
-            std.debug.print("Error presenting frame: {any}\n", .{err});
+            log(.ERROR, "swapchain", "Error presenting frame: {any}", .{err});
         };
 
         current_frame.* = (current_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -485,11 +487,11 @@ pub const Swapchain = struct {
 
     pub fn endComputePass(self: *Swapchain, frame_info: FrameInfo) !void {
         self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
-            std.debug.print("Error ending command buffer: {any}\n", .{err});
+            log(.ERROR, "swapchain", "Error ending command buffer: {any}", .{err});
         };
 
         self.submitCompute(frame_info.compute_buffer, frame_info.current_frame) catch |err| {
-            std.debug.print("Error submitting compute command buffer: {any}\n", .{err});
+            log(.ERROR, "swapchain", "Error submitting compute command buffer: {any}", .{err});
         };
     }
 
@@ -497,7 +499,7 @@ pub const Swapchain = struct {
         // Wait for and reset compute fence for this frame
         // Submit compute command buffer
         //const wait_stage = [_]vk.PipelineStageFlags{.{ .compute_shader_bit = true }};
-        try self.gc.vkd.queueSubmit(self.gc.compute_queue.handle, 1, &[_]vk.SubmitInfo{.{
+        try self.gc.submitToComputeQueue(1, &[_]vk.SubmitInfo{.{
             .wait_semaphore_count = 0,
             .p_wait_dst_stage_mask = null,
             .command_buffer_count = 1,
@@ -634,7 +636,6 @@ fn findPresentMode(gc: *const GraphicsContext, allocator: Allocator) !vk.Present
     const present_modes = try allocator.alloc(vk.PresentModeKHR, count);
     defer allocator.free(present_modes);
     _ = try gc.vki.getPhysicalDeviceSurfacePresentModesKHR(gc.pdev, gc.surface, &count, present_modes.ptr);
-    std.debug.print("The following modes are here: {any}\n", .{present_modes});
     const preferred = [_]vk.PresentModeKHR{ .immediate_khr, .mailbox_khr };
 
     for (preferred) |mode| {

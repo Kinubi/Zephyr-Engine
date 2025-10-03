@@ -192,7 +192,6 @@ pub const HotReloadManager = struct {
         };
 
         self.stats.files_watched.fetchAdd(1, .monotonic);
-        log(.DEBUG, "enhanced_hot_reload", "Registered asset {} for hot reload: {s}", .{ asset_id, file_path });
     }
 
     /// Add callback for reload notifications
@@ -203,7 +202,6 @@ pub const HotReloadManager = struct {
     /// Set debounce time for file change detection
     pub fn setDebounceTime(self: *Self, ms: u64) void {
         self.debounce_ms = ms;
-        log(.DEBUG, "enhanced_hot_reload", "Debounce time set to {}ms", .{ms});
     }
 
     /// Process file change event (called by file watcher)
@@ -271,7 +269,6 @@ pub const HotReloadManager = struct {
         };
 
         _ = self.stats.reload_events.fetchAdd(1, .monotonic);
-        log(.DEBUG, "enhanced_hot_reload", "Queued reload for asset {} ({s}) with priority {}", .{ asset_id, file_path, priority });
     }
 
     /// Calculate reload priority based on asset type and usage

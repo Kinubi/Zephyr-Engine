@@ -97,7 +97,6 @@ pub const SceneBridge = struct {
             for (current_model_asset_ids.items, 0..) |current_id, i| {
                 if (current_id != self.last_model_asset_ids.items[i]) {
                     asset_ids_changed = true;
-                    log(.DEBUG, "scene_bridge", "Model asset ID changed at index {}: {d} -> {d}", .{ i, self.last_model_asset_ids.items[i], current_id });
                     break;
                 }
             }
@@ -126,14 +125,12 @@ pub const SceneBridge = struct {
             asset_ids_changed;
 
         if (needs_rebuild) {
-            log(.DEBUG, "scene_bridge", "🔄 BVH rebuild: forced={}, obj_count_changed={}->{}, geo_count_changed={}->{}, asset_ids_changed={}, current_ids={any}, last_ids={any}", .{ self.bvh_needs_rebuild, self.last_object_count, current_object_count, self.last_geometry_count, current_geometry_count, asset_ids_changed, current_model_asset_ids.items, self.last_model_asset_ids.items });
 
             // Only invalidate cache if it hasn't already been rebuilt this frame
             if (self.raytracing_cache != null) {
-                log(.DEBUG, "scene_bridge", "Invalidating existing raytracing cache due to BVH changes", .{});
                 self.invalidateGeometry();
             } else {
-                log(.DEBUG, "scene_bridge", "Cache already null, no need to invalidate", .{});
+                log(.INFO, "scene_bridge", "Cache already null, no need to invalidate", .{});
             }
         }
 
@@ -169,7 +166,6 @@ pub const SceneBridge = struct {
     fn getRaytracingData(self: *Self) RaytracingData {
         // Only rebuild raytracing cache if geometry actually changed, not just textures/materials
         if (self.raytracing_cache == null) {
-            log(.DEBUG, "scene_bridge", "Raytracing cache is null, rebuilding", .{});
             self.buildRaytracingCache() catch |err| {
                 log(.ERROR, "scene_bridge", "Failed to build raytracing cache: {}", .{err});
                 return RaytracingData{
@@ -273,7 +269,7 @@ pub const SceneBridge = struct {
                 if (self.scene.asset_manager.getLoadedModelConst(safe_asset_id)) |loaded_model| {
                     model_opt = loaded_model;
                 } else {
-                    log(.DEBUG, "scene_bridge", "Object {}: No loaded model found for safe_asset_id={}", .{ obj_idx, safe_asset_id });
+                    log(.INFO, "scene_bridge", "Object {}: No loaded model found for safe_asset_id={}", .{ obj_idx, safe_asset_id });
                 }
             }
 

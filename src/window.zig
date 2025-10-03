@@ -24,13 +24,10 @@ pub const Window = struct {
     }
 
     pub fn init(windowProps: WindowProps) !Window {
-        std.debug.print("Initializing GLFW...\n", .{});
         _ = c.glfwSetErrorCallback(errorCallback);
         if (c.glfwInit() != c.GLFW_TRUE) {
             return error.GlfwInitFailed;
         }
-
-        std.debug.print("GLFW initialized successfully.\n", .{});
 
         var monitor: ?*c.GLFWmonitor = null;
         var mode: ?*const c.GLFWvidmode = null;

@@ -124,7 +124,6 @@ pub const FallbackAssets = struct {
             .default => self.default_texture,
             .staged => self.loading_texture, // Reuse loading texture for staged
         };
-        std.log.debug("getAssetId({s}) = {?}", .{ @tagName(fallback_type), if (result) |id| id.toU64() else null });
         return result;
     }
 
@@ -718,8 +717,6 @@ pub const AssetManager = struct {
             // Get the texture index from the resolved asset ID
             const texture_index = self.asset_to_texture.get(resolved_texture_id) orelse 0;
             material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
-
-            log(.DEBUG, "asset_manager", "Material {}: resolved texture {} -> {} (index: {})", .{ i, texture_asset_id.toU64(), resolved_texture_id.toU64(), texture_index });
         }
 
         self.material_buffer.?.writeToBuffer(
@@ -753,7 +750,6 @@ pub const AssetManager = struct {
             std.log.info("buildTextureDescriptorArray: Placed texture at descriptor index {}", .{i});
         }
 
-        log(.DEBUG, "asset_manager", "Built texture descriptor array: {} textures", .{self.loaded_textures.items.len});
         return infos;
     }
 

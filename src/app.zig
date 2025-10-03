@@ -151,7 +151,7 @@ pub const App = struct {
 
         std.debug.print("Updating frame {s}\n", .{"ehho"});
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
-        std.log.debug("Using device: {s}", .{self.gc.deviceName()});
+        log(.DEBUG, "app", "Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
         std.debug.print("Updating frame {s}\n", .{"ehho"});
         try swapchain.createRenderPass();
@@ -504,7 +504,7 @@ pub const App = struct {
             // Create title with FPS - use a stack buffer for the string
             var title_buffer: [256:0]u8 = undefined;
             const title_slice = std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine - FPS: {d:.1}", .{self.current_fps}) catch |err| blk: {
-                std.log.warn("Failed to format title: {}", .{err});
+                log(.WARN, "app", "Failed to format title: {}", .{err});
                 break :blk std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine", .{}) catch "ZulkanZengine";
             };
 

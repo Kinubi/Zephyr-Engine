@@ -4,6 +4,7 @@ const GC = @import("graphics_context.zig").GraphicsContext;
 const Vertex = @import("../rendering/mesh.zig").Vertex;
 const ShaderLibrary = @import("shader.zig").ShaderLibrary;
 const Particle = @import("../renderers/renderer.zig").Particle;
+const log = @import("../utils/log.zig").log;
 
 pub const Pipeline = struct {
     gc: GC,
@@ -275,7 +276,7 @@ pub const Pipeline = struct {
     ) !Pipeline {
         // Safety check for shader library
         if (shader_library.shaders.items.len == 0) {
-            std.log.err("Pipeline.initRaytracing: Invalid shader library - len={}", .{shader_library.shaders.items.len});
+            log(.ERROR, "pipeline", "Pipeline.initRaytracing: Invalid shader library - len={}", .{shader_library.shaders.items.len});
             return error.InvalidShaderLibrary;
         }
 

@@ -330,7 +330,6 @@ pub const AssetLoader = struct {
         }
 
         // Note: Reduced logging to avoid thread safety issues with debug output
-        // log(.DEBUG, "enhanced_asset_loader", "Processing texture staging for asset {} ({s})", .{ staging.asset_id.toU64(), staging.path });
 
         // Create Vulkan texture from image data (heap-allocated)
         const texture = try self.allocator.create(Texture);
@@ -347,8 +346,6 @@ pub const AssetLoader = struct {
         self.registry.markAsLoaded(staging.asset_id, staging.image_data.len);
         self.asset_manager.texture_descriptors_dirty = true;
         self.asset_manager.materials_dirty = true;
-
-        log(.DEBUG, "enhanced_asset_loader", "Marked texture and materials as dirty due to new texture: path: {s}, asset_id: {}", .{ staging.path, staging.asset_id.toU64() });
 
         // Mark asset as loaded
 
@@ -369,7 +366,6 @@ pub const AssetLoader = struct {
         }
 
         // Note: Reduced logging to avoid thread safety issues with debug output
-        // log(.DEBUG, "enhanced_asset_loader", "Processing mesh staging for asset {} ({s})", .{ staging.asset_id.toU64(), staging.path });
 
         // Parse OBJ data and create Model
         const model = try Model.create(
@@ -509,7 +505,6 @@ fn assetLoadingWorker(context: *anyopaque, work_item: WorkItem) void {
     const start_time = std.time.microTimestamp();
 
     // Note: Reduced logging to avoid thread safety issues
-    // log(.DEBUG, "enhanced_asset_loader", "Worker processing asset {} (priority: {s}, work_id: {})", .{ asset_data.asset_id.toU64(), @tagName(work_item.priority), work_item.id });
 
     // Asset is already marked as loading atomically in requestLoad, so we can proceed directly
     loader.performAsyncLoad(asset_data.asset_id, start_time) catch |err| {

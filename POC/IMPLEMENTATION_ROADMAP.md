@@ -328,15 +328,24 @@ pub const DescriptorWriter = struct {
 - ✅ **BVH Integration**: Converted raytracing BLAS/TLAS building to use secondary command buffers
 - ✅ **Swapchain Integration**: Modified frame end to execute collected secondary command buffers
 
-**Current Issue - Resource Lifetime Management**: ⚠️ **BLOCKING**
+**Current Status - Secondary Command Buffer Implementation**: 🔄 **MAKING PROGRESS**
+
+**✅ FIXED: Staging Buffer Lifetime Issue**:
+- **Problem**: `vkCmdExecuteCommands(): pCommandBuffers[0] was called in VkCommandBuffer which is invalid because the bound VkBuffer was destroyed`
+- **Solution**: Implemented `copyFromStagingBuffer()` function with proper resource lifetime management for worker threads
+- **Result**: No more staging buffer validation errors - vertex/index buffer creation now works correctly with secondary command buffers
+
+**⚠️ NEW ISSUE: Device Lost Errors**: 
 ```
-vkCmdExecuteCommands(): pCommandBuffers[0] was called in VkCommandBuffer 0x7f71c0003820 
-which is invalid because the bound VkBuffer 0x460000000046 was destroyed.
+[ERROR] [bvh_builder] BLAS build failed: error.DeviceLost
+vkCmdBindPipeline(): was called before vkBeginCommandBuffer()
 ```
 
-**Root Cause**: Secondary command buffers are collected and executed at frame end, but staging buffers referenced in the commands are destroyed immediately after recording.
+**Root Cause**: Secondary command buffer execution or state management issues causing device to become unavailable.
 
-**Technical Challenge**: Need to extend buffer lifetime management to ensure resources persist until secondary command buffer execution completes.
+**Progress**: ✅ Staging buffer resource management fixed, ✅ Application starts and loads assets successfully, ❌ Device becomes lost during BVH building phase.
+
+**Technical Challenge**: Debug secondary command buffer execution and command buffer state management to prevent device loss.
 
 **Files Modified**:
 - `src/core/graphics_context.zig` - Secondary command buffer architecture

@@ -169,7 +169,6 @@ pub const RaytracingRenderer = struct {
     pub fn updateTLAS(self: *RaytracingRenderer, tlas: vk.AccelerationStructureKHR) void {
         self.tlas = tlas;
         self.tlas_valid = (tlas != vk.AccelerationStructureKHR.null_handle);
-        log(.DEBUG, "raytracing_renderer", "TLAS updated: valid={}", .{self.tlas_valid});
     }
 
     /// Update descriptors with current frame data
@@ -267,7 +266,6 @@ pub const RaytracingRenderer = struct {
         // Only resize if actually needed
         if (tlas_dirty or material_buffer_dirty) {
             if (needs_resize) {
-                log(.INFO, "raytracing_renderer", "Resizing raytracing descriptors: vertex_buffers={}, index_buffers={}, textures={}", .{ new_vertex_count, new_index_count, new_texture_count });
                 try self.resizeDescriptors(new_vertex_count, new_index_count, new_texture_count);
             }
             // After resizing, we need to update all descriptors
@@ -402,8 +400,6 @@ pub const RaytracingRenderer = struct {
             return error.EmptyShaderLibrary;
         }
 
-        log(.DEBUG, "raytracing_renderer", "Recreating pipeline with {} shaders", .{self.shader_library.shaders.items.len});
-
         // Add safety check for shader library validity
         if (self.shader_library.shaders.items.len == 0) {
             log(.ERROR, "raytracing_renderer", "Shader library corrupted: len={}", .{self.shader_library.shaders.items.len});
@@ -460,8 +456,6 @@ pub const RaytracingRenderer = struct {
 
         self.width = swapchain.extent.width;
         self.height = swapchain.extent.height;
-
-        log(.INFO, "raytracing_renderer", "Output texture resized to {}x{}", .{ self.width, self.height });
     }
 
     /// Record raytracing commands for a frame

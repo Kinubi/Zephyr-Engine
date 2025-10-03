@@ -236,14 +236,12 @@ pub const RenderPassDescriptorManager = struct {
 
                 switch (binding.resource) {
                     .buffer => |buffer_info| {
-                        log(.DEBUG, "render_pass_descriptor", "Updating descriptor set {} binding {} with buffer\n {X}", .{ set_index, binding.binding, buffer_info.buffer });
                         _ = writer.writeBuffer(binding.binding, @constCast(&buffer_info));
                     },
                     .image => |image_info| {
                         _ = writer.writeImage(binding.binding, @constCast(&image_info));
                     },
                     .buffer_array => |buffer_infos| {
-                        log(.DEBUG, "render_pass_descriptor", "Updating descriptor set {} binding {} with {} buffers\n", .{ set_index, binding.binding, buffer_infos.len });
                         _ = writer.writeBuffers(binding.binding, buffer_infos);
                     },
                     .image_array => |image_infos| {
@@ -688,7 +686,6 @@ pub const RayTracingRenderPassDescriptors = struct {
 
         // If no configs exist yet, we need to resize to create initial config
         if (self.configs.len == 0) {
-            log(.DEBUG, "raytracing_descriptors", "No configs exist, needs resize", .{});
             return true;
         }
 
@@ -697,7 +694,6 @@ pub const RayTracingRenderPassDescriptors = struct {
             if (config.set_index == 0) {
                 // Check if bindings is valid before accessing
                 if (config.bindings.len == 0) {
-                    log(.DEBUG, "raytracing_descriptors", "Config has no bindings, needs resize", .{});
                     return true;
                 }
                 for (config.bindings) |binding| {

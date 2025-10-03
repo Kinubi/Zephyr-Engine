@@ -37,7 +37,6 @@ fn gpuWorkerThread(ctx: *GpuWorkerContext) void {
     const loader = ctx.loader;
     const asset_manager = ctx.asset_manager;
 
-    log(.DEBUG, "gpu_worker", "GPU worker started, asset_manager ptr: {*}", .{asset_manager});
     std.log.info("GPU Worker Thread: Starting up and ready to process staging queue", .{});
 
     while (loader.gpu_running.load(.acquire)) {
@@ -366,13 +365,11 @@ pub const AssetLoader = struct {
 
     /// Process a mesh staging entry that was popped by the GPU worker
     pub fn processCompletedMeshFromStaging(self: *Self, staging: MeshStaging) !*Model {
-        log(.DEBUG, "asset_loader", "Processing mesh staging for asset {d}", .{staging.asset_id.toU64()});
         // Create model directly on heap to avoid ownership transfer issues
         const model_ptr = Model.create(self.allocator, self.graphics_context, staging.obj_data, staging.path) catch |err| {
             log(.ERROR, "asset_loader", "Failed to create Model from OBJ on GPU worker for asset {d}: {}", .{ staging.asset_id.toU64(), err });
             return err;
         };
-        log(.DEBUG, "asset_loader", "Created Model from OBJ for asset {d}", .{staging.asset_id.toU64()});
         return model_ptr;
     }
 
@@ -402,12 +399,10 @@ pub const AssetLoader = struct {
         switch (asset.state) {
             .loaded => return,
             .loading => {
-                log(.DEBUG, "asset_loader", "Asset {d} is already loading, skipping duplicate request", .{asset_id.toU64()});
                 return;
             },
             .unloaded, .failed => {},
             .staged => {
-                log(.DEBUG, "asset_loader", "Asset {d} is already staged, waiting for main-thread processing", .{asset_id.toU64()});
                 return;
             }, // Already staged, waiting for main-thread processing
         }
@@ -564,7 +559,6 @@ pub const AssetLoader = struct {
 
     /// Load a mesh asset from disk (worker thread): only loads file data, does not create GPU resources
     fn loadMeshFromDisk(self: *Self, asset: *const asset_types.AssetMetadata, completed_queue: *CompletedLoadQueue) !u64 {
-        log(.DEBUG, "asset_loader", "[Worker] Loading mesh file data: {s}", .{asset.path});
         // Load OBJ file contents into memory (max 10MB)
         const obj_data = loadFileAlloc(self.allocator, asset.path, 10 * 1024 * 1024) catch |err| {
             log(.ERROR, "asset_loader", "Failed to load mesh file {s}: {}", .{ asset.path, err });
@@ -584,7 +578,6 @@ pub const AssetLoader = struct {
     /// Load a texture asset from disk (worker thread): only loads file data, does not create GPU resources
     fn loadTextureFromDisk(self: *Self, asset: *const asset_types.AssetMetadata, completed_queue: *CompletedLoadQueue) !u64 {
         std.log.warn("loadTextureFromDisk: Starting load for asset {} path '{s}'", .{ asset.id.toU64(), asset.path });
-        log(.DEBUG, "asset_loader", "[Worker] Loading texture from file: {s}", .{asset.path});
         // Load the texture directly using Texture.initFromFile
         const img_data = loadFileAlloc(self.allocator, asset.path, 10 * 1024 * 1024) catch |err| {
             std.log.err("loadTextureFromDisk: FAILED to load texture file '{s}' for asset {}: {}", .{ asset.path, asset.id.toU64(), err });

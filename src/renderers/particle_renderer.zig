@@ -160,14 +160,13 @@ pub const ParticleRenderer = struct {
         return self;
     }
     pub fn deinit(self: *ParticleRenderer) void {
-        log(.DEBUG, "particle_renderer", "Deinitializing ParticleRenderer: raster_pipeline handle={x}, compute_pipeline handle={x}", .{ self.raster_pipeline.pipeline, self.compute_pipeline.pipeline });
         self.raster_pipeline.deinit();
         self.compute_pipeline.deinit();
         self.particle_buffer_in.deinit();
         self.particle_buffer_out.deinit();
         var descriptor_sets = [_]vk.DescriptorSet{self.descriptor_set};
         deinitDescriptorResources(self.descriptor_pool, self.descriptor_set_layout, descriptor_sets[0..], self.allocator) catch |err| {
-            std.debug.print("Failed to deinit descriptor resources: {}\n", .{err});
+            log(.ERROR, "particle_renderer", "Failed to deinit descriptor resources: {any}", .{err});
         };
     }
     pub fn render(self: *ParticleRenderer, frame_info: FrameInfo) !void {
@@ -178,7 +177,7 @@ pub const ParticleRenderer = struct {
     }
     pub fn dispatch(self: *ParticleRenderer) void {
         self.gc.copyBuffer(self.particle_buffer_in.buffer, self.particle_buffer_out.buffer, @sizeOf(Particle) * self.num_particles) catch |err| {
-            std.debug.print("Failed to copy particle buffers: {}\n", .{err});
+            log(.ERROR, "particle_renderer", "Failed to copy particle buffers: {any}", .{err});
             return;
         };
     }
