@@ -1,6 +1,8 @@
 const std = @import("std");
 const ShaderCompiler = @import("shader_compiler.zig").ShaderCompiler;
-const AssetManager = @import("asset_manager.zig");
+const CompiledShader = @import("shader_compiler.zig").CompiledShader;
+const CompilationOptions = @import("shader_compiler.zig").CompilationOptions;
+const AssetManager = @import("asset_manager.zig").AssetManager;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 
 // Real-time multithreaded shader hot reload system
@@ -14,8 +16,8 @@ pub const ShaderWatcher = struct {
 
     // File watching and hot reload state
     watch_directories: std.ArrayList([]const u8),
-    watched_shaders: std.HashMap([]const u8, ShaderFileInfo),
-    compilation_queue: std.fifo.LinearFifo(CompilationJob, .Dynamic),
+    watched_shaders: std.HashMap([]const u8, ShaderFileInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    compilation_queue: std.ArrayList(CompilationJob),
     compilation_mutex: std.Thread.Mutex,
 
     // Hot reload callbacks
@@ -29,31 +31,38 @@ pub const ShaderWatcher = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool, asset_manager: *AssetManager) !Self {
-        return Self{
+        var watcher = Self{
             .allocator = allocator,
             .thread_pool = thread_pool,
             .shader_compiler = try ShaderCompiler.init(allocator),
             .asset_manager = asset_manager,
-            .watch_directories = std.ArrayList([]const u8).init(allocator),
-            .watched_shaders = std.HashMap([]const u8, ShaderFileInfo).init(allocator),
-            .compilation_queue = std.fifo.LinearFifo(CompilationJob, .Dynamic).init(allocator),
+            .watch_directories = undefined,
+            .watched_shaders = std.HashMap([]const u8, ShaderFileInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .compilation_queue = undefined,
             .compilation_mutex = std.Thread.Mutex{},
-            .shader_reloaded_callbacks = std.ArrayList(ShaderReloadCallback).init(allocator),
+            .shader_reloaded_callbacks = undefined,
             .watcher_thread = null,
-            .compiler_threads = std.ArrayList(std.Thread).init(allocator),
+            .compiler_threads = undefined,
             .should_stop = std.atomic.Value(bool).init(false),
         };
+
+        watcher.watch_directories = std.ArrayList([]const u8){};
+        watcher.compilation_queue = std.ArrayList(CompilationJob){};
+        watcher.shader_reloaded_callbacks = std.ArrayList(ShaderReloadCallback){};
+        watcher.compiler_threads = std.ArrayList(std.Thread){};
+
+        return watcher;
     }
 
     pub fn deinit(self: *Self) void {
         self.stop();
 
         self.shader_compiler.deinit();
-        self.watch_directories.deinit();
+        self.watch_directories.deinit(self.allocator);
         self.watched_shaders.deinit();
-        self.compilation_queue.deinit();
-        self.shader_reloaded_callbacks.deinit();
-        self.compiler_threads.deinit();
+        self.compilation_queue.deinit(self.allocator);
+        self.shader_reloaded_callbacks.deinit(self.allocator);
+        self.compiler_threads.deinit(self.allocator);
     }
 
     pub fn start(self: *Self) !void {
@@ -68,7 +77,7 @@ pub const ShaderWatcher = struct {
         const num_compiler_threads = @min(4, std.Thread.getCpuCount() catch 4);
         for (0..num_compiler_threads) |i| {
             const thread = try std.Thread.spawn(.{}, compilerThreadFn, .{ self, i });
-            try self.compiler_threads.append(thread);
+            try self.compiler_threads.append(self.allocator, thread);
         }
 
         std.log.info("✓ Shader hot reload system started with {} compiler threads", .{num_compiler_threads});
@@ -96,7 +105,7 @@ pub const ShaderWatcher = struct {
 
     pub fn addWatchDirectory(self: *Self, directory: []const u8) !void {
         const dir_copy = try self.allocator.dupe(u8, directory);
-        try self.watch_directories.append(dir_copy);
+        try self.watch_directories.append(self.allocator, dir_copy);
 
         // Scan for existing shaders in the directory
         try self.scanDirectory(directory);
@@ -105,7 +114,7 @@ pub const ShaderWatcher = struct {
     }
 
     pub fn addShaderReloadCallback(self: *Self, callback: ShaderReloadCallback) !void {
-        try self.shader_reloaded_callbacks.append(callback);
+        try self.shader_reloaded_callbacks.append(self.allocator, callback);
     }
 
     fn scanDirectory(self: *Self, directory_path: []const u8) !void {
@@ -152,7 +161,7 @@ pub const ShaderWatcher = struct {
             };
 
             // Check every 100ms for file changes
-            std.time.sleep(100 * std.time.ns_per_ms);
+            std.Thread.sleep(100 * std.time.ns_per_ms);
         }
 
         std.log.debug("Shader watcher thread stopped", .{});
@@ -198,7 +207,7 @@ pub const ShaderWatcher = struct {
                 self.compilation_mutex.lock();
                 defer self.compilation_mutex.unlock();
 
-                try self.compilation_queue.writeItem(job);
+                try self.compilation_queue.append(self.allocator, job);
             }
         }
     }
@@ -211,7 +220,11 @@ pub const ShaderWatcher = struct {
                 self.compilation_mutex.lock();
                 defer self.compilation_mutex.unlock();
 
-                break :blk self.compilation_queue.readItem() catch null;
+                if (self.compilation_queue.items.len > 0) {
+                    break :blk self.compilation_queue.orderedRemove(0);
+                } else {
+                    break :blk null;
+                }
             };
 
             if (job) |compilation_job| {
@@ -220,7 +233,7 @@ pub const ShaderWatcher = struct {
                 };
             } else {
                 // No jobs available, sleep briefly
-                std.time.sleep(10 * std.time.ns_per_ms);
+                std.Thread.sleep(10 * std.time.ns_per_ms);
             }
         }
 
@@ -233,7 +246,7 @@ pub const ShaderWatcher = struct {
         std.log.info("⚙️  [Thread {}] Compiling shader: {s}", .{ thread_id, job.file_path });
 
         // Compile shader with optimized settings for hot reload
-        const options = ShaderCompiler.CompilationOptions{
+        const options = CompilationOptions{
             .target = .vulkan,
             .optimization_level = .none, // Fast compilation for hot reload
             .debug_info = true, // Enable debug info for better error messages
@@ -256,8 +269,8 @@ pub const ShaderWatcher = struct {
 
         std.log.info("✅ [Thread {}] Shader compiled in {d:.2}ms: {s} ({} bytes)", .{ thread_id, compile_time_ms, job.file_path, compiled_shader.spirv_code.len });
 
-        // Update asset manager with new shader
-        try self.asset_manager.updateAsset(job.file_path, compiled_shader.asset_data);
+        // TODO: Update asset manager with new shader when asset integration is complete
+        // try self.asset_manager.updateAsset(job.file_path, compiled_shader.asset_data);
 
         // Notify all callbacks about the reload
         for (self.shader_reloaded_callbacks.items) |callback| {
@@ -305,7 +318,7 @@ pub const CompilationJob = struct {
 
 pub const ShaderReloadCallback = struct {
     context: ?*anyopaque = null,
-    onShaderReloaded: *const fn (file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) void,
+    onShaderReloaded: *const fn (file_path: []const u8, compiled_shader: CompiledShader) void,
 };
 
 // Performance metrics

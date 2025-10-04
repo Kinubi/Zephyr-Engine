@@ -34,6 +34,7 @@ const Material = @import("assets/asset_manager.zig").Material;
 // Asset system imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
+const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
 
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
@@ -120,6 +121,7 @@ pub const App = struct {
 
     var compute_shader_system: ComputeShaderSystem = undefined;
     var render_system: RenderSystem = undefined;
+    var shader_manager: ShaderManager = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -197,6 +199,12 @@ pub const App = struct {
 
         // Initialize Asset Manager on heap for stable pointer address
         asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
+
+        // Initialize Shader Manager for hot reload and compilation
+        shader_manager = try ShaderManager.init(self.allocator, asset_manager, thread_pool);
+        try shader_manager.addShaderDirectory("shaders");
+        try shader_manager.start();
+        log(.INFO, "app", "Shader hot reload system initialized", .{});
 
         // Initialize Scene with Asset Manager integration
         scene = Scene.init(&self.gc, self.allocator, asset_manager);
@@ -640,6 +648,7 @@ pub const App = struct {
 
         particle_renderer.deinit();
         scene.deinit();
+        shader_manager.deinit();
         asset_manager.deinit();
         swapchain.deinit();
         self.gc.deinit();

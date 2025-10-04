@@ -58,7 +58,7 @@ pub const AssetType = enum(u8) {
 pub const AssetState = enum(u8) {
     unloaded,
     loading,
-    staged,  // Loaded from disk but not yet processed for GPU/final form
+    staged, // Loaded from disk but not yet processed for GPU/final form
     loaded,
     failed,
 
@@ -198,6 +198,53 @@ pub const LoadResult = struct {
     success: bool,
     error_message: ?[]const u8 = null,
     load_time_ms: f32,
+};
+
+/// Placeholder asset types - will be properly defined later
+pub const TextureAsset = struct {
+    // Placeholder for texture data
+    data: []const u8,
+};
+
+pub const MeshAsset = struct {
+    // Placeholder for mesh data
+    data: []const u8,
+};
+
+pub const MaterialAsset = struct {
+    // Placeholder for material data
+    data: []const u8,
+};
+
+pub const ShaderAsset = struct {
+    // Placeholder for shader data
+    data: []const u8,
+};
+
+pub const AudioAsset = struct {
+    // Placeholder for audio data
+    data: []const u8,
+};
+
+pub const SceneAsset = struct {
+    // Placeholder for scene data
+    data: []const u8,
+};
+
+pub const AnimationAsset = struct {
+    // Placeholder for animation data
+    data: []const u8,
+};
+
+/// Union of all possible asset data types
+pub const AssetData = union(AssetType) {
+    texture: TextureAsset,
+    mesh: MeshAsset,
+    material: MaterialAsset,
+    shader: ShaderAsset,
+    audio: AudioAsset,
+    scene: SceneAsset,
+    animation: AnimationAsset,
 };
 
 test "AssetId generation and validation" {

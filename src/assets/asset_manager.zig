@@ -196,8 +196,8 @@ pub const AssetManager = struct {
     asset_to_model: std.AutoHashMap(AssetId, usize), // AssetId -> model array index
     asset_to_material: std.AutoHashMap(AssetId, usize), // AssetId -> material array index
 
-    // Enhanced hot reloading
-    hot_reload_manager: ?hot_reload_manager.HotReloadManager = null,
+    // Enhanced hot reloading (heap allocated to avoid move/copy issues)
+    hot_reload_manager: ?*hot_reload_manager.HotReloadManager = null,
 
     // Priority-based request tracking
     pending_requests: std.AutoHashMap(AssetId, LoadRequest),
@@ -309,6 +309,13 @@ pub const AssetManager = struct {
         // Register the asset first
         const asset_id = try self.registry.registerAsset(path, .texture);
 
+        // Register with hot reload manager if available
+        if (self.hot_reload_manager) |hot_reload| {
+            hot_reload.registerAsset(asset_id, path, .texture) catch |err| {
+                log(.WARN, "asset_manager", "Failed to register texture for hot reload: {s} ({})", .{ path, err });
+            };
+        }
+
         // Load texture directly using the graphics context
         const texture = try self.allocator.create(Texture);
         texture.* = try Texture.initFromFile(self.loader.graphics_context, self.allocator, path, .rgba8);
@@ -324,8 +331,9 @@ pub const AssetManager = struct {
     /// Clean up resources
     pub fn deinit(self: *Self) void {
         // Clean up hot reload manager first
-        if (self.hot_reload_manager) |*hrm| {
+        if (self.hot_reload_manager) |hrm| {
             hrm.deinit();
+            self.allocator.destroy(hrm);
         }
 
         // Clean up loader and registry
@@ -376,6 +384,13 @@ pub const AssetManager = struct {
     pub fn loadAssetAsync(self: *Self, file_path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
         // Register or get existing asset ID
         const asset_id = try self.registry.registerAsset(file_path, asset_type);
+
+        // Register with hot reload manager if available
+        if (self.hot_reload_manager) |hot_reload| {
+            hot_reload.registerAsset(asset_id, file_path, asset_type) catch |err| {
+                log(.WARN, "asset_manager", "Failed to register asset for hot reload: {s} ({})", .{ file_path, err });
+            };
+        }
 
         // Check if already loaded
         if (self.registry.getAsset(asset_id)) |metadata| {
@@ -622,8 +637,20 @@ pub const AssetManager = struct {
 
     /// Initialize hot reloading
     pub fn initHotReload(self: *Self) !void {
-        self.hot_reload_manager = try hot_reload_manager.HotReloadManager.init(self.allocator, self);
+        const manager = try self.allocator.create(hot_reload_manager.HotReloadManager);
+        manager.* = try hot_reload_manager.HotReloadManager.init(self.allocator, self);
+        self.hot_reload_manager = manager;
         log(.INFO, "enhanced_asset_manager", "Hot reload manager initialized", .{});
+    }
+
+    /// Enable hot reloading (starts the directory watching)
+    pub fn enableHotReload(self: *Self) !void {
+        if (self.hot_reload_manager) |manager| {
+            try manager.start();
+            log(.INFO, "enhanced_asset_manager", "Hot reload system enabled and started", .{});
+        } else {
+            log(.WARN, "enhanced_asset_manager", "Cannot enable hot reload - manager not initialized", .{});
+        }
     }
 
     /// Update texture descriptor array (call when textures are loaded)
@@ -845,7 +872,7 @@ pub const AssetManager = struct {
         log(.INFO, "enhanced_asset_manager", "Cache hits: {d}, Cache misses: {d}", .{ stats.cache_hits, stats.cache_misses });
         log(.INFO, "enhanced_asset_manager", "Thread pool efficiency: {d:.1}%", .{(@as(f32, @floatFromInt(stats.completed_loads)) * 100.0) / @as(f32, @floatFromInt(stats.active_loads + stats.completed_loads))});
 
-        if (self.hot_reload_manager) |*hot_reload| {
+        if (self.hot_reload_manager) |hot_reload| {
             const reload_stats = hot_reload.getStatistics();
             log(.INFO, "enhanced_asset_manager", "Hot reload stats - batched: {d}, successful: {d}, failed: {d}", .{ reload_stats.batched_reloads, reload_stats.successful_reloads, reload_stats.failed_reloads });
         }

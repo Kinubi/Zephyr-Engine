@@ -1,7 +1,7 @@
 const std = @import("std");
 const ShaderCompiler = @import("shader_compiler.zig");
 const ShaderHotReload = @import("shader_hot_reload.zig");
-const AssetManager = @import("asset_manager.zig");
+const AssetManager = @import("asset_manager.zig").AssetManager;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 
 // High-level shader management system that coordinates compilation, hot reload,
@@ -17,8 +17,8 @@ pub const ShaderManager = struct {
     thread_pool: *ThreadPool,
 
     // Shader registry and caching
-    loaded_shaders: std.HashMap([]const u8, LoadedShader),
-    shader_dependencies: std.HashMap([]const u8, std.ArrayList([]const u8)), // shader -> dependent pipelines
+    loaded_shaders: std.HashMap([]const u8, LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    shader_dependencies: std.HashMap([]const u8, std.ArrayList([]const u8), std.hash_map.StringContext, std.hash_map.default_max_load_percentage), // shader -> dependent pipelines
 
     // Pipeline integration
     pipeline_reload_callbacks: std.ArrayList(PipelineReloadCallback),
@@ -32,9 +32,9 @@ pub const ShaderManager = struct {
             .hot_reload = try ShaderHotReload.ShaderWatcher.init(allocator, thread_pool, asset_manager),
             .asset_manager = asset_manager,
             .thread_pool = thread_pool,
-            .loaded_shaders = std.HashMap([]const u8, LoadedShader).init(allocator),
-            .shader_dependencies = std.HashMap([]const u8, std.ArrayList([]const u8)).init(allocator),
-            .pipeline_reload_callbacks = std.ArrayList(PipelineReloadCallback).init(allocator),
+            .loaded_shaders = std.HashMap([]const u8, LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .shader_dependencies = std.HashMap([]const u8, std.ArrayList([]const u8), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .pipeline_reload_callbacks = std.ArrayList(PipelineReloadCallback){},
         };
 
         // Register hot reload callback
@@ -61,12 +61,12 @@ pub const ShaderManager = struct {
         // Clean up dependencies
         var dep_iterator = self.shader_dependencies.iterator();
         while (dep_iterator.next()) |entry| {
-            entry.value_ptr.deinit();
+            entry.value_ptr.deinit(self.allocator);
             self.allocator.free(entry.key_ptr.*);
         }
         self.shader_dependencies.deinit();
 
-        self.pipeline_reload_callbacks.deinit();
+        self.pipeline_reload_callbacks.deinit(self.allocator);
     }
 
     pub fn start(self: *Self) !void {
@@ -130,10 +130,10 @@ pub const ShaderManager = struct {
         const pipeline_key = try self.allocator.dupe(u8, pipeline_id);
 
         if (self.shader_dependencies.getPtr(shader_key)) |deps| {
-            try deps.append(pipeline_key);
+            try deps.append(self.allocator, pipeline_key);
         } else {
-            var deps = std.ArrayList([]const u8).init(self.allocator);
-            try deps.append(pipeline_key);
+            var deps = std.ArrayList([]const u8){};
+            try deps.append(self.allocator, pipeline_key);
             try self.shader_dependencies.put(shader_key, deps);
         }
 

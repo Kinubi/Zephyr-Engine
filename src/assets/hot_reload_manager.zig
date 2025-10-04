@@ -38,9 +38,11 @@ pub const HotReloadManager = struct {
     // Path to AssetId mapping for quick lookups during file events
     path_to_asset: std.StringHashMap(AssetId),
     asset_to_type: std.AutoHashMap(AssetId, AssetType),
+    asset_map_mutex: std.Thread.Mutex = std.Thread.Mutex{}, // Protect HashMap access from multiple threads
 
     // Hot reload settings
     enabled: bool = true,
+    watcher_started: bool = false, // Track if FileWatcher has been started
     debounce_ms: u64 = 300, // Wait 300ms after last change before reloading
     max_retries: u32 = 3,
     batch_timeout_ms: u64 = 1000, // Maximum time to wait for batch completion
@@ -96,10 +98,16 @@ pub const HotReloadManager = struct {
         // Set up file watcher callback
         manager.file_watcher.setCallback(globalFileEventCallback);
 
+        // Set this instance as the global manager for file events
+        global_hot_reload_manager = &manager;
+
+        // DON'T start the file watcher immediately - start it lazily when first asset is registered
+        // This avoids race conditions during initialization
+
         // Start batch processing timer - DISABLED to fix crashes
         // manager.batch_timer = try std.Thread.spawn(.{}, batchProcessingWorker, .{&manager});
 
-        log(.INFO, "enhanced_hot_reload", "Enhanced hot reload manager initialized (hot reload disabled)", .{});
+        log(.INFO, "enhanced_hot_reload", "Enhanced hot reload manager initialized (hot reload {s})", .{if (manager.enabled) "enabled" else "disabled"});
         return manager;
     }
 
@@ -161,13 +169,57 @@ pub const HotReloadManager = struct {
         log(.INFO, "enhanced_hot_reload", "Enhanced hot reloading {s}", .{if (enabled) "enabled" else "disabled"});
     }
 
+    /// Start hot reloading system with directory watching
+    pub fn start(self: *Self) !void {
+        if (!self.enabled) {
+            log(.WARN, "enhanced_hot_reload", "Hot reloading is disabled, not starting", .{});
+            return;
+        }
+
+        // Start the file watcher
+        try self.file_watcher.start();
+        self.watcher_started = true;
+
+        // TEMPORARILY DISABLED directory watching to debug crashes
+        // self.watchDirectory("textures") catch |err| {
+        //     log(.WARN, "enhanced_hot_reload", "Could not watch textures directory: {}", .{err});
+        // };
+
+        // self.watchDirectory("shaders") catch |err| {
+        //     log(.WARN, "enhanced_hot_reload", "Could not watch shaders directory: {}", .{err});
+        // };
+
+        // self.watchDirectory("models") catch |err| {
+        //     log(.WARN, "enhanced_hot_reload", "Could not watch models directory: {}", .{err});
+        // };
+
+        log(.INFO, "enhanced_hot_reload", "Enhanced hot reload system started (directory watching temporarily disabled)", .{});
+    }
+
+    /// Watch a directory for file changes
+    pub fn watchDirectory(self: *Self, dir_path: []const u8) !void {
+        try self.file_watcher.addWatch(dir_path, true);
+        log(.INFO, "enhanced_hot_reload", "Watching directory for changes: {s}", .{dir_path});
+    }
+
     /// Register an asset for hot reloading when its file changes
     pub fn registerAsset(self: *Self, asset_id: AssetId, file_path: []const u8, asset_type: AssetType) !void {
+        // Start FileWatcher with directory watching on first asset registration
+        if (!self.watcher_started) {
+            self.start() catch |err| {
+                log(.ERROR, "enhanced_hot_reload", "Failed to start hot reload system: {}", .{err});
+                self.enabled = false;
+                return err;
+            };
+        }
+
         // Clone the path
         const owned_path = try self.allocator.dupe(u8, file_path);
         errdefer self.allocator.free(owned_path);
 
-        // Store mappings
+        // Store mappings (with mutex protection)
+        self.asset_map_mutex.lock();
+        defer self.asset_map_mutex.unlock();
         try self.path_to_asset.put(owned_path, asset_id);
         try self.asset_to_type.put(asset_id, asset_type);
 
@@ -180,18 +232,13 @@ pub const HotReloadManager = struct {
         const owned_metadata_path = try self.allocator.dupe(u8, file_path);
         try self.file_metadata.put(owned_metadata_path, metadata);
 
-        // Watch the file
-        const watch_result = if (std.fs.path.dirname(file_path)) |dir|
-            self.file_watcher.addWatch(dir, .{ .recursive = true, .kind = .directory })
-        else
-            self.file_watcher.addWatch(file_path, .{ .recursive = false, .kind = .file });
-
-        watch_result catch |err| {
-            log(.WARN, "enhanced_hot_reload", "Failed to watch {s}: {}", .{ file_path, err });
+        // Also watch the specific file (in addition to directory watching)
+        self.file_watcher.addWatch(file_path, false) catch |err| {
+            log(.WARN, "enhanced_hot_reload", "Failed to watch file {s}: {}", .{ file_path, err });
             return;
         };
 
-        self.stats.files_watched.fetchAdd(1, .monotonic);
+        _ = self.stats.files_watched.fetchAdd(1, .monotonic);
     }
 
     /// Add callback for reload notifications
@@ -208,20 +255,47 @@ pub const HotReloadManager = struct {
     pub fn onFileChanged(self: *Self, file_path: []const u8) void {
         if (!self.enabled) return;
 
-        const now = std.time.milliTimestamp();
-
-        // Check if this is a registered asset
-        if (self.path_to_asset.get(file_path)) |asset_id| {
-            const asset_type = self.asset_to_type.get(asset_id) orelse .texture;
-
-            // Check for actual file changes
-            if (self.hasFileChanged(file_path, asset_type)) {
-                self.queueReload(asset_id, file_path, asset_type, .file_changed, now);
-            }
-        } else {
-            // Check directory for any matching assets
-            self.scanDirectoryForAssets(file_path);
+        // Early safety check - avoid processing if we're not fully initialized
+        if (!self.watcher_started) {
+            log(.DEBUG, "enhanced_hot_reload", "Ignoring file change before watcher fully started: {s}", .{file_path});
+            return;
         }
+
+        // TEMPORARILY DISABLED to debug crashes
+        log(.DEBUG, "enhanced_hot_reload", "File change detected (processing disabled): {s}", .{file_path});
+        return;
+
+        // const now = std.time.milliTimestamp();
+
+        // // Check if this is a registered asset (with mutex protection and additional safety)
+        // self.asset_map_mutex.lock();
+        // defer self.asset_map_mutex.unlock();
+        
+        // // Double-check the HashMap is valid before accessing
+        // const asset_id = if (self.path_to_asset.count() > 0) 
+        //     self.path_to_asset.get(file_path) 
+        // else 
+        //     null;
+        
+        // const asset_type = if (asset_id) |id| 
+        //     if (self.asset_to_type.count() > 0) 
+        //         self.asset_to_type.get(id) orelse .texture 
+        //     else 
+        //         .texture
+        // else 
+        //     null;
+
+        // if (asset_id) |id| {
+        //     log(.DEBUG, "enhanced_hot_reload", "Processing file change for registered asset: {s} (ID: {})", .{ file_path, id });
+        //     // Check for actual file changes
+        //     if (self.hasFileChanged(file_path, asset_type.?)) {
+        //         self.queueReload(id, file_path, asset_type.?, .file_changed, now);
+        //     }
+        // } else {
+        //     log(.DEBUG, "enhanced_hot_reload", "File change detected but not a registered asset: {s}", .{file_path});
+        //     // Check directory for any matching assets
+        //     self.scanDirectoryForAssets(file_path);
+        // }
     }
 
     /// Queue a reload request with priority
@@ -318,6 +392,9 @@ pub const HotReloadManager = struct {
 
     /// Scan directory for asset files that might match registered assets
     fn scanDirectoryForAssets(self: *Self, dir_path: []const u8) void {
+        self.asset_map_mutex.lock();
+        defer self.asset_map_mutex.unlock();
+        
         var path_iter = self.path_to_asset.iterator();
         while (path_iter.next()) |entry| {
             const asset_path = entry.key_ptr.*;
