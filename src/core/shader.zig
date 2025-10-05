@@ -4,7 +4,7 @@ const GC = @import("graphics_context.zig").GraphicsContext;
 
 pub const entry_point_definition = struct { name: []const u8 = "main" };
 
-const Shader = struct {
+pub const Shader = struct {
     module: vk.ShaderModule,
     shader_type: vk.ShaderStageFlags,
     entry_point: entry_point_definition = entry_point_definition{ .name = "main" },

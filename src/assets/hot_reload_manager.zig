@@ -113,15 +113,21 @@ pub const HotReloadManager = struct {
 
     /// Clean up resources
     pub fn deinit(self: *Self) void {
-        // Signal shutdown
+        // Signal shutdown first
         self.shutdown_requested.store(true, .release);
+
+        // Stop file watcher BEFORE cleaning up HashMaps to prevent callback access
+        self.file_watcher.stop();
+        self.file_watcher.deinit();
 
         // Wait for batch timer to finish
         if (self.batch_timer) |thread| {
             thread.join();
         }
 
-        self.file_watcher.deinit();
+        // Now safely clean up HashMaps with mutex protection
+        self.asset_map_mutex.lock();
+        defer self.asset_map_mutex.unlock();
 
         // Free path strings
         var path_iter = self.path_to_asset.iterator();
@@ -270,19 +276,19 @@ pub const HotReloadManager = struct {
         // // Check if this is a registered asset (with mutex protection and additional safety)
         // self.asset_map_mutex.lock();
         // defer self.asset_map_mutex.unlock();
-        
+
         // // Double-check the HashMap is valid before accessing
-        // const asset_id = if (self.path_to_asset.count() > 0) 
-        //     self.path_to_asset.get(file_path) 
-        // else 
+        // const asset_id = if (self.path_to_asset.count() > 0)
+        //     self.path_to_asset.get(file_path)
+        // else
         //     null;
-        
-        // const asset_type = if (asset_id) |id| 
-        //     if (self.asset_to_type.count() > 0) 
-        //         self.asset_to_type.get(id) orelse .texture 
-        //     else 
+
+        // const asset_type = if (asset_id) |id|
+        //     if (self.asset_to_type.count() > 0)
+        //         self.asset_to_type.get(id) orelse .texture
+        //     else
         //         .texture
-        // else 
+        // else
         //     null;
 
         // if (asset_id) |id| {
@@ -394,7 +400,7 @@ pub const HotReloadManager = struct {
     fn scanDirectoryForAssets(self: *Self, dir_path: []const u8) void {
         self.asset_map_mutex.lock();
         defer self.asset_map_mutex.unlock();
-        
+
         var path_iter = self.path_to_asset.iterator();
         while (path_iter.next()) |entry| {
             const asset_path = entry.key_ptr.*;

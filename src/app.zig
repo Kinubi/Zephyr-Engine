@@ -36,6 +36,17 @@ const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
 const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
 
+// Dynamic pipeline system imports
+const DynamicPipelineManager = @import("rendering/dynamic_pipeline_manager.zig").DynamicPipelineManager;
+const PipelineTemplate = @import("rendering/dynamic_pipeline_manager.zig").PipelineTemplate;
+const PipelineBuilder = @import("rendering/pipeline_builder.zig").PipelineBuilder;
+const VertexInputBinding = @import("rendering/pipeline_builder.zig").VertexInputBinding;
+const VertexInputAttribute = @import("rendering/pipeline_builder.zig").VertexInputAttribute;
+const DescriptorBinding = @import("rendering/pipeline_builder.zig").DescriptorBinding;
+const PushConstantRange = @import("rendering/pipeline_builder.zig").PushConstantRange;
+const ShaderPipelineIntegration = @import("rendering/shader_pipeline_integration.zig").ShaderPipelineIntegration;
+const setGlobalIntegration = @import("rendering/shader_pipeline_integration.zig").setGlobalIntegration;
+
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
 const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
@@ -122,6 +133,8 @@ pub const App = struct {
     var compute_shader_system: ComputeShaderSystem = undefined;
     var render_system: RenderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
+    var dynamic_pipeline_manager: DynamicPipelineManager = undefined;
+    var shader_pipeline_integration: ShaderPipelineIntegration = undefined;
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -203,8 +216,27 @@ pub const App = struct {
         // Initialize Shader Manager for hot reload and compilation
         shader_manager = try ShaderManager.init(self.allocator, asset_manager, thread_pool);
         try shader_manager.addShaderDirectory("shaders");
+        try shader_manager.addShaderDirectory("shaders/cached");
         try shader_manager.start();
         log(.INFO, "app", "Shader hot reload system initialized", .{});
+
+        // Initialize Dynamic Pipeline Manager
+        dynamic_pipeline_manager = try DynamicPipelineManager.init(
+            self.allocator,
+            &self.gc,
+            asset_manager,
+            &shader_manager
+        );
+        log(.INFO, "app", "Dynamic pipeline manager initialized", .{});
+
+        // Initialize shader-pipeline integration for hot reload
+        shader_pipeline_integration = try ShaderPipelineIntegration.init(
+            self.allocator,
+            &dynamic_pipeline_manager,
+            &shader_manager.hot_reload
+        );
+        setGlobalIntegration(&shader_pipeline_integration);
+        log(.INFO, "app", "Shader-pipeline integration initialized", .{});
 
         // Initialize Scene with Asset Manager integration
         scene = Scene.init(&self.gc, self.allocator, asset_manager);
@@ -244,7 +276,7 @@ pub const App = struct {
         try scheduled_assets.append(self.allocator, ScheduledAsset{
             .frame = 50000,
             .model_path = "models/flat_vase.obj",
-            .texture_path = "textures/granitesmooth1-albedo3.png",
+            .texture_path = "textures/granitesmooth1-albedo.png",
             .position = Math.Vec3.init(-1.4, -0.5, 0.5),
             .rotation = Math.Vec3.init(0, 0, 0),
             .scale = Math.Vec3.init(0.5, 0.5, 0.5),
@@ -283,6 +315,10 @@ pub const App = struct {
         global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
+        // Register pipeline templates for dynamic pipeline system
+        try self.registerPipelineTemplates();
+        log(.INFO, "app", "Pipeline templates registered", .{});
+
         var shader_library = ShaderLibrary.init(self.gc, self.allocator);
 
         try shader_library.add(&.{
@@ -296,7 +332,7 @@ pub const App = struct {
             entry_point_definition{},
         });
         _ = try scene.updateSyncResources(self.allocator);
-        textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout);
+        textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout, &dynamic_pipeline_manager);
         for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
             try textured_renderer.updateMaterialData(@intCast(FF_index), scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray());
         }
@@ -313,7 +349,7 @@ pub const App = struct {
             entry_point_definition{},
             entry_point_definition{},
         });
-        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout);
+        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout, &dynamic_pipeline_manager);
 
         // Use ShaderLibrary abstraction for shader loading - heap allocate for proper lifetime
         var shader_library_raytracing = ShaderLibrary.init(self.gc, self.allocator);
@@ -459,6 +495,7 @@ pub const App = struct {
         }
 
         // Process any pending hot reloads first
+        dynamic_pipeline_manager.processRebuildQueue(swapchain.render_pass);
 
         // Check for and update any newly loaded async resources (textures, models, materials)
         // Note: Asset completion is handled automatically by the asset manager's worker thread
@@ -622,6 +659,87 @@ pub const App = struct {
         return self.window.isRunning();
     }
 
+    /// Register pipeline templates for the dynamic pipeline system
+    fn registerPipelineTemplates(self: *App) !void {
+        _ = self; // Method for future expansion, currently uses global dynamic_pipeline_manager
+        
+        // Textured renderer pipeline template
+        const textured_template = PipelineTemplate{
+            .name = "textured_renderer",
+            .vertex_shader = "shaders/cached/textured.vert.spv",
+            .fragment_shader = "shaders/cached/textured.frag.spv",
+            
+            .vertex_bindings = &[_]VertexInputBinding{
+                VertexInputBinding.create(0, @sizeOf(Vertex)),
+            },
+            
+            .vertex_attributes = &[_]VertexInputAttribute{
+                VertexInputAttribute.create(0, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "pos")),
+                VertexInputAttribute.create(1, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "normal")),
+                VertexInputAttribute.create(2, 0, .r32g32_sfloat, @offsetOf(Vertex, "uv")),
+                VertexInputAttribute.create(3, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "color")),
+            },
+            
+            .descriptor_bindings = &[_]DescriptorBinding{
+                DescriptorBinding.uniformBuffer(0, .{ .vertex_bit = true, .fragment_bit = true }), // Global UBO
+                DescriptorBinding.uniformBuffer(1, .{ .fragment_bit = true }), // Material buffer
+                DescriptorBinding.combinedImageSampler(2, .{ .fragment_bit = true }).withCount(16), // Texture array
+            },
+            
+            .push_constant_ranges = &[_]PushConstantRange{
+                PushConstantRange{
+                    .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+                    .offset = 0,
+                    .size = @sizeOf(@import("renderers/textured_renderer.zig").TexturedPushConstantData),
+                },
+            },
+            
+            .depth_test_enable = true,
+            .depth_write_enable = true,
+            .cull_mode = .{ .back_bit = true },
+            .front_face = .counter_clockwise,
+        };
+        
+        try dynamic_pipeline_manager.registerPipeline(textured_template);
+        
+        // Point light renderer pipeline template
+        const point_light_template = PipelineTemplate{
+            .name = "point_light_renderer",
+            .vertex_shader = "shaders/cached/point_light.vert.spv",
+            .fragment_shader = "shaders/cached/point_light.frag.spv",
+            
+            .vertex_bindings = &[_]VertexInputBinding{
+                // Point light renderer uses no vertex input (draws fullscreen quad procedurally)
+            },
+            
+            .vertex_attributes = &[_]VertexInputAttribute{
+                // No vertex attributes needed
+            },
+            
+            .descriptor_bindings = &[_]DescriptorBinding{
+                DescriptorBinding.uniformBuffer(0, .{ .vertex_bit = true, .fragment_bit = true }), // Global UBO
+            },
+            
+            .push_constant_ranges = &[_]PushConstantRange{
+                PushConstantRange{
+                    .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+                    .offset = 0,
+                    .size = @sizeOf(@import("renderers/point_light_renderer.zig").PointLightPushConstant),
+                },
+            },
+            
+            .primitive_topology = .triangle_list,
+            .depth_test_enable = false, // Point lights are additive
+            .depth_write_enable = false,
+            .blend_enable = true, // Enable blending for light accumulation
+            .cull_mode = .{ .back_bit = true },
+        };
+        
+        try dynamic_pipeline_manager.registerPipeline(point_light_template);
+        
+        log(.INFO, "app", "Registered pipeline templates: textured_renderer, point_light_renderer", .{});
+    }
+
     pub fn deinit(self: *App) void {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
@@ -648,6 +766,11 @@ pub const App = struct {
 
         particle_renderer.deinit();
         scene.deinit();
+        
+        // Clean up dynamic pipeline system
+        shader_pipeline_integration.deinit();
+        dynamic_pipeline_manager.deinit();
+        
         shader_manager.deinit();
         asset_manager.deinit();
         swapchain.deinit();

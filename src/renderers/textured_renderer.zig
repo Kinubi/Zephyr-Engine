@@ -8,21 +8,23 @@ const Camera = @import("../rendering/camera.zig").Camera;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const ForwardRenderPassDescriptors = @import("../rendering/render_pass_descriptors.zig").ForwardRenderPassDescriptors;
 const RasterizationData = @import("../rendering/scene_view.zig").RasterizationData;
+const DynamicPipelineManager = @import("../rendering/dynamic_pipeline_manager.zig").DynamicPipelineManager;
 const log = @import("../utils/log.zig").log;
 
-const TexturedPushConstantData = extern struct {
+pub const TexturedPushConstantData = extern struct {
     transform: [16]f32 = Math.Mat4x4.identity().data,
     normal_matrix: [16]f32 = Math.Mat4x4.identity().data,
     material_index: u32 = 0,
 };
 
-/// Textured renderer that supports materials and textures
+/// Textured renderer that supports materials and textures with dynamic pipelines
 pub const TexturedRenderer = struct {
     gc: *GraphicsContext,
-    pipeline: Pipeline,
-    pipeline_layout: vk.PipelineLayout,
+    pipeline_manager: *DynamicPipelineManager,
     descriptors: ForwardRenderPassDescriptors,
     allocator: std.mem.Allocator,
+    pipeline_name: []const u8 = "textured_renderer",
+    render_pass: vk.RenderPass,
 
     pub fn init(
         gc: *GraphicsContext,
@@ -30,60 +32,25 @@ pub const TexturedRenderer = struct {
         shader_library: ShaderLibrary,
         allocator: std.mem.Allocator,
         global_set_layout: vk.DescriptorSetLayout,
+        pipeline_manager: *DynamicPipelineManager,
     ) !TexturedRenderer {
+        _ = shader_library; // No longer needed, using dynamic pipelines
+        _ = global_set_layout; // Used for descriptor setup but not pipeline creation
+        
         // Initialize descriptor management
-        var descriptors = try ForwardRenderPassDescriptors.init(gc, allocator);
-
-        // Create pipeline layout with both global and material descriptor sets
-        const material_layout = descriptors.getMaterialDescriptorSetLayout() orelse return error.NoMaterialLayout;
-
-        const descriptor_set_layouts = [_]vk.DescriptorSetLayout{
-            global_set_layout, // Set 0: Global data
-            material_layout, // Set 1: Material data
-        };
-
-        const push_constant_ranges = [_]vk.PushConstantRange{
-            .{
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-                .offset = 0,
-                .size = @sizeOf(TexturedPushConstantData),
-            },
-        };
-
-        const pipeline_layout = try gc.vkd.createPipelineLayout(
-            gc.dev,
-            &vk.PipelineLayoutCreateInfo{
-                .flags = .{},
-                .set_layout_count = descriptor_set_layouts.len,
-                .p_set_layouts = &descriptor_set_layouts,
-                .push_constant_range_count = push_constant_ranges.len,
-                .p_push_constant_ranges = &push_constant_ranges,
-            },
-            null,
-        );
-
-        // Create graphics pipeline
-        const pipeline = try Pipeline.init(
-            gc.*,
-            render_pass,
-            shader_library,
-            pipeline_layout,
-            try Pipeline.defaultLayout(pipeline_layout),
-            allocator,
-        );
+        const descriptors = try ForwardRenderPassDescriptors.init(gc, allocator);
 
         return TexturedRenderer{
             .gc = gc,
-            .pipeline = pipeline,
-            .pipeline_layout = pipeline_layout,
+            .pipeline_manager = pipeline_manager,
             .descriptors = descriptors,
             .allocator = allocator,
+            .render_pass = render_pass,
         };
     }
 
     pub fn deinit(self: *TexturedRenderer) void {
-        self.pipeline.deinit();
-        self.gc.vkd.destroyPipelineLayout(self.gc.dev, self.pipeline_layout, null);
+        // Only clean up descriptors, pipeline is managed by DynamicPipelineManager
         self.descriptors.deinit();
     }
 
@@ -97,10 +64,23 @@ pub const TexturedRenderer = struct {
         try self.descriptors.updateMaterialData(frame_index, material_buffer_info, texture_image_infos);
     }
 
-    /// Render objects using materials and textures
+    /// Render objects using materials and textures with dynamic pipelines
     pub fn render(self: *TexturedRenderer, frame_info: FrameInfo, raster_data: RasterizationData) !void {
-        // Bind pipeline
-        self.gc.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
+        // Get dynamic pipeline
+        const pipeline = self.pipeline_manager.getPipeline(self.pipeline_name, self.render_pass) catch |err| {
+            log(.ERROR, "textured_renderer", "Failed to get pipeline: {}", .{err});
+            return;
+        };
+        
+        const pipeline_layout = self.pipeline_manager.getPipelineLayout(self.pipeline_name);
+        
+        if (pipeline == null or pipeline_layout == null) {
+            log(.WARN, "textured_renderer", "Pipeline or layout not available", .{});
+            return;
+        }
+
+        // Bind dynamic pipeline
+        self.gc.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, pipeline.?);
 
         // Bind descriptor sets
         const descriptor_sets = [_]vk.DescriptorSet{
@@ -111,7 +91,7 @@ pub const TexturedRenderer = struct {
         self.gc.vkd.cmdBindDescriptorSets(
             frame_info.command_buffer,
             .graphics,
-            self.pipeline_layout,
+            pipeline_layout.?,
             0, // First set
             descriptor_sets.len,
             &descriptor_sets,
@@ -133,7 +113,7 @@ pub const TexturedRenderer = struct {
 
             self.gc.vkd.cmdPushConstants(
                 frame_info.command_buffer,
-                self.pipeline_layout,
+                pipeline_layout.?,
                 .{ .vertex_bit = true, .fragment_bit = true },
                 0,
                 @sizeOf(TexturedPushConstantData),

@@ -280,49 +280,50 @@ pub const ShaderCompiler = struct {
 
     fn compileGlsl(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         _ = options; // Currently unused but kept for future use
-        
+
         // Create a temporary file for the GLSL source
         var tmp_dir = std.testing.tmpDir(.{});
         defer tmp_dir.cleanup();
-        
+
         const input_path = "shader_input.glsl";
         const output_path = "shader_output.spv";
-        
+
         // Write GLSL source to temporary file
         try tmp_dir.dir.writeFile(.{ .sub_path = input_path, .data = source.code });
-        
+
         // Determine shader stage argument for glslc
         const stage_arg = switch (source.stage) {
             .vertex => "-fshader-stage=vertex",
-            .fragment => "-fshader-stage=fragment", 
+            .fragment => "-fshader-stage=fragment",
             .compute => "-fshader-stage=compute",
             .geometry => "-fshader-stage=geometry",
             .tessellation_control => "-fshader-stage=tesscontrol",
             .tessellation_evaluation => "-fshader-stage=tesseval",
             else => "-fshader-stage=vertex", // Default fallback
         };
-        
+
         // Build glslc command
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        
+
         // Use simple relative paths within the temp directory
         const args = [_][]const u8{
             "glslc",
             stage_arg,
-            "-o", output_path,
+            "-o",
+            output_path,
             input_path,
         };
-        
+
         // Execute glslc in the temp directory
         var child = std.process.Child.init(&args, self.allocator);
         child.cwd_dir = tmp_dir.dir;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
-        
+
         try child.spawn();
         const result = try child.wait();
-        
+
         if (result != .Exited or result.Exited != 0) {
             // Read stderr for error message
             if (child.stderr) |stderr| {
@@ -333,11 +334,11 @@ pub const ShaderCompiler = struct {
             }
             return error.GlslCompilationFailed;
         }
-        
+
         // Read the compiled SPIR-V
         const spirv_bytes = try tmp_dir.dir.readFileAlloc(self.allocator, output_path, 1024 * 1024); // 1MB max
         defer self.allocator.free(spirv_bytes);
-        
+
         // Convert to u32 array and validate
         return try self.parseSpirv(spirv_bytes);
     }

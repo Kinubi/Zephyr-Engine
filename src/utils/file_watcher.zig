@@ -147,7 +147,7 @@ pub const FileWatcher = struct {
             if (loop_count <= 3) {
                 log(.DEBUG, "file_watcher", "Watcher loop #{}: running={}, paths={}", .{ loop_count, self.running, self.watched_paths.count() });
             }
-            
+
             self.checkForChanges();
 
             // Sleep for polling interval (100ms)
