@@ -512,7 +512,7 @@ pub const PipelineBuilder = struct {
 
     pub fn buildDescriptorSetLayouts(self: *Self, descriptor_sets: []const []const DescriptorBinding, allocator: std.mem.Allocator) ![]vk.DescriptorSetLayout {
         var layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
-        
+
         for (descriptor_sets, 0..) |set_bindings, set_index| {
             var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
             try bindings.ensureTotalCapacity(allocator, set_bindings.len);
@@ -535,7 +535,7 @@ pub const PipelineBuilder = struct {
 
             layouts[set_index] = try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &create_info, null);
         }
-        
+
         return layouts;
     }
 

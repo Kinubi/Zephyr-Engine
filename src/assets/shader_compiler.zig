@@ -1,6 +1,7 @@
 const std = @import("std");
 const spirv_cross = @import("spirv_cross.zig");
 const AssetTypes = @import("asset_types.zig");
+const glsl_compiler = @import("glsl_compiler.zig");
 
 // Native shader compiler using SPIRV-Cross
 // Supports GLSL -> SPIR-V and HLSL -> SPIR-V compilation with reflection
@@ -192,6 +193,9 @@ pub const CompilationOptions = struct {
     target: CompilationTarget,
     optimization_level: OptimizationLevel = .none,
     debug_info: bool = false,
+    
+    // Compiler selection
+    use_embedded_compiler: bool = true, // Use libshaderc vs external glslc
 
     // GLSL specific
     glsl_version: u32 = 450,
@@ -247,7 +251,10 @@ pub const ShaderCompiler = struct {
         // Compile source to SPIR-V based on input language
         const spirv_data = switch (source.language) {
             .spirv => try self.parseSpirv(source.code),
-            .glsl => try self.compileGlsl(source, options),
+            .glsl => if (options.use_embedded_compiler) 
+                try self.compileGlslEmbedded(source, options)
+            else 
+                try self.compileGlslExternal(source, options),
             .hlsl => return error.HlslCompilationNotImplemented, // Would use DXC or similar
         };
 
@@ -278,7 +285,7 @@ pub const ShaderCompiler = struct {
         };
     }
 
-    fn compileGlsl(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
+    fn compileGlslExternal(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         _ = options; // Currently unused but kept for future use
 
         // Create a temporary file for the GLSL source
@@ -361,6 +368,67 @@ pub const ShaderCompiler = struct {
         @memcpy(result, spirv_words);
 
         return result;
+    }
+
+    fn compileGlslEmbedded(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
+        // Use the embedded libshaderc compiler
+        var compiler = glsl_compiler.Compiler.init(self.allocator) catch |err| {
+            std.log.warn("Failed to initialize embedded GLSL compiler: {}, falling back to external glslc", .{err});
+            return self.compileGlslExternal(source, options);
+        };
+        defer compiler.deinit();
+
+        // Convert shader stage to shaderc format
+        const shader_kind = glsl_compiler.shaderStageToShaderKind(source.stage);
+
+        // Set up compilation options
+        const compile_options = glsl_compiler.CompileOptions{
+            .optimization_level = switch (options.optimization_level) {
+                .none => .zero,
+                .size => .size,
+                .performance => .performance,
+            },
+            .target_env = if (options.vulkan_semantics) .vulkan else .opengl,
+            .generate_debug_info = options.debug_info,
+            .source_language = @import("glsl_compiler.zig").c.shaderc_source_language_glsl,
+        };
+
+        // Compile to SPIR-V
+        const result = compiler.compileGlslToSpirv(
+            source.code,
+            shader_kind,
+            "shader_source", // input file name for error reporting
+            source.entry_point,
+            &compile_options,
+        ) catch |err| {
+            std.log.err("Embedded GLSL compilation failed: {}", .{err});
+            return err;
+        };
+        defer {
+            // Note: result.spirv_data will be owned by the returned value
+            // Only free warnings and errors here
+            self.allocator.free(result.warnings);
+            self.allocator.free(result.errors);
+        }
+
+        // Log any warnings
+        if (result.warnings.len > 0) {
+            std.log.warn("GLSL compilation warnings: {s}", .{result.warnings});
+        }
+
+        // Return the SPIR-V data (ownership transferred to caller)
+        // SPIR-V data is stored as bytes but should be interpreted as u32 words
+        const spirv_words = @as([*]const u32, @ptrCast(@alignCast(result.spirv_data.ptr)))[0..result.spirv_data.len / 4];
+        
+        // We need to duplicate the data since result will be deinitialized
+        const spirv_copy = try self.allocator.alloc(u32, spirv_words.len);
+        @memcpy(spirv_copy, spirv_words);
+        
+        // Clean up the result
+        var mut_result = result;
+        mut_result.deinit(self.allocator);
+        
+        return spirv_copy;
     }
 
     fn crossCompile(self: *Self, spirv_data: []const u32, options: CompilationOptions) ![]const u8 {

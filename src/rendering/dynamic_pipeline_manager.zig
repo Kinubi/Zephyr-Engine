@@ -65,7 +65,7 @@ pub const DynamicPipeline = struct {
     last_rebuild_time: i64 = 0,
     rebuild_needed: bool = false,
     rebuild_failure_count: u32 = 0, // Track consecutive rebuild failures
-    max_rebuild_attempts: u32 = 5,  // Maximum rebuild attempts before giving up
+    max_rebuild_attempts: u32 = 5, // Maximum rebuild attempts before giving up
 
     // Usage statistics
     usage_count: u32 = 0,
@@ -202,7 +202,7 @@ pub const DynamicPipelineManager = struct {
                     log(.ERROR, "dynamic_pipeline", "Pipeline {s} exceeded max rebuild attempts ({}), skipping", .{ name, dynamic_pipeline.max_rebuild_attempts });
                     return null;
                 }
-                
+
                 // Attempt to rebuild pipeline
                 self.rebuildPipeline(dynamic_pipeline, render_pass) catch |err| {
                     dynamic_pipeline.rebuild_failure_count += 1;
@@ -430,7 +430,7 @@ pub const DynamicPipelineManager = struct {
         var descriptor_set_layouts: []vk.DescriptorSetLayout = undefined;
         var single_layout: vk.DescriptorSetLayout = undefined;
         var managed_layouts: bool = false;
-        
+
         if (template.descriptor_sets) |multi_sets| {
             // Use new multi-set support
             descriptor_set_layouts = try builder.buildDescriptorSetLayouts(multi_sets, self.allocator);
@@ -444,7 +444,7 @@ pub const DynamicPipelineManager = struct {
             descriptor_set_layouts = try self.allocator.alloc(vk.DescriptorSetLayout, 1);
             descriptor_set_layouts[0] = single_layout;
             managed_layouts = true;
-        }        // Configure push constants
+        } // Configure push constants
         for (template.push_constant_ranges) |range| {
             _ = try builder.addPushConstantRange(range);
         }
@@ -484,10 +484,10 @@ pub const DynamicPipelineManager = struct {
 
         dynamic_pipeline.pipeline = pipeline;
         dynamic_pipeline.pipeline_layout = pipeline_layout;
-        
+
         // For single descriptor set, store the layout; for multi-set, store the first one
         dynamic_pipeline.descriptor_set_layout = descriptor_set_layouts[0];
-        
+
         dynamic_pipeline.rebuild_needed = false;
         dynamic_pipeline.rebuild_failure_count = 0; // Reset failure counter on success
         dynamic_pipeline.last_rebuild_time = std.time.timestamp();

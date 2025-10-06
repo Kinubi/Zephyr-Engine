@@ -17,11 +17,7 @@ pub const Shader = struct {
             .code_size = code.len,
             .p_code = data,
         }, null);
-        return Shader{ 
-            .module = module, 
-            .shader_type = shader_type, 
-            .entry_point = entry_point orelse entry_point_definition{ .name = "main" }
-        };
+        return Shader{ .module = module, .shader_type = shader_type, .entry_point = entry_point orelse entry_point_definition{ .name = "main" } };
     }
 
     pub fn deinit(self: Shader, gc: GC) void {

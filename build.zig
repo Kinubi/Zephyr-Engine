@@ -105,6 +105,12 @@ pub fn build(b: *std.Build) !void {
     // Link C++ standard library
     exe.linkLibCpp();
 
+    // Use system shaderc library
+    exe.linkSystemLibrary("shaderc");
+    
+    // Link against required system libraries
+    exe.linkSystemLibrary("pthread");
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
