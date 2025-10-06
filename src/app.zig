@@ -221,20 +221,11 @@ pub const App = struct {
         log(.INFO, "app", "Shader hot reload system initialized", .{});
 
         // Initialize Dynamic Pipeline Manager
-        dynamic_pipeline_manager = try DynamicPipelineManager.init(
-            self.allocator,
-            &self.gc,
-            asset_manager,
-            &shader_manager
-        );
+        dynamic_pipeline_manager = try DynamicPipelineManager.init(self.allocator, &self.gc, asset_manager, &shader_manager);
         log(.INFO, "app", "Dynamic pipeline manager initialized", .{});
 
         // Initialize shader-pipeline integration for hot reload
-        shader_pipeline_integration = try ShaderPipelineIntegration.init(
-            self.allocator,
-            &dynamic_pipeline_manager,
-            &shader_manager.hot_reload
-        );
+        shader_pipeline_integration = try ShaderPipelineIntegration.init(self.allocator, &dynamic_pipeline_manager, &shader_manager.hot_reload);
         setGlobalIntegration(&shader_pipeline_integration);
         log(.INFO, "app", "Shader-pipeline integration initialized", .{});
 
@@ -662,30 +653,30 @@ pub const App = struct {
     /// Register pipeline templates for the dynamic pipeline system
     fn registerPipelineTemplates(self: *App) !void {
         _ = self; // Method for future expansion, currently uses global dynamic_pipeline_manager
-        
+
         // Textured renderer pipeline template
         const textured_template = PipelineTemplate{
             .name = "textured_renderer",
             .vertex_shader = "shaders/cached/textured.vert.spv",
             .fragment_shader = "shaders/cached/textured.frag.spv",
-            
+
             .vertex_bindings = &[_]VertexInputBinding{
                 VertexInputBinding.create(0, @sizeOf(Vertex)),
             },
-            
+
             .vertex_attributes = &[_]VertexInputAttribute{
                 VertexInputAttribute.create(0, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "pos")),
                 VertexInputAttribute.create(1, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "normal")),
                 VertexInputAttribute.create(2, 0, .r32g32_sfloat, @offsetOf(Vertex, "uv")),
                 VertexInputAttribute.create(3, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "color")),
             },
-            
+
             .descriptor_bindings = &[_]DescriptorBinding{
                 DescriptorBinding.uniformBuffer(0, .{ .vertex_bit = true, .fragment_bit = true }), // Global UBO
                 DescriptorBinding.uniformBuffer(1, .{ .fragment_bit = true }), // Material buffer
                 DescriptorBinding.combinedImageSampler(2, .{ .fragment_bit = true }).withCount(16), // Texture array
             },
-            
+
             .push_constant_ranges = &[_]PushConstantRange{
                 PushConstantRange{
                     .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
@@ -693,33 +684,33 @@ pub const App = struct {
                     .size = @sizeOf(@import("renderers/textured_renderer.zig").TexturedPushConstantData),
                 },
             },
-            
+
             .depth_test_enable = true,
             .depth_write_enable = true,
             .cull_mode = .{ .back_bit = true },
             .front_face = .counter_clockwise,
         };
-        
+
         try dynamic_pipeline_manager.registerPipeline(textured_template);
-        
+
         // Point light renderer pipeline template
         const point_light_template = PipelineTemplate{
             .name = "point_light_renderer",
             .vertex_shader = "shaders/cached/point_light.vert.spv",
             .fragment_shader = "shaders/cached/point_light.frag.spv",
-            
+
             .vertex_bindings = &[_]VertexInputBinding{
                 // Point light renderer uses no vertex input (draws fullscreen quad procedurally)
             },
-            
+
             .vertex_attributes = &[_]VertexInputAttribute{
                 // No vertex attributes needed
             },
-            
+
             .descriptor_bindings = &[_]DescriptorBinding{
                 DescriptorBinding.uniformBuffer(0, .{ .vertex_bit = true, .fragment_bit = true }), // Global UBO
             },
-            
+
             .push_constant_ranges = &[_]PushConstantRange{
                 PushConstantRange{
                     .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
@@ -727,16 +718,16 @@ pub const App = struct {
                     .size = @sizeOf(@import("renderers/point_light_renderer.zig").PointLightPushConstant),
                 },
             },
-            
+
             .primitive_topology = .triangle_list,
             .depth_test_enable = false, // Point lights are additive
             .depth_write_enable = false,
             .blend_enable = true, // Enable blending for light accumulation
             .cull_mode = .{ .back_bit = true },
         };
-        
+
         try dynamic_pipeline_manager.registerPipeline(point_light_template);
-        
+
         log(.INFO, "app", "Registered pipeline templates: textured_renderer, point_light_renderer", .{});
     }
 
@@ -766,11 +757,11 @@ pub const App = struct {
 
         particle_renderer.deinit();
         scene.deinit();
-        
+
         // Clean up dynamic pipeline system
         shader_pipeline_integration.deinit();
         dynamic_pipeline_manager.deinit();
-        
+
         shader_manager.deinit();
         asset_manager.deinit();
         swapchain.deinit();

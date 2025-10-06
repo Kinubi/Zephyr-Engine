@@ -36,7 +36,7 @@ pub const TexturedRenderer = struct {
     ) !TexturedRenderer {
         _ = shader_library; // No longer needed, using dynamic pipelines
         _ = global_set_layout; // Used for descriptor setup but not pipeline creation
-        
+
         // Initialize descriptor management
         const descriptors = try ForwardRenderPassDescriptors.init(gc, allocator);
 
@@ -71,9 +71,9 @@ pub const TexturedRenderer = struct {
             log(.ERROR, "textured_renderer", "Failed to get pipeline: {}", .{err});
             return;
         };
-        
+
         const pipeline_layout = self.pipeline_manager.getPipelineLayout(self.pipeline_name);
-        
+
         if (pipeline == null or pipeline_layout == null) {
             log(.WARN, "textured_renderer", "Pipeline or layout not available", .{});
             return;

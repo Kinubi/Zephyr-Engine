@@ -31,11 +31,11 @@ pub const PointLightRenderer = struct {
         _ = shader_library; // No longer needed, using dynamic pipelines
         _ = alloc; // No longer needed for pipeline creation
         _ = global_set_layout; // No longer needed for pipeline creation
-        
-        return PointLightRenderer{ 
-            .scene = scene, 
+
+        return PointLightRenderer{
+            .scene = scene,
             .pipeline_manager = pipeline_manager,
-            .gc = gc, 
+            .gc = gc,
             .camera = camera,
             .render_pass = render_pass,
         };
@@ -71,9 +71,9 @@ pub const PointLightRenderer = struct {
             log(.ERROR, "point_light_renderer", "Failed to get pipeline: {}", .{err});
             return;
         };
-        
+
         const pipeline_layout = self.pipeline_manager.getPipelineLayout(self.pipeline_name);
-        
+
         if (pipeline == null or pipeline_layout == null) {
             log(.WARN, "point_light_renderer", "Pipeline or layout not available", .{});
             return;
@@ -81,10 +81,10 @@ pub const PointLightRenderer = struct {
 
         // Bind dynamic pipeline
         self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, pipeline.?);
-        
+
         // Bind descriptor sets
         self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, pipeline_layout.?, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
-        
+
         for (self.scene.objects.items) |*object| {
             if (object.point_light == null) {
                 continue;
@@ -95,7 +95,7 @@ pub const PointLightRenderer = struct {
                 object.transform.local2world.data[14],
                 object.transform.local2world.data[15],
             ), .color = Math.Vec4.init(object.point_light.?.color.x, object.point_light.?.color.y, object.point_light.?.color.z, object.point_light.?.intensity), .radius = object.transform.object_scale.x };
-            
+
             self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, pipeline_layout.?, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PointLightPushConstant), @ptrCast(&push));
             self.gc.vkd.cmdDraw(frame_info.command_buffer, 6, 1, 0, 0);
         }
