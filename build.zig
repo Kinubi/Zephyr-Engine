@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) !void {
 
     // Use system shaderc library
     exe.linkSystemLibrary("shaderc");
-    
+
     // Link against required system libraries
     exe.linkSystemLibrary("pthread");
 

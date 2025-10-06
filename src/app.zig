@@ -732,8 +732,8 @@ pub const App = struct {
         // Textured renderer pipeline template
         const textured_template = PipelineTemplate{
             .name = "textured_renderer",
-            .vertex_shader = "shaders/cached/textured.vert.spv",
-            .fragment_shader = "shaders/cached/textured.frag.spv",
+            .vertex_shader = "shaders/textured.vert",
+            .fragment_shader = "shaders/textured.frag",
 
             .vertex_bindings = &textured_vertex_bindings,
             .vertex_attributes = &textured_vertex_attributes,
@@ -777,8 +777,8 @@ pub const App = struct {
         // Point light renderer pipeline template
         const point_light_template = PipelineTemplate{
             .name = "point_light_renderer",
-            .vertex_shader = "shaders/cached/point_light.vert.spv",
-            .fragment_shader = "shaders/cached/point_light.frag.spv",
+            .vertex_shader = "shaders/point_light.vert",
+            .fragment_shader = "shaders/point_light.frag",
 
             .vertex_bindings = &point_light_vertex_bindings,
             .vertex_attributes = &point_light_vertex_attributes,

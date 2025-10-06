@@ -77,23 +77,23 @@ pub const CompilationResult = struct {
 pub const Compiler = struct {
     compiler_handle: c.shaderc_compiler_t,
     allocator: std.mem.Allocator,
-    
+
     pub fn init(allocator: std.mem.Allocator) !Compiler {
         const compiler_handle = c.shaderc_compiler_initialize();
         if (compiler_handle == null) {
             return error.CompilerInitializationFailed;
         }
-        
+
         return Compiler{
             .compiler_handle = compiler_handle,
             .allocator = allocator,
         };
     }
-    
+
     pub fn deinit(self: *Compiler) void {
         c.shaderc_compiler_release(self.compiler_handle);
     }
-    
+
     /// Compile GLSL source code to SPIR-V
     pub fn compileGlslToSpirv(
         self: *Compiler,
@@ -113,7 +113,7 @@ pub const Compiler = struct {
             c.shaderc_compile_options_set_optimization_level(compile_options.?, @intFromEnum(options.?.optimization_level));
             c.shaderc_compile_options_set_target_env(compile_options.?, @intFromEnum(options.?.target_env), options.?.target_env_version);
             c.shaderc_compile_options_set_source_language(compile_options.?, options.?.source_language);
-            
+
             if (options.?.generate_debug_info) {
                 c.shaderc_compile_options_set_generate_debug_info(compile_options.?);
             }
@@ -149,7 +149,7 @@ pub const Compiler = struct {
 
         const spirv_length = c.shaderc_result_get_length(result.?);
         const spirv_bytes = c.shaderc_result_get_bytes(result.?);
-        
+
         if (spirv_bytes == null or spirv_length == 0) {
             return error.NoSpirvOutput;
         }
@@ -214,7 +214,7 @@ pub const Compiler = struct {
 
         const result_length = c.shaderc_result_get_length(result.?);
         const result_bytes = c.shaderc_result_get_bytes(result.?);
-        
+
         if (result_bytes == null or result_length == 0) {
             return error.NoPreprocessedOutput;
         }

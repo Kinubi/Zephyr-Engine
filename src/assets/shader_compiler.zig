@@ -193,7 +193,7 @@ pub const CompilationOptions = struct {
     target: CompilationTarget,
     optimization_level: OptimizationLevel = .none,
     debug_info: bool = false,
-    
+
     // Compiler selection
     use_embedded_compiler: bool = true, // Use libshaderc vs external glslc
 
@@ -251,9 +251,9 @@ pub const ShaderCompiler = struct {
         // Compile source to SPIR-V based on input language
         const spirv_data = switch (source.language) {
             .spirv => try self.parseSpirv(source.code),
-            .glsl => if (options.use_embedded_compiler) 
+            .glsl => if (options.use_embedded_compiler)
                 try self.compileGlslEmbedded(source, options)
-            else 
+            else
                 try self.compileGlslExternal(source, options),
             .hlsl => return error.HlslCompilationNotImplemented, // Would use DXC or similar
         };
@@ -418,16 +418,16 @@ pub const ShaderCompiler = struct {
 
         // Return the SPIR-V data (ownership transferred to caller)
         // SPIR-V data is stored as bytes but should be interpreted as u32 words
-        const spirv_words = @as([*]const u32, @ptrCast(@alignCast(result.spirv_data.ptr)))[0..result.spirv_data.len / 4];
-        
+        const spirv_words = @as([*]const u32, @ptrCast(@alignCast(result.spirv_data.ptr)))[0 .. result.spirv_data.len / 4];
+
         // We need to duplicate the data since result will be deinitialized
         const spirv_copy = try self.allocator.alloc(u32, spirv_words.len);
         @memcpy(spirv_copy, spirv_words);
-        
+
         // Clean up the result
         var mut_result = result;
         mut_result.deinit(self.allocator);
-        
+
         return spirv_copy;
     }
 

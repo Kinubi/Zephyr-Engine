@@ -1,6 +1,7 @@
 const std = @import("std");
 const ShaderCompiler = @import("shader_compiler.zig");
 const ShaderHotReload = @import("shader_hot_reload.zig");
+const ShaderCache = @import("shader_cache.zig");
 const AssetManager = @import("asset_manager.zig").AssetManager;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 
@@ -13,6 +14,7 @@ pub const ShaderManager = struct {
     // Core systems
     compiler: ShaderCompiler.ShaderCompiler,
     hot_reload: ShaderHotReload.ShaderWatcher,
+    cache: ShaderCache.ShaderCache,
     asset_manager: *AssetManager,
     thread_pool: *ThreadPool,
 
@@ -30,6 +32,7 @@ pub const ShaderManager = struct {
             .allocator = allocator,
             .compiler = try ShaderCompiler.ShaderCompiler.init(allocator),
             .hot_reload = try ShaderHotReload.ShaderWatcher.init(allocator, thread_pool, asset_manager),
+            .cache = try ShaderCache.ShaderCache.init(allocator, "shaders/cached"),
             .asset_manager = asset_manager,
             .thread_pool = thread_pool,
             .loaded_shaders = std.HashMap([]const u8, LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
@@ -48,6 +51,7 @@ pub const ShaderManager = struct {
 
     pub fn deinit(self: *Self) void {
         self.hot_reload.deinit();
+        self.cache.deinit();
         self.compiler.deinit();
 
         // Clean up shader registry
@@ -102,8 +106,8 @@ pub const ShaderManager = struct {
 
         std.log.info("📄 Loading shader: {s}", .{file_path});
 
-        // Compile shader
-        const compiled = try self.compiler.compileFromFile(file_path, options);
+        // Use cache for compilation - this will automatically handle file hashing and caching
+        const compiled = try self.cache.getCompiledShader(&self.compiler, file_path, options);
 
         // Create loaded shader entry
         const loaded = LoadedShader{
@@ -119,6 +123,42 @@ pub const ShaderManager = struct {
         std.log.info("✅ Shader loaded successfully: {s} ({} bytes SPIR-V)", .{ file_path, compiled.spirv_code.len });
 
         return self.loaded_shaders.getPtr(path_key).?;
+    }
+    
+    /// Load shader from raw GLSL/HLSL source code
+    pub fn loadShaderFromSource(
+        self: *Self, 
+        source: ShaderCompiler.ShaderSource, 
+        identifier: []const u8,
+        options: ShaderCompiler.CompilationOptions
+    ) !*LoadedShader {
+        const id_key = try self.allocator.dupe(u8, identifier);
+
+        // Check if already loaded
+        if (self.loaded_shaders.getPtr(id_key)) |existing| {
+            self.allocator.free(id_key); // Free the duplicate key
+            return existing;
+        }
+
+        std.log.info("📄 Loading shader from source: {s}", .{identifier});
+
+        // Use cache for compilation - this will automatically handle source hashing and caching
+        const compiled = try self.cache.getCompiledShaderFromSource(&self.compiler, source, identifier, options);
+
+        // Create loaded shader entry
+        const loaded = LoadedShader{
+            .file_path = id_key,
+            .compiled_shader = compiled,
+            .options = options,
+            .load_time = std.time.timestamp(),
+            .reload_count = 0,
+        };
+
+        try self.loaded_shaders.put(id_key, loaded);
+
+        std.log.info("✅ Shader loaded from source successfully: {s} ({} bytes SPIR-V)", .{ identifier, compiled.spirv_code.len });
+
+        return self.loaded_shaders.getPtr(id_key).?;
     }
 
     pub fn getShader(self: *Self, file_path: []const u8) ?*LoadedShader {
@@ -142,6 +182,43 @@ pub const ShaderManager = struct {
 
     pub fn addPipelineReloadCallback(self: *Self, callback: PipelineReloadCallback) !void {
         try self.pipeline_reload_callbacks.append(callback);
+    }
+    
+    /// Clear all cached shaders (useful for development/debugging)
+    pub fn clearShaderCache(self: *Self) !void {
+        try self.cache.clearCache();
+        std.log.info("🗑️ Shader cache cleared by ShaderManager", .{});
+    }
+    
+    /// Force recompilation of a specific shader (bypasses cache)
+    pub fn forceRecompileShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
+        std.log.info("🔄 Force recompiling shader: {s}", .{file_path});
+        
+        // Remove from loaded shaders if present
+        if (self.loaded_shaders.fetchRemove(file_path)) |entry| {
+            entry.value.compiled_shader.deinit(self.allocator);
+            self.allocator.free(entry.key);
+        }
+        
+        // Clear from cache and recompile
+        // TODO: Add method to ShaderCache to remove specific entry
+        
+        // Recompile directly (bypassing cache)
+        const compiled = try self.compiler.compileFromFile(file_path, options);
+        const path_key = try self.allocator.dupe(u8, file_path);
+        
+        const loaded = LoadedShader{
+            .file_path = path_key,
+            .compiled_shader = compiled,
+            .options = options,
+            .load_time = std.time.timestamp(),
+            .reload_count = 0,
+        };
+
+        try self.loaded_shaders.put(path_key, loaded);
+        
+        std.log.info("✅ Shader force recompiled: {s}", .{file_path});
+        return self.loaded_shaders.getPtr(path_key).?;
     }
 
     fn onShaderReloaded(file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) void {
@@ -187,11 +264,14 @@ pub const ShaderManager = struct {
     }
 
     pub fn getStats(self: *Self) ShaderManagerStats {
+        const cache_stats = self.cache.getCacheStats();
         return ShaderManagerStats{
             .loaded_shaders = @intCast(self.loaded_shaders.count()),
             .watched_directories = @intCast(self.hot_reload.watch_directories.items.len),
             .pipeline_dependencies = @intCast(self.shader_dependencies.count()),
             .active_compiler_threads = @intCast(self.hot_reload.compiler_threads.items.len),
+            .cached_shaders = cache_stats.total_cached_shaders,
+            .cache_directory = cache_stats.cache_directory,
         };
     }
 
@@ -235,6 +315,8 @@ pub const ShaderManagerStats = struct {
     watched_directories: u32,
     pipeline_dependencies: u32,
     active_compiler_threads: u32,
+    cached_shaders: u32,
+    cache_directory: []const u8,
 };
 
 // Convenience functions for common operations

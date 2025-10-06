@@ -754,7 +754,7 @@ pub const GraphicsContext = struct {
 
     pub fn copyBufferToImageSingleTime(
         self: *GraphicsContext,
-        buffer: vk.Buffer,
+        buffer: Buffer,
         image: vk.Image,
         width: u32,
         height: u32,
@@ -778,7 +778,7 @@ pub const GraphicsContext = struct {
             var threaded_command_pool = try self.beginSingleTimeCommands();
             self.vkd.cmdCopyBufferToImage(
                 threaded_command_pool.commandBuffer,
-                buffer,
+                buffer.buffer,
                 image,
                 vk.ImageLayout.transfer_dst_optimal,
                 1,
@@ -788,9 +788,10 @@ pub const GraphicsContext = struct {
         } else {
             // Worker thread: use secondary command buffer
             var secondary_cmd = try self.beginWorkerCommandBuffer();
+            try secondary_cmd.addPendingResource(buffer.buffer, buffer.memory);
             self.vkd.cmdCopyBufferToImage(
                 secondary_cmd.command_buffer,
-                buffer,
+                buffer.buffer,
                 image,
                 vk.ImageLayout.transfer_dst_optimal,
                 1,
