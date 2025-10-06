@@ -654,36 +654,91 @@ pub const App = struct {
     fn registerPipelineTemplates(self: *App) !void {
         _ = self; // Method for future expansion, currently uses global dynamic_pipeline_manager
 
+        // Descriptor set 0: Global uniforms
+        const textured_descriptor_set_0 = [_]DescriptorBinding{
+            DescriptorBinding{
+                .binding = 0,
+                .descriptor_type = .uniform_buffer,
+                .descriptor_count = 1,
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+            },
+        };
+
+        // Descriptor set 1: Material buffer and textures
+        const textured_descriptor_set_1 = [_]DescriptorBinding{
+            DescriptorBinding{
+                .binding = 0,
+                .descriptor_type = .storage_buffer,
+                .descriptor_count = 1,
+                .stage_flags = .{ .fragment_bit = true },
+            },
+            DescriptorBinding{
+                .binding = 1,
+                .descriptor_type = .combined_image_sampler,
+                .descriptor_count = 16,
+                .stage_flags = .{ .fragment_bit = true },
+            },
+        };
+
+        // Combine sets into array
+        const textured_descriptor_sets = [_][]const DescriptorBinding{
+            &textured_descriptor_set_0,
+            &textured_descriptor_set_1,
+        };
+
+        const textured_vertex_bindings = [_]VertexInputBinding{
+            VertexInputBinding{
+                .binding = 0,
+                .stride = @sizeOf(Vertex),
+                .input_rate = .vertex,
+            },
+        };
+
+        const textured_vertex_attributes = [_]VertexInputAttribute{
+            VertexInputAttribute{
+                .location = 0,
+                .binding = 0,
+                .format = .r32g32b32_sfloat,
+                .offset = @offsetOf(Vertex, "pos"),
+            },
+            VertexInputAttribute{
+                .location = 1,
+                .binding = 0,
+                .format = .r32g32b32_sfloat,
+                .offset = @offsetOf(Vertex, "color"),
+            },
+            VertexInputAttribute{
+                .location = 2,
+                .binding = 0,
+                .format = .r32g32b32_sfloat,
+                .offset = @offsetOf(Vertex, "normal"),
+            },
+            VertexInputAttribute{
+                .location = 3,
+                .binding = 0,
+                .format = .r32g32_sfloat,
+                .offset = @offsetOf(Vertex, "uv"),
+            },
+        };
+
+        const textured_push_constants = [_]PushConstantRange{
+            PushConstantRange{
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+                .offset = 0,
+                .size = @sizeOf(@import("renderers/textured_renderer.zig").TexturedPushConstantData),
+            },
+        };
+
         // Textured renderer pipeline template
         const textured_template = PipelineTemplate{
             .name = "textured_renderer",
             .vertex_shader = "shaders/cached/textured.vert.spv",
             .fragment_shader = "shaders/cached/textured.frag.spv",
 
-            .vertex_bindings = &[_]VertexInputBinding{
-                VertexInputBinding.create(0, @sizeOf(Vertex)),
-            },
-
-            .vertex_attributes = &[_]VertexInputAttribute{
-                VertexInputAttribute.create(0, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "pos")),
-                VertexInputAttribute.create(1, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "normal")),
-                VertexInputAttribute.create(2, 0, .r32g32_sfloat, @offsetOf(Vertex, "uv")),
-                VertexInputAttribute.create(3, 0, .r32g32b32_sfloat, @offsetOf(Vertex, "color")),
-            },
-
-            .descriptor_bindings = &[_]DescriptorBinding{
-                DescriptorBinding.uniformBuffer(0, .{ .vertex_bit = true, .fragment_bit = true }), // Global UBO
-                DescriptorBinding.uniformBuffer(1, .{ .fragment_bit = true }), // Material buffer
-                DescriptorBinding.combinedImageSampler(2, .{ .fragment_bit = true }).withCount(16), // Texture array
-            },
-
-            .push_constant_ranges = &[_]PushConstantRange{
-                PushConstantRange{
-                    .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-                    .offset = 0,
-                    .size = @sizeOf(@import("renderers/textured_renderer.zig").TexturedPushConstantData),
-                },
-            },
+            .vertex_bindings = &textured_vertex_bindings,
+            .vertex_attributes = &textured_vertex_attributes,
+            .descriptor_sets = &textured_descriptor_sets,
+            .push_constant_ranges = &textured_push_constants,
 
             .depth_test_enable = true,
             .depth_write_enable = true,
@@ -693,31 +748,42 @@ pub const App = struct {
 
         try dynamic_pipeline_manager.registerPipeline(textured_template);
 
+        // Static arrays for point light renderer
+        const point_light_vertex_bindings = [_]VertexInputBinding{
+            // Point light renderer uses no vertex input (draws fullscreen quad procedurally)
+        };
+
+        const point_light_vertex_attributes = [_]VertexInputAttribute{
+            // No vertex attributes needed
+        };
+
+        const point_light_descriptor_bindings = [_]DescriptorBinding{
+            DescriptorBinding{
+                .binding = 0,
+                .descriptor_type = .uniform_buffer,
+                .descriptor_count = 1,
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+            },
+        };
+
+        const point_light_push_constants = [_]PushConstantRange{
+            PushConstantRange{
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+                .offset = 0,
+                .size = @sizeOf(@import("renderers/point_light_renderer.zig").PointLightPushConstant),
+            },
+        };
+
         // Point light renderer pipeline template
         const point_light_template = PipelineTemplate{
             .name = "point_light_renderer",
             .vertex_shader = "shaders/cached/point_light.vert.spv",
             .fragment_shader = "shaders/cached/point_light.frag.spv",
 
-            .vertex_bindings = &[_]VertexInputBinding{
-                // Point light renderer uses no vertex input (draws fullscreen quad procedurally)
-            },
-
-            .vertex_attributes = &[_]VertexInputAttribute{
-                // No vertex attributes needed
-            },
-
-            .descriptor_bindings = &[_]DescriptorBinding{
-                DescriptorBinding.uniformBuffer(0, .{ .vertex_bit = true, .fragment_bit = true }), // Global UBO
-            },
-
-            .push_constant_ranges = &[_]PushConstantRange{
-                PushConstantRange{
-                    .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-                    .offset = 0,
-                    .size = @sizeOf(@import("renderers/point_light_renderer.zig").PointLightPushConstant),
-                },
-            },
+            .vertex_bindings = &point_light_vertex_bindings,
+            .vertex_attributes = &point_light_vertex_attributes,
+            .descriptor_bindings = &point_light_descriptor_bindings,
+            .push_constant_ranges = &point_light_push_constants,
 
             .primitive_topology = .triangle_list,
             .depth_test_enable = false, // Point lights are additive

@@ -330,15 +330,15 @@ pub const PipelineBuilder = struct {
         return Self{
             .allocator = allocator,
             .graphics_context = graphics_context,
-            .shader_stages = std.ArrayList(ShaderStage){},
-            .vertex_bindings = std.ArrayList(VertexInputBinding){},
-            .vertex_attributes = std.ArrayList(VertexInputAttribute){},
-            .descriptor_bindings = std.ArrayList(DescriptorBinding){},
-            .push_constant_ranges = std.ArrayList(PushConstantRange){},
-            .color_blend_attachments = std.ArrayList(ColorBlendAttachment){},
-            .dynamic_states = std.ArrayList(vk.DynamicState){},
-            .miss_shaders = std.ArrayList(*const Shader){},
-            .hit_shaders = std.ArrayList(*const Shader){},
+            .shader_stages = .{},
+            .vertex_bindings = .{},
+            .vertex_attributes = .{},
+            .descriptor_bindings = .{},
+            .push_constant_ranges = .{},
+            .color_blend_attachments = .{},
+            .dynamic_states = .{},
+            .miss_shaders = .{},
+            .hit_shaders = .{},
         };
     }
 
@@ -427,6 +427,10 @@ pub const PipelineBuilder = struct {
 
     // Descriptor layout
     pub fn addDescriptorBinding(self: *Self, binding: DescriptorBinding) !*Self {
+        // Ensure the ArrayList is properly initialized
+        if (self.descriptor_bindings.capacity == 0) {
+            try self.descriptor_bindings.ensureTotalCapacity(self.allocator, 8);
+        }
         try self.descriptor_bindings.append(self.allocator, binding);
         return self;
     }
@@ -459,6 +463,12 @@ pub const PipelineBuilder = struct {
 
     // Dynamic state
     pub fn addDynamicState(self: *Self, state: vk.DynamicState) !*Self {
+        // Check if this dynamic state is already added to avoid duplicates
+        for (self.dynamic_states.items) |existing_state| {
+            if (existing_state == state) {
+                return self; // Already exists, don't add duplicate
+            }
+        }
         try self.dynamic_states.append(self.allocator, state);
         return self;
     }
@@ -478,7 +488,7 @@ pub const PipelineBuilder = struct {
 
     // Build methods
     pub fn buildDescriptorSetLayout(self: *Self) !vk.DescriptorSetLayout {
-        var bindings = std.ArrayList(vk.DescriptorSetLayoutBinding){};
+        var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
         try bindings.ensureTotalCapacity(self.allocator, self.descriptor_bindings.items.len);
         defer bindings.deinit(self.allocator);
 
@@ -500,8 +510,37 @@ pub const PipelineBuilder = struct {
         return try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &create_info, null);
     }
 
+    pub fn buildDescriptorSetLayouts(self: *Self, descriptor_sets: []const []const DescriptorBinding, allocator: std.mem.Allocator) ![]vk.DescriptorSetLayout {
+        var layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
+        
+        for (descriptor_sets, 0..) |set_bindings, set_index| {
+            var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
+            try bindings.ensureTotalCapacity(allocator, set_bindings.len);
+            defer bindings.deinit(allocator);
+
+            for (set_bindings) |binding| {
+                try bindings.append(allocator, vk.DescriptorSetLayoutBinding{
+                    .binding = binding.binding,
+                    .descriptor_type = binding.descriptor_type,
+                    .descriptor_count = binding.descriptor_count,
+                    .stage_flags = binding.stage_flags,
+                    .p_immutable_samplers = binding.immutable_samplers,
+                });
+            }
+
+            const create_info = vk.DescriptorSetLayoutCreateInfo{
+                .binding_count = @intCast(bindings.items.len),
+                .p_bindings = if (bindings.items.len > 0) bindings.items.ptr else null,
+            };
+
+            layouts[set_index] = try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &create_info, null);
+        }
+        
+        return layouts;
+    }
+
     pub fn buildPipelineLayout(self: *Self, descriptor_set_layouts: []const vk.DescriptorSetLayout) !vk.PipelineLayout {
-        var push_constants = std.ArrayList(vk.PushConstantRange){};
+        var push_constants: std.ArrayList(vk.PushConstantRange) = .{};
         try push_constants.ensureTotalCapacity(self.allocator, self.push_constant_ranges.items.len);
         defer push_constants.deinit(self.allocator);
 
@@ -528,7 +567,7 @@ pub const PipelineBuilder = struct {
         if (self.render_pass == null) return error.MissingRenderPass;
 
         // Build shader stages
-        var stages = std.ArrayList(vk.PipelineShaderStageCreateInfo){};
+        var stages: std.ArrayList(vk.PipelineShaderStageCreateInfo) = .{};
         try stages.ensureTotalCapacity(self.allocator, self.shader_stages.items.len);
         defer stages.deinit(self.allocator);
 
@@ -542,10 +581,10 @@ pub const PipelineBuilder = struct {
         }
 
         // Build vertex input state
-        var vertex_bindings_vk = std.ArrayList(vk.VertexInputBindingDescription){};
+        var vertex_bindings_vk: std.ArrayList(vk.VertexInputBindingDescription) = .{};
         try vertex_bindings_vk.ensureTotalCapacity(self.allocator, self.vertex_bindings.items.len);
         defer vertex_bindings_vk.deinit(self.allocator);
-        var vertex_attributes_vk = std.ArrayList(vk.VertexInputAttributeDescription){};
+        var vertex_attributes_vk: std.ArrayList(vk.VertexInputAttributeDescription) = .{};
         try vertex_attributes_vk.ensureTotalCapacity(self.allocator, self.vertex_attributes.items.len);
         defer vertex_attributes_vk.deinit(self.allocator);
 
@@ -623,7 +662,7 @@ pub const PipelineBuilder = struct {
         };
 
         // Color blend state
-        var color_blend_attachments_vk = std.ArrayList(vk.PipelineColorBlendAttachmentState){};
+        var color_blend_attachments_vk: std.ArrayList(vk.PipelineColorBlendAttachmentState) = .{};
         try color_blend_attachments_vk.ensureTotalCapacity(self.allocator, self.color_blend_attachments.items.len);
         defer color_blend_attachments_vk.deinit(self.allocator);
 

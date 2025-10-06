@@ -10,9 +10,11 @@ const PushConstantRange = @import("pipeline_builder.zig").PushConstantRange;
 const DepthStencilState = @import("pipeline_builder.zig").DepthStencilState;
 const RasterizationState = @import("pipeline_builder.zig").RasterizationState;
 const MultisampleState = @import("pipeline_builder.zig").MultisampleState;
+const ColorBlendAttachment = @import("pipeline_builder.zig").ColorBlendAttachment;
 const PipelineCache = @import("pipeline_cache.zig").PipelineCache;
 const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
+const CompilationOptions = @import("../assets/shader_compiler.zig").CompilationOptions;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const log = @import("../utils/log.zig").log;
 
@@ -30,7 +32,8 @@ pub const PipelineTemplate = struct {
     // Pipeline configuration
     vertex_bindings: []const VertexInputBinding = &[_]VertexInputBinding{},
     vertex_attributes: []const VertexInputAttribute = &[_]VertexInputAttribute{},
-    descriptor_bindings: []const DescriptorBinding = &[_]DescriptorBinding{},
+    descriptor_bindings: []const DescriptorBinding = &[_]DescriptorBinding{}, // Legacy single set
+    descriptor_sets: ?[]const []const DescriptorBinding = null, // New multi-set support
     push_constant_ranges: []const PushConstantRange = &[_]PushConstantRange{},
 
     // Render state
@@ -61,6 +64,8 @@ pub const DynamicPipeline = struct {
     shader_assets: std.ArrayList(AssetId),
     last_rebuild_time: i64 = 0,
     rebuild_needed: bool = false,
+    rebuild_failure_count: u32 = 0, // Track consecutive rebuild failures
+    max_rebuild_attempts: u32 = 5,  // Maximum rebuild attempts before giving up
 
     // Usage statistics
     usage_count: u32 = 0,
@@ -99,6 +104,10 @@ pub const DynamicPipeline = struct {
     }
 
     pub fn isValid(self: *const DynamicPipeline) bool {
+        // Consider pipeline invalid if we've failed too many rebuild attempts
+        if (self.rebuild_failure_count >= self.max_rebuild_attempts) {
+            return false; // Give up rebuilding
+        }
         return self.pipeline != null and self.pipeline_layout != null and !self.rebuild_needed;
     }
 };
@@ -188,7 +197,18 @@ pub const DynamicPipelineManager = struct {
 
             // Check if pipeline needs rebuilding
             if (!dynamic_pipeline.isValid()) {
-                try self.rebuildPipeline(dynamic_pipeline, render_pass);
+                // Check if we've exceeded max rebuild attempts
+                if (dynamic_pipeline.rebuild_failure_count >= dynamic_pipeline.max_rebuild_attempts) {
+                    log(.ERROR, "dynamic_pipeline", "Pipeline {s} exceeded max rebuild attempts ({}), skipping", .{ name, dynamic_pipeline.max_rebuild_attempts });
+                    return null;
+                }
+                
+                // Attempt to rebuild pipeline
+                self.rebuildPipeline(dynamic_pipeline, render_pass) catch |err| {
+                    dynamic_pipeline.rebuild_failure_count += 1;
+                    log(.ERROR, "dynamic_pipeline", "Failed to rebuild pipeline {s} (attempt {}): {}", .{ name, dynamic_pipeline.rebuild_failure_count, err });
+                    return null;
+                };
             }
 
             return dynamic_pipeline.pipeline;
@@ -327,14 +347,30 @@ pub const DynamicPipelineManager = struct {
         var builder = PipelineBuilder.init(self.allocator, self.graphics_context);
         defer builder.deinit();
 
-        // Load and set shaders
-        const vertex_loaded_shader = self.shader_manager.getShader(template.vertex_shader) orelse {
-            log(.ERROR, "dynamic_pipeline", "Failed to load vertex shader: {s}", .{template.vertex_shader});
-            return error.ShaderLoadFailed;
+        // Load and set shaders - try to get existing, otherwise load from file
+        const vertex_loaded_shader = self.shader_manager.getShader(template.vertex_shader) orelse blk: {
+            log(.INFO, "dynamic_pipeline", "Loading vertex shader: {s}", .{template.vertex_shader});
+            const options = CompilationOptions{
+                .target = .vulkan,
+                .optimization_level = .none,
+                .debug_info = false,
+            };
+            break :blk self.shader_manager.loadShader(template.vertex_shader, options) catch |err| {
+                log(.ERROR, "dynamic_pipeline", "Failed to load vertex shader: {s} - {}", .{ template.vertex_shader, err });
+                return error.ShaderLoadFailed;
+            };
         };
-        const fragment_loaded_shader = self.shader_manager.getShader(template.fragment_shader) orelse {
-            log(.ERROR, "dynamic_pipeline", "Failed to load fragment shader: {s}", .{template.fragment_shader});
-            return error.ShaderLoadFailed;
+        const fragment_loaded_shader = self.shader_manager.getShader(template.fragment_shader) orelse blk: {
+            log(.INFO, "dynamic_pipeline", "Loading fragment shader: {s}", .{template.fragment_shader});
+            const options = CompilationOptions{
+                .target = .vulkan,
+                .optimization_level = .none,
+                .debug_info = false,
+            };
+            break :blk self.shader_manager.loadShader(template.fragment_shader, options) catch |err| {
+                log(.ERROR, "dynamic_pipeline", "Failed to load fragment shader: {s} - {}", .{ template.fragment_shader, err });
+                return error.ShaderLoadFailed;
+            };
         };
 
         // Create Shader objects from LoadedShader
@@ -390,12 +426,25 @@ pub const DynamicPipelineManager = struct {
             _ = try builder.addVertexAttribute(attribute);
         }
 
-        // Configure descriptors
-        for (template.descriptor_bindings) |binding| {
-            _ = try builder.addDescriptorBinding(binding);
-        }
-
-        // Configure push constants
+        // Configure descriptor bindings - support both single and multi-set layouts
+        var descriptor_set_layouts: []vk.DescriptorSetLayout = undefined;
+        var single_layout: vk.DescriptorSetLayout = undefined;
+        var managed_layouts: bool = false;
+        
+        if (template.descriptor_sets) |multi_sets| {
+            // Use new multi-set support
+            descriptor_set_layouts = try builder.buildDescriptorSetLayouts(multi_sets, self.allocator);
+            managed_layouts = true;
+        } else {
+            // Use legacy single descriptor set
+            for (template.descriptor_bindings) |binding| {
+                _ = try builder.addDescriptorBinding(binding);
+            }
+            single_layout = try builder.buildDescriptorSetLayout();
+            descriptor_set_layouts = try self.allocator.alloc(vk.DescriptorSetLayout, 1);
+            descriptor_set_layouts[0] = single_layout;
+            managed_layouts = true;
+        }        // Configure push constants
         for (template.push_constant_ranges) |range| {
             _ = try builder.addPushConstantRange(range);
         }
@@ -414,6 +463,13 @@ pub const DynamicPipelineManager = struct {
         // Set default multisampling
         _ = builder.withMultisampleState(MultisampleState.default());
 
+        // Configure color blending - add a color attachment for the render pass
+        if (template.blend_enable) {
+            _ = try builder.addColorBlendAttachment(ColorBlendAttachment.alphaBlend());
+        } else {
+            _ = try builder.addColorBlendAttachment(ColorBlendAttachment.disabled());
+        }
+
         // Set dynamic states
         for (template.dynamic_states) |state| {
             _ = try builder.addDynamicState(state);
@@ -423,16 +479,23 @@ pub const DynamicPipelineManager = struct {
         _ = builder.withRenderPass(render_pass, 0);
 
         // Build the pipeline components
-        const descriptor_set_layout = try builder.buildDescriptorSetLayout();
-        const descriptor_set_layouts = [_]vk.DescriptorSetLayout{descriptor_set_layout};
-        const pipeline_layout = try builder.buildPipelineLayout(&descriptor_set_layouts);
+        const pipeline_layout = try builder.buildPipelineLayout(descriptor_set_layouts);
         const pipeline = try builder.buildGraphicsPipeline(pipeline_layout);
 
         dynamic_pipeline.pipeline = pipeline;
         dynamic_pipeline.pipeline_layout = pipeline_layout;
-        dynamic_pipeline.descriptor_set_layout = descriptor_set_layout;
+        
+        // For single descriptor set, store the layout; for multi-set, store the first one
+        dynamic_pipeline.descriptor_set_layout = descriptor_set_layouts[0];
+        
         dynamic_pipeline.rebuild_needed = false;
+        dynamic_pipeline.rebuild_failure_count = 0; // Reset failure counter on success
         dynamic_pipeline.last_rebuild_time = std.time.timestamp();
+
+        // Clean up managed layouts if we allocated them
+        if (managed_layouts) {
+            self.allocator.free(descriptor_set_layouts);
+        }
 
         log(.INFO, "dynamic_pipeline", "Successfully rebuilt pipeline: {s}", .{template.name});
     }
