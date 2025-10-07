@@ -66,8 +66,6 @@ pub const ShaderWatcher = struct {
     }
 
     pub fn start(self: *Self) !void {
-        std.log.info("Starting shader hot reload system...", .{});
-
         self.should_stop.store(false, .monotonic);
 
         // Start file watcher thread
@@ -79,13 +77,9 @@ pub const ShaderWatcher = struct {
             const thread = try std.Thread.spawn(.{}, compilerThreadFn, .{ self, i });
             try self.compiler_threads.append(self.allocator, thread);
         }
-
-        std.log.info("✓ Shader hot reload system started with {} compiler threads", .{num_compiler_threads});
     }
 
     pub fn stop(self: *Self) void {
-        std.log.info("Stopping shader hot reload system...", .{});
-
         self.should_stop.store(true, .monotonic);
 
         // Wait for watcher thread
@@ -99,8 +93,6 @@ pub const ShaderWatcher = struct {
             thread.join();
         }
         self.compiler_threads.clearRetainingCapacity();
-
-        std.log.info("✓ Shader hot reload system stopped", .{});
     }
 
     pub fn addWatchDirectory(self: *Self, directory: []const u8) !void {
@@ -109,8 +101,6 @@ pub const ShaderWatcher = struct {
 
         // Scan for existing shaders in the directory
         try self.scanDirectory(directory);
-
-        std.log.info("✓ Added shader watch directory: {s}", .{directory});
     }
 
     pub fn addShaderReloadCallback(self: *Self, callback: ShaderReloadCallback) !void {
@@ -149,12 +139,9 @@ pub const ShaderWatcher = struct {
         };
 
         try self.watched_shaders.put(file_info.path, file_info);
-        std.log.debug("Added shader file to watch list: {s}", .{file_path});
     }
 
     fn watcherThreadFn(self: *Self) void {
-        std.log.debug("Shader watcher thread started", .{});
-
         while (!self.should_stop.load(.monotonic)) {
             self.checkForFileChanges() catch |err| {
                 std.log.err("Error checking for file changes: {}", .{err});
@@ -163,8 +150,6 @@ pub const ShaderWatcher = struct {
             // Check every 100ms for file changes
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
-
-        std.log.debug("Shader watcher thread stopped", .{});
     }
 
     fn checkForFileChanges(self: *Self) !void {
@@ -190,8 +175,6 @@ pub const ShaderWatcher = struct {
 
             // Check if file was modified
             if (current_stat.mtime > file_info.last_modified or current_stat.size != file_info.size) {
-                std.log.info("🔥 Shader file changed: {s}", .{file_info.path});
-
                 // Mark as compilation in progress
                 file_info.compilation_in_progress = true;
                 file_info.last_modified = current_stat.mtime;
@@ -213,8 +196,6 @@ pub const ShaderWatcher = struct {
     }
 
     fn compilerThreadFn(self: *Self, thread_id: usize) void {
-        std.log.debug("Shader compiler thread {} started", .{thread_id});
-
         while (!self.should_stop.load(.monotonic)) {
             const job = blk: {
                 self.compilation_mutex.lock();
@@ -236,14 +217,10 @@ pub const ShaderWatcher = struct {
                 std.Thread.sleep(10 * std.time.ns_per_ms);
             }
         }
-
-        std.log.debug("Shader compiler thread {} stopped", .{thread_id});
     }
 
     fn processCompilationJob(self: *Self, job: CompilationJob, thread_id: usize) !void {
         const start_time = std.time.microTimestamp();
-
-        std.log.info("⚙️  [Thread {}] Compiling shader: {s}", .{ thread_id, job.file_path });
 
         // Compile shader with optimized settings for hot reload
         const options = CompilationOptions{
@@ -266,8 +243,7 @@ pub const ShaderWatcher = struct {
 
         const end_time = std.time.microTimestamp();
         const compile_time_ms = @as(f64, @floatFromInt(end_time - start_time)) / 1000.0;
-
-        std.log.info("✅ [Thread {}] Shader compiled in {d:.2}ms: {s} ({} bytes)", .{ thread_id, compile_time_ms, job.file_path, compiled_shader.spirv_code.len });
+        _ = compile_time_ms; // Suppress unused variable warning
 
         // TODO: Update asset manager with new shader when asset integration is complete
         // try self.asset_manager.updateAsset(job.file_path, compiled_shader.asset_data);

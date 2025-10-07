@@ -75,25 +75,16 @@ pub const ShaderManager = struct {
     }
 
     pub fn start(self: *Self) !void {
-        std.log.info("Starting ShaderManager...", .{});
-
         // Start hot reload system
         try self.hot_reload.start();
-
-        std.log.info("✓ ShaderManager started successfully", .{});
     }
 
     pub fn stop(self: *Self) void {
-        std.log.info("Stopping ShaderManager...", .{});
-
         self.hot_reload.stop();
-
-        std.log.info("✓ ShaderManager stopped", .{});
     }
 
     pub fn addShaderDirectory(self: *Self, directory: []const u8) !void {
         try self.hot_reload.addWatchDirectory(directory);
-        std.log.info("✓ Added shader directory to hot reload: {s}", .{directory});
     }
 
     pub fn loadShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
@@ -104,8 +95,6 @@ pub const ShaderManager = struct {
             self.allocator.free(path_key); // Free the duplicate key
             return existing;
         }
-
-        std.log.info("📄 Loading shader: {s}", .{file_path});
 
         // Use cache for compilation - this will automatically handle file hashing and caching
         const compiled = try self.cache.getCompiledShader(&self.compiler, file_path, options);
@@ -122,8 +111,6 @@ pub const ShaderManager = struct {
 
         try self.loaded_shaders.put(path_key, loaded);
 
-        std.log.info("✅ Shader loaded successfully: {s} ({} bytes SPIR-V)", .{ file_path, compiled.spirv_code.len });
-
         return loaded;
     }
 
@@ -136,8 +123,6 @@ pub const ShaderManager = struct {
             self.allocator.free(id_key); // Free the duplicate key
             return existing;
         }
-
-        std.log.info("📄 Loading shader from source: {s}", .{identifier});
 
         // Use cache for compilation - this will automatically handle source hashing and caching
         const compiled = try self.cache.getCompiledShaderFromSource(&self.compiler, source, identifier, options);
@@ -153,8 +138,6 @@ pub const ShaderManager = struct {
         };
 
         try self.loaded_shaders.put(id_key, loaded);
-
-        std.log.info("✅ Shader loaded from source successfully: {s} ({} bytes SPIR-V)", .{ identifier, compiled.spirv_code.len });
 
         return loaded;
     }
@@ -174,8 +157,6 @@ pub const ShaderManager = struct {
             try deps.append(self.allocator, pipeline_key);
             try self.shader_dependencies.put(shader_key, deps);
         }
-
-        std.log.debug("📌 Registered pipeline dependency: {s} -> {s}", .{ shader_path, pipeline_id });
     }
 
     pub fn addPipelineReloadCallback(self: *Self, callback: PipelineReloadCallback) !void {
@@ -185,13 +166,10 @@ pub const ShaderManager = struct {
     /// Clear all cached shaders (useful for development/debugging)
     pub fn clearShaderCache(self: *Self) !void {
         try self.cache.clearCache();
-        std.log.info("🗑️ Shader cache cleared by ShaderManager", .{});
     }
 
     /// Force recompilation of a specific shader (bypasses cache)
     pub fn forceRecompileShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
-        std.log.info("🔄 Force recompiling shader: {s}", .{file_path});
-
         // Remove from loaded shaders if present
         if (self.loaded_shaders.fetchRemove(file_path)) |entry| {
             entry.value.compiled_shader.deinit(self.allocator);
@@ -217,7 +195,6 @@ pub const ShaderManager = struct {
 
         try self.loaded_shaders.put(path_key, loaded);
 
-        std.log.info("✅ Shader force recompiled: {s}", .{file_path});
         return loaded;
     }
 
@@ -226,23 +203,19 @@ pub const ShaderManager = struct {
 
         // Note: We need to cast the context back to ShaderManager
         // In a real implementation, we'd need a proper callback system
-        std.log.info("🔥 Shader hot reloaded: {s}", .{file_path});
 
         // Update loaded shader registry (simplified implementation)
         // In practice, this would need proper synchronization and context handling
         _ = compiled_shader;
+        _ = file_path;
     }
 
     pub fn recompileAllShaders(self: *Self) !void {
-        std.log.info("🔄 Recompiling all loaded shaders...", .{});
-
         var iterator = self.loaded_shaders.iterator();
         var recompiled_count: u32 = 0;
 
         while (iterator.next()) |entry| {
             const loaded_shader = entry.value_ptr.*;
-
-            std.log.info("Recompiling: {s}", .{loaded_shader.file_path});
 
             // Recompile with the same options
             const new_compiled = self.compiler.compileFromFile(loaded_shader.file_path, loaded_shader.options) catch |err| {
@@ -259,8 +232,6 @@ pub const ShaderManager = struct {
 
             recompiled_count += 1;
         }
-
-        std.log.info("✅ Recompiled {} shaders successfully", .{recompiled_count});
     }
 
     pub fn getStats(self: *Self) ShaderManagerStats {

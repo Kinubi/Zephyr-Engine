@@ -136,24 +136,19 @@ pub const UnifiedPipelineSystem = struct {
 
         // Load compute shader
         if (config.compute_shader) |compute_path| {
-            std.log.info("[unified_pipeline] Debug: Loading COMPUTE shader: {s}", .{compute_path});
             const compiled_shader = try self.shader_manager.loadShader(compute_path, config.shader_options);
             const shader = try self.allocator.create(Shader);
             shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .compute_bit = true }, null);
             try shaders.append(self.allocator, shader);
-            std.log.info("[unified_pipeline] Debug: Added compute shader at index {}", .{shaders.items.len - 1});
 
             // Extract descriptor layout from shader reflection
             try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .compute_bit = true });
         } // Load vertex shader
         if (config.vertex_shader) |vertex_path| {
-            std.log.info("[unified_pipeline] Debug: Loading VERTEX shader: {s}", .{vertex_path});
             const compiled_shader = try self.shader_manager.loadShader(vertex_path, config.shader_options);
             const shader = try self.allocator.create(Shader);
             shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
-            std.log.info("[unified_pipeline] Debug: Created vertex shader object: ptr={*}, module={any}, vertex_bit={}, fragment_bit={}", .{ shader, shader.module, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit });
             try shaders.append(self.allocator, shader);
-            std.log.info("[unified_pipeline] Debug: Added vertex shader at index {}", .{shaders.items.len - 1});
 
             // Extract descriptor layout from shader reflection
             try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .vertex_bit = true });
@@ -161,13 +156,10 @@ pub const UnifiedPipelineSystem = struct {
 
         // Load fragment shader
         if (config.fragment_shader) |fragment_path| {
-            std.log.info("[unified_pipeline] Debug: Loading FRAGMENT shader: {s}", .{fragment_path});
             const compiled_shader = try self.shader_manager.loadShader(fragment_path, config.shader_options);
             const shader = try self.allocator.create(Shader);
             shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
-            std.log.info("[unified_pipeline] Debug: Created fragment shader object: ptr={*}, module={any}, vertex_bit={}, fragment_bit={}", .{ shader, shader.module, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit });
             try shaders.append(self.allocator, shader);
-            std.log.info("[unified_pipeline] Debug: Added fragment shader at index {}", .{shaders.items.len - 1});
 
             // Extract and merge descriptor layout from shader reflection
             try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .fragment_bit = true });
@@ -373,7 +365,6 @@ pub const UnifiedPipelineSystem = struct {
                 entry.value_ptr.dirty = true;
             }
         }
-        std.log.info("Marked all resources for pipeline {s} as dirty", .{pipeline_id.name});
     }
 
     /// Update all dirty descriptor sets
@@ -381,7 +372,6 @@ pub const UnifiedPipelineSystem = struct {
 
         // Skip descriptor updates if hot reload is in progress to avoid validation errors
         if (self.hot_reload_in_progress) {
-            log(.DEBUG, "unified_pipeline", "Skipping descriptor updates - hot reload in progress", .{});
             return;
         }
 

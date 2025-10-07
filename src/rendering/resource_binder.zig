@@ -49,8 +49,6 @@ pub const ResourceBinder = struct {
         range: vk.DeviceSize,
         frame_index: u32,
     ) !void {
-        log(.DEBUG, "resource_binder", "Binding uniform buffer: set={}, binding={}, frame={}", .{ set, binding, frame_index });
-
         const resource = Resource{
             .buffer = .{
                 .buffer = buffer.buffer,
@@ -89,8 +87,6 @@ pub const ResourceBinder = struct {
         layout: vk.ImageLayout,
         frame_index: u32,
     ) !void {
-        log(.DEBUG, "resource_binder", "Binding texture: set={}, binding={}, frame={}", .{ set, binding, frame_index });
-
         const resource = Resource{
             .image = .{
                 .image_view = image_view,
@@ -129,8 +125,6 @@ pub const ResourceBinder = struct {
         range: vk.DeviceSize,
         frame_index: u32,
     ) !void {
-        log(.DEBUG, "resource_binder", "Binding storage buffer: set={}, binding={}, frame={}", .{ set, binding, frame_index });
-
         const resource = Resource{
             .buffer = .{
                 .buffer = buffer.buffer,

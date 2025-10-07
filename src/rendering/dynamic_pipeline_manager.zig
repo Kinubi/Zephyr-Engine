@@ -374,7 +374,6 @@ pub const DynamicPipelineManager = struct {
         };
 
         // Create Shader objects from LoadedShader (heap allocated to avoid memory corruption)
-        std.log.info("[dynamic_pipeline] Debug: Creating vertex shader, SPIR-V size: {}", .{vertex_loaded_shader.compiled_shader.spirv_code.len});
         const vertex_shader = try self.allocator.create(Shader);
         vertex_shader.* = try Shader.create(self.graphics_context.*, vertex_loaded_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
         defer {
@@ -382,7 +381,6 @@ pub const DynamicPipelineManager = struct {
             self.allocator.destroy(vertex_shader);
         }
 
-        std.log.info("[dynamic_pipeline] Debug: Creating fragment shader, SPIR-V size: {}", .{fragment_loaded_shader.compiled_shader.spirv_code.len});
         const fragment_shader = try self.allocator.create(Shader);
         fragment_shader.* = try Shader.create(self.graphics_context.*, fragment_loaded_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
         defer {

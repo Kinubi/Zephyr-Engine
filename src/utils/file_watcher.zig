@@ -139,22 +139,16 @@ pub const FileWatcher = struct {
 
     /// Main watcher thread function - polls for file changes
     fn watcherThread(self: *Self) void {
-        log(.DEBUG, "file_watcher", "Watcher thread started", .{});
-
         var loop_count: u32 = 0;
         while (self.running) {
             loop_count += 1;
-            if (loop_count <= 3) {
-                log(.DEBUG, "file_watcher", "Watcher loop #{}: running={}, paths={}", .{ loop_count, self.running, self.watched_paths.count() });
-            }
+            if (loop_count <= 3) {}
 
             self.checkForChanges();
 
             // Sleep for polling interval (100ms)
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
-
-        log(.DEBUG, "file_watcher", "Watcher thread exiting after {} loops", .{loop_count});
     }
 
     /// Check all watched paths for changes

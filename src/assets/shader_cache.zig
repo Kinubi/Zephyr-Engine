@@ -59,13 +59,15 @@ pub const ShaderCache = struct {
         if (self.cache_metadata.get(source_path)) |entry| {
             if (entry.file_hash == file_hash and entry.options_hash == self.calculateOptionsHash(options)) {
                 // Cache hit - load existing SPIR-V
-                std.log.info("📋 Shader cache hit: {s}", .{source_path});
                 return try self.loadCachedSpirv(entry.cached_spirv_path, entry.file_hash);
             } else {
-                std.log.info("🔄 Shader cache miss (file or options changed): {s}", .{source_path});
+                // Cache invalidated - clean up old entry
+
+                // Clean up old cache entry
+                self.allocator.free(entry.cached_spirv_path);
             }
         } else {
-            std.log.info("🆕 New shader, compiling: {s}", .{source_path});
+            // New shader compilation needed
         }
 
         // Cache miss or invalid - compile the shader
@@ -92,8 +94,6 @@ pub const ShaderCache = struct {
             std.log.warn("Failed to save cache metadata: {}", .{err});
         };
 
-        std.log.info("✅ Shader compiled and cached: {s} -> {s}", .{ source_path, spirv_cache_path });
-
         return compiled;
     }
 
@@ -114,13 +114,8 @@ pub const ShaderCache = struct {
         if (self.cache_metadata.get(source_identifier)) |entry| {
             if (entry.file_hash == source_hash and entry.options_hash == self.calculateOptionsHash(options)) {
                 // Cache hit - load existing SPIR-V
-                std.log.info("📋 Shader source cache hit: {s}", .{source_identifier});
                 return try self.loadCachedSpirv(entry.cached_spirv_path, source_hash);
-            } else {
-                std.log.info("🔄 Shader source cache miss (source or options changed): {s}", .{source_identifier});
             }
-        } else {
-            std.log.info("🆕 New shader source, compiling: {s}", .{source_identifier});
         }
 
         // Cache miss or invalid - compile the shader
@@ -147,15 +142,11 @@ pub const ShaderCache = struct {
             std.log.warn("Failed to save cache metadata: {}", .{err});
         };
 
-        std.log.info("✅ Shader source compiled and cached: {s} -> {s}", .{ source_identifier, spirv_cache_path });
-
         return compiled;
     }
 
     /// Clear all cached shaders
     pub fn clearCache(self: *Self) !void {
-        std.log.info("🗑️ Clearing shader cache...");
-
         // Remove all cached SPIR-V files
         var iterator = self.cache_metadata.iterator();
         while (iterator.next()) |entry| {
@@ -170,8 +161,6 @@ pub const ShaderCache = struct {
 
         // Clear metadata
         self.cache_metadata.clearAndFree();
-
-        std.log.info("✅ Shader cache cleared");
     }
 
     pub fn getCacheStats(self: *Self) CacheStats {
@@ -283,7 +272,6 @@ pub const ShaderCache = struct {
 
         const metadata_content = std.fs.cwd().readFileAlloc(self.allocator, metadata_path, 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => {
-                std.log.info("No existing shader cache metadata found, starting fresh", .{});
                 return; // No existing metadata, that's fine
             },
             else => return err,
@@ -358,8 +346,6 @@ pub const ShaderCache = struct {
                 try self.cache_metadata.put(key, cache_entry);
             }
         }
-
-        std.log.info("Loaded {} shader cache entries from metadata", .{self.cache_metadata.count()});
     }
 
     fn saveCacheMetadata(self: *Self) !void {
