@@ -104,32 +104,30 @@ pub const UnifiedPipelineSystem = struct {
             shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .compute_bit = true }, null);
             try shaders.append(self.allocator, shader);
             std.log.info("[unified_pipeline] Debug: Added compute shader at index {}", .{shaders.items.len - 1});
-            
+
             // Extract descriptor layout from shader reflection
             try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .compute_bit = true });
-        }        // Load vertex shader
+        } // Load vertex shader
         if (config.vertex_shader) |vertex_path| {
             std.log.info("[unified_pipeline] Debug: Loading VERTEX shader: {s}", .{vertex_path});
             const compiled_shader = try self.shader_manager.loadShader(vertex_path, config.shader_options);
             const shader = try self.allocator.create(Shader);
             shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
-            std.log.info("[unified_pipeline] Debug: Created vertex shader object: ptr={*}, module={any}, vertex_bit={}, fragment_bit={}", 
-                .{shader, shader.module, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit});
+            std.log.info("[unified_pipeline] Debug: Created vertex shader object: ptr={*}, module={any}, vertex_bit={}, fragment_bit={}", .{ shader, shader.module, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit });
             try shaders.append(self.allocator, shader);
             std.log.info("[unified_pipeline] Debug: Added vertex shader at index {}", .{shaders.items.len - 1});
-            
+
             // Extract descriptor layout from shader reflection
             try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .vertex_bit = true });
         }
-        
+
         // Load fragment shader
         if (config.fragment_shader) |fragment_path| {
             std.log.info("[unified_pipeline] Debug: Loading FRAGMENT shader: {s}", .{fragment_path});
             const compiled_shader = try self.shader_manager.loadShader(fragment_path, config.shader_options);
             const shader = try self.allocator.create(Shader);
             shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
-            std.log.info("[unified_pipeline] Debug: Created fragment shader object: ptr={*}, module={any}, vertex_bit={}, fragment_bit={}", 
-                .{shader, shader.module, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit});
+            std.log.info("[unified_pipeline] Debug: Created fragment shader object: ptr={*}, module={any}, vertex_bit={}, fragment_bit={}", .{ shader, shader.module, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit });
             try shaders.append(self.allocator, shader);
             std.log.info("[unified_pipeline] Debug: Added fragment shader at index {}", .{shaders.items.len - 1});
 
@@ -278,11 +276,11 @@ pub const UnifiedPipelineSystem = struct {
             // For now, bind all sets from frame 0 (we'll update this when we implement frame indexing)
             var descriptor_sets_to_bind = std.ArrayList(vk.DescriptorSet){};
             defer descriptor_sets_to_bind.deinit(self.allocator);
-            
+
             for (pipeline.descriptor_sets.items) |frame_sets| {
                 try descriptor_sets_to_bind.append(self.allocator, frame_sets[0]); // Use frame 0 for now
             }
-            
+
             if (descriptor_sets_to_bind.items.len > 0) {
                 self.graphics_context.vkd.cmdBindDescriptorSets(
                     command_buffer,
@@ -336,7 +334,7 @@ pub const UnifiedPipelineSystem = struct {
 
     /// Update all dirty descriptor sets
     pub fn updateDescriptorSets(self: *Self, frame_index: u32) !void {
-        
+
         // Group updates by pipeline and set
         var updates_by_pipeline = std.HashMap(PipelineId, std.ArrayList(DescriptorUpdate), PipelineIdContext, std.hash_map.default_max_load_percentage).init(self.allocator);
         defer {
@@ -356,7 +354,7 @@ pub const UnifiedPipelineSystem = struct {
 
             if (key.frame_index == frame_index and bound_resource.dirty) {
                 dirty_count += 1;
-                
+
                 const update = DescriptorUpdate{
                     .set = key.set,
                     .binding = key.binding,
@@ -406,7 +404,7 @@ pub const UnifiedPipelineSystem = struct {
         // TODO: Implement SPIR-V reflection to extract descriptor bindings
         // For now, hardcode layouts for known shaders
         _ = reflection;
-        
+
         // Hardcoded layout for particle compute shader
         if (stage_flags.compute_bit) {
             // Set 0: Uniform buffer (binding 0), Storage buffer (binding 1), Storage buffer (binding 2)
@@ -433,7 +431,7 @@ pub const UnifiedPipelineSystem = struct {
                     .p_immutable_samplers = null,
                 },
             };
-            
+
             try layout_info.sets.append(self.allocator, try self.allocator.dupe(vk.DescriptorSetLayoutBinding, &set0_bindings));
         }
 
@@ -444,15 +442,15 @@ pub const UnifiedPipelineSystem = struct {
     fn createDescriptorSetLayouts(self: *Self, layout_info: *const DescriptorLayoutInfo) ![]vk.DescriptorSetLayout {
         var layouts = std.ArrayList(vk.DescriptorSetLayout){};
         defer layouts.deinit(self.allocator);
-        
+
         for (layout_info.sets.items) |set_bindings| {
             if (set_bindings.len == 0) continue;
-            
+
             const layout_create_info = vk.DescriptorSetLayoutCreateInfo{
                 .binding_count = @intCast(set_bindings.len),
                 .p_bindings = set_bindings.ptr,
             };
-            
+
             const layout = try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &layout_create_info, null);
             try layouts.append(self.allocator, layout);
         }
@@ -485,9 +483,9 @@ pub const UnifiedPipelineSystem = struct {
         sets: std.ArrayList([]vk.DescriptorSet),
     } {
         _ = set_layouts; // We'll build our own layouts with the builder pattern
-        
+
         std.log.info("createDescriptorSets: Creating descriptor sets for {} sets", .{layout_info.sets.items.len});
-        
+
         var pools = std.ArrayList(*DescriptorPool){};
         var layouts = std.ArrayList(*DescriptorSetLayout){};
         var sets = std.ArrayList([]vk.DescriptorSet){};
@@ -507,16 +505,16 @@ pub const UnifiedPipelineSystem = struct {
             }
             sets.deinit(self.allocator);
         }
-        
+
         // For each descriptor set in the layout
         for (layout_info.sets.items, 0..) |set_bindings, set_index| {
             if (set_bindings.len == 0) continue;
-            
+
             // Count descriptor types for pool sizing
             var uniform_buffers: u32 = 0;
             var storage_buffers: u32 = 0;
             var combined_samplers: u32 = 0;
-            
+
             for (set_bindings) |binding| {
                 switch (binding.descriptor_type) {
                     .uniform_buffer => uniform_buffers += binding.descriptor_count,
@@ -525,7 +523,7 @@ pub const UnifiedPipelineSystem = struct {
                     else => {},
                 }
             }
-            
+
             // Create descriptor pool using builder pattern
             var pool_builder = DescriptorPool.Builder{
                 .gc = self.graphics_context,
@@ -535,7 +533,7 @@ pub const UnifiedPipelineSystem = struct {
                 .allocator = self.allocator,
             };
             defer pool_builder.poolSizes.deinit(self.allocator);
-            
+
             const pool = try self.allocator.create(DescriptorPool);
             pool.* = try pool_builder
                 .setMaxSets(MAX_FRAMES_IN_FLIGHT * 4) // Allow for multiple pipelines per frame
@@ -543,38 +541,33 @@ pub const UnifiedPipelineSystem = struct {
                 .addPoolSize(.storage_buffer, @max(storage_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1))
                 .addPoolSize(.combined_image_sampler, @max(combined_samplers * MAX_FRAMES_IN_FLIGHT * 2, 1))
                 .build();
-            
+
             try pools.append(self.allocator, pool);
-            
+
             // Create descriptor set layout using builder pattern
             var layout_builder = DescriptorSetLayout.Builder{
                 .gc = self.graphics_context,
                 .bindings = std.AutoHashMap(u32, vk.DescriptorSetLayoutBinding).init(self.allocator),
             };
-            
+
             for (set_bindings) |binding| {
-                _ = layout_builder.addBinding(
-                    binding.binding,
-                    binding.descriptor_type,
-                    binding.stage_flags,
-                    binding.descriptor_count
-                );
+                _ = layout_builder.addBinding(binding.binding, binding.descriptor_type, binding.stage_flags, binding.descriptor_count);
             }
-            
+
             const layout = try self.allocator.create(DescriptorSetLayout);
             layout.* = try layout_builder.build();
             try layouts.append(self.allocator, layout);
-            
+
             // Allocate descriptor sets for all frames
             const frame_sets = try self.allocator.alloc(vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT);
             for (frame_sets) |*set| {
                 try pool.allocateDescriptor(layout.descriptor_set_layout, set);
             }
             try sets.append(self.allocator, frame_sets);
-            
-            std.log.info("createDescriptorSets: Created descriptor set {} with {} frames", .{set_index, MAX_FRAMES_IN_FLIGHT});
+
+            std.log.info("createDescriptorSets: Created descriptor set {} with {} frames", .{ set_index, MAX_FRAMES_IN_FLIGHT });
         }
-        
+
         return .{
             .pools = pools,
             .layouts = layouts,
@@ -672,9 +665,7 @@ pub const UnifiedPipelineSystem = struct {
             const descriptor_set = descriptor_sets[frame_index];
             writer.update(descriptor_set);
 
-            std.log.info("Applied {} descriptor updates to set {} for pipeline {s} frame {}", .{ 
-                set_updates.items.len, set_index, pipeline_id.name, frame_index 
-            });
+            std.log.info("Applied {} descriptor updates to set {} for pipeline {s} frame {}", .{ set_updates.items.len, set_index, pipeline_id.name, frame_index });
         }
     }
 
@@ -774,14 +765,14 @@ pub const PipelineId = struct {
 const DescriptorLayoutInfo = struct {
     sets: std.ArrayList([]const vk.DescriptorSetLayoutBinding),
     allocator: std.mem.Allocator,
-    
+
     fn init(allocator: std.mem.Allocator) DescriptorLayoutInfo {
         return DescriptorLayoutInfo{
             .sets = std.ArrayList([]const vk.DescriptorSetLayoutBinding){},
             .allocator = allocator,
         };
     }
-    
+
     fn deinit(self: *DescriptorLayoutInfo) void {
         for (self.sets.items) |bindings| {
             self.allocator.free(bindings);

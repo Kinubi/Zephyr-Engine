@@ -141,11 +141,11 @@ pub const App = struct {
     var shader_manager: ShaderManager = undefined;
     var dynamic_pipeline_manager: DynamicPipelineManager = undefined;
     var shader_pipeline_integration: ShaderPipelineIntegration = undefined;
-    
+
     // Unified pipeline system
     var unified_pipeline_system: UnifiedPipelineSystem = undefined;
     var resource_binder: ResourceBinder = undefined;
-    
+
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -617,7 +617,7 @@ pub const App = struct {
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
         compute_shader_system.beginCompute(frame_info);
-        
+
         // Update and render particles using the unified system
         try unified_particle_renderer.updateParticles(
             frame_info.compute_buffer,
@@ -625,7 +625,7 @@ pub const App = struct {
             .{ 0.0, 2.0, 0.0 }, // emitter position
             frame_info.current_frame,
         );
-        
+
         // Keep old particle renderer for compatibility (TODO: remove)
         particle_renderer.dispatch();
         compute_shader_system.dispatch(
@@ -634,7 +634,7 @@ pub const App = struct {
             frame_info,
             .{ @intCast(particle_renderer.num_particles / 256), 1, 1 },
         );
-        
+
         compute_shader_system.endCompute(frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
@@ -655,7 +655,7 @@ pub const App = struct {
 
         // Render particles using unified system
         try unified_particle_renderer.renderParticles(frame_info.command_buffer, &camera, frame_info.current_frame);
-        
+
         // Keep old particle renderer for compatibility (TODO: remove)
         try particle_renderer.render(frame_info);
 
@@ -838,7 +838,7 @@ pub const App = struct {
         // Particle renderer pipeline templates (for unified system reference)
         // Note: The unified particle renderer creates its own pipelines automatically
         // These templates are here for documentation and potential fallback use
-        
+
         const particle_vertex_bindings = [_]VertexInputBinding{
             VertexInputBinding{
                 .binding = 0,
@@ -892,12 +892,12 @@ pub const App = struct {
             .name = "particle_renderer",
             .vertex_shader = "shaders/particles.vert",
             .fragment_shader = "shaders/particles.frag",
-            
+
             .vertex_bindings = &particle_vertex_bindings,
             .vertex_attributes = &particle_vertex_attributes,
             .descriptor_sets = &particle_descriptor_sets,
             .push_constant_ranges = &[_]PushConstantRange{},
-            
+
             .primitive_topology = .point_list,
             .depth_test_enable = true,
             .depth_write_enable = false, // Particles don't write to depth
@@ -928,12 +928,12 @@ pub const App = struct {
         self.allocator.destroy(thread_pool);
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
-        
+
         // Clean up unified systems
         unified_particle_renderer.deinit();
         resource_binder.deinit();
         unified_pipeline_system.deinit();
-        
+
         point_light_renderer.deinit();
         textured_renderer.deinit();
         raytracing_renderer.deinit(); // This handles the integrated raytracing system cleanup

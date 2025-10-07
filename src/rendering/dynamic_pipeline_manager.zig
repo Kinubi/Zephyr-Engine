@@ -381,7 +381,7 @@ pub const DynamicPipelineManager = struct {
             vertex_shader.deinit(self.graphics_context.*);
             self.allocator.destroy(vertex_shader);
         }
-        
+
         std.log.info("[dynamic_pipeline] Debug: Creating fragment shader, SPIR-V size: {}", .{fragment_loaded_shader.compiled_shader.spirv_code.len});
         const fragment_shader = try self.allocator.create(Shader);
         fragment_shader.* = try Shader.create(self.graphics_context.*, fragment_loaded_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
@@ -391,7 +391,7 @@ pub const DynamicPipelineManager = struct {
         }
 
         _ = try builder.vertexShader(vertex_shader);
-        _ = try builder.fragmentShader(fragment_shader);         // Set optional shaders (also heap allocated)
+        _ = try builder.fragmentShader(fragment_shader); // Set optional shaders (also heap allocated)
         var geometry_shader: ?*Shader = null;
         var tess_control_shader: ?*Shader = null;
         var tess_eval_shader: ?*Shader = null;
