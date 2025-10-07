@@ -179,7 +179,7 @@ pub const ShaderManager = struct {
     }
 
     pub fn addPipelineReloadCallback(self: *Self, callback: PipelineReloadCallback) !void {
-        try self.pipeline_reload_callbacks.append(callback);
+        try self.pipeline_reload_callbacks.append(self.allocator, callback);
     }
 
     /// Clear all cached shaders (useful for development/debugging)

@@ -234,6 +234,7 @@ pub const App = struct {
         // Initialize Unified Pipeline System
         unified_pipeline_system = try UnifiedPipelineSystem.init(self.allocator, &self.gc, &shader_manager);
         resource_binder = ResourceBinder.init(self.allocator, &unified_pipeline_system);
+        @import("rendering/unified_pipeline_system.zig").setGlobalUnifiedPipelineSystem(&unified_pipeline_system);
         log(.INFO, "app", "Unified pipeline system initialized", .{});
 
         // Initialize Dynamic Pipeline Manager
@@ -401,6 +402,10 @@ pub const App = struct {
             swapchain.render_pass,
             1024, // max particles
         );
+
+        // Register for hot reload after renderer is in final memory location
+        try unified_particle_renderer.registerHotReload();
+
         log(.INFO, "app", "Unified particle renderer initialized", .{});
 
         // --- Compute shader system initialization ---

@@ -41,6 +41,9 @@ pub const UnifiedParticleRenderer = struct {
     // Hot-reload context
     reload_context: PipelineReloadContext,
 
+    // Flag to track if resources need to be re-setup after hot reload
+    needs_resource_setup: bool = false,
+
     const Self = @This();
 
     pub fn init(
@@ -134,16 +137,10 @@ pub const UnifiedParticleRenderer = struct {
             .reload_context = undefined,
         };
 
-        // Set up hot-reload context
+        // Set up hot-reload context (but don't register callback yet)
         renderer.reload_context = PipelineReloadContext{
-            .renderer = &renderer,
+            .renderer = undefined, // Will be set after renderer is in final location
         };
-
-        // Register for pipeline hot-reload
-        try pipeline_system.registerPipelineReloadCallback(.{
-            .context = &renderer.reload_context,
-            .onPipelineReloaded = PipelineReloadContext.onPipelineReloaded,
-        });
 
         // Bind resources for all frames
         try renderer.setupResources();
@@ -155,6 +152,20 @@ pub const UnifiedParticleRenderer = struct {
         log(.INFO, "unified_particle_renderer", "✅ Unified particle renderer initialized", .{});
 
         return renderer;
+    }
+
+    /// Register for hot reload callbacks - must be called after renderer is in final memory location
+    pub fn registerHotReload(self: *Self) !void {
+        // Set up the context pointer now that renderer is in final location
+        self.reload_context.renderer = self;
+
+        // Register for pipeline hot-reload
+        try self.pipeline_system.registerPipelineReloadCallback(.{
+            .context = &self.reload_context,
+            .onPipelineReloaded = PipelineReloadContext.onPipelineReloaded,
+        });
+
+        log(.DEBUG, "unified_particle_renderer", "Registered for pipeline hot reload callbacks", .{});
     }
 
     pub fn deinit(self: *Self) void {
@@ -186,6 +197,19 @@ pub const UnifiedParticleRenderer = struct {
         emitter_position: [3]f32,
         frame_index: u32,
     ) !void {
+
+        // Check if we need to re-setup resources after hot reload
+        if (self.needs_resource_setup) {
+            log(.DEBUG, "unified_particle_renderer", "Re-setting up resources after hot reload", .{});
+
+            // Wait for GPU to finish current work before re-binding resources
+            // This ensures no descriptor sets are in use when we bind new ones
+            try self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev);
+            log(.DEBUG, "unified_particle_renderer", "GPU idle wait completed for resource re-setup", .{});
+
+            try self.setupResources();
+            self.needs_resource_setup = false;
+        }
 
         // Update compute uniform data
         const compute_data = ComputeUniformBuffer{
@@ -297,6 +321,10 @@ pub const UnifiedParticleRenderer = struct {
 
     fn setupResources(self: *Self) !void {
         log(.DEBUG, "unified_particle_renderer", "Setting up particle renderer resources", .{});
+
+        // Defensive check: ensure pipeline IDs are valid
+        log(.DEBUG, "unified_particle_renderer", "Compute pipeline: {s} (hash: {})", .{ self.compute_pipeline.name, self.compute_pipeline.hash });
+        log(.DEBUG, "unified_particle_renderer", "Render pipeline: {s} (hash: {})", .{ self.render_pipeline.name, self.render_pipeline.hash });
 
         // Bind resources for all frames
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
@@ -419,9 +447,22 @@ const PipelineReloadContext = struct {
 
         log(.INFO, "unified_particle_renderer", "Pipeline reloaded: {s}", .{pipeline_id.name});
 
-        // Re-setup resources after pipeline reload
-        self.renderer.setupResources() catch |err| {
-            log(.ERROR, "unified_particle_renderer", "Failed to re-setup resources after reload: {}", .{err});
-        };
+        // Update the renderer's pipeline ID references to avoid stale pointers
+        if (std.mem.eql(u8, pipeline_id.name, "particle_compute")) {
+            self.renderer.compute_pipeline = pipeline_id;
+            log(.DEBUG, "unified_particle_renderer", "Updated compute pipeline reference", .{});
+        } else if (std.mem.eql(u8, pipeline_id.name, "particle_render")) {
+            self.renderer.render_pipeline = pipeline_id;
+            log(.DEBUG, "unified_particle_renderer", "Updated render pipeline reference", .{});
+        }
+
+        // NOTE: We don't call setupResources() here during hot reload because:
+        // 1. It would bind resources immediately, marking them as dirty
+        // 2. updateFrame() might be called while old descriptor sets are still in use
+        // 3. This causes Vulkan validation errors about updating in-use descriptor sets
+        //
+        // Instead, mark that resources need setup and handle it on the next render call.
+        self.renderer.needs_resource_setup = true;
+        log(.DEBUG, "unified_particle_renderer", "Pipeline hot reload complete - resources will be set up on next render", .{});
     }
 };
