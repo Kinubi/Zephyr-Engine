@@ -19,7 +19,7 @@ pub const ShaderManager = struct {
     thread_pool: *ThreadPool,
 
     // Shader registry and caching
-    loaded_shaders: std.HashMap([]const u8, LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    loaded_shaders: std.HashMap([]const u8, *LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
     shader_dependencies: std.HashMap([]const u8, std.ArrayList([]const u8), std.hash_map.StringContext, std.hash_map.default_max_load_percentage), // shader -> dependent pipelines
 
     // Pipeline integration
@@ -35,7 +35,7 @@ pub const ShaderManager = struct {
             .cache = try ShaderCache.ShaderCache.init(allocator, "shaders/cached"),
             .asset_manager = asset_manager,
             .thread_pool = thread_pool,
-            .loaded_shaders = std.HashMap([]const u8, LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .loaded_shaders = std.HashMap([]const u8, *LoadedShader, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .shader_dependencies = std.HashMap([]const u8, std.ArrayList([]const u8), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .pipeline_reload_callbacks = std.ArrayList(PipelineReloadCallback){},
         };
@@ -57,8 +57,9 @@ pub const ShaderManager = struct {
         // Clean up shader registry
         var shader_iterator = self.loaded_shaders.iterator();
         while (shader_iterator.next()) |entry| {
-            entry.value_ptr.compiled_shader.deinit(self.allocator);
-            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.compiled_shader.deinit(self.allocator);
+            self.allocator.free(entry.value_ptr.*.file_path);
+            self.allocator.destroy(entry.value_ptr.*);
         }
         self.loaded_shaders.deinit();
 
@@ -99,7 +100,7 @@ pub const ShaderManager = struct {
         const path_key = try self.allocator.dupe(u8, file_path);
 
         // Check if already loaded
-        if (self.loaded_shaders.getPtr(path_key)) |existing| {
+        if (self.loaded_shaders.get(path_key)) |existing| {
             self.allocator.free(path_key); // Free the duplicate key
             return existing;
         }
@@ -109,8 +110,9 @@ pub const ShaderManager = struct {
         // Use cache for compilation - this will automatically handle file hashing and caching
         const compiled = try self.cache.getCompiledShader(&self.compiler, file_path, options);
 
-        // Create loaded shader entry
-        const loaded = LoadedShader{
+        // Create loaded shader entry (heap allocated)
+        const loaded = try self.allocator.create(LoadedShader);
+        loaded.* = LoadedShader{
             .file_path = path_key,
             .compiled_shader = compiled,
             .options = options,
@@ -122,20 +124,15 @@ pub const ShaderManager = struct {
 
         std.log.info("✅ Shader loaded successfully: {s} ({} bytes SPIR-V)", .{ file_path, compiled.spirv_code.len });
 
-        return self.loaded_shaders.getPtr(path_key).?;
+        return loaded;
     }
-    
+
     /// Load shader from raw GLSL/HLSL source code
-    pub fn loadShaderFromSource(
-        self: *Self, 
-        source: ShaderCompiler.ShaderSource, 
-        identifier: []const u8,
-        options: ShaderCompiler.CompilationOptions
-    ) !*LoadedShader {
+    pub fn loadShaderFromSource(self: *Self, source: ShaderCompiler.ShaderSource, identifier: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         const id_key = try self.allocator.dupe(u8, identifier);
 
         // Check if already loaded
-        if (self.loaded_shaders.getPtr(id_key)) |existing| {
+        if (self.loaded_shaders.get(id_key)) |existing| {
             self.allocator.free(id_key); // Free the duplicate key
             return existing;
         }
@@ -145,8 +142,9 @@ pub const ShaderManager = struct {
         // Use cache for compilation - this will automatically handle source hashing and caching
         const compiled = try self.cache.getCompiledShaderFromSource(&self.compiler, source, identifier, options);
 
-        // Create loaded shader entry
-        const loaded = LoadedShader{
+        // Create loaded shader entry (heap allocated)
+        const loaded = try self.allocator.create(LoadedShader);
+        loaded.* = LoadedShader{
             .file_path = id_key,
             .compiled_shader = compiled,
             .options = options,
@@ -158,11 +156,11 @@ pub const ShaderManager = struct {
 
         std.log.info("✅ Shader loaded from source successfully: {s} ({} bytes SPIR-V)", .{ identifier, compiled.spirv_code.len });
 
-        return self.loaded_shaders.getPtr(id_key).?;
+        return loaded;
     }
 
     pub fn getShader(self: *Self, file_path: []const u8) ?*LoadedShader {
-        return self.loaded_shaders.getPtr(file_path);
+        return self.loaded_shaders.get(file_path);
     }
 
     pub fn registerPipelineDependency(self: *Self, shader_path: []const u8, pipeline_id: []const u8) !void {
@@ -183,31 +181,33 @@ pub const ShaderManager = struct {
     pub fn addPipelineReloadCallback(self: *Self, callback: PipelineReloadCallback) !void {
         try self.pipeline_reload_callbacks.append(callback);
     }
-    
+
     /// Clear all cached shaders (useful for development/debugging)
     pub fn clearShaderCache(self: *Self) !void {
         try self.cache.clearCache();
         std.log.info("🗑️ Shader cache cleared by ShaderManager", .{});
     }
-    
+
     /// Force recompilation of a specific shader (bypasses cache)
     pub fn forceRecompileShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         std.log.info("🔄 Force recompiling shader: {s}", .{file_path});
-        
+
         // Remove from loaded shaders if present
         if (self.loaded_shaders.fetchRemove(file_path)) |entry| {
             entry.value.compiled_shader.deinit(self.allocator);
-            self.allocator.free(entry.key);
+            self.allocator.free(entry.value.file_path);
+            self.allocator.destroy(entry.value);
         }
-        
+
         // Clear from cache and recompile
         // TODO: Add method to ShaderCache to remove specific entry
-        
+
         // Recompile directly (bypassing cache)
         const compiled = try self.compiler.compileFromFile(file_path, options);
         const path_key = try self.allocator.dupe(u8, file_path);
-        
-        const loaded = LoadedShader{
+
+        const loaded = try self.allocator.create(LoadedShader);
+        loaded.* = LoadedShader{
             .file_path = path_key,
             .compiled_shader = compiled,
             .options = options,
@@ -216,9 +216,9 @@ pub const ShaderManager = struct {
         };
 
         try self.loaded_shaders.put(path_key, loaded);
-        
+
         std.log.info("✅ Shader force recompiled: {s}", .{file_path});
-        return self.loaded_shaders.getPtr(path_key).?;
+        return loaded;
     }
 
     fn onShaderReloaded(file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) void {
@@ -240,7 +240,7 @@ pub const ShaderManager = struct {
         var recompiled_count: u32 = 0;
 
         while (iterator.next()) |entry| {
-            const loaded_shader = entry.value_ptr;
+            const loaded_shader = entry.value_ptr.*;
 
             std.log.info("Recompiling: {s}", .{loaded_shader.file_path});
 

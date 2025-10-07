@@ -373,27 +373,49 @@ pub const DynamicPipelineManager = struct {
             };
         };
 
-        // Create Shader objects from LoadedShader
-        const vertex_shader = try Shader.create(self.graphics_context.*, vertex_loaded_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
-        defer vertex_shader.deinit(self.graphics_context.*);
-        const fragment_shader = try Shader.create(self.graphics_context.*, fragment_loaded_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
-        defer fragment_shader.deinit(self.graphics_context.*);
-
-        _ = try builder.vertexShader(&vertex_shader);
-        _ = try builder.fragmentShader(&fragment_shader); // Set optional shaders
-        var geometry_shader: ?Shader = null;
-        var tess_control_shader: ?Shader = null;
-        var tess_eval_shader: ?Shader = null;
+        // Create Shader objects from LoadedShader (heap allocated to avoid memory corruption)
+        std.log.info("[dynamic_pipeline] Debug: Creating vertex shader, SPIR-V size: {}", .{vertex_loaded_shader.compiled_shader.spirv_code.len});
+        const vertex_shader = try self.allocator.create(Shader);
+        vertex_shader.* = try Shader.create(self.graphics_context.*, vertex_loaded_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
         defer {
-            if (geometry_shader) |shader| shader.deinit(self.graphics_context.*);
-            if (tess_control_shader) |shader| shader.deinit(self.graphics_context.*);
-            if (tess_eval_shader) |shader| shader.deinit(self.graphics_context.*);
+            vertex_shader.deinit(self.graphics_context.*);
+            self.allocator.destroy(vertex_shader);
+        }
+        
+        std.log.info("[dynamic_pipeline] Debug: Creating fragment shader, SPIR-V size: {}", .{fragment_loaded_shader.compiled_shader.spirv_code.len});
+        const fragment_shader = try self.allocator.create(Shader);
+        fragment_shader.* = try Shader.create(self.graphics_context.*, fragment_loaded_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
+        defer {
+            fragment_shader.deinit(self.graphics_context.*);
+            self.allocator.destroy(fragment_shader);
+        }
+
+        _ = try builder.vertexShader(vertex_shader);
+        _ = try builder.fragmentShader(fragment_shader);         // Set optional shaders (also heap allocated)
+        var geometry_shader: ?*Shader = null;
+        var tess_control_shader: ?*Shader = null;
+        var tess_eval_shader: ?*Shader = null;
+        defer {
+            if (geometry_shader) |shader| {
+                shader.deinit(self.graphics_context.*);
+                self.allocator.destroy(shader);
+            }
+            if (tess_control_shader) |shader| {
+                shader.deinit(self.graphics_context.*);
+                self.allocator.destroy(shader);
+            }
+            if (tess_eval_shader) |shader| {
+                shader.deinit(self.graphics_context.*);
+                self.allocator.destroy(shader);
+            }
         }
 
         if (template.geometry_shader) |path| {
             if (self.shader_manager.getShader(path)) |loaded_shader| {
-                geometry_shader = try Shader.create(self.graphics_context.*, loaded_shader.compiled_shader.spirv_code, .{ .geometry_bit = true }, null);
-                _ = try builder.addShaderStage(.{ .geometry_bit = true }, &geometry_shader.?);
+                const shader = try self.allocator.create(Shader);
+                shader.* = try Shader.create(self.graphics_context.*, loaded_shader.compiled_shader.spirv_code, .{ .geometry_bit = true }, null);
+                geometry_shader = shader;
+                _ = try builder.addShaderStage(.{ .geometry_bit = true }, shader);
             } else {
                 log(.WARN, "dynamic_pipeline", "Failed to load geometry shader: {s}", .{path});
             }
@@ -401,8 +423,10 @@ pub const DynamicPipelineManager = struct {
 
         if (template.tess_control_shader) |path| {
             if (self.shader_manager.getShader(path)) |loaded_shader| {
-                tess_control_shader = try Shader.create(self.graphics_context.*, loaded_shader.compiled_shader.spirv_code, .{ .tessellation_control_bit = true }, null);
-                _ = try builder.addShaderStage(.{ .tessellation_control_bit = true }, &tess_control_shader.?);
+                const shader = try self.allocator.create(Shader);
+                shader.* = try Shader.create(self.graphics_context.*, loaded_shader.compiled_shader.spirv_code, .{ .tessellation_control_bit = true }, null);
+                tess_control_shader = shader;
+                _ = try builder.addShaderStage(.{ .tessellation_control_bit = true }, shader);
             } else {
                 log(.WARN, "dynamic_pipeline", "Failed to load tessellation control shader: {s}", .{path});
             }
@@ -410,8 +434,10 @@ pub const DynamicPipelineManager = struct {
 
         if (template.tess_eval_shader) |path| {
             if (self.shader_manager.getShader(path)) |loaded_shader| {
-                tess_eval_shader = try Shader.create(self.graphics_context.*, loaded_shader.compiled_shader.spirv_code, .{ .tessellation_evaluation_bit = true }, null);
-                _ = try builder.addShaderStage(.{ .tessellation_evaluation_bit = true }, &tess_eval_shader.?);
+                const shader = try self.allocator.create(Shader);
+                shader.* = try Shader.create(self.graphics_context.*, loaded_shader.compiled_shader.spirv_code, .{ .tessellation_evaluation_bit = true }, null);
+                tess_eval_shader = shader;
+                _ = try builder.addShaderStage(.{ .tessellation_evaluation_bit = true }, shader);
             } else {
                 log(.WARN, "dynamic_pipeline", "Failed to load tessellation evaluation shader: {s}", .{path});
             }

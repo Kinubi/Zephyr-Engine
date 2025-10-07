@@ -571,7 +571,8 @@ pub const PipelineBuilder = struct {
         try stages.ensureTotalCapacity(self.allocator, self.shader_stages.items.len);
         defer stages.deinit(self.allocator);
 
-        for (self.shader_stages.items) |stage| {
+        for (self.shader_stages.items, 0..) |stage, i| {
+            _ = i; // suppress unused variable warning
             try stages.append(self.allocator, vk.PipelineShaderStageCreateInfo{
                 .stage = @bitCast(stage.stage),
                 .module = stage.shader.module,

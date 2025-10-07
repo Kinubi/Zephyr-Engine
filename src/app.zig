@@ -47,11 +47,16 @@ const PushConstantRange = @import("rendering/pipeline_builder.zig").PushConstant
 const ShaderPipelineIntegration = @import("rendering/shader_pipeline_integration.zig").ShaderPipelineIntegration;
 const setGlobalIntegration = @import("rendering/shader_pipeline_integration.zig").setGlobalIntegration;
 
+// Unified pipeline system imports
+const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
+
 // Renderer imports
 const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
 const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
+const UnifiedParticleRenderer = @import("renderers/unified_particle_renderer.zig").UnifiedParticleRenderer;
 const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
 
 // System imports
@@ -123,6 +128,7 @@ pub const App = struct {
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_renderer: RaytracingRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
+    var unified_particle_renderer: UnifiedParticleRenderer = undefined;
 
     // Generic forward renderer that orchestrates rasterization renderers
     var forward_renderer: GenericRenderer = undefined;
@@ -135,6 +141,11 @@ pub const App = struct {
     var shader_manager: ShaderManager = undefined;
     var dynamic_pipeline_manager: DynamicPipelineManager = undefined;
     var shader_pipeline_integration: ShaderPipelineIntegration = undefined;
+    
+    // Unified pipeline system
+    var unified_pipeline_system: UnifiedPipelineSystem = undefined;
+    var resource_binder: ResourceBinder = undefined;
+    
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var viewer_object: *GameObject = undefined;
@@ -219,6 +230,11 @@ pub const App = struct {
         try shader_manager.addShaderDirectory("shaders/cached");
         try shader_manager.start();
         log(.INFO, "app", "Shader hot reload system initialized", .{});
+
+        // Initialize Unified Pipeline System
+        unified_pipeline_system = try UnifiedPipelineSystem.init(self.allocator, &self.gc, &shader_manager);
+        resource_binder = ResourceBinder.init(self.allocator, &unified_pipeline_system);
+        log(.INFO, "app", "Unified pipeline system initialized", .{});
 
         // Initialize Dynamic Pipeline Manager
         dynamic_pipeline_manager = try DynamicPipelineManager.init(self.allocator, &self.gc, asset_manager, &shader_manager);
@@ -376,10 +392,23 @@ pub const App = struct {
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
         // SBT will be created by raytracing renderer when pipeline is ready
 
+        // --- Initialize Unified Particle Renderer ---
+        unified_particle_renderer = try UnifiedParticleRenderer.init(
+            self.allocator,
+            &self.gc,
+            &shader_manager,
+            &unified_pipeline_system,
+            swapchain.render_pass,
+            1024, // max particles
+        );
+        log(.INFO, "app", "Unified particle renderer initialized", .{});
+
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
+
+        // Keep old particle renderer for compatibility (TODO: remove when fully migrated)
         var particle_render_shader_library = ShaderLibrary.init(self.gc, self.allocator);
-        // Read raytracing SPV files at runtime instead of @embedFile
+        // Read particle SPV files at runtime instead of @embedFile
         const prvert = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.vert.spv", 10 * 1024 * 1024);
         const prfrag = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.frag.spv", 10 * 1024 * 1024);
 
@@ -396,7 +425,6 @@ pub const App = struct {
         );
 
         var particle_comp_shader_library = ShaderLibrary.init(self.gc, self.allocator);
-        // Read raytracing SPV files at runtime instead of @embedFile
         const prcomp = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.comp.spv", 10 * 1024 * 1024);
 
         try particle_comp_shader_library.add(
@@ -409,7 +437,7 @@ pub const App = struct {
             },
         );
 
-        // Create UBO infos for particle renderer
+        // Create UBO infos for old particle renderer
         var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
         defer self.allocator.free(ubo_infos);
         for (global_ubo_set.buffers, 0..) |buf, i| {
@@ -589,7 +617,16 @@ pub const App = struct {
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
         compute_shader_system.beginCompute(frame_info);
-        // Each compute system will dispatch its own compute shader
+        
+        // Update and render particles using the unified system
+        try unified_particle_renderer.updateParticles(
+            frame_info.compute_buffer,
+            @floatCast(dt),
+            .{ 0.0, 2.0, 0.0 }, // emitter position
+            frame_info.current_frame,
+        );
+        
+        // Keep old particle renderer for compatibility (TODO: remove)
         particle_renderer.dispatch();
         compute_shader_system.dispatch(
             &particle_renderer.compute_pipeline,
@@ -597,6 +634,7 @@ pub const App = struct {
             frame_info,
             .{ @intCast(particle_renderer.num_particles / 256), 1, 1 },
         );
+        
         compute_shader_system.endCompute(frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
@@ -615,7 +653,10 @@ pub const App = struct {
         // try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
-        // Render particles separately for now (TODO: add to appropriate render pass)
+        // Render particles using unified system
+        try unified_particle_renderer.renderParticles(frame_info.command_buffer, &camera, frame_info.current_frame);
+        
+        // Keep old particle renderer for compatibility (TODO: remove)
         try particle_renderer.render(frame_info);
 
         // Execute rasterization renderers through the forward renderer
@@ -794,7 +835,79 @@ pub const App = struct {
 
         try dynamic_pipeline_manager.registerPipeline(point_light_template);
 
-        log(.INFO, "app", "Registered pipeline templates: textured_renderer, point_light_renderer", .{});
+        // Particle renderer pipeline templates (for unified system reference)
+        // Note: The unified particle renderer creates its own pipelines automatically
+        // These templates are here for documentation and potential fallback use
+        
+        const particle_vertex_bindings = [_]VertexInputBinding{
+            VertexInputBinding{
+                .binding = 0,
+                .stride = @sizeOf(@import("renderers/unified_particle_renderer.zig").ParticleVertex),
+                .input_rate = .instance,
+            },
+        };
+
+        const particle_vertex_attributes = [_]VertexInputAttribute{
+            VertexInputAttribute{
+                .location = 0,
+                .binding = 0,
+                .format = .r32g32b32_sfloat,
+                .offset = 0, // position
+            },
+            VertexInputAttribute{
+                .location = 1,
+                .binding = 0,
+                .format = .r32g32b32_sfloat,
+                .offset = 12, // velocity
+            },
+            VertexInputAttribute{
+                .location = 2,
+                .binding = 0,
+                .format = .r32g32b32a32_sfloat,
+                .offset = 24, // color
+            },
+            VertexInputAttribute{
+                .location = 3,
+                .binding = 0,
+                .format = .r32_sfloat,
+                .offset = 40, // life
+            },
+        };
+
+        const particle_descriptor_set_0 = [_]DescriptorBinding{
+            DescriptorBinding{
+                .binding = 0,
+                .descriptor_type = .uniform_buffer,
+                .descriptor_count = 1,
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+            },
+        };
+
+        const particle_descriptor_sets = [_][]const DescriptorBinding{
+            &particle_descriptor_set_0,
+        };
+
+        // Particle render pipeline template
+        const particle_render_template = PipelineTemplate{
+            .name = "particle_renderer",
+            .vertex_shader = "shaders/particles.vert",
+            .fragment_shader = "shaders/particles.frag",
+            
+            .vertex_bindings = &particle_vertex_bindings,
+            .vertex_attributes = &particle_vertex_attributes,
+            .descriptor_sets = &particle_descriptor_sets,
+            .push_constant_ranges = &[_]PushConstantRange{},
+            
+            .primitive_topology = .point_list,
+            .depth_test_enable = true,
+            .depth_write_enable = false, // Particles don't write to depth
+            .blend_enable = true, // Enable blending for particle effects
+            .cull_mode = .{}, // No culling for point sprites
+        };
+
+        try dynamic_pipeline_manager.registerPipeline(particle_render_template);
+
+        log(.INFO, "app", "Registered pipeline templates: textured_renderer, point_light_renderer, particle_renderer", .{});
     }
 
     pub fn deinit(self: *App) void {
@@ -815,6 +928,12 @@ pub const App = struct {
         self.allocator.destroy(thread_pool);
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
+        
+        // Clean up unified systems
+        unified_particle_renderer.deinit();
+        resource_binder.deinit();
+        unified_pipeline_system.deinit();
+        
         point_light_renderer.deinit();
         textured_renderer.deinit();
         raytracing_renderer.deinit(); // This handles the integrated raytracing system cleanup

@@ -1,6 +1,18 @@
 {
   "version": 1,
   "entries": {
+    "shaders/particles.comp": {
+      "cached_spirv_path": "shaders/cached/particles.comp.spv",
+      "file_hash": "2846476459326883562",
+      "options_hash": "13509613240315378116",
+      "compile_time": 1759744276
+    },
+    "shaders/point_light.vert": {
+      "cached_spirv_path": "shaders/cached/point_light.vert.spv",
+      "file_hash": "9682996370501299141",
+      "options_hash": "13509613240315378116",
+      "compile_time": 1759739220
+    },
     "shaders/point_light.frag": {
       "cached_spirv_path": "shaders/cached/point_light.frag.spv",
       "file_hash": "15163634821569300814",
@@ -13,17 +25,23 @@
       "options_hash": "13509613240315378116",
       "compile_time": 1759739220
     },
+    "shaders/particles.vert": {
+      "cached_spirv_path": "shaders/cached/particles.vert.spv",
+      "file_hash": "16919163387583369419",
+      "options_hash": "13509613240315378116",
+      "compile_time": 1759744276
+    },
     "shaders/textured.vert": {
       "cached_spirv_path": "shaders/cached/textured.vert.spv",
       "file_hash": "555876089172112867",
       "options_hash": "13509613240315378116",
       "compile_time": 1759739220
     },
-    "shaders/point_light.vert": {
-      "cached_spirv_path": "shaders/cached/point_light.vert.spv",
-      "file_hash": "9682996370501299141",
+    "shaders/particles.frag": {
+      "cached_spirv_path": "shaders/cached/particles.frag.spv",
+      "file_hash": "2463064927817098519",
       "options_hash": "13509613240315378116",
-      "compile_time": 1759739220
+      "compile_time": 1759744276
     }
   }
 }
