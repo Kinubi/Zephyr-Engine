@@ -56,7 +56,6 @@ const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
 const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
-const UnifiedParticleRenderer = @import("renderers/unified_particle_renderer.zig").UnifiedParticleRenderer;
 const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
 
 // System imports
@@ -127,8 +126,8 @@ pub const App = struct {
     var textured_renderer: TexturedRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_renderer: RaytracingRenderer = undefined;
+    //var particle_renderer: ParticleRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
-    var unified_particle_renderer: UnifiedParticleRenderer = undefined;
 
     // Generic forward renderer that orchestrates rasterization renderers
     var forward_renderer: GenericRenderer = undefined;
@@ -394,7 +393,7 @@ pub const App = struct {
         // SBT will be created by raytracing renderer when pipeline is ready
 
         // --- Initialize Unified Particle Renderer ---
-        unified_particle_renderer = try UnifiedParticleRenderer.init(
+        particle_renderer = try ParticleRenderer.init(
             self.allocator,
             &self.gc,
             &shader_manager,
@@ -404,7 +403,10 @@ pub const App = struct {
         );
 
         // Register for hot reload after renderer is in final memory location
-        try unified_particle_renderer.registerHotReload();
+        try particle_renderer.registerHotReload();
+
+        // Initialize particles with random data
+        try particle_renderer.initializeParticles();
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
 
@@ -442,22 +444,22 @@ pub const App = struct {
             },
         );
 
-        // Create UBO infos for old particle renderer
-        var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
-        defer self.allocator.free(ubo_infos);
-        for (global_ubo_set.buffers, 0..) |buf, i| {
-            ubo_infos[i] = buf.descriptor_info;
-        }
+        // // Create UBO infos for old particle renderer
+        // var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
+        // defer self.allocator.free(ubo_infos);
+        // for (global_ubo_set.buffers, 0..) |buf, i| {
+        //     ubo_infos[i] = buf.descriptor_info;
+        // }
 
-        particle_renderer = try ParticleRenderer.init(
-            &self.gc,
-            swapchain.render_pass,
-            particle_render_shader_library,
-            particle_comp_shader_library,
-            self.allocator,
-            1024,
-            ubo_infos,
-        );
+        // particle_renderer = try ParticleRenderer.init(
+        //     &self.gc,
+        //     swapchain.render_pass,
+        //     particle_render_shader_library,
+        //     particle_comp_shader_library,
+        //     self.allocator,
+        //     1024,
+        //     ubo_infos,
+        // );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
         // Initialize Generic Forward Renderer (rasterization only)
@@ -624,21 +626,21 @@ pub const App = struct {
         compute_shader_system.beginCompute(frame_info);
 
         // Update and render particles using the unified system
-        try unified_particle_renderer.updateParticles(
+        try particle_renderer.updateParticles(
             frame_info.compute_buffer,
-            @floatCast(dt),
-            .{ 0.0, 2.0, 0.0 }, // emitter position
             frame_info.current_frame,
+            frame_info.dt,
+            .{ .x = 0.0, .y = 0.0, .z = 0.0 }, // Default emitter position at center
         );
 
-        // Keep old particle renderer for compatibility (TODO: remove)
-        particle_renderer.dispatch();
-        compute_shader_system.dispatch(
-            &particle_renderer.compute_pipeline,
-            &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = particle_renderer.descriptor_set },
-            frame_info,
-            .{ @intCast(particle_renderer.num_particles / 256), 1, 1 },
-        );
+        // // Keep old particle renderer for compatibility (TODO: remove)
+        // particle_renderer.dispatch();
+        // compute_shader_system.dispatch(
+        //     &particle_renderer.compute_pipeline,
+        //     &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = particle_renderer.descriptor_set },
+        //     frame_info,
+        //     .{ @intCast(particle_renderer.num_particles / 256), 1, 1 },
+        // );
 
         compute_shader_system.endCompute(frame_info);
 
@@ -659,10 +661,7 @@ pub const App = struct {
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Render particles using unified system
-        try unified_particle_renderer.renderParticles(frame_info.command_buffer, &camera, frame_info.current_frame);
-
-        // Keep old particle renderer for compatibility (TODO: remove)
-        try particle_renderer.render(frame_info);
+        try particle_renderer.renderParticles(frame_info.command_buffer, &camera, frame_info.current_frame);
 
         // Execute rasterization renderers through the forward renderer
         try forward_renderer.render(frame_info);
@@ -686,7 +685,7 @@ pub const App = struct {
         }
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
-        try rt_render_pass.render(frame_info);
+        //try rt_render_pass.render(frame_info);
 
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
@@ -847,7 +846,7 @@ pub const App = struct {
         const particle_vertex_bindings = [_]VertexInputBinding{
             VertexInputBinding{
                 .binding = 0,
-                .stride = @sizeOf(@import("renderers/unified_particle_renderer.zig").ParticleVertex),
+                .stride = @sizeOf(@import("renderers/particle_renderer.zig").Particle),
                 .input_rate = .instance,
             },
         };
@@ -935,7 +934,7 @@ pub const App = struct {
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
 
         // Clean up unified systems
-        unified_particle_renderer.deinit();
+        particle_renderer.deinit();
         resource_binder.deinit();
         unified_pipeline_system.deinit();
 
@@ -945,7 +944,7 @@ pub const App = struct {
 
         // Cleanup heap-allocated shader library
 
-        particle_renderer.deinit();
+        //particle_renderer.deinit();
         scene.deinit();
 
         // Clean up dynamic pipeline system

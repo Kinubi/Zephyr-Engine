@@ -438,6 +438,8 @@ pub const Swapchain = struct {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]), .true, std.math.maxInt(u64));
 
             // Now that GPU has finished executing the previous frame, cleanup secondary command buffers
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]), .true, std.math.maxInt(u64));
+
             self.gc.cleanupSubmittedSecondaryBuffers();
         }
 

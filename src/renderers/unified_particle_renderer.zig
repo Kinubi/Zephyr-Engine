@@ -9,14 +9,16 @@ const PipelineId = @import("../rendering/unified_pipeline_system.zig").PipelineI
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
+const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const log = @import("../utils/log.zig").log;
+const math = @import("../utils/math.zig");
 
-/// Particle renderer adapted to use the unified pipeline system
+/// Particle renderer using the unified pipeline system
 ///
-/// This renderer demonstrates how to adapt compute-based particle systems
-/// to work with the new unified pipeline and descriptor management.
-pub const UnifiedParticleRenderer = struct {
+/// This renderer demonstrates how to implement compute-based particle systems
+/// with the unified pipeline and descriptor management.
+pub const ParticleRenderer = struct {
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
     shader_manager: *ShaderManager,
@@ -54,7 +56,7 @@ pub const UnifiedParticleRenderer = struct {
         render_pass: vk.RenderPass,
         max_particles: u32,
     ) !Self {
-        log(.INFO, "unified_particle_renderer", "Initializing unified particle renderer (max_particles: {})", .{max_particles});
+        log(.INFO, "particle_renderer", "Initializing particle renderer (max_particles: {})", .{max_particles});
 
         // Use the provided unified pipeline system
         const resource_binder = ResourceBinder.init(allocator, pipeline_system);
@@ -107,13 +109,12 @@ pub const UnifiedParticleRenderer = struct {
             .fragment_shader = "shaders/particles.frag",
             .render_pass = render_pass,
             .vertex_input_bindings = &[_]@import("../rendering/pipeline_builder.zig").VertexInputBinding{
-                .{ .binding = 0, .stride = @sizeOf(ParticleVertex), .input_rate = .instance },
+                .{ .binding = 0, .stride = @sizeOf(Particle), .input_rate = .vertex },
             },
             .vertex_input_attributes = &[_]@import("../rendering/pipeline_builder.zig").VertexInputAttribute{
-                .{ .location = 0, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(ParticleVertex, "position") },
-                .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(ParticleVertex, "velocity") },
-                .{ .location = 2, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(ParticleVertex, "color") },
-                .{ .location = 3, .binding = 0, .format = .r32_sfloat, .offset = @offsetOf(ParticleVertex, "life") },
+                .{ .location = 0, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "position") },
+                .{ .location = 1, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "velocity") },
+                .{ .location = 2, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(Particle, "color") },
             },
             .topology = .point_list,
             .cull_mode = .{}, // No culling for particles
@@ -149,7 +150,7 @@ pub const UnifiedParticleRenderer = struct {
         // Note: render pipeline doesn't use descriptor sets, only vertex attributes
         renderer.pipeline_system.markPipelineResourcesDirty(renderer.compute_pipeline);
 
-        log(.INFO, "unified_particle_renderer", "✅ Unified particle renderer initialized", .{});
+        log(.INFO, "particle_renderer", "✅ Particle renderer initialized", .{});
 
         return renderer;
     }
@@ -165,11 +166,11 @@ pub const UnifiedParticleRenderer = struct {
             .onPipelineReloaded = PipelineReloadContext.onPipelineReloaded,
         });
 
-        log(.DEBUG, "unified_particle_renderer", "Registered for pipeline hot reload callbacks", .{});
+        log(.DEBUG, "particle_renderer", "Registered for pipeline hot reload callbacks", .{});
     }
 
     pub fn deinit(self: *Self) void {
-        log(.INFO, "unified_particle_renderer", "Cleaning up unified particle renderer", .{});
+        log(.INFO, "particle_renderer", "Cleaning up particle renderer", .{});
 
         // Clean up particle buffers
         for (&self.particle_buffers) |*buffers| {
@@ -177,10 +178,6 @@ pub const UnifiedParticleRenderer = struct {
         }
 
         // Clean up uniform buffers
-        for (&self.compute_uniform_buffers) |*buffer| {
-            buffer.deinit();
-        }
-
         for (&self.render_uniform_buffers) |*buffer| {
             buffer.deinit();
         }
@@ -193,41 +190,46 @@ pub const UnifiedParticleRenderer = struct {
     pub fn updateParticles(
         self: *Self,
         command_buffer: vk.CommandBuffer,
-        delta_time: f32,
-        emitter_position: [3]f32,
         frame_index: u32,
+        delta_time: f32,
+        emitter_position: math.Vec3,
     ) !void {
 
         // Check if we need to re-setup resources after hot reload
         if (self.needs_resource_setup) {
-            log(.DEBUG, "unified_particle_renderer", "Re-setting up resources after hot reload", .{});
+            log(.DEBUG, "particle_renderer", "Re-setting up resources after hot reload", .{});
 
             // Wait for GPU to finish current work before re-binding resources
             // This ensures no descriptor sets are in use when we bind new ones
             try self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev);
-            log(.DEBUG, "unified_particle_renderer", "GPU idle wait completed for resource re-setup", .{});
+            log(.DEBUG, "particle_renderer", "GPU idle wait completed for resource re-setup", .{});
 
             try self.setupResources();
             self.needs_resource_setup = false;
         }
 
-        // Update compute uniform data
-        const compute_data = ComputeUniformBuffer{
+        // Update ComputeUniformBuffer with current frame data
+        const compute_ubo = ComputeUniformBuffer{
             .delta_time = delta_time,
-            .emitter_position = .{ emitter_position[0], emitter_position[1], emitter_position[2], 1.0 },
+            .emitter_position = .{ emitter_position.x, emitter_position.y, emitter_position.z, 0.0 },
             .particle_count = self.particle_count,
             .max_particles = self.max_particles,
-            .gravity = .{ 0.0, -9.81, 0.0, 0.0 },
-            .spawn_rate = 100.0,
+            .gravity = .{ 0.0, -9.81, 0.0, 0.0 }, // Default gravity
+            .spawn_rate = 100.0, // Default spawn rate
         };
 
-        try self.updateUniformBuffer(&compute_data, &self.compute_uniform_buffers[frame_index]);
+        // Write compute uniform data to buffer
+        const compute_ubo_bytes = std.mem.asBytes(&compute_ubo);
+        self.compute_uniform_buffers[frame_index].writeToBuffer(compute_ubo_bytes, @sizeOf(ComputeUniformBuffer), 0);
 
-        // Update descriptor sets
+        // Update descriptor sets for all resources (includes ComputeUniformBuffer and storage buffers)
         try self.resource_binder.updateFrame(frame_index);
 
         // Dispatch compute shader
         try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
+
+        // Update descriptor sets first
+        try self.pipeline_system.updateDescriptorSets(frame_index);
 
         // Memory barrier to ensure compute writes are visible to vertex stage
         const memory_barrier = vk.MemoryBarrier{
@@ -249,9 +251,62 @@ pub const UnifiedParticleRenderer = struct {
         );
 
         // Dispatch compute workgroups
-        const workgroup_size = 64;
+        const workgroup_size = 256; // Match shader local_size_x
         const workgroups = (self.max_particles + workgroup_size - 1) / workgroup_size;
         self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
+
+        // Memory barrier to ensure compute writes are complete before copy
+        const memory_barrier_after_compute = vk.MemoryBarrier{
+            .src_access_mask = .{ .shader_write_bit = true },
+            .dst_access_mask = .{ .transfer_read_bit = true, .vertex_attribute_read_bit = true },
+        };
+
+        self.graphics_context.vkd.cmdPipelineBarrier(
+            command_buffer,
+            .{ .compute_shader_bit = true },
+            .{ .transfer_bit = true, .vertex_input_bit = true },
+            .{},
+            1,
+            @ptrCast(&memory_barrier_after_compute),
+            0,
+            null,
+            0,
+            null,
+        );
+
+        // Copy output buffer back to input buffer for next frame (like old system)
+        const buffer_size = @sizeOf(Particle) * self.max_particles;
+        const copy_region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = 0,
+            .size = buffer_size,
+        };
+
+        self.graphics_context.vkd.cmdCopyBuffer(
+            command_buffer,
+            self.particle_buffers[frame_index].particle_buffer_out.buffer,
+            self.particle_buffers[frame_index].particle_buffer_in.buffer,
+            1,
+            @ptrCast(&copy_region),
+        );
+
+        self.graphics_context.vkd.cmdCopyBuffer(
+            command_buffer,
+            self.particle_buffers[frame_index].particle_buffer_out.buffer,
+            self.particle_buffers[(frame_index + 1) % MAX_FRAMES_IN_FLIGHT].particle_buffer_out.buffer,
+            1,
+            @ptrCast(&copy_region),
+        );
+
+        // Debug: Print first few particle positions every few frames
+        if (frame_index == 0 and @mod(@as(u64, @intCast(std.time.milliTimestamp())), 2000) < 16) {
+            log(.INFO, "particle_renderer", "Compute dispatched: {} workgroups for {} particles", .{ workgroups, self.max_particles });
+
+            // Read back first particle position for debugging (async, won't stall pipeline)
+            self.debugReadFirstParticle(frame_index) catch |err| {
+                log(.WARN, "particle_renderer", "Failed to read first particle for debug: {}", .{err});
+            };
+        }
     }
 
     /// Render particles
@@ -261,33 +316,31 @@ pub const UnifiedParticleRenderer = struct {
         camera: *const Camera,
         frame_index: u32,
     ) !void {
-        if (self.particle_count == 0) return;
+        _ = camera; // Unused since particle shaders don't need camera transforms
 
-        log(.DEBUG, "unified_particle_renderer", "Rendering {} particles (frame {})", .{ self.particle_count, frame_index });
+        if (self.particle_count == 0) {
+            log(.WARN, "particle_renderer", "No particles to render (particle_count=0)", .{});
+            return;
+        }
 
-        // Update render uniform data
-        const render_data = RenderUniformBuffer{
-            .view_projection = camera.projectionMatrix.mul(camera.viewMatrix).data,
-            .camera_position = [4]f32{ 0.0, 0.0, 0.0, 1.0 }, // TODO: Get camera position
-            .particle_size = 0.1,
-        };
+        //log(.INFO, "particle_renderer", "Rendering {} particles (frame {})", .{ self.particle_count, frame_index });
 
-        try self.updateUniformBuffer(&render_data, &self.render_uniform_buffers[frame_index]);
+        // Note: The particle shaders don't use uniform buffers, so we skip uniform updates
 
-        // Update descriptor sets
+        // Update descriptor sets (though render pipeline doesn't need them)
         try self.resource_binder.updateFrame(frame_index);
 
         // Bind render pipeline
         try self.pipeline_system.bindPipeline(command_buffer, self.render_pipeline);
 
-        // Bind particle vertex buffer
-        const vertex_buffers = [_]vk.Buffer{self.particle_buffers[frame_index].vertex_buffer.buffer};
+        // Bind particle vertex buffer (use input buffer for rendering like old system)
+        const vertex_buffers = [_]vk.Buffer{self.particle_buffers[frame_index].particle_buffer_in.buffer};
         const offsets = [_]vk.DeviceSize{0};
 
         self.graphics_context.vkd.cmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
 
-        // Draw particles as instanced points
-        self.graphics_context.vkd.cmdDraw(command_buffer, 1, self.particle_count, 0, 0);
+        // Draw particles as points (vertex rendering, not instanced)
+        self.graphics_context.vkd.cmdDraw(command_buffer, self.particle_count, 1, 0, 0);
     }
 
     // Private helper methods
@@ -317,42 +370,140 @@ pub const UnifiedParticleRenderer = struct {
         // This could be done with a compute shader or by clearing the buffers directly
     }
 
+    /// Initialize particles with random positions and velocities (like the old system)
+    pub fn initializeParticles(self: *Self) !void {
+        log(.INFO, "particle_renderer", "Initializing {} particles with random data", .{self.max_particles});
+
+        // Start with all particles active
+        self.particle_count = self.max_particles;
+
+        // Initialize particles with random positions and velocities
+        var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+        const rand = prng.random();
+
+        // Create initial particle data
+        const particle_data = try self.allocator.alloc(Particle, self.max_particles);
+        defer self.allocator.free(particle_data);
+
+        const pi = 3.14159265358979323846;
+        const scale = 0.25; // Match old system exactly
+        const vel_scale = 0.5; // Increased for visible movement (was 0.00025)
+
+        for (particle_data, 0..) |*particle, i| {
+            const r = scale * @sqrt(rand.float(f32));
+            const theta = rand.float(f32) * 2.0 * pi;
+
+            // Apply aspect ratio correction like old system (assume 16:9 aspect ratio)
+            const width: f32 = 1920.0;
+            const height: f32 = 1080.0;
+            const x = r * @cos(theta) * height / width;
+            const y = r * @sin(theta);
+
+            const len = @sqrt(x * x + y * y);
+            const vx = if (len > 0.0) (x / len) * vel_scale else 0.0;
+            const vy = if (len > 0.0) (y / len) * vel_scale else 0.0;
+
+            particle.* = Particle{
+                .position = .{ x, y },
+                .velocity = .{ vx, vy },
+                .color = .{ rand.float(f32), rand.float(f32), rand.float(f32), 1.0 },
+            };
+
+            // Debug first particle
+            if (i == 0) {
+                log(.INFO, "particle_renderer", "First particle initialized: pos=({d:.3}, {d:.3}), vel=({d:.3}, {d:.3})", .{ x, y, vx, vy });
+            }
+        }
+
+        // Create staging buffer to transfer data to GPU
+        const buffer_size = @sizeOf(Particle) * self.max_particles;
+        var staging_buffer = try Buffer.init(
+            self.graphics_context,
+            @sizeOf(Particle),
+            self.max_particles,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        defer staging_buffer.deinit();
+
+        // Map and write data to staging buffer
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(std.mem.sliceAsBytes(particle_data), buffer_size, 0);
+
+        // Copy from staging buffer to all frame input AND output buffers (like old system)
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
+            try self.graphics_context.copyBuffer(self.particle_buffers[frame_index].particle_buffer_in.buffer, staging_buffer.buffer, buffer_size);
+            try self.graphics_context.copyBuffer(self.particle_buffers[frame_index].particle_buffer_out.buffer, staging_buffer.buffer, buffer_size);
+        }
+
+        log(.INFO, "particle_renderer", "✅ Initialized {} particles", .{self.particle_count});
+    }
+
+    /// Debug method to read back the first particle's position
+    fn debugReadFirstParticle(self: *Self, frame_index: u32) !void {
+        // Create a staging buffer to read back the first particle
+        var staging_buffer = try Buffer.init(
+            self.graphics_context,
+            @sizeOf(Particle),
+            1,
+            .{ .transfer_dst_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        defer staging_buffer.deinit();
+
+        // Copy first particle from GPU buffer to staging buffer
+        try self.graphics_context.copyBuffer(staging_buffer.buffer, self.particle_buffers[frame_index].particle_buffer_out.buffer, @sizeOf(Particle));
+
+        // Map and read the data
+        try staging_buffer.map(@sizeOf(Particle), 0);
+        defer staging_buffer.unmap();
+
+        if (staging_buffer.mapped) |mapped_ptr| {
+            const particle_ptr: *Particle = @ptrCast(@alignCast(mapped_ptr));
+            const pos = particle_ptr.position;
+            const vel = particle_ptr.velocity;
+            log(.INFO, "particle_renderer", "🔍 First particle: pos=({d:.3}, {d:.3}), vel=({d:.3}, {d:.3}), color=({d:.3}, {d:.3}, {d:.3}, {d:.3})", .{ pos[0], pos[1], vel[0], vel[1], particle_ptr.color[0], particle_ptr.color[1], particle_ptr.color[2], particle_ptr.color[3] });
+        }
+    }
+
     // Private implementation
 
     fn setupResources(self: *Self) !void {
-        log(.DEBUG, "unified_particle_renderer", "Setting up particle renderer resources", .{});
+        log(.DEBUG, "particle_renderer", "Setting up particle renderer resources", .{});
 
         // Defensive check: ensure pipeline IDs are valid
-        log(.DEBUG, "unified_particle_renderer", "Compute pipeline: {s} (hash: {})", .{ self.compute_pipeline.name, self.compute_pipeline.hash });
-        log(.DEBUG, "unified_particle_renderer", "Render pipeline: {s} (hash: {})", .{ self.render_pipeline.name, self.render_pipeline.hash });
+        log(.DEBUG, "particle_renderer", "Compute pipeline: {s} (hash: {})", .{ self.compute_pipeline.name, self.compute_pipeline.hash });
+        log(.DEBUG, "particle_renderer", "Render pipeline: {s} (hash: {})", .{ self.render_pipeline.name, self.render_pipeline.hash });
 
-        // Bind resources for all frames
+        // Bind resources for all frames following old system approach
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
             const frame_idx = @as(u32, @intCast(frame_index));
 
-            // Set 0: Compute uniforms
+            // Set 0: All descriptors following old system approach
+            // Binding 0: ComputeUniformBuffer
             try self.resource_binder.bindFullUniformBuffer(
                 self.compute_pipeline,
                 0,
-                0, // set 0, binding 0 - Compute uniform data
+                0, // set 0, binding 0 - ComputeUniformBuffer
                 &self.compute_uniform_buffers[frame_index],
                 frame_idx,
             );
 
-            // Set 0: Particle data (storage buffers) - Updated to match descriptor layout
+            // Binding 1: Particle input buffer (ParticleSSBOIn)
             try self.resource_binder.bindFullStorageBuffer(
                 self.compute_pipeline,
                 0,
-                1, // set 0, binding 1 - Particle positions (ParticleSSBOIn)
-                &self.particle_buffers[frame_index].vertex_buffer,
+                1, // set 0, binding 1 - Particle input buffer
+                &self.particle_buffers[frame_index].particle_buffer_in,
                 frame_idx,
             );
 
+            // Binding 2: Particle output buffer (ParticleSSBOOut)
             try self.resource_binder.bindFullStorageBuffer(
                 self.compute_pipeline,
                 0,
-                2, // set 0, binding 2 - Particle velocities (ParticleSSBOOut)
-                &self.particle_buffers[frame_index].velocity_buffer,
+                2, // set 0, binding 2 - Particle output buffer
+                &self.particle_buffers[frame_index].particle_buffer_out,
                 frame_idx,
             );
 
@@ -362,10 +513,10 @@ pub const UnifiedParticleRenderer = struct {
     }
 };
 
-/// Particle buffers for each frame
+/// Particle buffers for each frame - matches old renderer exactly
 const ParticleBuffers = struct {
-    vertex_buffer: Buffer,
-    velocity_buffer: Buffer,
+    particle_buffer_in: Buffer,
+    particle_buffer_out: Buffer,
 
     fn create(
         allocator: std.mem.Allocator,
@@ -374,48 +525,60 @@ const ParticleBuffers = struct {
     ) !ParticleBuffers {
         _ = allocator; // Not needed for Buffer.init
 
-        const vertex_buffer = try Buffer.init(
+        const buffer_size = @sizeOf(Particle) * max_particles;
+
+        const particle_buffer_in = try Buffer.init(
             graphics_context,
-            @sizeOf(ParticleVertex),
-            max_particles,
-            .{ .vertex_buffer_bit = true, .storage_buffer_bit = true },
+            buffer_size,
+            1,
+            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true },
             .{ .device_local_bit = true },
         );
 
-        const velocity_buffer = try Buffer.init(
+        const particle_buffer_out = try Buffer.init(
             graphics_context,
-            @sizeOf(ParticleVelocity),
-            max_particles,
-            .{ .storage_buffer_bit = true },
+            buffer_size,
+            1,
+            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_src_bit = true, .transfer_dst_bit = true },
             .{ .device_local_bit = true },
         );
 
         return ParticleBuffers{
-            .vertex_buffer = vertex_buffer,
-            .velocity_buffer = velocity_buffer,
+            .particle_buffer_in = particle_buffer_in,
+            .particle_buffer_out = particle_buffer_out,
         };
     }
 
     fn destroy(self: *ParticleBuffers) void {
-        self.vertex_buffer.deinit();
-        self.velocity_buffer.deinit();
+        self.particle_buffer_in.deinit();
+        self.particle_buffer_out.deinit();
     }
 };
 
-/// Particle vertex data (for rendering)
-pub const ParticleVertex = extern struct {
-    position: [3]f32,
-    velocity: [3]f32,
+/// Particle vertex data (for rendering) - matches old renderer exactly
+pub const Particle = extern struct {
+    position: [2]f32,
+    velocity: [2]f32,
     color: [4]f32,
-    life: f32,
-    _padding: [3]f32 = .{ 0.0, 0.0, 0.0 },
+
+    pub const binding_description = vk.VertexInputBindingDescription{
+        .binding = 0,
+        .stride = @sizeOf(Particle),
+        .input_rate = .vertex,
+    };
+
+    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
+        .{ .binding = 0, .location = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "position") },
+        .{ .binding = 0, .location = 1, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "velocity") },
+        .{ .binding = 0, .location = 2, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(Particle, "color") },
+    };
 };
 
-/// Particle velocity data (for compute shader)
-const ParticleVelocity = extern struct {
-    velocity: [3]f32,
-    life: f32,
-    start_life: f32,
+/// Render shader uniform buffer
+const RenderUniformBuffer = extern struct {
+    view_projection: [16]f32,
+    camera_position: [4]f32,
+    particle_size: f32,
     _padding: [3]f32 = .{ 0.0, 0.0, 0.0 },
 };
 
@@ -430,30 +593,22 @@ const ComputeUniformBuffer = extern struct {
     _padding: [3]f32 = .{ 0.0, 0.0, 0.0 },
 };
 
-/// Render shader uniform buffer
-const RenderUniformBuffer = extern struct {
-    view_projection: [16]f32,
-    camera_position: [4]f32,
-    particle_size: f32,
-    _padding: [3]f32 = .{ 0.0, 0.0, 0.0 },
-};
-
 /// Pipeline reload context for hot-reload integration
 const PipelineReloadContext = struct {
-    renderer: *UnifiedParticleRenderer,
+    renderer: *ParticleRenderer,
 
     fn onPipelineReloaded(context: *anyopaque, pipeline_id: PipelineId) void {
         const self: *PipelineReloadContext = @ptrCast(@alignCast(context));
 
-        log(.INFO, "unified_particle_renderer", "Pipeline reloaded: {s}", .{pipeline_id.name});
+        log(.INFO, "particle_renderer", "Pipeline reloaded: {s}", .{pipeline_id.name});
 
         // Update the renderer's pipeline ID references to avoid stale pointers
         if (std.mem.eql(u8, pipeline_id.name, "particle_compute")) {
             self.renderer.compute_pipeline = pipeline_id;
-            log(.DEBUG, "unified_particle_renderer", "Updated compute pipeline reference", .{});
+            log(.DEBUG, "particle_renderer", "Updated compute pipeline reference", .{});
         } else if (std.mem.eql(u8, pipeline_id.name, "particle_render")) {
             self.renderer.render_pipeline = pipeline_id;
-            log(.DEBUG, "unified_particle_renderer", "Updated render pipeline reference", .{});
+            log(.DEBUG, "particle_renderer", "Updated render pipeline reference", .{});
         }
 
         // NOTE: We don't call setupResources() here during hot reload because:
@@ -463,6 +618,6 @@ const PipelineReloadContext = struct {
         //
         // Instead, mark that resources need setup and handle it on the next render call.
         self.renderer.needs_resource_setup = true;
-        log(.DEBUG, "unified_particle_renderer", "Pipeline hot reload complete - resources will be set up on next render", .{});
+        log(.DEBUG, "particle_renderer", "Pipeline hot reload complete - resources will be set up on next render", .{});
     }
 };

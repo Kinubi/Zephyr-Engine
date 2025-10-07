@@ -334,6 +334,12 @@ pub const UnifiedPipelineSystem = struct {
         }
     }
 
+    /// Get the pipeline layout for a given pipeline
+    pub fn getPipelineLayout(self: *Self, pipeline_id: PipelineId) !vk.PipelineLayout {
+        const pipeline = self.pipelines.get(pipeline_id) orelse return error.PipelineNotFound;
+        return pipeline.pipeline_layout;
+    }
+
     /// Bind a resource to a descriptor set
     pub fn bindResource(
         self: *Self,
