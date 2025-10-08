@@ -52,7 +52,6 @@ const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").U
 const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
 // Renderer imports
-const SimpleRenderer = @import("renderers/simple_renderer.zig").SimpleRenderer;
 const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
@@ -67,7 +66,6 @@ const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 const RenderPass = @import("rendering/render_pass.zig").RenderPass;
 const RenderContext = @import("rendering/render_pass.zig").RenderContext;
 const SceneView = @import("rendering/render_pass.zig").SceneView;
-const RenderPassManager = @import("rendering/render_pass_manager.zig").RenderPassManager;
 const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
 const RendererType = @import("rendering/generic_renderer.zig").RendererType;
 const RendererEntry = @import("rendering/generic_renderer.zig").RendererEntry;
