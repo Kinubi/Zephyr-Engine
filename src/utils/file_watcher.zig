@@ -4,7 +4,7 @@ const log = @import("log.zig").log;
 /// Cross-platform file system watcher for hot reloading
 pub const FileWatcher = struct {
     allocator: std.mem.Allocator,
-    watched_paths: std.StringHashMap(WatchedPath),
+    watched_paths: std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
     thread: ?std.Thread = null,
     running: bool = false,
     mutex: std.Thread.Mutex = .{},
@@ -41,7 +41,7 @@ pub const FileWatcher = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .watched_paths = std.StringHashMap(WatchedPath).init(allocator),
+            .watched_paths = std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
 
@@ -97,12 +97,16 @@ pub const FileWatcher = struct {
             .file_size = if (stat.kind == .directory) 0 else stat.size, // Directory size is not meaningful
         };
 
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.watched_paths.put(owned_key, watched_path);
         log(.INFO, "file_watcher", "Added watch for: {s} (recursive: {}, kind: {})", .{ path, recursive, stat.kind });
     }
 
     /// Remove a path from watching
     pub fn removeWatch(self: *Self, path: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.watched_paths.fetchRemove(path)) |entry| {
             self.allocator.free(entry.key);
             self.allocator.free(entry.value.path);
@@ -135,22 +139,28 @@ pub const FileWatcher = struct {
 
     /// Main watcher thread function - polls for file changes
     fn watcherThread(self: *Self) void {
-        log(.DEBUG, "file_watcher", "Watcher thread started", .{});
-
+        var loop_count: u32 = 0;
         while (self.running) {
+            loop_count += 1;
+            if (loop_count <= 3) {}
+
             self.checkForChanges();
 
             // Sleep for polling interval (100ms)
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
-
-        log(.DEBUG, "file_watcher", "Watcher thread exiting", .{});
     }
 
     /// Check all watched paths for changes
     fn checkForChanges(self: *Self) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        const path_count = self.watched_paths.count();
+        if (path_count == 0) {
+            // No paths to check - this is normal when starting up
+            return;
+        }
 
         var iterator = self.watched_paths.iterator();
         while (iterator.next()) |entry| {

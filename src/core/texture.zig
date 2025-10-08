@@ -209,7 +209,7 @@ pub const Texture = struct {
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
-        defer staging_buffer.deinit();
+
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(image.data, buffer_size, 0);
 
@@ -254,7 +254,7 @@ pub const Texture = struct {
 
         // 4. Copy buffer to image
         try gc.copyBufferToImageSingleTime(
-            staging_buffer.buffer,
+            staging_buffer,
             image_handle,
             image.width,
             image.height,
@@ -375,7 +375,7 @@ pub const Texture = struct {
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
-        defer staging_buffer.deinit();
+
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(image.data, buffer_size, 0);
 
@@ -420,7 +420,7 @@ pub const Texture = struct {
 
         // 4. Copy buffer to image
         try gc.copyBufferToImageSingleTime(
-            staging_buffer.buffer,
+            staging_buffer,
             image_handle,
             image.width,
             image.height,

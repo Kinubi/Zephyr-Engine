@@ -4,7 +4,7 @@ const GC = @import("graphics_context.zig").GraphicsContext;
 
 pub const entry_point_definition = struct { name: []const u8 = "main" };
 
-const Shader = struct {
+pub const Shader = struct {
     module: vk.ShaderModule,
     shader_type: vk.ShaderStageFlags,
     entry_point: entry_point_definition = entry_point_definition{ .name = "main" },
@@ -17,7 +17,7 @@ const Shader = struct {
             .code_size = code.len,
             .p_code = data,
         }, null);
-        return Shader{ .module = module, .shader_type = shader_type, .entry_point = entry_point.? };
+        return Shader{ .module = module, .shader_type = shader_type, .entry_point = entry_point orelse entry_point_definition{ .name = "main" } };
     }
 
     pub fn deinit(self: Shader, gc: GC) void {

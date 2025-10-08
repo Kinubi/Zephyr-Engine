@@ -356,14 +356,14 @@ pub const ForwardRenderPassDescriptors = struct {
                     .{
                         .binding = 0,
                         .descriptor_type = .storage_buffer,
-                        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+                        .stage_flags = .{ .fragment_bit = true }, // Match pipeline template - fragment only
                         .descriptor_count = 1,
                     },
                     .{
                         .binding = 1,
                         .descriptor_type = .combined_image_sampler,
                         .stage_flags = .{ .fragment_bit = true },
-                        .descriptor_count = 32, // Support up to 32 textures
+                        .descriptor_count = 16, // Support up to 16 textures - match pipeline template
                     },
                 },
             },

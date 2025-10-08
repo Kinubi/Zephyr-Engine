@@ -330,28 +330,28 @@ pub const PipelineBuilder = struct {
         return Self{
             .allocator = allocator,
             .graphics_context = graphics_context,
-            .shader_stages = std.ArrayList(ShaderStage).init(allocator),
-            .vertex_bindings = std.ArrayList(VertexInputBinding).init(allocator),
-            .vertex_attributes = std.ArrayList(VertexInputAttribute).init(allocator),
-            .descriptor_bindings = std.ArrayList(DescriptorBinding).init(allocator),
-            .push_constant_ranges = std.ArrayList(PushConstantRange).init(allocator),
-            .color_blend_attachments = std.ArrayList(ColorBlendAttachment).init(allocator),
-            .dynamic_states = std.ArrayList(vk.DynamicState).init(allocator),
-            .miss_shaders = std.ArrayList(*const Shader).init(allocator),
-            .hit_shaders = std.ArrayList(*const Shader).init(allocator),
+            .shader_stages = .{},
+            .vertex_bindings = .{},
+            .vertex_attributes = .{},
+            .descriptor_bindings = .{},
+            .push_constant_ranges = .{},
+            .color_blend_attachments = .{},
+            .dynamic_states = .{},
+            .miss_shaders = .{},
+            .hit_shaders = .{},
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.shader_stages.deinit();
-        self.vertex_bindings.deinit();
-        self.vertex_attributes.deinit();
-        self.descriptor_bindings.deinit();
-        self.push_constant_ranges.deinit();
-        self.color_blend_attachments.deinit();
-        self.dynamic_states.deinit();
-        self.miss_shaders.deinit();
-        self.hit_shaders.deinit();
+        self.shader_stages.deinit(self.allocator);
+        self.vertex_bindings.deinit(self.allocator);
+        self.vertex_attributes.deinit(self.allocator);
+        self.descriptor_bindings.deinit(self.allocator);
+        self.push_constant_ranges.deinit(self.allocator);
+        self.color_blend_attachments.deinit(self.allocator);
+        self.dynamic_states.deinit(self.allocator);
+        self.miss_shaders.deinit(self.allocator);
+        self.hit_shaders.deinit(self.allocator);
     }
 
     // Pipeline type configuration
@@ -372,7 +372,7 @@ pub const PipelineBuilder = struct {
 
     // Shader stage configuration
     pub fn addShaderStage(self: *Self, stage: vk.ShaderStageFlags, shader: *const Shader) !*Self {
-        try self.shader_stages.append(ShaderStage{
+        try self.shader_stages.append(self.allocator, ShaderStage{
             .stage = stage,
             .shader = shader,
         });
@@ -395,12 +395,12 @@ pub const PipelineBuilder = struct {
 
     // Vertex input configuration
     pub fn addVertexBinding(self: *Self, binding: VertexInputBinding) !*Self {
-        try self.vertex_bindings.append(binding);
+        try self.vertex_bindings.append(self.allocator, binding);
         return self;
     }
 
     pub fn addVertexAttribute(self: *Self, attribute: VertexInputAttribute) !*Self {
-        try self.vertex_attributes.append(attribute);
+        try self.vertex_attributes.append(self.allocator, attribute);
         return self;
     }
 
@@ -427,12 +427,16 @@ pub const PipelineBuilder = struct {
 
     // Descriptor layout
     pub fn addDescriptorBinding(self: *Self, binding: DescriptorBinding) !*Self {
-        try self.descriptor_bindings.append(binding);
+        // Ensure the ArrayList is properly initialized
+        if (self.descriptor_bindings.capacity == 0) {
+            try self.descriptor_bindings.ensureTotalCapacity(self.allocator, 8);
+        }
+        try self.descriptor_bindings.append(self.allocator, binding);
         return self;
     }
 
     pub fn addPushConstantRange(self: *Self, range: PushConstantRange) !*Self {
-        try self.push_constant_ranges.append(range);
+        try self.push_constant_ranges.append(self.allocator, range);
         return self;
     }
 
@@ -453,19 +457,25 @@ pub const PipelineBuilder = struct {
     }
 
     pub fn addColorBlendAttachment(self: *Self, attachment: ColorBlendAttachment) !*Self {
-        try self.color_blend_attachments.append(attachment);
+        try self.color_blend_attachments.append(self.allocator, attachment);
         return self;
     }
 
     // Dynamic state
     pub fn addDynamicState(self: *Self, state: vk.DynamicState) !*Self {
-        try self.dynamic_states.append(state);
+        // Check if this dynamic state is already added to avoid duplicates
+        for (self.dynamic_states.items) |existing_state| {
+            if (existing_state == state) {
+                return self; // Already exists, don't add duplicate
+            }
+        }
+        try self.dynamic_states.append(self.allocator, state);
         return self;
     }
 
     pub fn dynamicViewportScissor(self: *Self) !*Self {
-        try self.addDynamicState(.viewport);
-        try self.addDynamicState(.scissor);
+        _ = try self.addDynamicState(.viewport);
+        _ = try self.addDynamicState(.scissor);
         return self;
     }
 
@@ -478,11 +488,12 @@ pub const PipelineBuilder = struct {
 
     // Build methods
     pub fn buildDescriptorSetLayout(self: *Self) !vk.DescriptorSetLayout {
-        var bindings = std.ArrayList(vk.DescriptorSetLayoutBinding).init(self.allocator);
-        defer bindings.deinit();
+        var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
+        try bindings.ensureTotalCapacity(self.allocator, self.descriptor_bindings.items.len);
+        defer bindings.deinit(self.allocator);
 
         for (self.descriptor_bindings.items) |binding| {
-            try bindings.append(vk.DescriptorSetLayoutBinding{
+            try bindings.append(self.allocator, vk.DescriptorSetLayoutBinding{
                 .binding = binding.binding,
                 .descriptor_type = binding.descriptor_type,
                 .descriptor_count = binding.descriptor_count,
@@ -496,15 +507,45 @@ pub const PipelineBuilder = struct {
             .p_bindings = if (bindings.items.len > 0) bindings.items.ptr else null,
         };
 
-        return try self.graphics_context.device.createDescriptorSetLayout(&create_info, null);
+        return try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &create_info, null);
+    }
+
+    pub fn buildDescriptorSetLayouts(self: *Self, descriptor_sets: []const []const DescriptorBinding, allocator: std.mem.Allocator) ![]vk.DescriptorSetLayout {
+        var layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
+
+        for (descriptor_sets, 0..) |set_bindings, set_index| {
+            var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
+            try bindings.ensureTotalCapacity(allocator, set_bindings.len);
+            defer bindings.deinit(allocator);
+
+            for (set_bindings) |binding| {
+                try bindings.append(allocator, vk.DescriptorSetLayoutBinding{
+                    .binding = binding.binding,
+                    .descriptor_type = binding.descriptor_type,
+                    .descriptor_count = binding.descriptor_count,
+                    .stage_flags = binding.stage_flags,
+                    .p_immutable_samplers = binding.immutable_samplers,
+                });
+            }
+
+            const create_info = vk.DescriptorSetLayoutCreateInfo{
+                .binding_count = @intCast(bindings.items.len),
+                .p_bindings = if (bindings.items.len > 0) bindings.items.ptr else null,
+            };
+
+            layouts[set_index] = try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &create_info, null);
+        }
+
+        return layouts;
     }
 
     pub fn buildPipelineLayout(self: *Self, descriptor_set_layouts: []const vk.DescriptorSetLayout) !vk.PipelineLayout {
-        var push_constants = std.ArrayList(vk.PushConstantRange).init(self.allocator);
-        defer push_constants.deinit();
+        var push_constants: std.ArrayList(vk.PushConstantRange) = .{};
+        try push_constants.ensureTotalCapacity(self.allocator, self.push_constant_ranges.items.len);
+        defer push_constants.deinit(self.allocator);
 
         for (self.push_constant_ranges.items) |range| {
-            try push_constants.append(vk.PushConstantRange{
+            try push_constants.append(self.allocator, vk.PushConstantRange{
                 .stage_flags = range.stage_flags,
                 .offset = range.offset,
                 .size = range.size,
@@ -518,7 +559,7 @@ pub const PipelineBuilder = struct {
             .p_push_constant_ranges = if (push_constants.items.len > 0) push_constants.items.ptr else null,
         };
 
-        return try self.graphics_context.device.createPipelineLayout(&create_info, null);
+        return try self.graphics_context.vkd.createPipelineLayout(self.graphics_context.dev, &create_info, null);
     }
 
     pub fn buildGraphicsPipeline(self: *Self, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
@@ -526,11 +567,13 @@ pub const PipelineBuilder = struct {
         if (self.render_pass == null) return error.MissingRenderPass;
 
         // Build shader stages
-        var stages = std.ArrayList(vk.PipelineShaderStageCreateInfo).init(self.allocator);
-        defer stages.deinit();
+        var stages: std.ArrayList(vk.PipelineShaderStageCreateInfo) = .{};
+        try stages.ensureTotalCapacity(self.allocator, self.shader_stages.items.len);
+        defer stages.deinit(self.allocator);
 
-        for (self.shader_stages.items) |stage| {
-            try stages.append(vk.PipelineShaderStageCreateInfo{
+        for (self.shader_stages.items, 0..) |stage, i| {
+            _ = i; // suppress unused variable warning
+            try stages.append(self.allocator, vk.PipelineShaderStageCreateInfo{
                 .stage = @bitCast(stage.stage),
                 .module = stage.shader.module,
                 .p_name = stage.entry_point.ptr,
@@ -539,13 +582,15 @@ pub const PipelineBuilder = struct {
         }
 
         // Build vertex input state
-        var vertex_bindings_vk = std.ArrayList(vk.VertexInputBindingDescription).init(self.allocator);
-        defer vertex_bindings_vk.deinit();
-        var vertex_attributes_vk = std.ArrayList(vk.VertexInputAttributeDescription).init(self.allocator);
-        defer vertex_attributes_vk.deinit();
+        var vertex_bindings_vk: std.ArrayList(vk.VertexInputBindingDescription) = .{};
+        try vertex_bindings_vk.ensureTotalCapacity(self.allocator, self.vertex_bindings.items.len);
+        defer vertex_bindings_vk.deinit(self.allocator);
+        var vertex_attributes_vk: std.ArrayList(vk.VertexInputAttributeDescription) = .{};
+        try vertex_attributes_vk.ensureTotalCapacity(self.allocator, self.vertex_attributes.items.len);
+        defer vertex_attributes_vk.deinit(self.allocator);
 
         for (self.vertex_bindings.items) |binding| {
-            try vertex_bindings_vk.append(vk.VertexInputBindingDescription{
+            try vertex_bindings_vk.append(self.allocator, vk.VertexInputBindingDescription{
                 .binding = binding.binding,
                 .stride = binding.stride,
                 .input_rate = binding.input_rate,
@@ -553,7 +598,7 @@ pub const PipelineBuilder = struct {
         }
 
         for (self.vertex_attributes.items) |attribute| {
-            try vertex_attributes_vk.append(vk.VertexInputAttributeDescription{
+            try vertex_attributes_vk.append(self.allocator, vk.VertexInputAttributeDescription{
                 .location = attribute.location,
                 .binding = attribute.binding,
                 .format = attribute.format,
@@ -571,7 +616,7 @@ pub const PipelineBuilder = struct {
         // Input assembly state
         const input_assembly_state = vk.PipelineInputAssemblyStateCreateInfo{
             .topology = self.topology,
-            .primitive_restart_enable = if (self.primitive_restart_enable) vk.TRUE else vk.FALSE,
+            .primitive_restart_enable = if (self.primitive_restart_enable) .true else .false,
         };
 
         // Viewport state (using dynamic state)
@@ -582,12 +627,12 @@ pub const PipelineBuilder = struct {
 
         // Rasterization state
         const rasterization_state = vk.PipelineRasterizationStateCreateInfo{
-            .depth_clamp_enable = if (self.rasterization_state.depth_clamp_enable) vk.TRUE else vk.FALSE,
-            .rasterizer_discard_enable = if (self.rasterization_state.rasterizer_discard_enable) vk.TRUE else vk.FALSE,
+            .depth_clamp_enable = if (self.rasterization_state.depth_clamp_enable) .true else .false,
+            .rasterizer_discard_enable = if (self.rasterization_state.rasterizer_discard_enable) .true else .false,
             .polygon_mode = self.rasterization_state.polygon_mode,
             .cull_mode = self.rasterization_state.cull_mode,
             .front_face = self.rasterization_state.front_face,
-            .depth_bias_enable = if (self.rasterization_state.depth_bias_enable) vk.TRUE else vk.FALSE,
+            .depth_bias_enable = if (self.rasterization_state.depth_bias_enable) .true else .false,
             .depth_bias_constant_factor = self.rasterization_state.depth_bias_constant_factor,
             .depth_bias_clamp = self.rasterization_state.depth_bias_clamp,
             .depth_bias_slope_factor = self.rasterization_state.depth_bias_slope_factor,
@@ -597,20 +642,20 @@ pub const PipelineBuilder = struct {
         // Multisample state
         const multisample_state = vk.PipelineMultisampleStateCreateInfo{
             .rasterization_samples = @bitCast(self.multisample_state.rasterization_samples),
-            .sample_shading_enable = if (self.multisample_state.sample_shading_enable) vk.TRUE else vk.FALSE,
+            .sample_shading_enable = if (self.multisample_state.sample_shading_enable) .true else .false,
             .min_sample_shading = self.multisample_state.min_sample_shading,
-            .p_sample_mask = self.multisample_state.sample_mask,
-            .alpha_to_coverage_enable = if (self.multisample_state.alpha_to_coverage_enable) vk.TRUE else vk.FALSE,
-            .alpha_to_one_enable = if (self.multisample_state.alpha_to_one_enable) vk.TRUE else vk.FALSE,
+            .p_sample_mask = if (self.multisample_state.sample_mask) |mask| @ptrCast(mask) else null,
+            .alpha_to_coverage_enable = if (self.multisample_state.alpha_to_coverage_enable) .true else .false,
+            .alpha_to_one_enable = if (self.multisample_state.alpha_to_one_enable) .true else .false,
         };
 
         // Depth stencil state
         const depth_stencil_state = vk.PipelineDepthStencilStateCreateInfo{
-            .depth_test_enable = if (self.depth_stencil_state.depth_test_enable) vk.TRUE else vk.FALSE,
-            .depth_write_enable = if (self.depth_stencil_state.depth_write_enable) vk.TRUE else vk.FALSE,
+            .depth_test_enable = if (self.depth_stencil_state.depth_test_enable) .true else .false,
+            .depth_write_enable = if (self.depth_stencil_state.depth_write_enable) .true else .false,
             .depth_compare_op = self.depth_stencil_state.depth_compare_op,
-            .depth_bounds_test_enable = if (self.depth_stencil_state.depth_bounds_test_enable) vk.TRUE else vk.FALSE,
-            .stencil_test_enable = if (self.depth_stencil_state.stencil_test_enable) vk.TRUE else vk.FALSE,
+            .depth_bounds_test_enable = if (self.depth_stencil_state.depth_bounds_test_enable) .true else .false,
+            .stencil_test_enable = if (self.depth_stencil_state.stencil_test_enable) .true else .false,
             .front = self.depth_stencil_state.front,
             .back = self.depth_stencil_state.back,
             .min_depth_bounds = self.depth_stencil_state.min_depth_bounds,
@@ -618,13 +663,14 @@ pub const PipelineBuilder = struct {
         };
 
         // Color blend state
-        var color_blend_attachments_vk = std.ArrayList(vk.PipelineColorBlendAttachmentState).init(self.allocator);
-        defer color_blend_attachments_vk.deinit();
+        var color_blend_attachments_vk: std.ArrayList(vk.PipelineColorBlendAttachmentState) = .{};
+        try color_blend_attachments_vk.ensureTotalCapacity(self.allocator, self.color_blend_attachments.items.len);
+        defer color_blend_attachments_vk.deinit(self.allocator);
 
         for (self.color_blend_attachments.items) |attachment| {
-            try color_blend_attachments_vk.append(vk.PipelineColorBlendAttachmentState{
+            try color_blend_attachments_vk.append(self.allocator, vk.PipelineColorBlendAttachmentState{
                 .color_write_mask = attachment.color_write_mask,
-                .blend_enable = if (attachment.blend_enable) vk.TRUE else vk.FALSE,
+                .blend_enable = if (attachment.blend_enable) .true else .false,
                 .src_color_blend_factor = attachment.src_color_blend_factor,
                 .dst_color_blend_factor = attachment.dst_color_blend_factor,
                 .color_blend_op = attachment.color_blend_op,
@@ -635,7 +681,7 @@ pub const PipelineBuilder = struct {
         }
 
         const color_blend_state = vk.PipelineColorBlendStateCreateInfo{
-            .logic_op_enable = vk.FALSE,
+            .logic_op_enable = .false,
             .logic_op = .copy,
             .attachment_count = @intCast(color_blend_attachments_vk.items.len),
             .p_attachments = if (color_blend_attachments_vk.items.len > 0) color_blend_attachments_vk.items.ptr else null,
@@ -669,7 +715,7 @@ pub const PipelineBuilder = struct {
         };
 
         var pipeline: vk.Pipeline = undefined;
-        _ = try self.graphics_context.device.createGraphicsPipelines(.null_handle, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
+        _ = try self.graphics_context.vkd.createGraphicsPipelines(self.graphics_context.dev, .null_handle, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
 
         return pipeline;
     }
@@ -690,7 +736,7 @@ pub const PipelineBuilder = struct {
         };
 
         var pipeline: vk.Pipeline = undefined;
-        _ = try self.graphics_context.device.createComputePipelines(.null_handle, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
+        _ = try self.graphics_context.vkd.createComputePipelines(self.graphics_context.dev, .null_handle, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
 
         return pipeline;
     }

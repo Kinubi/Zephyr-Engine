@@ -5,25 +5,21 @@ struct Particle {
 	vec2 velocity;
     vec4 color;
 };
-struct PointLight {
-    vec4 position;
-    vec4 color;
-};
 
-layout(set = 0, binding = 0) uniform GlobalUbo {
-    mat4 projection;
-    mat4 view;
-    vec4 ambientColor;
-    PointLight pointLights[16];
-    int numPointLights;
-    float deltaTime;
+layout(set = 0, binding = 0) uniform ComputeUniformBuffer {
+    float delta_time;
+    vec4 emitter_position;
+    uint particle_count;
+    uint max_particles;
+    vec4 gravity;
+    float spawn_rate;
 } ubo;
 
-layout(std140, binding = 1) readonly buffer ParticleSSBOIn {
+layout(std140, set = 0, binding = 1) readonly buffer ParticleSSBOIn {
    Particle particlesIn[ ];
 };
 
-layout(std140, binding = 2) buffer ParticleSSBOOut {
+layout(std140, set = 0, binding = 2) buffer ParticleSSBOOut {
    Particle particlesOut[ ];
 };
 
@@ -35,8 +31,9 @@ void main()
 
     Particle particleIn = particlesIn[index];
 
-    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.deltaTime * 1000;
+    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.delta_time * 5;
     particlesOut[index].velocity = particleIn.velocity;
+    particlesOut[index].color = particleIn.color;
 
     // Flip movement at window border
     if ((particlesOut[index].position.x <= -1.0) || (particlesOut[index].position.x >= 1.0)) {

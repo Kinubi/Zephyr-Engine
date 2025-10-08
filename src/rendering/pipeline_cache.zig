@@ -2,7 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const PipelineBuilder = @import("pipeline_builder.zig").PipelineBuilder;
-const log = @import("../utils/logger.zig").log;
+const log = @import("../utils/log.zig").log;
 
 /// Pipeline cache entry for storing built pipelines
 const PipelineCacheEntry = struct {
@@ -46,7 +46,7 @@ pub const PipelineCache = struct {
 
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
-    cache: std.HashMap(u64, PipelineCacheEntry, std.hash_map.DefaultContext(u64), std.hash_map.default_max_load_percentage),
+    cache: std.AutoHashMap(u64, PipelineCacheEntry),
     vulkan_cache: vk.PipelineCache,
     current_frame: u32 = 0,
 
@@ -61,12 +61,12 @@ pub const PipelineCache = struct {
             .p_initial_data = null,
         };
 
-        const vulkan_cache = try graphics_context.device.createPipelineCache(&cache_create_info, null);
+        const vulkan_cache = try graphics_context.vkd.createPipelineCache(graphics_context.dev, &cache_create_info, null);
 
         return Self{
             .allocator = allocator,
             .graphics_context = graphics_context,
-            .cache = std.HashMap(u64, PipelineCacheEntry, std.hash_map.DefaultContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .cache = std.AutoHashMap(u64, PipelineCacheEntry).init(allocator),
             .vulkan_cache = vulkan_cache,
         };
     }
@@ -75,15 +75,15 @@ pub const PipelineCache = struct {
         // Destroy all cached pipelines
         var iterator = self.cache.iterator();
         while (iterator.next()) |entry| {
-            self.graphics_context.device.destroyPipeline(entry.value_ptr.pipeline, null);
-            self.graphics_context.device.destroyPipelineLayout(entry.value_ptr.pipeline_layout, null);
+            self.graphics_context.vkd.destroyPipeline(self.graphics_context.dev, entry.value_ptr.pipeline, null);
+            self.graphics_context.vkd.destroyPipelineLayout(self.graphics_context.dev, entry.value_ptr.pipeline_layout, null);
             if (entry.value_ptr.descriptor_set_layout) |layout| {
-                self.graphics_context.device.destroyDescriptorSetLayout(layout, null);
+                self.graphics_context.vkd.destroyDescriptorSetLayout(self.graphics_context.dev, layout, null);
             }
         }
 
         self.cache.deinit();
-        self.graphics_context.device.destroyPipelineCache(self.vulkan_cache, null);
+        self.graphics_context.vkd.destroyPipelineCache(self.graphics_context.dev, self.vulkan_cache, null);
     }
 
     /// Get or create a pipeline using the builder
@@ -208,10 +208,10 @@ pub const PipelineCache = struct {
 
         for (to_remove.items) |hash| {
             if (self.cache.fetchRemove(hash)) |entry| {
-                self.graphics_context.device.destroyPipeline(entry.value.pipeline, null);
-                self.graphics_context.device.destroyPipelineLayout(entry.value.pipeline_layout, null);
+                self.graphics_context.vkd.destroyPipeline(self.graphics_context.dev, entry.value.pipeline, null);
+                self.graphics_context.vkd.destroyPipelineLayout(self.graphics_context.dev, entry.value.pipeline_layout, null);
                 if (entry.value.descriptor_set_layout) |layout| {
-                    self.graphics_context.device.destroyDescriptorSetLayout(layout, null);
+                    self.graphics_context.vkd.destroyDescriptorSetLayout(self.graphics_context.dev, layout, null);
                 }
             }
         }
@@ -220,13 +220,13 @@ pub const PipelineCache = struct {
     /// Save cache data to disk for faster startup
     pub fn saveToDisk(self: *Self, path: []const u8) !void {
         var cache_size: usize = undefined;
-        _ = try self.graphics_context.device.getPipelineCacheData(self.vulkan_cache, &cache_size, null);
+        _ = try self.graphics_context.vkd.getPipelineCacheData(self.graphics_context.dev, self.vulkan_cache, &cache_size, null);
 
         if (cache_size > 0) {
             const cache_data = try self.allocator.alloc(u8, cache_size);
             defer self.allocator.free(cache_data);
 
-            _ = try self.graphics_context.device.getPipelineCacheData(self.vulkan_cache, &cache_size, cache_data.ptr);
+            _ = try self.graphics_context.vkd.getPipelineCacheData(self.graphics_context.dev, self.vulkan_cache, &cache_size, cache_data.ptr);
 
             const file = try std.fs.cwd().createFile(path, .{});
             defer file.close();
@@ -247,14 +247,14 @@ pub const PipelineCache = struct {
         defer self.allocator.free(cache_data);
 
         // Destroy old cache and create new one with data
-        self.graphics_context.device.destroyPipelineCache(self.vulkan_cache, null);
+        self.graphics_context.vkd.destroyPipelineCache(self.graphics_context.dev, self.vulkan_cache, null);
 
         const cache_create_info = vk.PipelineCacheCreateInfo{
             .initial_data_size = cache_data.len,
             .p_initial_data = cache_data.ptr,
         };
 
-        self.vulkan_cache = try self.graphics_context.device.createPipelineCache(&cache_create_info, null);
+        self.vulkan_cache = try self.graphics_context.vkd.createPipelineCache(self.graphics_context.dev, &cache_create_info, null);
     }
 
     /// Get cache statistics

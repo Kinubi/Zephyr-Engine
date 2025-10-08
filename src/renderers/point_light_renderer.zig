@@ -10,8 +10,10 @@ const Camera = @import("../rendering/camera.zig").Camera;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const RenderSystem = @import("../systems/render_system.zig").RenderSystem;
+const DynamicPipelineManager = @import("../rendering/dynamic_pipeline_manager.zig").DynamicPipelineManager;
+const log = @import("../utils/log.zig").log;
 
-const PointLightPushConstant = struct {
+pub const PointLightPushConstant = struct {
     position: Math.Vec4 = Math.Vec4.init(0, 0, 0, 1),
     color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 1),
     radius: f32 = 1.0,
@@ -19,27 +21,24 @@ const PointLightPushConstant = struct {
 
 pub const PointLightRenderer = struct {
     scene: *Scene = undefined,
-    pipeline: Pipeline = undefined,
+    pipeline_manager: *DynamicPipelineManager,
     gc: *GraphicsContext = undefined,
-    pipeline_layout: vk.PipelineLayout = undefined,
     camera: *Camera = undefined,
+    pipeline_name: []const u8 = "point_light_renderer",
+    render_pass: vk.RenderPass,
 
-    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: *Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout) !PointLightRenderer {
-        const pcr = [_]vk.PushConstantRange{.{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(PointLightPushConstant) }};
-        const dsl = [_]vk.DescriptorSetLayout{global_set_layout};
-        const layout = try gc.*.vkd.createPipelineLayout(
-            gc.*.dev,
-            &vk.PipelineLayoutCreateInfo{
-                .flags = .{},
-                .set_layout_count = dsl.len,
-                .p_set_layouts = &dsl,
-                .push_constant_range_count = pcr.len,
-                .p_push_constant_ranges = &pcr,
-            },
-            null,
-        );
-        const pipeline = try Pipeline.init(gc.*, render_pass, shader_library, layout, try Pipeline.defaultLayout(layout), alloc);
-        return PointLightRenderer{ .scene = scene, .pipeline = pipeline, .gc = gc, .pipeline_layout = layout, .camera = camera };
+    pub fn init(gc: *GraphicsContext, render_pass: vk.RenderPass, scene: *Scene, shader_library: ShaderLibrary, alloc: std.mem.Allocator, camera: *Camera, global_set_layout: vk.DescriptorSetLayout, pipeline_manager: *DynamicPipelineManager) !PointLightRenderer {
+        _ = shader_library; // No longer needed, using dynamic pipelines
+        _ = alloc; // No longer needed for pipeline creation
+        _ = global_set_layout; // No longer needed for pipeline creation
+
+        return PointLightRenderer{
+            .scene = scene,
+            .pipeline_manager = pipeline_manager,
+            .gc = gc,
+            .camera = camera,
+            .render_pass = render_pass,
+        };
     }
 
     pub fn update_point_lights(self: *PointLightRenderer, frame_info: *FrameInfo, global_ubo: *GlobalUbo) !void {
@@ -62,12 +61,30 @@ pub const PointLightRenderer = struct {
     }
 
     pub fn deinit(self: *PointLightRenderer) void {
-        self.pipeline.deinit();
+        // Pipeline is managed by DynamicPipelineManager, no cleanup needed
+        _ = self;
     }
 
     pub fn render(self: *PointLightRenderer, frame_info: FrameInfo) !void {
-        self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, self.pipeline.pipeline);
-        self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, self.pipeline_layout, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
+        // Get dynamic pipeline
+        const pipeline = self.pipeline_manager.getPipeline(self.pipeline_name, self.render_pass) catch |err| {
+            log(.ERROR, "point_light_renderer", "Failed to get pipeline: {}", .{err});
+            return;
+        };
+
+        const pipeline_layout = self.pipeline_manager.getPipelineLayout(self.pipeline_name);
+
+        if (pipeline == null or pipeline_layout == null) {
+            log(.WARN, "point_light_renderer", "Pipeline or layout not available", .{});
+            return;
+        }
+
+        // Bind dynamic pipeline
+        self.gc.*.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, pipeline.?);
+
+        // Bind descriptor sets
+        self.gc.vkd.cmdBindDescriptorSets(frame_info.command_buffer, .graphics, pipeline_layout.?, 0, 1, @ptrCast(&frame_info.global_descriptor_set), 0, null);
+
         for (self.scene.objects.items) |*object| {
             if (object.point_light == null) {
                 continue;
@@ -78,7 +95,8 @@ pub const PointLightRenderer = struct {
                 object.transform.local2world.data[14],
                 object.transform.local2world.data[15],
             ), .color = Math.Vec4.init(object.point_light.?.color.x, object.point_light.?.color.y, object.point_light.?.color.z, object.point_light.?.intensity), .radius = object.transform.object_scale.x };
-            self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PointLightPushConstant), @ptrCast(&push));
+
+            self.gc.*.vkd.cmdPushConstants(frame_info.command_buffer, pipeline_layout.?, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PointLightPushConstant), @ptrCast(&push));
             self.gc.vkd.cmdDraw(frame_info.command_buffer, 6, 1, 0, 0);
         }
     }
