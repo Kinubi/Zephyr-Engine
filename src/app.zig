@@ -139,7 +139,8 @@ pub const App = struct {
     var render_system: RenderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
     var dynamic_pipeline_manager: DynamicPipelineManager = undefined;
-    var shader_pipeline_integration: ShaderPipelineIntegration = undefined;
+    // NOTE: Shader-pipeline integration disabled - unified pipeline system handles hot reload now
+    // var shader_pipeline_integration: ShaderPipelineIntegration = undefined;
 
     // Unified pipeline system
     var unified_pipeline_system: UnifiedPipelineSystem = undefined;
@@ -240,10 +241,10 @@ pub const App = struct {
         dynamic_pipeline_manager = try DynamicPipelineManager.init(self.allocator, &self.gc, asset_manager, &shader_manager);
         log(.INFO, "app", "Dynamic pipeline manager initialized", .{});
 
-        // Initialize shader-pipeline integration for hot reload
-        shader_pipeline_integration = try ShaderPipelineIntegration.init(self.allocator, &dynamic_pipeline_manager, &shader_manager.hot_reload);
-        setGlobalIntegration(&shader_pipeline_integration);
-        log(.INFO, "app", "Shader-pipeline integration initialized", .{});
+        // NOTE: Shader-pipeline integration disabled - unified pipeline system handles hot reload now
+        // shader_pipeline_integration = try ShaderPipelineIntegration.init(self.allocator, &dynamic_pipeline_manager, &shader_manager.hot_reload);
+        // setGlobalIntegration(&shader_pipeline_integration);
+        // log(.INFO, "app", "Shader-pipeline integration initialized", .{});
 
         // Initialize Scene with Asset Manager integration
         scene = Scene.init(&self.gc, self.allocator, asset_manager);
@@ -502,6 +503,9 @@ pub const App = struct {
     }
 
     pub fn onUpdate(self: *App) !bool {
+        // Process deferred pipeline destroys for hot reload safety
+        unified_pipeline_system.processDeferredDestroys();
+
         // Increment frame counter for scheduling
         frame_counter += 1;
 
@@ -948,7 +952,8 @@ pub const App = struct {
         scene.deinit();
 
         // Clean up dynamic pipeline system
-        shader_pipeline_integration.deinit();
+        // NOTE: Shader-pipeline integration disabled - unified pipeline system handles hot reload now
+        // shader_pipeline_integration.deinit();
         dynamic_pipeline_manager.deinit();
 
         shader_manager.deinit();

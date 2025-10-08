@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const log = @import("../utils/log.zig").log;
 
 /// GPU resource types tracked by the system
 pub const ResourceType = enum {
@@ -326,14 +327,14 @@ pub const ResourceTracker = struct {
 
     /// Print debug information
     pub fn printDebugInfo(self: *const Self) void {
-        std.log.info("=== Resource Tracker Debug Info ===");
-        std.log.info("Tracked Resources: {d}", .{self.resources.count()});
-        std.log.info("Pending Barriers: {d}", .{self.pending_barriers.items.len});
+        log(.INFO, "resource_tracker", "=== Resource Tracker Debug Info ===", .{});
+        log(.INFO, "resource_tracker", "Tracked Resources: {d}", .{self.resources.count()});
+        log(.INFO, "resource_tracker", "Pending Barriers: {d}", .{self.pending_barriers.items.len});
 
         var iterator = self.resources.iterator();
         while (iterator.next()) |entry| {
             const resource = entry.value_ptr.*;
-            std.log.info("  Resource: {s} (type: {s}, handle: 0x{X})", .{
+            log(.INFO, "resource_tracker", "  Resource: {s} (type: {s}, handle: 0x{X})", .{
                 resource.name,
                 @tagName(resource.resource_type),
                 resource.handle,

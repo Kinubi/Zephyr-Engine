@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../utils/log.zig").log;
 const ShaderManager = @import("shader_manager.zig").ShaderManager;
 const AssetManager = @import("asset_manager.zig");
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
@@ -44,7 +45,7 @@ pub const EngineShaderIntegration = struct {
     }
 
     pub fn start(self: *Self) !void {
-        std.log.info("🚀 Starting ZulkanZengine Shader Integration...", .{});
+        log(.INFO, "engine_shader_integration", "🚀 Starting ZulkanZengine Shader Integration...", .{});
 
         // Start shader manager
         try self.shader_manager.start();
@@ -52,15 +53,15 @@ pub const EngineShaderIntegration = struct {
         // Pre-load essential shaders
         try self.loadEssentialShaders();
 
-        std.log.info("✅ ZulkanZengine Shader Integration started successfully", .{});
+        log(.INFO, "engine_shader_integration", "✅ ZulkanZengine Shader Integration started successfully", .{});
     }
 
     pub fn stop(self: *Self) void {
-        std.log.info("Stopping ZulkanZengine Shader Integration...", .{});
+        log(.INFO, "engine_shader_integration", "Stopping ZulkanZengine Shader Integration...", .{});
 
         self.shader_manager.stop();
 
-        std.log.info("✅ ZulkanZengine Shader Integration stopped", .{});
+        log(.INFO, "engine_shader_integration", "✅ ZulkanZengine Shader Integration stopped", .{});
     }
 
     fn loadEssentialShaders(self: *Self) !void {
@@ -71,7 +72,7 @@ pub const EngineShaderIntegration = struct {
             .glsl_version = 450,
         };
 
-        std.log.info("📚 Loading essential shaders...", .{});
+        log(.INFO, "engine_shader_integration", "📚 Loading essential shaders...", .{});
 
         // Load core rendering shaders
         _ = try self.shader_manager.loadVertexFragmentPair(
@@ -101,7 +102,7 @@ pub const EngineShaderIntegration = struct {
         // Register pipeline dependencies
         try self.registerPipelineDependencies();
 
-        std.log.info("✅ Essential shaders loaded successfully", .{});
+        log(.INFO, "engine_shader_integration", "✅ Essential shaders loaded successfully", .{});
     }
 
     fn registerPipelineDependencies(self: *Self) !void {
@@ -125,11 +126,11 @@ pub const EngineShaderIntegration = struct {
     fn onPipelineReloadRequired(context: ?*anyopaque, shader_path: []const u8, pipeline_ids: []const []const u8) void {
         _ = context; // Cast back to EngineShaderIntegration in real implementation
 
-        std.log.info("🔧 Pipeline reload required for shader: {s}", .{shader_path});
-        std.log.info("   Affected pipelines: {}", .{pipeline_ids.len});
+        log(.INFO, "engine_shader_integration", "🔧 Pipeline reload required for shader: {s}", .{shader_path});
+        log(.INFO, "engine_shader_integration", "   Affected pipelines: {}", .{pipeline_ids.len});
 
         for (pipeline_ids) |pipeline_id| {
-            std.log.info("   - {s}", .{pipeline_id});
+            log(.INFO, "engine_shader_integration", "   - {s}", .{pipeline_id});
 
             // In real implementation:
             // 1. Invalidate existing Vulkan pipeline
@@ -189,7 +190,7 @@ const IntegrationStats = struct {
 
 // Example usage in main engine
 pub fn demonstrateIntegration() !void {
-    std.log.info("🎮 ZulkanZengine Shader Hot Reload Demo", .{});
+    log(.INFO, "engine_shader_integration", "🎮 ZulkanZengine Shader Hot Reload Demo", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -205,23 +206,23 @@ pub fn demonstrateIntegration() !void {
 
     // Get loaded shaders
     if (integration.getShaderByName("simple_vertex")) |vertex_shader| {
-        std.log.info("✅ Simple vertex shader loaded: {} bytes SPIR-V", .{vertex_shader.compiled_shader.spirv_code.len});
+        log(.INFO, "engine_shader_integration", "✅ Simple vertex shader loaded: {} bytes SPIR-V", .{vertex_shader.compiled_shader.spirv_code.len});
     }
 
     if (integration.getShaderByName("point_light_fragment")) |fragment_shader| {
-        std.log.info("✅ Point light fragment shader loaded: {} bytes SPIR-V", .{fragment_shader.compiled_shader.spirv_code.len});
+        log(.INFO, "engine_shader_integration", "✅ Point light fragment shader loaded: {} bytes SPIR-V", .{fragment_shader.compiled_shader.spirv_code.len});
     }
 
     // Print stats
     const stats = integration.getStats();
-    std.log.info("📊 Shader System Stats:", .{});
-    std.log.info("   - Loaded shaders: {}", .{stats.shader_manager_stats.loaded_shaders});
-    std.log.info("   - Watched directories: {}", .{stats.shader_manager_stats.watched_directories});
-    std.log.info("   - Compiler threads: {}", .{stats.shader_manager_stats.active_compiler_threads});
-    std.log.info("   - Cached pipelines: {}", .{stats.cached_pipelines});
+    log(.INFO, "engine_shader_integration", "📊 Shader System Stats:", .{});
+    log(.INFO, "engine_shader_integration", "   - Loaded shaders: {}", .{stats.shader_manager_stats.loaded_shaders});
+    log(.INFO, "engine_shader_integration", "   - Watched directories: {}", .{stats.shader_manager_stats.watched_directories});
+    log(.INFO, "engine_shader_integration", "   - Compiler threads: {}", .{stats.shader_manager_stats.active_compiler_threads});
+    log(.INFO, "engine_shader_integration", "   - Cached pipelines: {}", .{stats.cached_pipelines});
 
-    std.log.info("🔥 Hot reload active - modify shaders in 'shaders/' directory to see live recompilation!", .{});
-    std.log.info("⚡ System ready for real-time shader development!", .{});
+    log(.INFO, "engine_shader_integration", "🔥 Hot reload active - modify shaders in 'shaders/' directory to see live recompilation!", .{});
+    log(.INFO, "engine_shader_integration", "⚡ System ready for real-time shader development!", .{});
 }
 
 // Test integration

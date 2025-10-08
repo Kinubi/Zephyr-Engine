@@ -703,6 +703,11 @@ pub const GraphicsContext = struct {
         try self.vkd.queueWaitIdle(self.graphics_queue.handle);
     }
 
+    /// Wait for all device operations to complete
+    pub fn waitDeviceIdle(self: *GraphicsContext) !void {
+        try self.vkd.deviceWaitIdle(self.dev);
+    }
+
     /// Synchronized present queue submission (if different from graphics)
     pub fn submitToPresentQueue(
         self: *GraphicsContext,

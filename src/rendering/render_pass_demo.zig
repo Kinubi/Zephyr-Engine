@@ -9,6 +9,7 @@ const ResourceBinding = @import("render_pass.zig").ResourceBinding;
 const ResourceAccess = @import("render_pass.zig").ResourceAccess;
 const ResourceTracker = @import("resource_tracker.zig").ResourceTracker;
 const SceneView = @import("render_pass.zig").SceneView;
+const log = @import("../utils/log.zig").log;
 
 /// Example geometry pass implementation
 pub const GeometryPass = struct {
@@ -19,21 +20,21 @@ pub const GeometryPass = struct {
     pub fn init(self: *Self, graphics_context: anytype) !void {
         _ = self;
         _ = graphics_context;
-        std.log.info("GeometryPass: Initialized", .{});
+        log(.INFO, "render_pass_demo", "GeometryPass: Initialized", .{});
     }
 
     pub fn execute(self: *Self, context: RenderContext) !void {
         _ = self;
-        std.log.info("GeometryPass: Executing frame {d}", .{context.frame_index});
+        log(.INFO, "render_pass_demo", "GeometryPass: Executing frame {d}", .{context.frame_index});
 
         // Get rasterization data from scene
         const raster_data = context.scene_view.getRasterizationData();
-        std.log.info("GeometryPass: Processing {d} objects", .{raster_data.objects.len});
+        log(.INFO, "render_pass_demo", "GeometryPass: Processing {d} objects", .{raster_data.objects.len});
     }
 
     pub fn deinit(self: *Self) void {
         _ = self;
-        std.log.info("GeometryPass: Deinitialized", .{});
+        log(.INFO, "render_pass_demo", "GeometryPass: Deinitialized", .{});
     }
 
     pub fn getResourceRequirements(self: *Self) []const ResourceBinding {
@@ -55,21 +56,21 @@ pub const LightingPass = struct {
     pub fn init(self: *Self, graphics_context: anytype) !void {
         _ = self;
         _ = graphics_context;
-        std.log.info("LightingPass: Initialized", .{});
+        log(.INFO, "render_pass_demo", "LightingPass: Initialized", .{});
     }
 
     pub fn execute(self: *Self, context: RenderContext) !void {
         _ = self;
-        std.log.info("LightingPass: Executing frame {d}", .{context.frame_index});
+        log(.INFO, "render_pass_demo", "LightingPass: Executing frame {d}", .{context.frame_index});
 
         // Access geometry buffer from previous pass
         const raster_data = context.scene_view.getRasterizationData();
-        std.log.info("LightingPass: Using {d} materials", .{raster_data.materials.len});
+        log(.INFO, "render_pass_demo", "LightingPass: Using {d} materials", .{raster_data.materials.len});
     }
 
     pub fn deinit(self: *Self) void {
         _ = self;
-        std.log.info("LightingPass: Deinitialized", .{});
+        log(.INFO, "render_pass_demo", "LightingPass: Deinitialized", .{});
     }
 
     pub fn getResourceRequirements(self: *Self) []const ResourceBinding {
@@ -92,17 +93,17 @@ pub const PostProcessPass = struct {
     pub fn init(self: *Self, graphics_context: anytype) !void {
         _ = self;
         _ = graphics_context;
-        std.log.info("PostProcessPass: Initialized", .{});
+        log(.INFO, "render_pass_demo", "PostProcessPass: Initialized", .{});
     }
 
     pub fn execute(self: *Self, context: RenderContext) !void {
         _ = self;
-        std.log.info("PostProcessPass: Executing frame {d}", .{context.frame_index});
+        log(.INFO, "render_pass_demo", "PostProcessPass: Executing frame {d}", .{context.frame_index});
     }
 
     pub fn deinit(self: *Self) void {
         _ = self;
-        std.log.info("PostProcessPass: Deinitialized", .{});
+        log(.INFO, "render_pass_demo", "PostProcessPass: Deinitialized", .{});
     }
 
     pub fn getResourceRequirements(self: *Self) []const ResourceBinding {
@@ -117,7 +118,7 @@ pub const PostProcessPass = struct {
 
 /// Demonstrate the Week 1 render pass architecture
 pub fn demonstrateRenderPassArchitecture(allocator: std.mem.Allocator) !void {
-    std.log.info("=== Week 1: Render Pass Architecture Demo ===", .{});
+    log(.INFO, "render_pass_demo", "=== Week 1: Render Pass Architecture Demo ===", .{});
 
     // Initialize render graph
     var render_graph = RenderGraph.init(allocator);
@@ -161,7 +162,7 @@ pub fn demonstrateRenderPassArchitecture(allocator: std.mem.Allocator) !void {
 
     // Validate the graph
     const is_valid = try render_graph.validate();
-    std.log.info("Render graph validation: {}", .{is_valid});
+    log(.INFO, "render_pass_demo", "Render graph validation: {}", .{is_valid});
 
     // Print debug information
     render_graph.printDebugInfo();
@@ -170,15 +171,15 @@ pub fn demonstrateRenderPassArchitecture(allocator: std.mem.Allocator) !void {
     try render_graph.buildExecutionOrder();
 
     // Simulate frame execution (without actual Vulkan context)
-    std.log.info("\n=== Simulating Frame Execution ===", .{});
+    log(.INFO, "render_pass_demo", "\n=== Simulating Frame Execution ===", .{});
     // Note: This would normally require a proper RenderContext with Vulkan objects
     // For now, we'll just demonstrate the structure
 
-    std.log.info("Week 1 implementation complete!", .{});
-    std.log.info("✅ RenderPass trait/interface system with VTable", .{});
-    std.log.info("✅ RenderGraph with dependency tracking and topological sorting", .{});
-    std.log.info("✅ SceneView abstraction for pass-specific data extraction", .{});
-    std.log.info("✅ ResourceTracker for automatic GPU resource management", .{});
+    log(.INFO, "render_pass_demo", "Week 1 implementation complete!", .{});
+    log(.INFO, "render_pass_demo", "✅ RenderPass trait/interface system with VTable", .{});
+    log(.INFO, "render_pass_demo", "✅ RenderGraph with dependency tracking and topological sorting", .{});
+    log(.INFO, "render_pass_demo", "✅ SceneView abstraction for pass-specific data extraction", .{});
+    log(.INFO, "render_pass_demo", "✅ ResourceTracker for automatic GPU resource management", .{});
 }
 
 /// Test the render pass architecture

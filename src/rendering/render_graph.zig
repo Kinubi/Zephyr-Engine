@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../utils/log.zig").log;
 const RenderPass = @import("render_pass.zig").RenderPass;
 const RenderContext = @import("render_pass.zig").RenderContext;
 const ResourceBinding = @import("render_pass.zig").ResourceBinding;
@@ -271,12 +272,12 @@ pub const RenderGraph = struct {
 
     /// Print debug information about the render graph
     pub fn printDebugInfo(self: *const Self) void {
-        std.log.info("=== Render Graph Debug Info ===");
-        std.log.info("Passes: {d}", .{self.passes.items.len});
+        log(.INFO, "render_graph", "=== Render Graph Debug Info ===", .{});
+        log(.INFO, "render_graph", "Passes: {d}", .{self.passes.items.len});
 
         for (self.passes.items, 0..) |pass, i| {
             const handle = @as(PassHandle, @enumFromInt(@as(u32, @intCast(i + 1))));
-            std.log.info("  Pass {}: {} (type: {s}, priority: {})", .{
+            log(.INFO, "render_graph", "  Pass {}: {} (type: {s}, priority: {})", .{
                 handle,
                 @intFromEnum(handle),
                 @tagName(pass.config.pass_type),
@@ -284,14 +285,14 @@ pub const RenderGraph = struct {
             });
         }
 
-        std.log.info("Dependencies: {d}", .{self.dependencies.items.len});
+        log(.INFO, "render_graph", "Dependencies: {d}", .{self.dependencies.items.len});
         for (self.dependencies.items) |dep| {
-            std.log.info("  {} -> {} (resource: {s})", .{ dep.from, dep.to, dep.resource_name });
+            log(.INFO, "render_graph", "  {} -> {} (resource: {s})", .{ dep.from, dep.to, dep.resource_name });
         }
 
-        std.log.info("Execution Order: {d} passes", .{self.execution_order.items.len});
+        log(.INFO, "render_graph", "Execution Order: {d} passes", .{self.execution_order.items.len});
         for (self.execution_order.items, 0..) |handle, i| {
-            std.log.info("  {d}. Pass {}", .{ i + 1, handle });
+            log(.INFO, "render_graph", "  {d}. Pass {}", .{ i + 1, handle });
         }
     }
 };

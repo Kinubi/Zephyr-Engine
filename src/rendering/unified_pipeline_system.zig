@@ -20,6 +20,12 @@ pub fn setGlobalUnifiedPipelineSystem(system: *UnifiedPipelineSystem) void {
     global_unified_pipeline_system = system;
 }
 
+// Deferred destruction for hot reload safety
+const DeferredPipeline = struct {
+    pipeline: Pipeline,
+    frames_to_wait: u32,
+};
+
 /// Unified Pipeline and Descriptor Set Management System
 ///
 /// This system provides a high-level abstraction over Vulkan pipelines and descriptor sets,
@@ -41,7 +47,12 @@ pub const UnifiedPipelineSystem = struct {
 
     // Flag to skip descriptor updates during hot reload
     hot_reload_in_progress: bool = false,
+    // Flag to prevent recursive shader reload callbacks
+    rebuilding_pipelines: bool = false,
     shader_to_pipelines: std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage), // shader_path -> pipeline_ids
+
+    // Deferred destruction for hot reload safety
+    deferred_destroys: std.ArrayList(DeferredPipeline),
 
     const Self = @This();
 
@@ -53,8 +64,9 @@ pub const UnifiedPipelineSystem = struct {
             .pipelines = std.HashMap(PipelineId, Pipeline, PipelineIdContext, std.hash_map.default_max_load_percentage).init(allocator),
             .descriptor_pools = std.HashMap(u32, *DescriptorPool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
             .bound_resources = std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .pipeline_reload_callbacks = std.ArrayList(PipelineReloadCallback){},
             .shader_to_pipelines = std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .pipeline_reload_callbacks = .{},
+            .deferred_destroys = .{},
         };
 
         // Register with shader manager for hot-reload notifications
@@ -82,6 +94,13 @@ pub const UnifiedPipelineSystem = struct {
         // Clean up resources
         self.bound_resources.deinit();
         self.pipeline_reload_callbacks.deinit(self.allocator);
+
+        // Clean up any remaining deferred destroys
+        for (self.deferred_destroys.items) |deferred| {
+            var pipeline_mut = deferred.pipeline;
+            pipeline_mut.deinit(self.graphics_context, self.allocator);
+        }
+        self.deferred_destroys.deinit(self.allocator);
 
         // Clean up shader-to-pipeline mapping
         var shader_iter = self.shader_to_pipelines.valueIterator();
@@ -241,17 +260,13 @@ pub const UnifiedPipelineSystem = struct {
 
             // Add shader stages (vertex and fragment only) in the correct order
             // Skip compute shaders for graphics pipelines
-            std.log.info("[unified_pipeline] Debug: Processing {} shaders for graphics pipeline", .{shaders.items.len});
-            for (shaders.items, 0..) |shader, i| {
-                std.log.info("[unified_pipeline] Debug: Shader {}: vertex_bit={}, fragment_bit={}, compute_bit={}", .{ i, shader.shader_type.vertex_bit, shader.shader_type.fragment_bit, shader.shader_type.compute_bit });
+            for (shaders.items) |shader| {
                 if (shader.shader_type.vertex_bit and !shader.shader_type.compute_bit) {
-                    std.log.info("[unified_pipeline] Debug: Adding shader {} as VERTEX stage", .{i});
                     _ = try builder.addShaderStage(shader.shader_type, shader);
                 }
             }
-            for (shaders.items, 0..) |shader, i| {
+            for (shaders.items) |shader| {
                 if (shader.shader_type.fragment_bit and !shader.shader_type.compute_bit) {
-                    std.log.info("[unified_pipeline] Debug: Adding shader {} as FRAGMENT stage", .{i});
                     _ = try builder.addShaderStage(shader.shader_type, shader);
                 }
             }
@@ -295,7 +310,15 @@ pub const UnifiedPipelineSystem = struct {
 
     /// Bind a pipeline for rendering
     pub fn bindPipeline(self: *Self, command_buffer: vk.CommandBuffer, pipeline_id: PipelineId) !void {
-        const pipeline = self.pipelines.get(pipeline_id) orelse return error.PipelineNotFound;
+        const pipeline = self.pipelines.get(pipeline_id) orelse {
+            log(.ERROR, "unified_pipeline", "❌ Pipeline not found when binding: {s} (hash: {})", .{ pipeline_id.name, pipeline_id.hash });
+            log(.ERROR, "unified_pipeline", "Available pipelines: {}", .{self.pipelines.count()});
+            var iter = self.pipelines.keyIterator();
+            while (iter.next()) |key| {
+                log(.ERROR, "unified_pipeline", "  - {s} (hash: {})", .{ key.name, key.hash });
+            }
+            return error.PipelineNotFound;
+        };
 
         // Bind the Vulkan pipeline with correct bind point
         const bind_point: vk.PipelineBindPoint = if (pipeline.is_compute) .compute else .graphics;
@@ -464,8 +487,6 @@ pub const UnifiedPipelineSystem = struct {
             }
 
             try result.value_ptr.append(self.allocator, pipeline_id);
-
-            log(.DEBUG, "unified_pipeline", "Registered dependency: {s} -> {s}", .{ path, pipeline_id.name });
         }
     }
 
@@ -491,7 +512,17 @@ pub const UnifiedPipelineSystem = struct {
     }
 
     fn handleShaderReload(self: *Self, shader_path: []const u8) !void {
+        // Prevent recursive shader reload calls
+        if (self.rebuilding_pipelines) {
+            log(.WARN, "unified_pipeline", "Skipping shader reload for {s} - already rebuilding pipelines", .{shader_path});
+            return;
+        }
+
         log(.INFO, "unified_pipeline", "🔥 Handling shader reload: {s}", .{shader_path});
+
+        // Set flag to prevent recursive calls
+        self.rebuilding_pipelines = true;
+        defer self.rebuilding_pipelines = false;
 
         // Find all pipelines that use this shader
         const affected_pipelines = self.shader_to_pipelines.get(shader_path) orelse return;
@@ -539,20 +570,48 @@ pub const UnifiedPipelineSystem = struct {
 
         log(.INFO, "unified_pipeline", "Cleared {} dirty flags for pipeline: {s}", .{ cleared_count, pipeline_id.name });
 
-        // Remove the old pipeline (this will clean up all Vulkan resources)
-        // Note: We let the old descriptor sets finish their current usage naturally
-        var old_pipeline_mut = self.pipelines.fetchRemove(pipeline_id).?.value;
-        old_pipeline_mut.deinit(self.graphics_context, self.allocator);
+        // Get reference to the old pipeline before we replace it
+        const old_pipeline_to_destroy = self.pipelines.get(pipeline_id).?;
 
-        // Remove shader dependencies for the old pipeline
+        // Remove shader dependencies for the old pipeline before creating new one
         try self.unregisterPipelineDependencies(pipeline_id);
 
-        // Recreate the pipeline with the same config but force the same ID
-        // This will create completely new descriptor sets, avoiding the in-use issue
-        const rebuilt_pipeline = try self.createPipelineWithId(config, pipeline_id);
-        _ = rebuilt_pipeline; // The ID should be the same as the input
+        // Create the new pipeline - this will atomically replace the old one in the hashmap
+        const new_pipeline_id = try self.createPipelineWithId(config, pipeline_id);
+        _ = new_pipeline_id; // Should be the same as input
+
+        // Schedule the old pipeline for destruction after a few frames
+        // This ensures any in-flight command buffers finish using it
+        const frames_to_wait = MAX_FRAMES_IN_FLIGHT + 1; // Wait for all frames in flight plus one more
+        try self.deferred_destroys.append(self.allocator, DeferredPipeline{
+            .pipeline = old_pipeline_to_destroy,
+            .frames_to_wait = frames_to_wait,
+        });
+
+        log(.INFO, "unified_pipeline", "Scheduled old pipeline for deferred destruction in {} frames", .{frames_to_wait});
 
         log(.INFO, "unified_pipeline", "✅ Pipeline rebuilt with new descriptor sets: {s}", .{pipeline_id.name});
+    }
+
+    /// Process deferred pipeline destructions - call this each frame
+    pub fn processDeferredDestroys(self: *Self) void {
+        var i: usize = 0;
+        while (i < self.deferred_destroys.items.len) {
+            var deferred = &self.deferred_destroys.items[i];
+            if (deferred.frames_to_wait == 0) {
+                // Time to destroy this pipeline
+                var pipeline_to_destroy = deferred.pipeline;
+                pipeline_to_destroy.deinit(self.graphics_context, self.allocator);
+
+                // Remove from the list
+                _ = self.deferred_destroys.swapRemove(i);
+                // Don't increment i since we removed an element
+            } else {
+                // Decrement the wait counter
+                deferred.frames_to_wait -= 1;
+                i += 1;
+            }
+        }
     }
 
     fn unregisterPipelineDependencies(self: *Self, pipeline_id: PipelineId) !void {
@@ -660,8 +719,6 @@ pub const UnifiedPipelineSystem = struct {
     } {
         _ = set_layouts; // We'll build our own layouts with the builder pattern
 
-        std.log.info("createDescriptorSets: Creating descriptor sets for {} sets", .{layout_info.sets.items.len});
-
         var pools = std.ArrayList(*DescriptorPool){};
         var layouts = std.ArrayList(*DescriptorSetLayout){};
         var sets = std.ArrayList([]vk.DescriptorSet){};
@@ -683,7 +740,7 @@ pub const UnifiedPipelineSystem = struct {
         }
 
         // For each descriptor set in the layout
-        for (layout_info.sets.items, 0..) |set_bindings, set_index| {
+        for (layout_info.sets.items) |set_bindings| {
             if (set_bindings.len == 0) continue;
 
             // Count descriptor types for pool sizing
@@ -740,8 +797,6 @@ pub const UnifiedPipelineSystem = struct {
                 try pool.allocateDescriptor(layout.descriptor_set_layout, set);
             }
             try sets.append(self.allocator, frame_sets);
-
-            std.log.info("createDescriptorSets: Created descriptor set {} with {} frames", .{ set_index, MAX_FRAMES_IN_FLIGHT });
         }
 
         return .{
@@ -840,8 +895,6 @@ pub const UnifiedPipelineSystem = struct {
             // Build and apply the updates to the descriptor set
             const descriptor_set = descriptor_sets[frame_index];
             writer.update(descriptor_set);
-
-            std.log.info("Applied {} descriptor updates to set {} for pipeline {s} frame {}", .{ set_updates.items.len, set_index, pipeline_id.name, frame_index });
         }
     }
 
