@@ -35,6 +35,7 @@ const Material = @import("assets/asset_manager.zig").Material;
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
 const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
+const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
 
 // Dynamic pipeline system imports
 const DynamicPipelineManager = @import("rendering/dynamic_pipeline_manager.zig").DynamicPipelineManager;
@@ -154,7 +155,12 @@ pub const App = struct {
     var scene: Scene = undefined;
     var thread_pool: *ThreadPool = undefined;
     var asset_manager: *AssetManager = undefined;
-    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats    // Scheduled asset loading system
+    var file_watcher: *FileWatcher = undefined;
+    // Application-owned FileWatcher for hot-reload; created early so it can be
+    // deinitialized after other systems that depend on it have been deinitialized.
+
+    var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
+    // Scheduled asset loading system
     const ScheduledAsset = struct {
         frame: u64,
         model_path: []const u8,
@@ -237,15 +243,18 @@ pub const App = struct {
         dynamic_pipeline_manager = try DynamicPipelineManager.init(self.allocator, &self.gc, asset_manager, &shader_manager);
         log(.INFO, "app", "Dynamic pipeline manager initialized", .{});
 
-    // Shader-pipeline integration intentionally removed. Unified pipeline system is active.
+        // Shader-pipeline integration intentionally removed. Unified pipeline system is active.
 
         // Initialize Scene with Asset Manager integration
         scene = Scene.init(&self.gc, self.allocator, asset_manager);
 
         // Enhanced Scene registers for asset completion callbacks during its init
 
-        // Enable hot reloading for development BEFORE loading assets
-        scene.enableHotReload() catch |err| {
+        // Create application-owned FileWatcher and hand it to hot-reload systems
+        file_watcher = try self.allocator.create(FileWatcher);
+        file_watcher.* = FileWatcher.init(self.allocator);
+
+        scene.enableHotReload(file_watcher) catch |err| {
             log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
         };
 
@@ -924,10 +933,6 @@ pub const App = struct {
         // Cleanup generic renderer
         forward_renderer.deinit();
 
-        // Shutdown thread pool first to prevent threading conflicts
-        thread_pool.deinit();
-        self.allocator.destroy(thread_pool);
-
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
 
         // Clean up unified systems
@@ -944,11 +949,15 @@ pub const App = struct {
         //particle_renderer.deinit();
         scene.deinit();
 
-    // Clean up dynamic pipeline system
-    dynamic_pipeline_manager.deinit();
+        // Clean up dynamic pipeline system
+        dynamic_pipeline_manager.deinit();
 
         shader_manager.deinit();
         asset_manager.deinit();
+        file_watcher.deinit();
+        // Shutdown thread pool first to prevent threading conflicts
+        thread_pool.deinit();
+        self.allocator.destroy(thread_pool);
         swapchain.deinit();
         self.gc.deinit();
 

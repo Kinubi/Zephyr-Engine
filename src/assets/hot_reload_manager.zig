@@ -34,7 +34,9 @@ pub const ReloadRequest = struct {
 pub const HotReloadManager = struct {
     allocator: std.mem.Allocator,
     asset_manager: *AssetManager,
-    file_watcher: FileWatcher,
+    // FileWatcher is owned by the application and passed in during init so
+    // it can be deinitialized after all dependents have been torn down.
+    file_watcher: *FileWatcher,
 
     // Path to AssetId mapping for quick lookups during file events
     path_to_asset: std.StringHashMap(AssetId),
@@ -57,7 +59,7 @@ pub const HotReloadManager = struct {
 
     // Debouncing state for batch processing
     pending_reloads: std.StringHashMap(i64), // path -> timestamp
-    batch_timer: ?std.Thread = null,
+    // batch_timer removed - rely on ThreadPool for processing
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Callbacks for reload notifications
@@ -83,11 +85,11 @@ pub const HotReloadManager = struct {
     const Self = @This();
 
     /// Initialize enhanced hot reload manager
-    pub fn init(allocator: std.mem.Allocator, asset_manager: *AssetManager) !Self {
+    pub fn init(allocator: std.mem.Allocator, asset_manager: *AssetManager, watcher: *FileWatcher) !Self {
         var manager = Self{
             .allocator = allocator,
             .asset_manager = asset_manager,
-            .file_watcher = FileWatcher.init(allocator),
+            .file_watcher = watcher,
             .path_to_asset = std.StringHashMap(AssetId).init(allocator),
             .asset_to_type = std.AutoHashMap(AssetId, AssetType).init(allocator),
             .file_metadata = std.StringHashMap(FileMetadata).init(allocator),
@@ -118,14 +120,7 @@ pub const HotReloadManager = struct {
         // Signal shutdown first
         self.shutdown_requested.store(true, .release);
 
-        // Stop file watcher BEFORE cleaning up HashMaps to prevent callback access
-        self.file_watcher.stop();
-        self.file_watcher.deinit();
-
-        // Wait for batch timer to finish
-        if (self.batch_timer) |thread| {
-            thread.join();
-        }
+        // No local batch timer to wait on - processing uses ThreadPool workers
 
         // Now safely clean up HashMaps with mutex protection
         self.asset_map_mutex.lock();
@@ -281,9 +276,9 @@ pub const HotReloadManager = struct {
             null;
 
         if (asset_id) |id| {
-                // Force registry into unloaded state so AssetLoader will accept
-                // a fresh load request even if the asset was previously loaded.
-                self.asset_manager.registry.forceMarkUnloaded(id);
+            // Force registry into unloaded state so AssetLoader will accept
+            // a fresh load request even if the asset was previously loaded.
+            self.asset_manager.registry.forceMarkUnloaded(id);
 
             const asset_type = if (self.asset_to_type.count() > 0) self.asset_to_type.get(id) orelse .texture else .texture;
             log(.DEBUG, "enhanced_hot_reload", "Processing file change for registered asset: {s} (ID: {})", .{ file_path, id });

@@ -4,6 +4,7 @@ const asset_types = @import("asset_types.zig");
 const asset_registry = @import("asset_registry.zig");
 const asset_loader = @import("asset_loader.zig");
 const hot_reload_manager = @import("hot_reload_manager.zig");
+const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Model = @import("../rendering/mesh.zig").Model;
 const Texture = @import("../core/texture.zig").Texture;
@@ -635,22 +636,12 @@ pub const AssetManager = struct {
         return null;
     }
 
-    /// Initialize hot reloading
-    pub fn initHotReload(self: *Self) !void {
+    pub fn initHotReload(self: *Self, watcher: *FileWatcher) !void {
         const manager = try self.allocator.create(hot_reload_manager.HotReloadManager);
-        manager.* = try hot_reload_manager.HotReloadManager.init(self.allocator, self);
+        manager.* = try hot_reload_manager.HotReloadManager.init(self.allocator, self, watcher);
         self.hot_reload_manager = manager;
-        log(.INFO, "enhanced_asset_manager", "Hot reload manager initialized", .{});
-    }
-
-    /// Enable hot reloading (starts the directory watching)
-    pub fn enableHotReload(self: *Self) !void {
-        if (self.hot_reload_manager) |manager| {
-            try manager.start();
-            log(.INFO, "enhanced_asset_manager", "Hot reload system enabled and started", .{});
-        } else {
-            log(.WARN, "enhanced_asset_manager", "Cannot enable hot reload - manager not initialized", .{});
-        }
+        log(.INFO, "enhanced_asset_manager", "Hot reload manager initialized (external watcher)", .{});
+        try self.hot_reload_manager.?.start();
     }
 
     /// Update texture descriptor array (call when textures are loaded)

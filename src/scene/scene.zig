@@ -16,6 +16,7 @@ const LogLevel = @import("../utils/log.zig").LogLevel;
 
 // Asset management imports
 const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
+const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const AssetId = @import("../assets/asset_manager.zig").AssetId;
 const AssetType = @import("../assets/asset_manager.zig").AssetType;
 const LoadPriority = @import("../assets/asset_manager.zig").LoadPriority;
@@ -247,10 +248,9 @@ pub const Scene = struct {
         self.raytracing_system = rt_system;
     }
 
-    /// Enable hot reloading (API compatibility)
-    pub fn enableHotReload(self: *Self) !void {
-        try self.asset_manager.initHotReload();
-        log(.INFO, "enhanced_scene", "Hot reloading enabled for scene assets", .{});
+    /// Enable hot reloading (requires an app-owned FileWatcher)
+    pub fn enableHotReload(self: *Self, watcher: *FileWatcher) !void {
+        try self.asset_manager.initHotReload(watcher);
     }
 
     /// Get texture descriptor array (API compatibility)

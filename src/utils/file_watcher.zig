@@ -13,9 +13,9 @@ const AssetId = @import("../assets/asset_types.zig").AssetId;
 pub const FileWatcher = struct {
     allocator: std.mem.Allocator,
     watched_paths: std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
-    thread: ?std.Thread = null,
+    // The FileWatcher runs exclusively inside the project's ThreadPool.
+    // No local std.Thread is spawned by this module.
     running: bool = false,
-    running_in_pool: bool = false,
     mutex: std.Thread.Mutex = .{},
 
     // Event callback function (legacy)
@@ -156,16 +156,15 @@ pub const FileWatcher = struct {
         }
     }
 
-    /// Start the file watching thread
+    /// Start the file watcher. This MUST be called after `setThreadPoolTarget`.
     pub fn start(self: *Self) !void {
         if (self.running) return;
 
-        self.running = true;
-
-        // If a ThreadPool target is configured, submit the watcher loop as a
-        // long-running work item to the pool instead of spawning a dedicated thread.
+        // FileWatcher requires a ThreadPool target; we don't spawn local threads.
         if (self.thread_pool) |pool| {
-            if (self.pool_worker_fn) |_| {
+            self.running = true;
+
+            if (self.pool_worker_fn != null) {
                 const work_item = TP.WorkItem{
                     .id = 0,
                     .item_type = TP.WorkItemType.hot_reload,
@@ -175,50 +174,28 @@ pub const FileWatcher = struct {
                     .context = @as(*anyopaque, self),
                 };
 
-                // Submit the long-running watcher loop to the pool
                 try pool.submitWork(work_item);
-                self.running_in_pool = true;
                 log(.INFO, "file_watcher", "FileWatcher started in ThreadPool (monitoring {} paths)", .{self.watched_paths.count()});
                 return;
             }
+            log(.ERROR, "file_watcher", "Cannot start FileWatcher: pool worker function not configured", .{});
+            return error.InvalidState;
+        } else {
+            log(.ERROR, "file_watcher", "Cannot start FileWatcher: no ThreadPool target configured", .{});
+            return error.InvalidState;
         }
     }
 
-    /// Stop the file watching thread
+    /// Stop the file watcher. Signals the pool worker loop to exit.
     pub fn stop(self: *Self) void {
         if (!self.running) return;
-
         self.running = false;
-
-        // If we started in the thread pool, there is no std.Thread to join; the
-        // worker will exit soon after seeing running==false. Clear the flag.
-        if (self.running_in_pool) {
-            self.running_in_pool = false;
-            log(.INFO, "file_watcher", "FileWatcher stopping (running in ThreadPool)", .{});
-            return;
-        }
-
-        if (self.thread) |thread| {
-            thread.join();
-            self.thread = null;
-        }
-
-        log(.INFO, "file_watcher", "FileWatcher stopped", .{});
+        log(.INFO, "file_watcher", "FileWatcher stopping", .{});
     }
 
     /// Main watcher thread function - polls for file changes
-    fn watcherThread(self: *Self) void {
-        var loop_count: u32 = 0;
-        while (self.running) {
-            loop_count += 1;
-            if (loop_count <= 3) {}
-
-            self.checkForChanges();
-
-            // Sleep for polling interval (100ms)
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-        }
-    }
+    // Legacy local-thread polling loop removed. The watcher runs in the ThreadPool
+    // via `watcherThreadWorker` which invokes `checkForChanges` periodically.
 
     // Worker function that runs in the ThreadPool; simply executes the same
     // polling loop but adheres to the ThreadPool worker signature.
@@ -250,6 +227,9 @@ pub const FileWatcher = struct {
 
         var iterator = self.watched_paths.iterator();
         while (iterator.next()) |entry| {
+            if (self.running == false) {
+                return;
+            }
             const path = entry.value_ptr.path;
             const watched = entry.value_ptr;
 
