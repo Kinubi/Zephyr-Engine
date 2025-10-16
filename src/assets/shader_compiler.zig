@@ -268,7 +268,7 @@ pub const ShaderCompiler = struct {
         }
 
         // Generate reflection data
-        const reflection = try generateReflection(final_spirv);
+        const reflection = try self.generateReflection(final_spirv);
 
         // Calculate source hash for cache invalidation
         const source_hash = std.hash_map.hashString(source.code);
@@ -457,11 +457,433 @@ pub const ShaderCompiler = struct {
         return result;
     }
 
-    fn generateReflection(spirv_data: []const u32) !ShaderReflection {
-        _ = spirv_data; // TODO: Implement SPIR-V reflection parsing
+    fn generateReflection(self: *Self, spirv_data: []const u32) !ShaderReflection {
+        // Ask SPIRV-Cross for JSON reflection using the JSON backend
+        const sc_opts = spirv_cross.CompileOptions{
+            .glsl_version = null,
+            .glsl_es = null,
+            .vulkan_semantics = true,
+            .hlsl_shader_model = null,
+            .debug_info = false,
+        };
+        const json_cstr = try self.spv_cross.compileSpirv(spirv_data, spirv_cross.Backend.json, sc_opts);
+        // Copy JSON into our allocator so parsing and returned slices are stable
+        const json_owned = try self.allocator.dupe(u8, json_cstr);
+        defer self.allocator.free(json_owned);
 
-        // For now, return empty reflection data
-        return ShaderReflection.init();
+        var parser = std.json.parseFromSlice(std.json.Value, self.allocator, json_owned, .{}) catch |err| {
+            std.log.err("Failed to parse SPIRV-Cross JSON reflection: {}", .{err});
+            return error.ReflectionGenerationFailed;
+        };
+        defer parser.deinit();
+
+        const root = parser.value;
+        if (root != .object) return ShaderReflection.init();
+
+        var refl = ShaderReflection.init();
+
+        // Populate arrays (they were zero-initialized in init)
+        refl.inputs = std.ArrayList(ShaderVariable){};
+        refl.outputs = std.ArrayList(ShaderVariable){};
+        refl.uniform_buffers = std.ArrayList(ShaderBuffer){};
+        refl.storage_buffers = std.ArrayList(ShaderBuffer){};
+        refl.textures = std.ArrayList(ShaderTexture){};
+        refl.samplers = std.ArrayList(ShaderSampler){};
+        refl.specialization_constants = std.ArrayList(ShaderSpecializationConstant){};
+
+        // SPIRV-Cross may emit a `resources` object with arrays of resources
+        if (root.object.get("resources")) |res_val| {
+            if (res_val == .object) {
+                const res_obj = res_val.object;
+
+                // stage_inputs
+                if (res_obj.get("stage_inputs")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                if (elem.object.get("name")) |name_v| {
+                                    if (elem.object.get("location")) |loc_v| {
+                                        if (name_v == .string and loc_v == .integer) {
+                                            const name = name_v.string;
+                                            const location = @as(u32, @intCast(loc_v.integer));
+                                            const name_copy = try self.allocator.dupe(u8, name);
+                                            try refl.inputs.append(self.allocator, ShaderVariable{ .name = name_copy, .location = location, .type = ShaderDataType.struct_type, .size = 0 });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // stage_outputs
+                if (res_obj.get("stage_outputs")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const loc_opt = elem.object.get("location");
+                                if (name_opt) |name_v| {
+                                    if (loc_opt) |loc_v| {
+                                        if (name_v == .string and loc_v == .integer) {
+                                            const name = name_v.string;
+                                            const location = @as(u32, @intCast(loc_v.integer));
+                                            const name_copy = try self.allocator.dupe(u8, name);
+                                            try refl.outputs.append(self.allocator, ShaderVariable{ .name = name_copy, .location = location, .type = ShaderDataType.struct_type, .size = 0 });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // uniform_buffers
+                if (res_obj.get("uniform_buffers")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const size_opt = elem.object.get("size");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const name = name_v.string;
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+                                                var size: u32 = 0;
+                                                if (size_opt) |s_v| {
+                                                    if (s_v == .integer) {
+                                                        size = @as(u32, @intCast(s_v.integer));
+                                                    }
+                                                }
+                                                const name_copy = try self.allocator.dupe(u8, name);
+                                                var members = std.ArrayList(ShaderBufferMember){};
+                                                _ = &members;
+
+                                                try refl.uniform_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // storage_buffers
+                if (res_obj.get("storage_buffers")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const size_opt = elem.object.get("size");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const name = name_v.string;
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+                                                var size: u32 = 0;
+                                                if (size_opt) |s_v| {
+                                                    if (s_v == .integer) {
+                                                        size = @as(u32, @intCast(s_v.integer));
+                                                    }
+                                                }
+                                                const name_copy = try self.allocator.dupe(u8, name);
+                                                var members = std.ArrayList(ShaderBufferMember){};
+                                                _ = &members;
+                                                try refl.storage_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // sampled_images -> textures
+                if (res_obj.get("sampled_images")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const name = name_v.string;
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+                                                const name_copy = try self.allocator.dupe(u8, name);
+                                                try refl.textures.append(self.allocator, ShaderTexture{ .name = name_copy, .binding = binding, .set = set, .dimension = TextureDimension.texture_2d, .format = null });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // separate_samplers
+                if (res_obj.get("separate_samplers")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const name = name_v.string;
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+                                                const name_copy = try self.allocator.dupe(u8, name);
+                                                try refl.samplers.append(self.allocator, ShaderSampler{ .name = name_copy, .binding = binding, .set = set });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // push_constants
+                if (res_obj.get("push_constants")) |v| {
+                    if (v == .array and v.array.items.len > 0) {
+                        const first = v.array.items[0];
+                        if (first == .object) {
+                            const size_opt = first.object.get("size");
+                            if (size_opt) |s_v| {
+                                if (s_v == .integer) {
+                                    const pc = ShaderPushConstants{ .size = @as(u32, @intCast(s_v.integer)), .offset = 0, .stage_flags = 0 };
+                                    refl.push_constants = pc;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // specialization_constants
+                if (res_obj.get("specialization_constants")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const id_opt = elem.object.get("constant_id");
+                                const default_opt = elem.object.get("default_value");
+                                if (name_opt) |name_v| {
+                                    if (id_opt) |id_v| {
+                                        if (name_v == .string and id_v == .integer) {
+                                            const name = name_v.string;
+                                            const id = @as(u32, @intCast(id_v.integer));
+                                            var def: SpecConstValue = .{ .uint_type = 0 };
+                                            if (default_opt) |dv| {
+                                                switch (dv) {
+                                                    .integer => def = SpecConstValue{ .int_type = @as(i32, @intCast(dv.integer)) },
+                                                    .float => def = SpecConstValue{ .float_type = @as(f32, @floatCast(dv.float)) },
+                                                    .bool => def = SpecConstValue{ .bool_type = dv.bool },
+                                                    else => {},
+                                                }
+                                            }
+                                            const name_copy = try self.allocator.dupe(u8, name);
+                                            try refl.specialization_constants.append(self.allocator, ShaderSpecializationConstant{ .name = name_copy, .id = id, .default_value = def });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: if SPIRV-Cross emitted top-level arrays like `inputs`, `outputs`, `ubos`, `push_constants`
+        const types_val = root.object.get("types");
+
+        // inputs
+        if (root.object.get("inputs")) |in_val| {
+            if (in_val == .array) {
+                for (in_val.array.items) |elem| {
+                    if (elem == .object) {
+                        if (elem.object.get("name")) |name_v| {
+                            if (elem.object.get("location")) |loc_v| {
+                                if (name_v == .string and loc_v == .integer) {
+                                    const name = name_v.string;
+                                    const location = @as(u32, @intCast(loc_v.integer));
+                                    const name_copy = try self.allocator.dupe(u8, name);
+                                    try refl.inputs.append(self.allocator, ShaderVariable{ .name = name_copy, .location = location, .type = ShaderDataType.struct_type, .size = 0 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // outputs
+        if (root.object.get("outputs")) |out_val| {
+            if (out_val == .array) {
+                for (out_val.array.items) |elem| {
+                    if (elem == .object) {
+                        if (elem.object.get("name")) |name_v| {
+                            if (elem.object.get("location")) |loc_v| {
+                                if (name_v == .string and loc_v == .integer) {
+                                    const name = name_v.string;
+                                    const location = @as(u32, @intCast(loc_v.integer));
+                                    const name_copy = try self.allocator.dupe(u8, name);
+                                    try refl.outputs.append(self.allocator, ShaderVariable{ .name = name_copy, .location = location, .type = ShaderDataType.struct_type, .size = 0 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ubos (top-level uniform blocks)
+        if (root.object.get("ubos")) |ubos_val| {
+            if (ubos_val == .array) {
+                for (ubos_val.array.items) |elem| {
+                    if (elem == .object) {
+                        if (elem.object.get("name")) |name_v| {
+                            if (elem.object.get("set")) |set_v| {
+                                if (elem.object.get("binding")) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const name = name_v.string;
+                                        const set = @as(u32, @intCast(set_v.integer));
+                                        const binding = @as(u32, @intCast(bind_v.integer));
+                                        var size: u32 = 0;
+                                        if (elem.object.get("block_size")) |s_v| {
+                                            if (s_v == .integer) {
+                                                size = @as(u32, @intCast(s_v.integer));
+                                            }
+                                        }
+                                        const name_copy = try self.allocator.dupe(u8, name);
+                                        var members = std.ArrayList(ShaderBufferMember){};
+
+                                        // Resolve members via types if available
+                                        if (elem.object.get("type")) |t_v| {
+                                            if (t_v == .string) {
+                                                const type_key = t_v.string;
+                                                if (types_val) |tv| {
+                                                    if (tv == .object) {
+                                                        const tobj = tv.object;
+                                                        if (tobj.get(type_key)) |type_def| {
+                                                            if (type_def == .object) {
+                                                                if (type_def.object.get("members")) |mval| {
+                                                                    if (mval == .array) {
+                                                                        for (mval.array.items) |memb| {
+                                                                            if (memb == .object) {
+                                                                                if (memb.object.get("name")) |mn| {
+                                                                                    if (mn == .string) {
+                                                                                        const m_name = mn.string;
+                                                                                          var m_size: u32 = 0;
+                                                                                          if (memb.object.get("offset")) |mo| {
+                                                                                              if (mo == .integer) {
+                                                                                                  const m_offset = @as(u32, @intCast(mo.integer));
+                                                                                                  // size may be set below; use a temp const for offset
+                                                                                                  if (memb.object.get("size")) |ms| {
+                                                                                                      if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
+                                                                                                  }
+                                                                                                  const m_name_copy = try self.allocator.dupe(u8, m_name);
+                                                                                                  try members.append(self.allocator, ShaderBufferMember{ .name = m_name_copy, .offset = m_offset, .size = m_size, .type = ShaderDataType.struct_type });
+                                                                                                  continue;
+                                                                                              }
+                                                                                          }
+                                                                                          if (memb.object.get("size")) |ms| {
+                                                                                              if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
+                                                                                          }
+                                                                                                                    // Fallback append (offset may be 0 if not found above)
+                                                                                                                    const m_name_copy = try self.allocator.dupe(u8, m_name);
+                                                                                                                    try members.append(self.allocator, ShaderBufferMember{ .name = m_name_copy, .offset = 0, .size = m_size, .type = ShaderDataType.struct_type });
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        try refl.uniform_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // push_constants (take the first entry if present and resolve size from types)
+            if (root.object.get("push_constants")) |pc_val| {
+                if (pc_val == .array and pc_val.array.items.len > 0) {
+                    const first = pc_val.array.items[0];
+                    if (first == .object) {
+                        if (first.object.get("type")) |t_v| {
+                            if (t_v == .string) {
+                                const type_key = t_v.string;
+                                var pc_size: u32 = 0;
+                                if (types_val) |tv| {
+                                    if (tv == .object) {
+                                        const tobj = tv.object;
+                                        const type_def_opt = tobj.get(type_key);
+                                        if (type_def_opt) |type_def| {
+                                            if (type_def == .object) {
+                                                const members_opt = type_def.object.get("members");
+                                                if (members_opt) |mval| {
+                                                    if (mval == .array) {
+                                                        var max_end: u32 = 0;
+                                                        for (mval.array.items) |memb| {
+                                                            if (memb == .object) {
+                                                                const offset_opt = memb.object.get("offset");
+                                                                if (offset_opt) |mo| {
+                                                                    if (mo == .integer) {
+                                                                        const m_offset = @as(u32, @intCast(mo.integer));
+                                                                        var m_size: u32 = 0;
+                                                                        const size_opt = memb.object.get("size");
+                                                                        if (size_opt) |ms| {
+                                                                            if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
+                                                                        }
+                                                                        if (m_size == 0) m_size = 16; // conservative default
+                                                                        if (m_offset + m_size > max_end) max_end = m_offset + m_size;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        pc_size = max_end;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (pc_size != 0) refl.push_constants = ShaderPushConstants{ .size = pc_size, .offset = 0, .stage_flags = 0 };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return refl;
     }
 
     // Hot reload support
