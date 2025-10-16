@@ -25,6 +25,9 @@ pub const SceneBridge = struct {
     last_model_asset_ids: std.ArrayList(u64), // Track model asset IDs to detect changes
     bvh_needs_rebuild: bool = true, // Start with needing rebuild
 
+    // Material/texture descriptor update tracking (per frame in flight)
+    descriptor_update_needed: [3]bool = [_]bool{true, true, true}, // Start with needing updates
+
     const Self = @This();
 
     /// Initialize scene bridge
@@ -62,6 +65,25 @@ pub const SceneBridge = struct {
         self.bvh_needs_rebuild = true;
         // Only invalidate raytracing cache since geometry changed
         self.raytracing_cache = null;
+    }
+
+    /// Check if material/texture descriptors need updating for a given frame
+    pub fn needsDescriptorUpdate(self: *Self, frame_index: u32) bool {
+        // Check if asset manager has new materials or textures
+        const asset_manager = self.scene.asset_manager;
+        if (asset_manager.materials_dirty or asset_manager.texture_descriptors_dirty) {
+            // Mark all frames as needing updates
+            for (&self.descriptor_update_needed) |*needs_update| {
+                needs_update.* = true;
+            }
+        }
+        
+        return self.descriptor_update_needed[frame_index];
+    }
+
+    /// Mark that descriptor update has been completed for a given frame
+    pub fn markDescriptorUpdated(self: *Self, frame_index: u32) void {
+        self.descriptor_update_needed[frame_index] = false;
     }
 
     /// Check if BVH needs rebuilding based on geometry changes (not texture/material changes)

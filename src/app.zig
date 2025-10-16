@@ -519,36 +519,19 @@ pub const App = struct {
         };
         // Update textured renderer with any new material/texture data if resources changed
         if (resources_updated) {
-            // Instead of deviceWaitIdle, just mark all frames as needing updates
-            for (&self.descriptor_dirty_flags) |*flag| {
-                flag.* = true;
-            }
+            // Mark scene bridge that descriptors need updating
+            scene.scene_bridge.?.descriptor_update_needed = [_]bool{true, true, true};
 
             // Clear the global flag since we've handled it
             resources_updated = false;
-        }
-
-        // Before rendering each frame, check if descriptors need updating
-        if (self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT]) {
-            log(.DEBUG, "app", "Updating descriptors for frame {d}", .{(current_frame + 1) % MAX_FRAMES_IN_FLIGHT});
-
-            // Update textured renderer's material/texture descriptors
-            try textured_renderer.updateMaterialData(
-                (current_frame + 1) % MAX_FRAMES_IN_FLIGHT,
-                scene.asset_manager.material_buffer.?.descriptor_info,
-                scene.asset_manager.getTextureDescriptorArray(),
-            );
-
-            // Note: raytracing_renderer descriptors are updated in updateFromSceneView() during rendering
-            // No need to call updateMaterialData() here as it would be redundant
-
-            // Mark this frame as updated
-            self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT] = false;
-            log(.DEBUG, "app", "The descriptor flags are: {any}, resources_updates: {any}", .{ self.descriptor_dirty_flags, resources_updated });
-
+            
             // Mark raytracing renderer materials as dirty for all frames
             raytracing_renderer.markMaterialsDirty();
         }
+
+        // Update all renderer descriptors through forward_renderer
+        // SceneBridge tracks which frames need updates
+        try forward_renderer.update((current_frame + 1) % MAX_FRAMES_IN_FLIGHT);
 
         if (raytracing_renderer.rt_system.tlas_dirty) {
             // Update raytracing renderer's TLAS reference only when AS changes

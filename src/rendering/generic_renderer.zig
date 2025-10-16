@@ -115,6 +115,53 @@ pub const GenericRenderer = struct {
         try self.renderers.append(self.allocator, entry);
     }
 
+    /// Update descriptor sets for all renderers that need material/texture updates
+    /// Checks SceneBridge to determine if updates are needed for this frame
+    pub fn update(self: *GenericRenderer, frame_index: u32) !void {
+        // Get scene bridge to check if updates are needed
+        const SceneBridge = @import("scene_bridge.zig").SceneBridge;
+        const scene_bridge: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr orelse return error.NoSceneBridge));
+        
+        // Check if this frame needs descriptor updates
+        if (!scene_bridge.needsDescriptorUpdate(frame_index)) {
+            return; // Nothing to update for this frame
+        }
+
+        const Scene = @import("../scene/scene.zig").Scene;
+        const scene: *Scene = scene_bridge.scene;
+        const asset_manager = scene.asset_manager;
+
+        // Update all renderers that need material/texture descriptor updates
+        for (self.renderers.items) |*renderer| {
+            // Currently only textured renderer needs material/texture updates
+            // In the future, this could be extended with a vtable update method
+            if (std.mem.eql(u8, renderer.name, "textured")) {
+                const UnifiedTexturedRenderer = @import("../renderers/unified_textured_renderer.zig").UnifiedTexturedRenderer;
+                const textured_renderer: *UnifiedTexturedRenderer = @ptrCast(@alignCast(renderer.renderer_ptr));
+
+                // Only update if we have a material buffer
+                if (asset_manager.material_buffer) |material_buffer| {
+                    const material_buffer_info = vk.DescriptorBufferInfo{
+                        .buffer = material_buffer.buffer,
+                        .offset = 0,
+                        .range = vk.WHOLE_SIZE,
+                    };
+
+                    const texture_image_infos = asset_manager.getTextureDescriptorArray();
+
+                    try textured_renderer.updateMaterialData(
+                        frame_index,
+                        material_buffer_info,
+                        texture_image_infos,
+                    );
+                }
+            }
+        }
+
+        // Mark that this frame's descriptors have been updated
+        scene_bridge.markDescriptorUpdated(frame_index);
+    }
+
     /// Execute all renderers in type order
     pub fn render(self: *GenericRenderer, frame_info: FrameInfo) !void {
         // Get scene bridge
