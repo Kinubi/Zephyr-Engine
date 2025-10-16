@@ -758,7 +758,7 @@ pub const PipelineBuilder = struct {
     pub fn buildRaytracingPipeline(self: *Self, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
         _ = self;
         _ = pipeline_layout;
-        
+
         // TODO: Implement full raytracing pipeline creation
         // For now, return an error indicating this needs implementation
         return error.RaytracingPipelineNotImplemented;

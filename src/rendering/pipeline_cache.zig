@@ -71,7 +71,7 @@ pub const PipelineCache = struct {
                 log(.WARN, "pipeline_cache", "Failed to read cache file: {}", .{err});
                 break :blk null;
             };
-            
+
             if (cache_data) |data| {
                 log(.INFO, "pipeline_cache", "✅ Loaded pipeline cache from disk ({} bytes)", .{data.len});
             }
@@ -128,15 +128,15 @@ pub const PipelineCache = struct {
             self.cache_hits += 1;
             entry.usage_count += 1;
             entry.last_used_frame = self.current_frame;
-            
+
             log(.DEBUG, "pipeline_cache", "✅ Cache HIT for pipeline hash: 0x{X} (usage: {})", .{ config_hash, entry.usage_count });
-            
+
             return entry.*;
         }
 
         // Cache miss - build new pipeline
         self.cache_misses += 1;
-        
+
         log(.INFO, "pipeline_cache", "⚙️  Cache MISS - building new pipeline (hash: 0x{X})", .{config_hash});
 
         // Build descriptor set layout
@@ -167,12 +167,9 @@ pub const PipelineCache = struct {
         };
 
         try self.cache.put(config_hash, entry);
-        
-        log(.INFO, "pipeline_cache", "✅ Pipeline cached (hash: 0x{X}, type: {s})", .{ 
-            config_hash, 
-            @tagName(builder.pipeline_type) 
-        });
-        
+
+        log(.INFO, "pipeline_cache", "✅ Pipeline cached (hash: 0x{X}, type: {s})", .{ config_hash, @tagName(builder.pipeline_type) });
+
         return entry;
     }
 
@@ -285,7 +282,7 @@ pub const PipelineCache = struct {
             defer file.close();
 
             try file.writeAll(cache_data);
-            
+
             log(.INFO, "pipeline_cache", "💾 Saved pipeline cache to disk: {} bytes at {s}", .{ cache_size, path });
         } else {
             log(.DEBUG, "pipeline_cache", "No cache data to save", .{});
@@ -318,7 +315,7 @@ pub const PipelineCache = struct {
         };
 
         self.vulkan_cache = try self.graphics_context.vkd.createPipelineCache(self.graphics_context.dev, &cache_create_info, null);
-        
+
         log(.INFO, "pipeline_cache", "📂 Loaded pipeline cache from disk: {} bytes", .{cache_data.len});
     }
 

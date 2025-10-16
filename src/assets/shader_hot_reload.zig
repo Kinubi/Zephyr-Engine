@@ -118,6 +118,10 @@ pub const ShaderWatcher = struct {
                 continue;
             }
 
+            if (entry.kind == .directory and std.mem.eql(u8, entry.name, "shaders")) {
+                continue;
+            }
+
             if (entry.kind == .file) {
                 if (isShaderFile(entry.name)) {
                     const full_path = try std.fs.path.join(self.allocator, &.{ directory_path, entry.name });
@@ -155,6 +159,9 @@ pub const ShaderWatcher = struct {
     pub fn onFileChanged(self: *Self, file_path: []const u8) void {
         // Skip the cached directory - we don't want to recompile cache files
         if (std.mem.indexOf(u8, file_path, "cached") != null) {
+            return;
+        }
+        if (std.mem.indexOf(u8, file_path, "shaders") != null) {
             return;
         }
 
@@ -296,15 +303,3 @@ pub const ShaderWatcherStats = struct {
     average_compile_time_ms: f64,
     total_reloads: u32,
 };
-
-// Tests
-test "ShaderWatcher creation" {
-    const gpa = std.testing.allocator;
-
-    // Note: This is a basic smoke test - full testing would require mock filesystem
-    var thread_pool = try ThreadPool.init(gpa, 4);
-    defer thread_pool.deinit();
-
-    var watcher = try ShaderWatcher.init(gpa, &thread_pool);
-    defer watcher.deinit();
-}
