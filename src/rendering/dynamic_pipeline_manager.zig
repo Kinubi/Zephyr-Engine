@@ -100,7 +100,7 @@ pub const DynamicPipeline = struct {
 
     pub fn markRebuildNeeded(self: *DynamicPipeline) void {
         self.rebuild_needed = true;
-        log(.INFO, "dynamic_pipeline", "Pipeline '{}' marked for rebuild due to shader changes", .{self.template.name});
+        log(.INFO, "dynamic_pipeline", "Pipeline '{s}' marked for rebuild due to shader changes", .{self.template.name});
     }
 
     pub fn isValid(self: *const DynamicPipeline) bool {

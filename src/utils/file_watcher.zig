@@ -1,5 +1,13 @@
 const std = @import("std");
 const log = @import("log.zig").log;
+const TP = @import("../threading/thread_pool.zig");
+const ThreadPool = TP.ThreadPool;
+const AssetId = @import("../assets/asset_types.zig").AssetId;
+
+// TODO: Migrate asset and shader management to use this file watcher for hot reloading
+//       Current implementation is basic and polling-based, but works cross-platform
+//       Future enhancements could include platform-specific backends for efficiency
+//       I don't want callbacks, everything gets handled via the threadpool queue
 
 /// Cross-platform file system watcher for hot reloading
 pub const FileWatcher = struct {
@@ -7,10 +15,17 @@ pub const FileWatcher = struct {
     watched_paths: std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
     thread: ?std.Thread = null,
     running: bool = false,
+    running_in_pool: bool = false,
     mutex: std.Thread.Mutex = .{},
 
-    // Event callback function
+    // Event callback function (legacy)
     callback: ?*const fn (event: FileEvent) void = null,
+
+    // Optional ThreadPool target: when set, file events will be enqueued as
+    // ThreadPool WorkItems of type `hot_reload` instead of direct callbacks.
+    thread_pool: ?*ThreadPool = null,
+    pool_worker_fn: ?*const fn (*anyopaque, TP.WorkItem) void = null,
+    pool_worker_context: ?*anyopaque = null,
 
     const Self = @This();
 
@@ -20,6 +35,11 @@ pub const FileWatcher = struct {
         recursive: bool,
         last_modified: i128, // Nanoseconds since epoch
         file_size: u64,
+        // Optional per-watch ThreadPool worker and context. If set, this
+        // worker_fn/context take precedence over the FileWatcher's global
+        // pool_worker_fn/pool_worker_context when enqueuing WorkItems.
+        pool_worker_fn: ?*const fn (*anyopaque, TP.WorkItem) void = null,
+        pool_worker_context: ?*anyopaque = null,
     };
 
     /// File system event types
@@ -76,8 +96,28 @@ pub const FileWatcher = struct {
         // Future enhancement: store context and callback per watch for better isolation
     }
 
+    /// Configure the FileWatcher to enqueue events into a ThreadPool instead of
+    /// calling the (legacy) callback. `worker_fn` should be a function that
+    /// matches the ThreadPool worker signature: fn(context: *anyopaque, work_item: TP.WorkItem) void
+    pub fn setThreadPoolTarget(self: *Self, pool: *ThreadPool, worker_fn: *const fn (*anyopaque, TP.WorkItem) void, context: *anyopaque) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.thread_pool = pool;
+        self.pool_worker_fn = worker_fn;
+        self.pool_worker_context = context;
+    }
+
     /// Add a path to watch for changes
     pub fn addWatch(self: *Self, path: []const u8, recursive: bool) !void {
+        // Default addWatch uses no per-watch worker (falls back to global)
+        try self.addWatchWithWorker(path, recursive, null, null);
+    }
+
+    /// Add a path to watch for changes and optionally supply a pool worker
+    /// function + context which will be used when submitting the hot_reload
+    /// WorkItem for this specific watched path.
+    pub fn addWatchWithWorker(self: *Self, path: []const u8, recursive: bool, worker_fn: ?*const fn (*anyopaque, TP.WorkItem) void, context: ?*anyopaque) !void {
         // Check if path exists and determine if it's a directory
         const stat = std.fs.cwd().statFile(path) catch |err| {
             log(.WARN, "file_watcher", "Cannot stat path to watch: {s} ({})", .{ path, err });
@@ -95,6 +135,8 @@ pub const FileWatcher = struct {
             .recursive = recursive,
             .last_modified = stat.mtime,
             .file_size = if (stat.kind == .directory) 0 else stat.size, // Directory size is not meaningful
+            .pool_worker_fn = worker_fn,
+            .pool_worker_context = context,
         };
 
         self.mutex.lock();
@@ -119,8 +161,27 @@ pub const FileWatcher = struct {
         if (self.running) return;
 
         self.running = true;
-        self.thread = try std.Thread.spawn(.{}, watcherThread, .{self});
-        log(.INFO, "file_watcher", "FileWatcher started monitoring {} paths", .{self.watched_paths.count()});
+
+        // If a ThreadPool target is configured, submit the watcher loop as a
+        // long-running work item to the pool instead of spawning a dedicated thread.
+        if (self.thread_pool) |pool| {
+            if (self.pool_worker_fn) |_| {
+                const work_item = TP.WorkItem{
+                    .id = 0,
+                    .item_type = TP.WorkItemType.hot_reload,
+                    .priority = TP.WorkPriority.low,
+                    .data = .{ .hot_reload = .{ .file_path = "", .asset_id = AssetId.fromU64(0) } },
+                    .worker_fn = watcherThreadWorker,
+                    .context = @as(*anyopaque, self),
+                };
+
+                // Submit the long-running watcher loop to the pool
+                try pool.submitWork(work_item);
+                self.running_in_pool = true;
+                log(.INFO, "file_watcher", "FileWatcher started in ThreadPool (monitoring {} paths)", .{self.watched_paths.count()});
+                return;
+            }
+        }
     }
 
     /// Stop the file watching thread
@@ -128,6 +189,14 @@ pub const FileWatcher = struct {
         if (!self.running) return;
 
         self.running = false;
+
+        // If we started in the thread pool, there is no std.Thread to join; the
+        // worker will exit soon after seeing running==false. Clear the flag.
+        if (self.running_in_pool) {
+            self.running_in_pool = false;
+            log(.INFO, "file_watcher", "FileWatcher stopping (running in ThreadPool)", .{});
+            return;
+        }
 
         if (self.thread) |thread| {
             thread.join();
@@ -139,6 +208,23 @@ pub const FileWatcher = struct {
 
     /// Main watcher thread function - polls for file changes
     fn watcherThread(self: *Self) void {
+        var loop_count: u32 = 0;
+        while (self.running) {
+            loop_count += 1;
+            if (loop_count <= 3) {}
+
+            self.checkForChanges();
+
+            // Sleep for polling interval (100ms)
+            std.Thread.sleep(100 * std.time.ns_per_ms);
+        }
+    }
+
+    // Worker function that runs in the ThreadPool; simply executes the same
+    // polling loop but adheres to the ThreadPool worker signature.
+    pub fn watcherThreadWorker(_context: *anyopaque, _work_item: TP.WorkItem) void {
+        const self: *FileWatcher = @ptrCast(@alignCast(_context));
+        _ = _work_item;
         var loop_count: u32 = 0;
         while (self.running) {
             loop_count += 1;
@@ -187,12 +273,45 @@ pub const FileWatcher = struct {
                 entry.value_ptr.last_modified = stat.mtime;
                 entry.value_ptr.file_size = stat.size;
 
-                // Notify callback
-                if (self.callback) |callback| {
-                    const event = FileEvent{
-                        .event_type = .modified,
-                        .path = path,
-                    };
+                // Build FileEvent
+                const event = FileEvent{
+                    .event_type = .modified,
+                    .path = path,
+                };
+
+                // If a ThreadPool target is configured, enqueue a hot_reload WorkItem
+                if (self.thread_pool) |pool| {
+                    // Prefer a per-watch worker if provided; otherwise use global pool worker
+                    var chosen_worker: ?*const fn (*anyopaque, TP.WorkItem) void = null;
+                    var chosen_ctx: *anyopaque = @as(*anyopaque, self);
+
+                    if (entry.value_ptr.pool_worker_fn) |pwf| {
+                        chosen_worker = pwf;
+                        if (entry.value_ptr.pool_worker_context) |pctx| chosen_ctx = pctx;
+                    } else if (self.pool_worker_fn) |gwf| {
+                        chosen_worker = gwf;
+                        if (self.pool_worker_context) |gctx| chosen_ctx = gctx;
+                    }
+
+                    if (chosen_worker) |worker_fn| {
+                        const work_item = TP.WorkItem{
+                            .id = 0,
+                            .item_type = TP.WorkItemType.hot_reload,
+                            .priority = TP.WorkPriority.high,
+                            .data = .{ .hot_reload = .{ .file_path = path, .asset_id = AssetId.fromU64(0) } },
+                            .worker_fn = worker_fn,
+                            .context = chosen_ctx,
+                        };
+
+                        pool.submitWork(work_item) catch |err| {
+                            log(.ERROR, "file_watcher", "Failed to submit hot_reload WorkItem for {s}: {}", .{ path, err });
+                        };
+                    } else if (self.callback) |callback| {
+                        // Fall back to legacy callback if no pool worker fn provided
+                        callback(event);
+                    }
+                } else if (self.callback) |callback| {
+                    // Legacy behavior: call the callback directly
                     callback(event);
                 }
 

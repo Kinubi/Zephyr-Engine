@@ -501,7 +501,8 @@ pub const UnifiedPipelineSystem = struct {
         };
     }
 
-    fn onShaderReloadedHotReload(file_path: []const u8, compiled_shader: @import("../assets/shader_compiler.zig").CompiledShader) void {
+    fn onShaderReloadedHotReload(context: ?*anyopaque, file_path: []const u8, compiled_shader: @import("../assets/shader_compiler.zig").CompiledShader) void {
+        _ = context; // context currently unused here, keep the parameter for compatibility
         _ = compiled_shader; // We don't need the compiled shader data for pipeline rebuilds
 
         log(.INFO, "unified_pipeline", "🔥 Hot reload callback triggered for shader: {s}", .{file_path});
@@ -666,34 +667,14 @@ pub const UnifiedPipelineSystem = struct {
             if (s.set > max_set_idx) max_set_idx = s.set;
         }
 
-        // Debug: log reflection contents so we can see what was discovered
-        log(.DEBUG, "unified_pipeline", "reflection counts: ubos={}, sbos={}, textures={}, samplers={}", .{
+        // Minimal info: log reflection summary at INFO so users can see what was found.
+        // Keep per-binding details at DEBUG for verbose troubleshooting.
+        log(.INFO, "unified_pipeline", "reflection summary: ubos={}, sbos={}, textures={}, samplers={}", .{
             reflection.uniform_buffers.items.len,
             reflection.storage_buffers.items.len,
             reflection.textures.items.len,
             reflection.samplers.items.len,
         });
-
-        var rif_i: usize = 0;
-        for (reflection.uniform_buffers.items) |ub| {
-            log(.DEBUG, "unified_pipeline", "  ub[{}] name={s} set={} binding={}", .{ rif_i, ub.name, ub.set, ub.binding });
-            rif_i += 1;
-        }
-        rif_i = 0;
-        for (reflection.storage_buffers.items) |sb| {
-            log(.DEBUG, "unified_pipeline", "  sb[{}] name={s} set={} binding={}", .{ rif_i, sb.name, sb.set, sb.binding });
-            rif_i += 1;
-        }
-        rif_i = 0;
-        for (reflection.textures.items) |t| {
-            log(.DEBUG, "unified_pipeline", "  tex[{}] name={s} set={} binding={}", .{ rif_i, t.name, t.set, t.binding });
-            rif_i += 1;
-        }
-        rif_i = 0;
-        for (reflection.samplers.items) |samp| {
-            log(.DEBUG, "unified_pipeline", "  samp[{}] name={s} set={} binding={}", .{ rif_i, samp.name, samp.set, samp.binding });
-            rif_i += 1;
-        }
 
         // Create per-set array of binding lists
         var per_set_lists = std.ArrayList(std.ArrayList(vk.DescriptorSetLayoutBinding)){};

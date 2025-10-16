@@ -44,8 +44,7 @@ const VertexInputBinding = @import("rendering/pipeline_builder.zig").VertexInput
 const VertexInputAttribute = @import("rendering/pipeline_builder.zig").VertexInputAttribute;
 const DescriptorBinding = @import("rendering/pipeline_builder.zig").DescriptorBinding;
 const PushConstantRange = @import("rendering/pipeline_builder.zig").PushConstantRange;
-const ShaderPipelineIntegration = @import("rendering/shader_pipeline_integration.zig").ShaderPipelineIntegration;
-const setGlobalIntegration = @import("rendering/shader_pipeline_integration.zig").setGlobalIntegration;
+// Shader-pipeline integration removed in favor of the unified pipeline system
 
 // Unified pipeline system imports
 const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
@@ -137,8 +136,7 @@ pub const App = struct {
     var render_system: RenderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
     var dynamic_pipeline_manager: DynamicPipelineManager = undefined;
-    // NOTE: Shader-pipeline integration disabled - unified pipeline system handles hot reload now
-    // var shader_pipeline_integration: ShaderPipelineIntegration = undefined;
+    // NOTE: Shader-pipeline integration removed - unified pipeline system handles hot reload now
 
     // Unified pipeline system
     var unified_pipeline_system: UnifiedPipelineSystem = undefined;
@@ -239,10 +237,7 @@ pub const App = struct {
         dynamic_pipeline_manager = try DynamicPipelineManager.init(self.allocator, &self.gc, asset_manager, &shader_manager);
         log(.INFO, "app", "Dynamic pipeline manager initialized", .{});
 
-        // NOTE: Shader-pipeline integration disabled - unified pipeline system handles hot reload now
-        // shader_pipeline_integration = try ShaderPipelineIntegration.init(self.allocator, &dynamic_pipeline_manager, &shader_manager.hot_reload);
-        // setGlobalIntegration(&shader_pipeline_integration);
-        // log(.INFO, "app", "Shader-pipeline integration initialized", .{});
+    // Shader-pipeline integration intentionally removed. Unified pipeline system is active.
 
         // Initialize Scene with Asset Manager integration
         scene = Scene.init(&self.gc, self.allocator, asset_manager);
@@ -949,10 +944,8 @@ pub const App = struct {
         //particle_renderer.deinit();
         scene.deinit();
 
-        // Clean up dynamic pipeline system
-        // NOTE: Shader-pipeline integration disabled - unified pipeline system handles hot reload now
-        // shader_pipeline_integration.deinit();
-        dynamic_pipeline_manager.deinit();
+    // Clean up dynamic pipeline system
+    dynamic_pipeline_manager.deinit();
 
         shader_manager.deinit();
         asset_manager.deinit();

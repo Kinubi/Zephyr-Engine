@@ -4,7 +4,8 @@ const AssetManager = @import("asset_manager.zig").AssetManager;
 const AssetId = @import("asset_types.zig").AssetId;
 const AssetType = @import("asset_types.zig").AssetType;
 const LoadPriority = @import("asset_manager.zig").LoadPriority;
-const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const TP = @import("../threading/thread_pool.zig");
+const ThreadPool = TP.ThreadPool;
 const log = @import("../utils/log.zig").log;
 
 /// Callback function type for asset reload notifications
@@ -95,8 +96,9 @@ pub const HotReloadManager = struct {
             .reload_callbacks = std.ArrayList(AssetReloadCallback){},
         };
 
-        // Set up file watcher callback
-        manager.file_watcher.setCallback(globalFileEventCallback);
+        // Set up file watcher to submit events into the provided ThreadPool
+        // (this avoids running potentially unsafe code on the watcher thread)
+        manager.file_watcher.setThreadPoolTarget(manager.asset_manager.loader.thread_pool, threadPoolFileEventWorker, @as(*anyopaque, &manager));
 
         // Set this instance as the global manager for file events
         global_hot_reload_manager = &manager;
@@ -239,7 +241,9 @@ pub const HotReloadManager = struct {
         try self.file_metadata.put(owned_metadata_path, metadata);
 
         // Also watch the specific file (in addition to directory watching)
-        self.file_watcher.addWatch(file_path, false) catch |err| {
+        // Use per-watch worker so events for this file are delivered directly
+        // to this HotReloadManager via the ThreadPool worker function.
+        self.file_watcher.addWatchWithWorker(file_path, false, threadPoolFileEventWorker, @as(*anyopaque, self)) catch |err| {
             log(.WARN, "enhanced_hot_reload", "Failed to watch file {s}: {}", .{ file_path, err });
             return;
         };
@@ -267,41 +271,41 @@ pub const HotReloadManager = struct {
             return;
         }
 
-        // TEMPORARILY DISABLED to debug crashes
-        log(.DEBUG, "enhanced_hot_reload", "File change detected (processing disabled): {s}", .{file_path});
-        return;
+        // Check if this is a registered asset (with mutex protection)
+        self.asset_map_mutex.lock();
+        defer self.asset_map_mutex.unlock();
 
-        // const now = std.time.milliTimestamp();
+        const asset_id = if (self.path_to_asset.count() > 0)
+            self.path_to_asset.get(file_path)
+        else
+            null;
 
-        // // Check if this is a registered asset (with mutex protection and additional safety)
-        // self.asset_map_mutex.lock();
-        // defer self.asset_map_mutex.unlock();
+        if (asset_id) |id| {
+                // Force registry into unloaded state so AssetLoader will accept
+                // a fresh load request even if the asset was previously loaded.
+                self.asset_manager.registry.forceMarkUnloaded(id);
 
-        // // Double-check the HashMap is valid before accessing
-        // const asset_id = if (self.path_to_asset.count() > 0)
-        //     self.path_to_asset.get(file_path)
-        // else
-        //     null;
+            const asset_type = if (self.asset_to_type.count() > 0) self.asset_to_type.get(id) orelse .texture else .texture;
+            log(.DEBUG, "enhanced_hot_reload", "Processing file change for registered asset: {s} (ID: {})", .{ file_path, id });
 
-        // const asset_type = if (asset_id) |id|
-        //     if (self.asset_to_type.count() > 0)
-        //         self.asset_to_type.get(id) orelse .texture
-        //     else
-        //         .texture
-        // else
-        //     null;
+            // We already received a file-changed event, no need to re-stat here.
+            // Submit an immediate load request to the AssetLoader via the ThreadPool.
+            const reload_priority = self.calculateReloadPriority(asset_type, file_path);
+            const work_priority = switch (reload_priority) {
+                .critical => TP.WorkPriority.critical,
+                .high => TP.WorkPriority.high,
+                .normal => TP.WorkPriority.normal,
+                .low => TP.WorkPriority.low,
+            };
 
-        // if (asset_id) |id| {
-        //     log(.DEBUG, "enhanced_hot_reload", "Processing file change for registered asset: {s} (ID: {})", .{ file_path, id });
-        //     // Check for actual file changes
-        //     if (self.hasFileChanged(file_path, asset_type.?)) {
-        //         self.queueReload(id, file_path, asset_type.?, .file_changed, now);
-        //     }
-        // } else {
-        //     log(.DEBUG, "enhanced_hot_reload", "File change detected but not a registered asset: {s}", .{file_path});
-        //     // Check directory for any matching assets
-        //     self.scanDirectoryForAssets(file_path);
-        // }
+            // AssetManager.loader is set during AssetManager init; call it and
+            // fall back to queued reload on error.
+            self.asset_manager.loader.requestLoad(id, work_priority) catch |err| {
+                log(.ERROR, "enhanced_hot_reload", "Failed to request load for changed asset {s}: {}", .{ file_path, err });
+            };
+        } else {
+            log(.DEBUG, "enhanced_hot_reload", "File change detected but not a registered asset: {s}", .{file_path});
+        }
     }
 
     /// Queue a reload request with priority
@@ -560,4 +564,13 @@ fn globalFileEventCallback(event: FileWatcher.FileEvent) void {
     if (global_hot_reload_manager) |manager| {
         manager.onFileChanged(event.path);
     }
+}
+
+// ThreadPool worker function that will be called when FileWatcher enqueues
+// a hot_reload WorkItem. It extracts the file path from the WorkItem and
+// delegates to HotReloadManager.onFileChanged.
+pub fn threadPoolFileEventWorker(context: *anyopaque, work_item: TP.WorkItem) void {
+    const manager: *HotReloadManager = @ptrCast(@alignCast(context));
+    const file_path = work_item.data.hot_reload.file_path;
+    manager.onFileChanged(file_path);
 }

@@ -141,7 +141,7 @@ pub const PipelineCache = struct {
 
         for (builder.shader_stages.items) |stage| {
             // Use shader module handle as identifier
-            const handle_str = try std.fmt.allocPrint(self.allocator, "{}", .{@intFromPtr(stage.shader.module.handle)});
+            const handle_str = try std.fmt.allocPrint(self.allocator, "{x}", .{@intFromPtr(stage.shader.module.handle)});
             defer self.allocator.free(handle_str);
             try shader_names.append(handle_str);
         }

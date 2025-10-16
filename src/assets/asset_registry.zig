@@ -167,6 +167,25 @@ pub const AssetRegistry = struct {
         }
     }
 
+    /// Force an asset back to the 'unloaded' state so it can be reloaded.
+    /// This adjusts counters if the asset was previously marked as loaded/failed.
+    pub fn forceMarkUnloaded(self: *Self, asset_id: AssetId) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.assets.getPtr(asset_id)) |asset| {
+            const old_state = asset.state;
+            asset.state = .unloaded;
+
+            if (old_state == .loaded and self.loaded_assets > 0) {
+                self.loaded_assets -= 1;
+            }
+            if (old_state == .failed and self.failed_assets > 0) {
+                self.failed_assets -= 1;
+            }
+        }
+    }
+
     /// Mark an asset as currently loading
     pub fn markAsLoading(self: *Self, asset_id: AssetId) void {
         if (self.getAsset(asset_id)) |asset| {

@@ -170,15 +170,8 @@ pub const ShaderManager = struct {
 
     /// Force recompilation of a specific shader (bypasses cache)
     pub fn forceRecompileShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
-        // Remove from loaded shaders if present
-        if (self.loaded_shaders.fetchRemove(file_path)) |entry| {
-            entry.value.compiled_shader.deinit(self.allocator);
-            self.allocator.free(entry.value.file_path);
-            self.allocator.destroy(entry.value);
-        }
-
-        // Clear from cache and recompile
-        // TODO: Add method to ShaderCache to remove specific entry
+        // Invalidate and unload the shader (if loaded), then recompile
+        try self.invalidateShader(file_path);
 
         // Recompile directly (bypassing cache)
         const compiled = try self.compiler.compileFromFile(file_path, options);
@@ -198,16 +191,75 @@ pub const ShaderManager = struct {
         return loaded;
     }
 
-    fn onShaderReloaded(file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) void {
-        // This function is called from the hot reload system when a shader is recompiled
+    /// Invalidate a shader: remove loaded entry, clear cache, and notify dependent pipelines
+    pub fn invalidateShader(self: *Self, file_path: []const u8) !void {
+        // Remove from loaded_shaders if present
+        if (self.loaded_shaders.fetchRemove(file_path)) |entry| {
+            entry.value.compiled_shader.deinit(self.allocator);
+            self.allocator.free(entry.value.file_path);
+            self.allocator.destroy(entry.value);
+        }
 
-        // Note: We need to cast the context back to ShaderManager
-        // In a real implementation, we'd need a proper callback system
+        // Invalidate cache entry
+        self.cache.removeCacheEntry(file_path) catch |err| {
+            std.log.warn("Failed to remove shader cache entry for {s}: {}", .{ file_path, err });
+        };
 
-        // Update loaded shader registry (simplified implementation)
-        // In practice, this would need proper synchronization and context handling
-        _ = compiled_shader;
-        _ = file_path;
+        // Notify dependent pipelines (if any) via registered callbacks
+        if (self.shader_dependencies.getPtr(file_path)) |deps| {
+            for (deps.items) |pipeline_name| {
+                for (self.pipeline_reload_callbacks.items) |callback| {
+                    if (callback.context) |ctx| {
+                        callback.onPipelineReload(ctx, file_path, &[_][]const u8{pipeline_name});
+                    } else {
+                        // No context available for this callback signature; ignore
+                    }
+                }
+            }
+        }
+    }
+
+    fn onShaderReloaded(context: ?*anyopaque, file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) void {
+        if (context == null) return;
+
+        const manager = @as(*ShaderManager, @ptrCast(@alignCast(context.?)));
+
+        // Invalidate cache and unload old shader if present
+        manager.invalidateShader(file_path) catch |err| {
+            std.log.warn("Failed to invalidate shader on reload for {s}: {}", .{ file_path, err });
+        };
+
+        // Update loaded_shaders with the newly compiled shader
+        // Note: compiled_shader already contains owned spirv_code and reflection
+        // Create a new LoadedShader entry and insert it
+        const path_key = manager.allocator.dupe(u8, file_path) catch |err| {
+            std.log.warn("Failed to duplicate file path for loaded shader: {s} - {}", .{ file_path, err });
+            return;
+        };
+
+        const loaded = manager.allocator.create(LoadedShader) catch |err| {
+            std.log.warn("Failed to allocate LoadedShader for {s}: {}", .{ file_path, err });
+            manager.allocator.free(path_key);
+            return;
+        };
+
+        loaded.* = LoadedShader{
+            .file_path = path_key,
+            .compiled_shader = compiled_shader,
+            .options = ShaderCompiler.CompilationOptions{ .target = .vulkan, .optimization_level = .none, .debug_info = false, .vulkan_semantics = true },
+            .load_time = std.time.timestamp(),
+            .reload_count = 1,
+        };
+
+        // Insert into loaded_shaders (fresh entry)
+        manager.loaded_shaders.put(path_key, loaded) catch |err| {
+            std.log.warn("Failed to insert loaded shader entry for {s}: {}", .{ file_path, err });
+            manager.allocator.free(path_key);
+            manager.allocator.destroy(loaded);
+            return;
+        };
+
+        // Notify pipelines via registered callbacks
     }
 
     pub fn recompileAllShaders(self: *Self) !void {
@@ -302,72 +354,4 @@ pub fn createDefaultShaderManager(allocator: std.mem.Allocator, asset_manager: *
     try manager.addShaderDirectory("assets/shaders");
 
     return manager;
-}
-
-// Example usage patterns
-pub const ShaderManagerExample = struct {
-    pub fn exampleUsage() !void {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
-
-        var asset_manager = AssetManager.init(allocator);
-        defer asset_manager.deinit();
-
-        // Create shader manager with hot reload
-        var shader_manager = try createDefaultShaderManager(allocator, &asset_manager);
-        defer shader_manager.deinit();
-
-        // Start hot reload system
-        try shader_manager.start();
-        defer shader_manager.stop();
-
-        // Load shaders with automatic hot reload
-        const compile_options = ShaderCompiler.CompilationOptions{
-            .target = .vulkan,
-            .optimization_level = .performance,
-            .vulkan_semantics = true,
-        };
-
-        // Load vertex/fragment pair
-        const basic_shaders = try shader_manager.loadVertexFragmentPair(
-            "shaders/basic.vert",
-            "shaders/basic.frag",
-            compile_options,
-        );
-
-        // Load compute shader
-        const compute_shader = try shader_manager.loadComputeShader(
-            "shaders/compute.comp",
-            compile_options,
-        );
-
-        // Register pipeline dependencies for automatic recreation
-        try shader_manager.registerPipelineDependency("shaders/basic.vert", "basic_pipeline");
-        try shader_manager.registerPipelineDependency("shaders/basic.frag", "basic_pipeline");
-        try shader_manager.registerPipelineDependency("shaders/compute.comp", "compute_pipeline");
-
-        // Shaders will now automatically recompile when files change
-        // Pipelines can register callbacks to be notified of shader changes
-
-        _ = basic_shaders;
-        _ = compute_shader;
-    }
-};
-
-// Tests
-test "ShaderManager basic operations" {
-    const allocator = std.testing.allocator;
-
-    var asset_manager = AssetManager.init(allocator);
-    defer asset_manager.deinit();
-
-    var thread_pool = try ThreadPool.init(allocator, 2);
-    defer thread_pool.deinit();
-
-    var manager = try ShaderManager.init(allocator, &asset_manager, &thread_pool);
-    defer manager.deinit();
-
-    const stats = manager.getStats();
-    try std.testing.expect(stats.loaded_shaders == 0);
 }

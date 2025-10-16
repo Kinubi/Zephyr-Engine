@@ -3,7 +3,9 @@ const ShaderCompiler = @import("shader_compiler.zig").ShaderCompiler;
 const CompiledShader = @import("shader_compiler.zig").CompiledShader;
 const CompilationOptions = @import("shader_compiler.zig").CompilationOptions;
 const AssetManager = @import("asset_manager.zig").AssetManager;
-const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const TP = @import("../threading/thread_pool.zig");
+const ThreadPool = TP.ThreadPool;
+const AssetId = @import("asset_types.zig").AssetId;
 
 // Real-time multithreaded shader hot reload system
 // Watches shader files for changes and automatically recompiles them
@@ -17,15 +19,17 @@ pub const ShaderWatcher = struct {
     // File watching and hot reload state
     watch_directories: std.ArrayList([]const u8),
     watched_shaders: std.HashMap([]const u8, ShaderFileInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    compilation_mutex: std.Thread.Mutex = .{},
     compilation_queue: std.ArrayList(CompilationJob),
-    compilation_mutex: std.Thread.Mutex,
+    // For compatibility with existing stats reporting (no internal compiler threads when using ThreadPool)
+    compiler_threads: std.ArrayList(?std.Thread),
+    // Compilation is handled via the global ThreadPool - we submit work items for compile + delivery
 
     // Hot reload callbacks
     shader_reloaded_callbacks: std.ArrayList(ShaderReloadCallback),
 
     // Threading and lifecycle
     watcher_thread: ?std.Thread,
-    compiler_threads: std.ArrayList(std.Thread),
     should_stop: std.atomic.Value(bool),
 
     const Self = @This();
@@ -38,18 +42,15 @@ pub const ShaderWatcher = struct {
             .asset_manager = asset_manager,
             .watch_directories = undefined,
             .watched_shaders = std.HashMap([]const u8, ShaderFileInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .compilation_queue = undefined,
-            .compilation_mutex = std.Thread.Mutex{},
+            .compilation_queue = std.ArrayList(CompilationJob){},
+            .compiler_threads = std.ArrayList(?std.Thread){},
             .shader_reloaded_callbacks = undefined,
             .watcher_thread = null,
-            .compiler_threads = undefined,
             .should_stop = std.atomic.Value(bool).init(false),
         };
 
         watcher.watch_directories = std.ArrayList([]const u8){};
-        watcher.compilation_queue = std.ArrayList(CompilationJob){};
         watcher.shader_reloaded_callbacks = std.ArrayList(ShaderReloadCallback){};
-        watcher.compiler_threads = std.ArrayList(std.Thread){};
 
         return watcher;
     }
@@ -60,8 +61,8 @@ pub const ShaderWatcher = struct {
         self.shader_compiler.deinit();
         self.watch_directories.deinit(self.allocator);
         self.watched_shaders.deinit();
-        self.compilation_queue.deinit(self.allocator);
         self.shader_reloaded_callbacks.deinit(self.allocator);
+        self.compilation_queue.deinit(self.allocator);
         self.compiler_threads.deinit(self.allocator);
     }
 
@@ -71,12 +72,7 @@ pub const ShaderWatcher = struct {
         // Start file watcher thread
         self.watcher_thread = try std.Thread.spawn(.{}, watcherThreadFn, .{self});
 
-        // Start compiler worker threads (4 threads for parallel compilation)
-        const num_compiler_threads = @min(4, std.Thread.getCpuCount() catch 4);
-        for (0..num_compiler_threads) |i| {
-            const thread = try std.Thread.spawn(.{}, compilerThreadFn, .{ self, i });
-            try self.compiler_threads.append(self.allocator, thread);
-        }
+        // Compilation handled by ThreadPool - submit compile work items from watcher
     }
 
     pub fn stop(self: *Self) void {
@@ -88,11 +84,7 @@ pub const ShaderWatcher = struct {
             self.watcher_thread = null;
         }
 
-        // Wait for all compiler threads
-        for (self.compiler_threads.items) |thread| {
-            thread.join();
-        }
-        self.compiler_threads.clearRetainingCapacity();
+        // No internal compiler threads to join (ThreadPool handles compilation workers)
     }
 
     pub fn addWatchDirectory(self: *Self, directory: []const u8) !void {
@@ -147,6 +139,31 @@ pub const ShaderWatcher = struct {
                 std.log.err("Error checking for file changes: {}", .{err});
             };
 
+            // Drain compilation queue and submit compile work to the ThreadPool
+            self.compilation_mutex.lock();
+            while (self.compilation_queue.items.len > 0) {
+                const job = self.compilation_queue.orderedRemove(0);
+                // Build a WorkItem for hot_reload compilation
+                const work_item = TP.WorkItem{
+                    .id = 0,
+                    .item_type = TP.WorkItemType.hot_reload,
+                    .priority = TP.WorkPriority.high,
+                    .data = .{ .hot_reload = .{ .file_path = job.file_path, .asset_id = AssetId.fromU64(0) } },
+                    .worker_fn = compileWorker,
+                    .context = @as(*anyopaque, self),
+                };
+
+                // Submit compile job to the thread pool
+                self.compilation_mutex.unlock();
+                self.thread_pool.submitWork(work_item) catch |err| {
+                    std.log.err("Failed to submit shader compile job for {s}: {}", .{ job.file_path, err });
+                    // mark compilation as not in progress so watcher can retry
+                    if (self.watched_shaders.getPtr(job.file_path)) |fi| fi.compilation_in_progress = false;
+                };
+                self.compilation_mutex.lock();
+            }
+            self.compilation_mutex.unlock();
+
             // Check every 100ms for file changes
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
@@ -195,68 +212,78 @@ pub const ShaderWatcher = struct {
         }
     }
 
-    fn compilerThreadFn(self: *Self, thread_id: usize) void {
-        while (!self.should_stop.load(.monotonic)) {
-            const job = blk: {
-                self.compilation_mutex.lock();
-                defer self.compilation_mutex.unlock();
+    // Removed internal compiler thread function; compilation is submitted to ThreadPool
 
-                if (self.compilation_queue.items.len > 0) {
-                    break :blk self.compilation_queue.orderedRemove(0);
-                } else {
-                    break :blk null;
-                }
-            };
-
-            if (job) |compilation_job| {
-                self.processCompilationJob(compilation_job, thread_id) catch |err| {
-                    std.log.err("Compilation job failed in thread {}: {}", .{ thread_id, err });
-                };
-            } else {
-                // No jobs available, sleep briefly
-                std.Thread.sleep(10 * std.time.ns_per_ms);
-            }
-        }
-    }
-
-    fn processCompilationJob(self: *Self, job: CompilationJob, thread_id: usize) !void {
-        const start_time = std.time.microTimestamp();
-
-        // Compile shader with optimized settings for hot reload
+    // Worker run by ThreadPool to compile a shader. Runs on a pool thread.
+    pub fn compileWorker(context: *anyopaque, _work_item: TP.WorkItem) void {
+        const watcher: *ShaderWatcher = @ptrCast(@alignCast(context));
+        const file_path = _work_item.data.hot_reload.file_path;
         const options = CompilationOptions{
             .target = .vulkan,
-            .optimization_level = .none, // Fast compilation for hot reload
-            .debug_info = true, // Enable debug info for better error messages
+            .optimization_level = .none,
+            .debug_info = true,
             .vulkan_semantics = true,
         };
 
-        const compiled_shader = self.shader_compiler.compileFromFile(job.file_path, options) catch |err| {
-            std.log.err("❌ [Thread {}] Shader compilation failed for {s}: {}", .{ thread_id, job.file_path, err });
-
-            // Mark compilation as no longer in progress
-            if (self.watched_shaders.getPtr(job.file_path)) |file_info| {
-                file_info.compilation_in_progress = false;
-            }
-
-            return err;
+        var compiled = watcher.shader_compiler.compileFromFile(file_path, options) catch |err| {
+            std.log.err("[hot_reload] Shader compilation failed for {s}: {}", .{ file_path, err });
+            // clear flag
+            if (watcher.watched_shaders.getPtr(file_path)) |fi| fi.compilation_in_progress = false;
+            return;
         };
 
-        const end_time = std.time.microTimestamp();
-        const compile_time_ms = @as(f64, @floatFromInt(end_time - start_time)) / 1000.0;
-        _ = compile_time_ms; // Suppress unused variable warning
+        // Allocate delivery job (owned by the GPU worker job)
+        const delivery = watcher.allocator.create(DeliveryJob) catch |err| {
+            // If allocation fails, clean up compiled shader and clear flag
+            compiled.deinit(watcher.allocator);
+            if (watcher.watched_shaders.getPtr(file_path)) |fi| fi.compilation_in_progress = false;
+            std.log.err("Failed to allocate delivery job: {}", .{err});
+            return;
+        };
+        delivery.* = DeliveryJob{ .file_path = file_path, .compiled_shader = compiled };
 
-        // TODO: Update asset manager with new shader when asset integration is complete
-        // try self.asset_manager.updateAsset(job.file_path, compiled_shader.asset_data);
+        // Submit GPU/worker job to perform pipeline rebuild (may use thread-local command pool)
+        const gpu_work_item = TP.createGPUWork(
+            0,
+            TP.GPUWork.texture,
+            AssetId.fromU64(0),
+            @as(*anyopaque, delivery),
+            TP.WorkPriority.high,
+            rebuildWorker,
+            @as(*anyopaque, watcher),
+        );
 
-        // Notify all callbacks about the reload
-        for (self.shader_reloaded_callbacks.items) |callback| {
-            callback.onShaderReloaded(job.file_path, compiled_shader);
+        watcher.thread_pool.submitWork(gpu_work_item) catch |err| {
+            // On submit failure, cleanup
+            delivery.compiled_shader.deinit(watcher.allocator);
+            watcher.allocator.destroy(delivery);
+            if (watcher.watched_shaders.getPtr(file_path)) |fi| fi.compilation_in_progress = false;
+            std.log.err("Failed to submit rebuild work: {}", .{err});
+            return;
+        };
+
+        // optional timing omitted
+    }
+
+    // Delivery job structure (heap allocated) to transfer ownership into ThreadPool worker
+    const DeliveryJob = struct {
+        file_path: []const u8,
+        compiled_shader: CompiledShader,
+    };
+
+    // Worker run by ThreadPool (GPU worker) to call pipeline rebuild callbacks and perform GPU work
+    pub fn rebuildWorker(context: *anyopaque, work_item: TP.WorkItem) void {
+        const watcher: *ShaderWatcher = @ptrCast(@alignCast(context));
+        const delivery: *DeliveryJob = @ptrCast(@alignCast(work_item.data.gpu_work.data));
+
+        for (watcher.shader_reloaded_callbacks.items) |callback| {
+            callback.onShaderReloaded(callback.context, delivery.file_path, delivery.compiled_shader);
         }
 
-        // Mark compilation as complete
-        if (self.watched_shaders.getPtr(job.file_path)) |file_info| {
-            file_info.compilation_in_progress = false;
-        }
+        // Clean up and clear compilation flag
+        delivery.compiled_shader.deinit(watcher.allocator);
+        watcher.allocator.destroy(delivery);
+        if (watcher.watched_shaders.getPtr(delivery.file_path)) |fi| fi.compilation_in_progress = false;
     }
 
     fn isShaderFile(filename: []const u8) bool {
@@ -294,7 +321,7 @@ pub const CompilationJob = struct {
 
 pub const ShaderReloadCallback = struct {
     context: ?*anyopaque = null,
-    onShaderReloaded: *const fn (file_path: []const u8, compiled_shader: CompiledShader) void,
+    onShaderReloaded: *const fn (context: ?*anyopaque, file_path: []const u8, compiled_shader: CompiledShader) void,
 };
 
 // Performance metrics

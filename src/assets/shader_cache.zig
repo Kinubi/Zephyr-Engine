@@ -163,6 +163,21 @@ pub const ShaderCache = struct {
         self.cache_metadata.clearAndFree();
     }
 
+    /// Remove a single cache entry (invalidate cached SPIR-V for a given key)
+    pub fn removeCacheEntry(self: *Self, key: []const u8) !void {
+        if (self.cache_metadata.fetchRemove(key)) |entry| {
+            // Try to delete cached file
+            std.fs.cwd().deleteFile(entry.value.cached_spirv_path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => std.log.warn("Failed to delete cached file {s}: {}", .{ entry.value.cached_spirv_path, err }),
+            };
+
+            // Free memory used by stored strings
+            self.allocator.free(entry.key);
+            self.allocator.free(entry.value.cached_spirv_path);
+        }
+    }
+
     pub fn getCacheStats(self: *Self) CacheStats {
         return CacheStats{
             .total_cached_shaders = @intCast(self.cache_metadata.count()),
@@ -376,7 +391,7 @@ pub const ShaderCache = struct {
             if (!first) try buffer.appendSlice(self.allocator, ",\n");
             first = false;
 
-            const entry_json = try std.fmt.allocPrint(self.allocator, "    \"{s}\": {{\n      \"cached_spirv_path\": \"{s}\",\n      \"file_hash\": \"{}\",\n      \"options_hash\": \"{}\",\n      \"compile_time\": {}\n    }}", .{ entry.key_ptr.*, entry.value_ptr.cached_spirv_path, entry.value_ptr.file_hash, entry.value_ptr.options_hash, entry.value_ptr.compile_time });
+            const entry_json = try std.fmt.allocPrint(self.allocator, "    \"{s}\": {{\n      \"cached_spirv_path\": \"{s}\",\n      \"file_hash\": \"{d}\",\n      \"options_hash\": \"{d}\",\n      \"compile_time\": {d}\n    }}", .{ entry.key_ptr.*, entry.value_ptr.cached_spirv_path, entry.value_ptr.file_hash, entry.value_ptr.options_hash, entry.value_ptr.compile_time });
             defer self.allocator.free(entry_json);
             try buffer.appendSlice(self.allocator, entry_json);
         }
