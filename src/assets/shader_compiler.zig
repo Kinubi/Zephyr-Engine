@@ -370,6 +370,15 @@ pub const ShaderCompiler = struct {
         return result;
     }
 
+    /// Public helper: generate reflection directly from SPIR-V bytes.
+    pub fn generateReflectionFromSpirv(self: *Self, spirv_bytes: []const u8) !ShaderReflection {
+        const spirv_words = try self.parseSpirv(spirv_bytes);
+        const reflection = try self.generateReflection(spirv_words);
+        // Free the parsed words allocated by parseSpirv
+        self.allocator.free(spirv_words);
+        return reflection;
+    }
+
     fn compileGlslEmbedded(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         // Use the embedded libshaderc compiler
         var compiler = glsl_compiler.Compiler.init(self.allocator) catch |err| {
@@ -480,6 +489,8 @@ pub const ShaderCompiler = struct {
         const root = parser.value;
         if (root != .object) return ShaderReflection.init();
 
+        // resources parsing handled below
+
         var refl = ShaderReflection.init();
 
         // Populate arrays (they were zero-initialized in init)
@@ -583,6 +594,44 @@ pub const ShaderCompiler = struct {
                                 const set_opt = elem.object.get("set");
                                 const binding_opt = elem.object.get("binding");
                                 const size_opt = elem.object.get("size");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const name = name_v.string;
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+                                                var size: u32 = 0;
+                                                if (size_opt) |s_v| {
+                                                    if (s_v == .integer) {
+                                                        size = @as(u32, @intCast(s_v.integer));
+                                                    }
+                                                }
+                                                const name_copy = try self.allocator.dupe(u8, name);
+                                                var members = std.ArrayList(ShaderBufferMember){};
+                                                _ = &members;
+                                                try refl.storage_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 'ssbos' is emitted by some SPIRV-Cross variants for storage buffers (SSBOs)
+                if (res_obj.get("ssbos")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const size_opt = elem.object.get("size");
+                                if (name_opt) |nv| std.log.debug("  name present: {s}", .{nv.string});
+                                if (set_opt) |sv| std.log.debug("  set present: {}", .{sv.integer});
+                                if (binding_opt) |bv| std.log.debug("  binding present: {}", .{bv.integer});
                                 if (name_opt) |name_v| {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
@@ -876,6 +925,37 @@ pub const ShaderCompiler = struct {
                                     }
                                 }
                                 if (pc_size != 0) refl.push_constants = ShaderPushConstants{ .size = pc_size, .offset = 0, .stage_flags = 0 };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ssbos (top-level storage buffer blocks) - some SPIRV-Cross variants emit 'ssbos'
+        if (root.object.get("ssbos")) |ssbos_val| {
+            if (ssbos_val == .array) {
+                for (ssbos_val.array.items) |elem| {
+                    if (elem == .object) {
+                        if (elem.object.get("name")) |name_v| {
+                            if (elem.object.get("set")) |set_v| {
+                                if (elem.object.get("binding")) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const name = name_v.string;
+                                        const set = @as(u32, @intCast(set_v.integer));
+                                        const binding = @as(u32, @intCast(bind_v.integer));
+                                        var size: u32 = 0;
+                                        if (elem.object.get("block_size")) |s_v| {
+                                            if (s_v == .integer) {
+                                                size = @as(u32, @intCast(s_v.integer));
+                                            }
+                                        }
+                                        const name_copy = try self.allocator.dupe(u8, name);
+                                        var members = std.ArrayList(ShaderBufferMember){};
+                                        _ = &members;
+                                        try refl.storage_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                    }
+                                }
                             }
                         }
                     }

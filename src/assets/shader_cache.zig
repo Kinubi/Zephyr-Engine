@@ -58,8 +58,8 @@ pub const ShaderCache = struct {
         // Check if we have a valid cached version
         if (self.cache_metadata.get(source_path)) |entry| {
             if (entry.file_hash == file_hash and entry.options_hash == self.calculateOptionsHash(options)) {
-                // Cache hit - load existing SPIR-V
-                return try self.loadCachedSpirv(entry.cached_spirv_path, entry.file_hash);
+                // Cache hit - load existing SPIR-V (include reflection)
+                return try self.loadCachedSpirv(compiler, entry.cached_spirv_path, entry.file_hash);
             } else {
                 // Cache invalidated - clean up old entry
 
@@ -114,7 +114,7 @@ pub const ShaderCache = struct {
         if (self.cache_metadata.get(source_identifier)) |entry| {
             if (entry.file_hash == source_hash and entry.options_hash == self.calculateOptionsHash(options)) {
                 // Cache hit - load existing SPIR-V
-                return try self.loadCachedSpirv(entry.cached_spirv_path, source_hash);
+                return try self.loadCachedSpirv(compiler, entry.cached_spirv_path, source_hash);
             }
         }
 
@@ -251,17 +251,23 @@ pub const ShaderCache = struct {
         try std.fs.cwd().writeFile(.{ .sub_path = cache_path, .data = spirv_data });
     }
 
-    fn loadCachedSpirv(self: *Self, cache_path: []const u8, expected_hash: u64) !ShaderCompiler.CompiledShader {
+    fn loadCachedSpirv(self: *Self, compiler: *ShaderCompiler.ShaderCompiler, cache_path: []const u8, expected_hash: u64) !ShaderCompiler.CompiledShader {
         const spirv_data = std.fs.cwd().readFileAlloc(self.allocator, cache_path, 16 * 1024 * 1024) catch |err| {
             std.log.warn("Failed to load cached SPIR-V from {s}: {}", .{ cache_path, err });
             return err;
         };
+        // Use the compiler to parse words and generate reflection
+        const spirv_bytes = spirv_data; // already read using self.allocator
 
-        // For now, create a basic CompiledShader structure
-        // TODO: Also cache reflection data
+        // parseSpirv expects a byte slice; it returns allocated u32 words owned by compiler. Use that to generate reflection.
+        const reflection = try compiler.generateReflectionFromSpirv(spirv_bytes);
+
+        // Duplicate the raw SPIR-V bytes into the cache allocator so ownership is consistent
+        const spirv_owned = try self.allocator.dupe(u8, spirv_bytes);
+
         return ShaderCompiler.CompiledShader{
-            .spirv_code = spirv_data,
-            .reflection = ShaderCompiler.ShaderReflection.init(),
+            .spirv_code = spirv_owned,
+            .reflection = reflection,
             .source_hash = expected_hash,
         };
     }
