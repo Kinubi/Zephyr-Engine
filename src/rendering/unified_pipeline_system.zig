@@ -52,9 +52,47 @@ pub const UnifiedPipelineSystem = struct {
     // Deferred destruction for hot reload safety
     deferred_destroys: std.ArrayList(DeferredPipeline),
 
+    // Vulkan pipeline cache for faster pipeline creation
+    vulkan_pipeline_cache: vk.PipelineCache,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, shader_manager: *ShaderManager) !Self {
+        // Try to load existing pipeline cache
+        var cache_data: ?[]u8 = null;
+        errdefer if (cache_data) |data| allocator.free(data);
+
+        const cache_path = "cache/unified_pipeline_cache.bin";
+
+        // Attempt to load cache from disk
+        if (std.fs.cwd().openFile(cache_path, .{})) |file| {
+            defer file.close();
+            cache_data = blk: {
+                const result = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch |err| {
+                    log(.WARN, "unified_pipeline", "Failed to read cache file: {}", .{err});
+                    break :blk null;
+                };
+                break :blk result;
+            };
+
+            if (cache_data) |data| {
+                log(.INFO, "unified_pipeline", "✅ Loaded pipeline cache from disk ({} bytes)", .{data.len});
+            }
+        } else |_| {
+            log(.INFO, "unified_pipeline", "No existing pipeline cache found, creating new cache", .{});
+        }
+
+        // Create Vulkan pipeline cache
+        const cache_create_info = vk.PipelineCacheCreateInfo{
+            .initial_data_size = if (cache_data) |data| data.len else 0,
+            .p_initial_data = if (cache_data) |data| data.ptr else null,
+        };
+
+        const vulkan_cache = try graphics_context.vkd.createPipelineCache(graphics_context.dev, &cache_create_info, null);
+
+        // Free cache_data after creating Vulkan cache
+        if (cache_data) |data| allocator.free(data);
+
         const self = Self{
             .allocator = allocator,
             .graphics_context = graphics_context,
@@ -64,24 +102,21 @@ pub const UnifiedPipelineSystem = struct {
             .bound_resources = std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .shader_to_pipelines = std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .deferred_destroys = .{},
+            .vulkan_pipeline_cache = vulkan_cache,
         };
 
         return self;
     }
 
-    /// Register this pipeline system to receive shader compilation notifications
-    /// Call this after the system is fully initialized and has a stable address
-    pub fn registerForShaderUpdates(self: *Self) void {
-        // Note: We don't register a delivery worker here because the shader_manager
-        // already has its own delivery worker (shaderDeliveryWorker) that calls
-        // onShaderReloaded. Instead, we rely on the shader_to_pipelines mapping
-        // to track which pipelines need rebuilding when shaders are delivered.
-        // The pipeline rebuilds are triggered by scheduleRebuildByName which is
-        // called from the shader manager's delivery path.
-        _ = self;
-    }
-
     pub fn deinit(self: *Self) void {
+        // Save pipeline cache to disk before cleaning up
+        self.savePipelineCacheToDisk() catch |err| {
+            log(.WARN, "unified_pipeline", "Failed to save pipeline cache: {any}", .{err});
+        };
+
+        // Destroy Vulkan pipeline cache
+        self.graphics_context.vkd.destroyPipelineCache(self.graphics_context.dev, self.vulkan_pipeline_cache, null);
+
         // Clean up pipelines
         var pipeline_iter = self.pipelines.valueIterator();
         while (pipeline_iter.next()) |pipeline| {
@@ -202,6 +237,7 @@ pub const UnifiedPipelineSystem = struct {
         // Build the actual Vulkan pipeline
         var builder = PipelineBuilder.init(self.allocator, self.graphics_context);
         defer builder.deinit();
+        _ = builder.setPipelineCache(self.vulkan_pipeline_cache);
 
         var vulkan_pipeline: vk.Pipeline = undefined;
 
@@ -1000,10 +1036,109 @@ pub const UnifiedPipelineSystem = struct {
     }
 
     fn calculatePipelineHash(self: *Self, config: PipelineConfig) u64 {
-        // TODO: Calculate a hash from the pipeline configuration
         _ = self;
-        _ = config;
-        return 0;
+        var hasher = std.hash.Wyhash.init(0);
+
+        // Hash pipeline name
+        hasher.update(config.name);
+
+        // Hash shader paths
+        if (config.vertex_shader) |vs| hasher.update(vs);
+        if (config.fragment_shader) |fs| hasher.update(fs);
+        if (config.geometry_shader) |gs| hasher.update(gs);
+        if (config.compute_shader) |cs| hasher.update(cs);
+
+        // Hash entry points
+        if (config.vertex_entry_point) |ep| hasher.update(ep);
+        if (config.fragment_entry_point) |ep| hasher.update(ep);
+        if (config.geometry_entry_point) |ep| hasher.update(ep);
+        if (config.compute_entry_point) |ep| hasher.update(ep);
+
+        // Hash vertex input configuration
+        if (config.vertex_input_bindings) |bindings| {
+            for (bindings) |binding| {
+                hasher.update(std.mem.asBytes(&binding));
+            }
+        }
+        if (config.vertex_input_attributes) |attributes| {
+            for (attributes) |attribute| {
+                hasher.update(std.mem.asBytes(&attribute));
+            }
+        }
+
+        // Hash topology
+        hasher.update(std.mem.asBytes(&config.topology));
+
+        // Hash render state
+        hasher.update(std.mem.asBytes(&config.polygon_mode));
+        hasher.update(std.mem.asBytes(&config.cull_mode));
+        hasher.update(std.mem.asBytes(&config.front_face));
+
+        // Hash multisample state if present
+        if (config.multisample_state) |ms| {
+            hasher.update(std.mem.asBytes(&ms));
+        }
+
+        // Hash push constant ranges
+        if (config.push_constant_ranges) |ranges| {
+            for (ranges) |range| {
+                hasher.update(std.mem.asBytes(&range));
+            }
+        }
+
+        // Hash render pass (use handle as identifier)
+        hasher.update(std.mem.asBytes(&config.render_pass));
+        hasher.update(std.mem.asBytes(&config.subpass));
+
+        // Hash shader options
+        hasher.update(std.mem.asBytes(&config.shader_options.target));
+        hasher.update(std.mem.asBytes(&config.shader_options.optimization_level));
+        hasher.update(std.mem.asBytes(&config.shader_options.debug_info));
+        hasher.update(std.mem.asBytes(&config.shader_options.vulkan_semantics));
+
+        return hasher.final();
+    }
+
+    /// Save the Vulkan pipeline cache to disk
+    fn savePipelineCacheToDisk(self: *Self) !void {
+        const cache_path = "cache/unified_pipeline_cache.bin";
+
+        // Get cache data size
+        var cache_size: usize = 0;
+        _ = try self.graphics_context.vkd.getPipelineCacheData(
+            self.graphics_context.dev,
+            self.vulkan_pipeline_cache,
+            &cache_size,
+            null,
+        );
+
+        if (cache_size == 0) {
+            log(.INFO, "unified_pipeline", "Pipeline cache is empty, skipping save", .{});
+            return;
+        }
+
+        // Allocate buffer and get cache data
+        const cache_data = try self.allocator.alloc(u8, cache_size);
+        defer self.allocator.free(cache_data);
+
+        _ = try self.graphics_context.vkd.getPipelineCacheData(
+            self.graphics_context.dev,
+            self.vulkan_pipeline_cache,
+            &cache_size,
+            cache_data.ptr,
+        );
+
+        // Ensure cache directory exists
+        std.fs.cwd().makeDir("cache") catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
+
+        // Write to file
+        const file = try std.fs.cwd().createFile(cache_path, .{});
+        defer file.close();
+        try file.writeAll(cache_data);
+
+        log(.INFO, "unified_pipeline", "Saved pipeline cache ({d} bytes) to {s}", .{ cache_size, cache_path });
     }
 };
 

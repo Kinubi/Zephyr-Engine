@@ -287,6 +287,9 @@ pub const PipelineBuilder = struct {
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
 
+    // Optional pipeline cache for faster pipeline creation
+    pipeline_cache: vk.PipelineCache = .null_handle,
+
     // Pipeline type
     pipeline_type: PipelineType = .graphics,
 
@@ -352,6 +355,12 @@ pub const PipelineBuilder = struct {
         self.dynamic_states.deinit(self.allocator);
         self.miss_shaders.deinit(self.allocator);
         self.hit_shaders.deinit(self.allocator);
+    }
+
+    /// Set the pipeline cache to use for pipeline creation
+    pub fn setPipelineCache(self: *Self, cache: vk.PipelineCache) *Self {
+        self.pipeline_cache = cache;
+        return self;
     }
 
     // Pipeline type configuration
@@ -715,7 +724,7 @@ pub const PipelineBuilder = struct {
         };
 
         var pipeline: vk.Pipeline = undefined;
-        _ = try self.graphics_context.vkd.createGraphicsPipelines(self.graphics_context.dev, .null_handle, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
+        _ = try self.graphics_context.vkd.createGraphicsPipelines(self.graphics_context.dev, self.pipeline_cache, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
 
         return pipeline;
     }
@@ -736,9 +745,23 @@ pub const PipelineBuilder = struct {
         };
 
         var pipeline: vk.Pipeline = undefined;
-        _ = try self.graphics_context.vkd.createComputePipelines(self.graphics_context.dev, .null_handle, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
+        _ = try self.graphics_context.vkd.createComputePipelines(self.graphics_context.dev, self.pipeline_cache, 1, @ptrCast(&create_info), null, @ptrCast(&pipeline));
 
         return pipeline;
+    }
+
+    /// Build a raytracing pipeline
+    /// NOTE: This is a placeholder - full raytracing pipeline implementation requires:
+    /// - Shader binding table setup
+    /// - Ray generation, miss, and hit shader groups
+    /// - Proper raytracing pipeline creation info
+    pub fn buildRaytracingPipeline(self: *Self, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
+        _ = self;
+        _ = pipeline_layout;
+        
+        // TODO: Implement full raytracing pipeline creation
+        // For now, return an error indicating this needs implementation
+        return error.RaytracingPipelineNotImplemented;
     }
 };
 

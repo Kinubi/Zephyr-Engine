@@ -4,11 +4,6 @@ const TP = @import("../threading/thread_pool.zig");
 const ThreadPool = TP.ThreadPool;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 
-// TODO: Migrate asset and shader management to use this file watcher for hot reloading
-//       Current implementation is basic and polling-based, but works cross-platform
-//       Future enhancements could include platform-specific backends for efficiency
-//       I don't want callbacks, everything gets handled via the threadpool queue
-
 /// Cross-platform file system watcher for hot reloading
 pub const FileWatcher = struct {
     allocator: std.mem.Allocator,

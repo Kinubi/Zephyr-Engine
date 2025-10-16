@@ -529,7 +529,6 @@ pub const AssetManager = struct {
             switch (asset.asset_type) {
                 .texture => return self.asset_to_texture.contains(asset_id),
                 .mesh => return self.asset_to_model.contains(asset_id),
-                // TODO: Add other asset types as needed
                 else => return false, // Unknown types not yet supported
             }
         }

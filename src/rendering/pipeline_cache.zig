@@ -55,10 +55,38 @@ pub const PipelineCache = struct {
     cache_misses: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) !Self {
-        // Create Vulkan pipeline cache
+        return try initWithCache(allocator, graphics_context, "cache/pipeline_cache.bin");
+    }
+
+    /// Initialize pipeline cache and optionally load from disk
+    pub fn initWithCache(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, cache_path: []const u8) !Self {
+        // Try to load existing cache data
+        var cache_data: ?[]u8 = null;
+        defer if (cache_data) |data| allocator.free(data);
+
+        // Attempt to load cache from disk
+        if (std.fs.cwd().openFile(cache_path, .{})) |file| {
+            defer file.close();
+            cache_data = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch |err| blk: { // 100MB max
+                log(.WARN, "pipeline_cache", "Failed to read cache file: {}", .{err});
+                break :blk null;
+            };
+            
+            if (cache_data) |data| {
+                log(.INFO, "pipeline_cache", "✅ Loaded pipeline cache from disk ({} bytes)", .{data.len});
+            }
+        } else |err| {
+            if (err != error.FileNotFound) {
+                log(.WARN, "pipeline_cache", "Failed to open cache file: {}", .{err});
+            } else {
+                log(.INFO, "pipeline_cache", "No existing pipeline cache found, creating new cache", .{});
+            }
+        }
+
+        // Create Vulkan pipeline cache with loaded data
         const cache_create_info = vk.PipelineCacheCreateInfo{
-            .initial_data_size = 0,
-            .p_initial_data = null,
+            .initial_data_size = if (cache_data) |data| data.len else 0,
+            .p_initial_data = if (cache_data) |data| data.ptr else null,
         };
 
         const vulkan_cache = try graphics_context.vkd.createPipelineCache(graphics_context.dev, &cache_create_info, null);
@@ -72,6 +100,11 @@ pub const PipelineCache = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Save cache to disk before cleanup
+        self.saveToDisk("cache/pipeline_cache.bin") catch |err| {
+            log(.WARN, "pipeline_cache", "Failed to save pipeline cache: {}", .{err});
+        };
+
         // Destroy all cached pipelines
         var iterator = self.cache.iterator();
         while (iterator.next()) |entry| {
@@ -95,11 +128,16 @@ pub const PipelineCache = struct {
             self.cache_hits += 1;
             entry.usage_count += 1;
             entry.last_used_frame = self.current_frame;
+            
+            log(.DEBUG, "pipeline_cache", "✅ Cache HIT for pipeline hash: 0x{X} (usage: {})", .{ config_hash, entry.usage_count });
+            
             return entry.*;
         }
 
         // Cache miss - build new pipeline
         self.cache_misses += 1;
+        
+        log(.INFO, "pipeline_cache", "⚙️  Cache MISS - building new pipeline (hash: 0x{X})", .{config_hash});
 
         // Build descriptor set layout
         const descriptor_set_layout = if (builder.descriptor_bindings.items.len > 0)
@@ -115,7 +153,7 @@ pub const PipelineCache = struct {
         const pipeline = switch (builder.pipeline_type) {
             .graphics => try builder.buildGraphicsPipeline(pipeline_layout),
             .compute => try builder.buildComputePipeline(pipeline_layout),
-            .raytracing => return error.RaytracingNotImplemented, // TODO: Implement raytracing pipeline creation
+            .raytracing => try builder.buildRaytracingPipeline(pipeline_layout),
         };
 
         // Cache the pipeline
@@ -129,6 +167,12 @@ pub const PipelineCache = struct {
         };
 
         try self.cache.put(config_hash, entry);
+        
+        log(.INFO, "pipeline_cache", "✅ Pipeline cached (hash: 0x{X}, type: {s})", .{ 
+            config_hash, 
+            @tagName(builder.pipeline_type) 
+        });
+        
         return entry;
     }
 
@@ -219,6 +263,15 @@ pub const PipelineCache = struct {
 
     /// Save cache data to disk for faster startup
     pub fn saveToDisk(self: *Self, path: []const u8) !void {
+        // Ensure cache directory exists
+        const cache_dir = std.fs.path.dirname(path) orelse ".";
+        std.fs.cwd().makePath(cache_dir) catch |err| {
+            if (err != error.PathAlreadyExists) {
+                log(.ERROR, "pipeline_cache", "Failed to create cache directory: {}", .{err});
+                return err;
+            }
+        };
+
         var cache_size: usize = undefined;
         _ = try self.graphics_context.vkd.getPipelineCacheData(self.graphics_context.dev, self.vulkan_cache, &cache_size, null);
 
@@ -232,14 +285,24 @@ pub const PipelineCache = struct {
             defer file.close();
 
             try file.writeAll(cache_data);
+            
+            log(.INFO, "pipeline_cache", "💾 Saved pipeline cache to disk: {} bytes at {s}", .{ cache_size, path });
+        } else {
+            log(.DEBUG, "pipeline_cache", "No cache data to save", .{});
         }
     }
 
     /// Load cache data from disk
     pub fn loadFromDisk(self: *Self, path: []const u8) !void {
         const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return, // No cache file exists yet
-            else => return err,
+            error.FileNotFound => {
+                log(.INFO, "pipeline_cache", "No cache file found at {s}", .{path});
+                return; // No cache file exists yet
+            },
+            else => {
+                log(.WARN, "pipeline_cache", "Failed to open cache file: {}", .{err});
+                return err;
+            },
         };
         defer file.close();
 
@@ -255,6 +318,8 @@ pub const PipelineCache = struct {
         };
 
         self.vulkan_cache = try self.graphics_context.vkd.createPipelineCache(self.graphics_context.dev, &cache_create_info, null);
+        
+        log(.INFO, "pipeline_cache", "📂 Loaded pipeline cache from disk: {} bytes", .{cache_data.len});
     }
 
     /// Get cache statistics

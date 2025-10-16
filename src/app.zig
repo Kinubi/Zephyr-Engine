@@ -425,37 +425,6 @@ pub const App = struct {
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
 
-        // Keep old particle renderer for compatibility (TODO: remove when fully migrated)
-        var particle_render_shader_library = ShaderLibrary.init(self.gc, self.allocator);
-        // Read particle SPV files at runtime instead of @embedFile
-        const prvert = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.vert.spv", 10 * 1024 * 1024);
-        const prfrag = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.frag.spv", 10 * 1024 * 1024);
-
-        try particle_render_shader_library.add(
-            &.{ prvert, prfrag },
-            &.{
-                vk.ShaderStageFlags{ .vertex_bit = true },
-                vk.ShaderStageFlags{ .fragment_bit = true },
-            },
-            &.{
-                entry_point_definition{},
-                entry_point_definition{},
-            },
-        );
-
-        var particle_comp_shader_library = ShaderLibrary.init(self.gc, self.allocator);
-        const prcomp = try std.fs.cwd().readFileAlloc(self.allocator, "shaders/cached/particles.comp.spv", 10 * 1024 * 1024);
-
-        try particle_comp_shader_library.add(
-            &.{prcomp},
-            &.{
-                vk.ShaderStageFlags{ .compute_bit = true },
-            },
-            &.{
-                entry_point_definition{},
-            },
-        );
-
         // // Create UBO infos for old particle renderer
         // var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
         // defer self.allocator.free(ubo_infos);
@@ -647,15 +616,6 @@ pub const App = struct {
             frame_info.dt,
             .{ .x = 0.0, .y = 0.0, .z = 0.0 }, // Default emitter position at center
         );
-
-        // // Keep old particle renderer for compatibility (TODO: remove)
-        // particle_renderer.dispatch();
-        // compute_shader_system.dispatch(
-        //     &particle_renderer.compute_pipeline,
-        //     &struct { descriptor_set: vk.DescriptorSet }{ .descriptor_set = particle_renderer.descriptor_set },
-        //     frame_info,
-        //     .{ @intCast(particle_renderer.num_particles / 256), 1, 1 },
-        // );
 
         compute_shader_system.endCompute(frame_info);
 
