@@ -791,25 +791,25 @@ pub const ShaderCompiler = struct {
                                                                                 if (memb.object.get("name")) |mn| {
                                                                                     if (mn == .string) {
                                                                                         const m_name = mn.string;
-                                                                                          var m_size: u32 = 0;
-                                                                                          if (memb.object.get("offset")) |mo| {
-                                                                                              if (mo == .integer) {
-                                                                                                  const m_offset = @as(u32, @intCast(mo.integer));
-                                                                                                  // size may be set below; use a temp const for offset
-                                                                                                  if (memb.object.get("size")) |ms| {
-                                                                                                      if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
-                                                                                                  }
-                                                                                                  const m_name_copy = try self.allocator.dupe(u8, m_name);
-                                                                                                  try members.append(self.allocator, ShaderBufferMember{ .name = m_name_copy, .offset = m_offset, .size = m_size, .type = ShaderDataType.struct_type });
-                                                                                                  continue;
-                                                                                              }
-                                                                                          }
-                                                                                          if (memb.object.get("size")) |ms| {
-                                                                                              if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
-                                                                                          }
-                                                                                                                    // Fallback append (offset may be 0 if not found above)
-                                                                                                                    const m_name_copy = try self.allocator.dupe(u8, m_name);
-                                                                                                                    try members.append(self.allocator, ShaderBufferMember{ .name = m_name_copy, .offset = 0, .size = m_size, .type = ShaderDataType.struct_type });
+                                                                                        var m_size: u32 = 0;
+                                                                                        if (memb.object.get("offset")) |mo| {
+                                                                                            if (mo == .integer) {
+                                                                                                const m_offset = @as(u32, @intCast(mo.integer));
+                                                                                                // size may be set below; use a temp const for offset
+                                                                                                if (memb.object.get("size")) |ms| {
+                                                                                                    if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
+                                                                                                }
+                                                                                                const m_name_copy = try self.allocator.dupe(u8, m_name);
+                                                                                                try members.append(self.allocator, ShaderBufferMember{ .name = m_name_copy, .offset = m_offset, .size = m_size, .type = ShaderDataType.struct_type });
+                                                                                                continue;
+                                                                                            }
+                                                                                        }
+                                                                                        if (memb.object.get("size")) |ms| {
+                                                                                            if (ms == .integer) m_size = @as(u32, @intCast(ms.integer));
+                                                                                        }
+                                                                                        // Fallback append (offset may be 0 if not found above)
+                                                                                        const m_name_copy = try self.allocator.dupe(u8, m_name);
+                                                                                        try members.append(self.allocator, ShaderBufferMember{ .name = m_name_copy, .offset = 0, .size = m_size, .type = ShaderDataType.struct_type });
                                                                                     }
                                                                                 }
                                                                             }

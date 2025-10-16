@@ -6,12 +6,16 @@ const PipelineBuilder = @import("pipeline_builder.zig").PipelineBuilder;
 const RasterizationState = @import("pipeline_builder.zig").RasterizationState;
 const MultisampleState = @import("pipeline_builder.zig").MultisampleState;
 const Shader = @import("../core/shader.zig").Shader;
+const ShaderCompiler = @import("../assets/shader_compiler.zig");
 const DescriptorPool = @import("../core/descriptors.zig").DescriptorPool;
 const DescriptorSetLayout = @import("../core/descriptors.zig").DescriptorSetLayout;
 const DescriptorWriter = @import("../core/descriptors.zig").DescriptorWriter;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const log = @import("../utils/log.zig").log;
+const DescriptorUtils = @import("../utils/descriptor_utils.zig");
+
+// (merge logic inlined into loops below)
 
 // Global instance for hot reload callbacks (similar to shader_pipeline_integration.zig)
 var global_unified_pipeline_system: ?*UnifiedPipelineSystem = null;
@@ -633,45 +637,111 @@ pub const UnifiedPipelineSystem = struct {
     fn extractDescriptorLayout(
         self: *Self,
         layout_info: *DescriptorLayoutInfo,
-        reflection: anytype,
+        reflection: ShaderCompiler.ShaderReflection,
         stage_flags: vk.ShaderStageFlags,
     ) !void {
-        // TODO: Implement SPIR-V reflection to extract descriptor bindings
-        // For now, hardcode layouts for known shaders
-        _ = reflection;
+        // Build per-set lists by scanning existing layout_info and reflection
+        var max_set_idx: u32 = 0;
 
-        // Hardcoded layout for particle compute shader
-        if (stage_flags.compute_bit) {
-            // Set 0: Uniform buffer (binding 0), Storage buffer (binding 1), Storage buffer (binding 2)
-            const set0_bindings = [_]vk.DescriptorSetLayoutBinding{
-                vk.DescriptorSetLayoutBinding{
-                    .binding = 0,
-                    .descriptor_type = .uniform_buffer,
-                    .descriptor_count = 1,
-                    .stage_flags = .{ .compute_bit = true },
-                    .p_immutable_samplers = null,
-                },
-                vk.DescriptorSetLayoutBinding{
-                    .binding = 1,
-                    .descriptor_type = .storage_buffer,
-                    .descriptor_count = 1,
-                    .stage_flags = .{ .compute_bit = true },
-                    .p_immutable_samplers = null,
-                },
-                vk.DescriptorSetLayoutBinding{
-                    .binding = 2,
-                    .descriptor_type = .storage_buffer,
-                    .descriptor_count = 1,
-                    .stage_flags = .{ .compute_bit = true },
-                    .p_immutable_samplers = null,
-                },
-            };
-
-            try layout_info.sets.append(self.allocator, try self.allocator.dupe(vk.DescriptorSetLayoutBinding, &set0_bindings));
+        // Scan existing layout_info for max set
+        var idx: usize = 0;
+        while (idx < layout_info.sets.items.len) : (idx += 1) {
+            if (layout_info.sets.items[idx].len != 0) {
+                const s = @as(u32, @intCast(idx));
+                if (s > max_set_idx) max_set_idx = s;
+            }
         }
 
-        // This would analyze the shader reflection data and populate layout_info
-        // with the descriptor bindings found in the shader
+        // Scan reflection for max set
+        for (reflection.uniform_buffers.items) |ub| {
+            if (ub.set > max_set_idx) max_set_idx = ub.set;
+        }
+        for (reflection.storage_buffers.items) |sb| {
+            if (sb.set > max_set_idx) max_set_idx = sb.set;
+        }
+        for (reflection.textures.items) |t| {
+            if (t.set > max_set_idx) max_set_idx = t.set;
+        }
+        for (reflection.samplers.items) |s| {
+            if (s.set > max_set_idx) max_set_idx = s.set;
+        }
+
+        // Create per-set array of binding lists
+        var per_set_lists = std.ArrayList(std.ArrayList(vk.DescriptorSetLayoutBinding)){};
+        var s: usize = 0;
+        while (s <= @as(usize, max_set_idx)) : (s += 1) {
+            try per_set_lists.append(self.allocator, std.ArrayList(vk.DescriptorSetLayoutBinding){});
+        }
+
+        // Copy existing layout_info bindings into per_set_lists
+        idx = 0;
+        while (idx < layout_info.sets.items.len) : (idx += 1) {
+            const bindings = layout_info.sets.items[idx];
+            if (bindings.len == 0) continue;
+            var list = per_set_lists.items[idx];
+            for (bindings) |b| {
+                try list.append(self.allocator, b);
+            }
+            per_set_lists.items[idx] = list;
+        }
+
+        // Merge helper: use shared util to merge/append bindings
+
+        // Walk uniform buffers
+        for (reflection.uniform_buffers.items) |ub| {
+            const set_idx = ub.set;
+            var list = per_set_lists.items[@as(usize, set_idx)];
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, ub.binding, .uniform_buffer, stage_flags, 1);
+            per_set_lists.items[@as(usize, set_idx)] = list;
+        }
+
+        // Walk storage buffers
+        for (reflection.storage_buffers.items) |sb| {
+            const set_idx = sb.set;
+            var list = per_set_lists.items[@as(usize, set_idx)];
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, sb.binding, .storage_buffer, stage_flags, 1);
+            per_set_lists.items[@as(usize, set_idx)] = list;
+        }
+
+        // Walk textures (sampled images) -> combined_image_sampler by default
+        for (reflection.textures.items) |tex| {
+            const set_idx = tex.set;
+            var list = per_set_lists.items[@as(usize, set_idx)];
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, tex.binding, .combined_image_sampler, stage_flags, 1);
+            per_set_lists.items[@as(usize, set_idx)] = list;
+        }
+
+        // Walk separate samplers
+        for (reflection.samplers.items) |samp| {
+            const set_idx = samp.set;
+            var list = per_set_lists.items[@as(usize, set_idx)];
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, samp.binding, .sampler, stage_flags, 1);
+            per_set_lists.items[@as(usize, set_idx)] = list;
+        }
+
+        // Convert per_set_lists into layout_info.sets (owned slices)
+        var idx_u: usize = 0;
+        while (idx_u < per_set_lists.items.len) : (idx_u += 1) {
+            var list_ptr = &per_set_lists.items[idx_u];
+            if (list_ptr.items.len == 0) continue;
+            const slice = try list_ptr.toOwnedSlice(self.allocator);
+            // Ensure layout_info.sets has enough entries
+            if (layout_info.sets.items.len <= idx_u) {
+                try layout_info.sets.append(self.allocator, &[_]vk.DescriptorSetLayoutBinding{});
+            }
+            // free previous placeholder if any
+            if (layout_info.sets.items[idx_u].len != 0) {
+                self.allocator.free(layout_info.sets.items[idx_u]);
+            }
+            layout_info.sets.items[idx_u] = slice;
+        }
+
+        // Cleanup per_set_lists
+        var cleanup_i: usize = 0;
+        while (cleanup_i < per_set_lists.items.len) : (cleanup_i += 1) {
+            per_set_lists.items[cleanup_i].deinit(self.allocator);
+        }
+        per_set_lists.deinit(self.allocator);
     }
 
     fn createDescriptorSetLayouts(self: *Self, layout_info: *const DescriptorLayoutInfo) ![]vk.DescriptorSetLayout {
