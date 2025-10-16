@@ -546,5 +546,10 @@ fn gpuWorker(context: *anyopaque, work_item: WorkItem) void {
             };
             processed_any = true;
         },
+        .shader_rebuild => {
+            // Shader rebuilds are not handled by asset_loader - they use a different worker
+            // This case should never be reached in the asset loader's GPU worker
+            log(.ERROR, "enhanced_asset_loader", "Unexpected shader_rebuild work in asset loader GPU worker!", .{});
+        },
     }
 }

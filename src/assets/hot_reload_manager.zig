@@ -53,13 +53,8 @@ pub const HotReloadManager = struct {
     // File metadata tracking for change detection
     file_metadata: std.StringHashMap(FileMetadata),
 
-    // Priority-based reload queue
-    reload_queue: std.ArrayList(ReloadRequest),
-    queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
-
-    // Debouncing state for batch processing
-    pending_reloads: std.StringHashMap(i64), // path -> timestamp
-    // batch_timer removed - rely on ThreadPool for processing
+    // This manager no longer performs local queuing. File events are delivered
+    // directly into the engine ThreadPool and handled immediately.
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Callbacks for reload notifications
@@ -86,30 +81,20 @@ pub const HotReloadManager = struct {
 
     /// Initialize enhanced hot reload manager
     pub fn init(allocator: std.mem.Allocator, asset_manager: *AssetManager, watcher: *FileWatcher) !Self {
-        var manager = Self{
+        const manager = Self{
             .allocator = allocator,
             .asset_manager = asset_manager,
             .file_watcher = watcher,
             .path_to_asset = std.StringHashMap(AssetId).init(allocator),
             .asset_to_type = std.AutoHashMap(AssetId, AssetType).init(allocator),
             .file_metadata = std.StringHashMap(FileMetadata).init(allocator),
-            .pending_reloads = std.StringHashMap(i64).init(allocator),
-            .reload_queue = std.ArrayList(ReloadRequest){},
             .reload_callbacks = std.ArrayList(AssetReloadCallback){},
         };
 
-        // Set up file watcher to submit events into the provided ThreadPool
-        // (this avoids running potentially unsafe code on the watcher thread)
-        manager.file_watcher.setThreadPoolTarget(manager.asset_manager.loader.thread_pool, threadPoolFileEventWorker, @as(*anyopaque, &manager));
-
-        // Set this instance as the global manager for file events
-        global_hot_reload_manager = &manager;
+        // File events are delivered via the ThreadPool; no global callback needed.
 
         // DON'T start the file watcher immediately - start it lazily when first asset is registered
         // This avoids race conditions during initialization
-
-        // Start batch processing timer - DISABLED to fix crashes
-        // manager.batch_timer = try std.Thread.spawn(.{}, batchProcessingWorker, .{&manager});
 
         log(.INFO, "enhanced_hot_reload", "Enhanced hot reload manager initialized (hot reload {s})", .{if (manager.enabled) "enabled" else "disabled"});
         return manager;
@@ -141,18 +126,7 @@ pub const HotReloadManager = struct {
         }
         self.file_metadata.deinit();
 
-        // Free pending reloads
-        var pending_iter = self.pending_reloads.iterator();
-        while (pending_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.pending_reloads.deinit();
-
-        // Free reload queue
-        for (self.reload_queue.items) |request| {
-            self.allocator.free(request.file_path);
-        }
-        self.reload_queue.deinit(self.allocator);
+        // No local reload queue to clean up
 
         self.reload_callbacks.deinit(self.allocator);
 
@@ -293,61 +267,13 @@ pub const HotReloadManager = struct {
                 .low => TP.WorkPriority.low,
             };
 
-            // AssetManager.loader is set during AssetManager init; call it and
-            // fall back to queued reload on error.
+            // AssetManager.loader is set during AssetManager init; request a load directly.
             self.asset_manager.loader.requestLoad(id, work_priority) catch |err| {
                 log(.ERROR, "enhanced_hot_reload", "Failed to request load for changed asset {s}: {}", .{ file_path, err });
             };
         } else {
             log(.DEBUG, "enhanced_hot_reload", "File change detected but not a registered asset: {s}", .{file_path});
         }
-    }
-
-    /// Queue a reload request with priority
-    fn queueReload(self: *Self, asset_id: AssetId, file_path: []const u8, asset_type: AssetType, event_type: ReloadEvent, timestamp: i64) void {
-        // Determine priority based on asset type and usage
-        const priority = self.calculateReloadPriority(asset_type, file_path);
-
-        const request = ReloadRequest{
-            .asset_id = asset_id,
-            .file_path = self.allocator.dupe(u8, file_path) catch return,
-            .asset_type = asset_type,
-            .event_type = event_type,
-            .priority = priority,
-            .timestamp = timestamp,
-        };
-
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
-
-        // Remove any existing request for this asset
-        var i: usize = 0;
-        while (i < self.reload_queue.items.len) {
-            if (self.reload_queue.items[i].asset_id == asset_id) {
-                const old_request = self.reload_queue.swapRemove(i);
-                self.allocator.free(old_request.file_path);
-            } else {
-                i += 1;
-            }
-        }
-
-        // Add new request in priority order
-        var insert_index: usize = 0;
-        for (self.reload_queue.items, 0..) |queued_request, index| {
-            if (@intFromEnum(request.priority) < @intFromEnum(queued_request.priority)) {
-                insert_index = index;
-                break;
-            }
-            insert_index = index + 1;
-        }
-
-        self.reload_queue.insert(self.allocator, insert_index, request) catch {
-            log(.ERROR, "enhanced_hot_reload", "Failed to queue reload request for asset {}", .{asset_id});
-            self.allocator.free(request.file_path);
-            return;
-        };
-
-        _ = self.stats.reload_events.fetchAdd(1, .monotonic);
     }
 
     /// Calculate reload priority based on asset type and usage
@@ -414,99 +340,6 @@ pub const HotReloadManager = struct {
         }
     }
 
-    /// Batch processing worker thread
-    fn batchProcessingWorker(self: *Self) void {
-        while (!self.shutdown_requested.load(.acquire)) {
-            std.Thread.sleep(50_000_000); // 50ms cycle
-
-            self.processPendingReloads();
-        }
-    }
-
-    /// Process pending reload requests
-    fn processPendingReloads(self: *Self) void {
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
-
-        // Early return if no pending reloads
-        if (self.reload_queue.items.len == 0) return;
-
-        const now = std.time.milliTimestamp();
-
-        // Process items backwards to avoid index shifting issues
-        var i = self.reload_queue.items.len;
-        while (i > 0) {
-            i -= 1; // Process from end to beginning
-
-            const request = &self.reload_queue.items[i];
-            if (now - request.timestamp >= self.debounce_ms) {
-                // Make a copy of the request before removing it
-                const request_copy = request.*;
-
-                // Remove the processed request from queue
-                _ = self.reload_queue.swapRemove(i);
-
-                // Process the request outside of the mutex lock
-                self.queue_mutex.unlock();
-                self.processReloadRequest(request_copy);
-                self.queue_mutex.lock();
-
-                // After unlocking/locking, the queue might have changed
-                // Adjust i to stay within bounds
-                if (i >= self.reload_queue.items.len) {
-                    i = self.reload_queue.items.len;
-                }
-            }
-        }
-    }
-
-    /// Process a single reload request
-    fn processReloadRequest(self: *Self, request: ReloadRequest) void {
-        const start_time = std.time.milliTimestamp();
-
-        // Attempt to reload the asset
-        const success = self.reloadAsset(request) catch false;
-
-        const load_time = @as(f32, @floatFromInt(std.time.milliTimestamp() - start_time));
-
-        if (success) {
-            _ = self.stats.successful_reloads.fetchAdd(1, .monotonic);
-
-            // Update average reload time
-            const current_avg = self.stats.average_reload_time_ms.load(.monotonic);
-            const new_avg = (current_avg * 0.9) + (load_time * 0.1);
-            self.stats.average_reload_time_ms.store(new_avg, .monotonic);
-
-            // Notify callbacks
-            for (self.reload_callbacks.items) |callback| {
-                callback(request.file_path, request.asset_id, request.asset_type);
-            }
-
-            log(.INFO, "enhanced_hot_reload", "Successfully reloaded asset {} ({s}) in {d:.1}ms", .{ request.asset_id, request.file_path, load_time });
-        } else {
-            _ = self.stats.failed_reloads.fetchAdd(1, .monotonic);
-
-            // Retry if under limit
-            if (request.retry_count < self.max_retries) {
-                var retry_request = request;
-                retry_request.retry_count += 1;
-                retry_request.timestamp = std.time.milliTimestamp() + @as(i64, @intCast(self.debounce_ms));
-
-                self.queue_mutex.lock();
-                defer self.queue_mutex.unlock();
-                self.reload_queue.append(self.allocator, retry_request) catch {};
-
-                log(.WARN, "enhanced_hot_reload", "Retrying reload for asset {} ({s}) - attempt {}/{}", .{ request.asset_id, request.file_path, request.retry_count + 1, self.max_retries });
-                return; // Don't free file_path, it's being reused
-            }
-
-            log(.ERROR, "enhanced_hot_reload", "Failed to reload asset {} ({s}) after {} attempts", .{ request.asset_id, request.file_path, self.max_retries });
-        }
-
-        // Clean up request
-        self.allocator.free(request.file_path);
-    }
-
     /// Reload a single asset
     fn reloadAsset(self: *Self, request: ReloadRequest) !bool {
         // Update file metadata first
@@ -533,33 +366,20 @@ pub const HotReloadManager = struct {
         average_reload_time_ms: f32,
         batched_reloads: u64,
     } {
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
-
         return .{
             .files_watched = self.stats.files_watched.load(.monotonic),
             .reload_events = self.stats.reload_events.load(.monotonic),
             .successful_reloads = self.stats.successful_reloads.load(.monotonic),
             .failed_reloads = self.stats.failed_reloads.load(.monotonic),
-            .pending_reloads = self.reload_queue.items.len,
+            .pending_reloads = 0,
             .average_reload_time_ms = self.stats.average_reload_time_ms.load(.monotonic),
             .batched_reloads = self.stats.batched_reloads.load(.monotonic),
         };
     }
 };
 
-/// Global file event callback (required by FileWatcher)
-var global_hot_reload_manager: ?*HotReloadManager = null;
-
-pub fn setGlobalHotReloadManager(manager: *HotReloadManager) void {
-    global_hot_reload_manager = manager;
-}
-
-fn globalFileEventCallback(event: FileWatcher.FileEvent) void {
-    if (global_hot_reload_manager) |manager| {
-        manager.onFileChanged(event.path);
-    }
-}
+// Legacy global callback support removed - file events are routed into the
+// ThreadPool and delivered via `threadPoolFileEventWorker`.
 
 // ThreadPool worker function that will be called when FileWatcher enqueues
 // a hot_reload WorkItem. It extracts the file path from the WorkItem and

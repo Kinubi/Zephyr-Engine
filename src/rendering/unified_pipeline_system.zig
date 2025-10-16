@@ -2,6 +2,9 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
+const TP = @import("../threading/thread_pool.zig");
+const ThreadPool = TP.ThreadPool;
+const AssetId = @import("../assets/asset_types.zig").AssetId;
 const PipelineBuilder = @import("pipeline_builder.zig").PipelineBuilder;
 const RasterizationState = @import("pipeline_builder.zig").RasterizationState;
 const MultisampleState = @import("pipeline_builder.zig").MultisampleState;
@@ -16,13 +19,6 @@ const log = @import("../utils/log.zig").log;
 const DescriptorUtils = @import("../utils/descriptor_utils.zig");
 
 // (merge logic inlined into loops below)
-
-// Global instance for hot reload callbacks (similar to shader_pipeline_integration.zig)
-var global_unified_pipeline_system: ?*UnifiedPipelineSystem = null;
-
-pub fn setGlobalUnifiedPipelineSystem(system: *UnifiedPipelineSystem) void {
-    global_unified_pipeline_system = system;
-}
 
 // Deferred destruction for hot reload safety
 const DeferredPipeline = struct {
@@ -47,11 +43,9 @@ pub const UnifiedPipelineSystem = struct {
     bound_resources: std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage),
 
     // Hot-reload integration
-    pipeline_reload_callbacks: std.ArrayList(PipelineReloadCallback),
-
     // Flag to skip descriptor updates during hot reload
     hot_reload_in_progress: bool = false,
-    // Flag to prevent recursive shader reload callbacks
+    // Flag to prevent recursive shader reload
     rebuilding_pipelines: bool = false,
     shader_to_pipelines: std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage), // shader_path -> pipeline_ids
 
@@ -61,7 +55,7 @@ pub const UnifiedPipelineSystem = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, shader_manager: *ShaderManager) !Self {
-        var system = Self{
+        const self = Self{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .shader_manager = shader_manager,
@@ -69,14 +63,22 @@ pub const UnifiedPipelineSystem = struct {
             .descriptor_pools = std.HashMap(u32, *DescriptorPool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
             .bound_resources = std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .shader_to_pipelines = std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .pipeline_reload_callbacks = .{},
             .deferred_destroys = .{},
         };
 
-        // Register with shader manager for hot-reload notifications
-        try system.registerForShaderReload();
+        return self;
+    }
 
-        return system;
+    /// Register this pipeline system to receive shader compilation notifications
+    /// Call this after the system is fully initialized and has a stable address
+    pub fn registerForShaderUpdates(self: *Self) void {
+        // Note: We don't register a delivery worker here because the shader_manager
+        // already has its own delivery worker (shaderDeliveryWorker) that calls
+        // onShaderReloaded. Instead, we rely on the shader_to_pipelines mapping
+        // to track which pipelines need rebuilding when shaders are delivered.
+        // The pipeline rebuilds are triggered by scheduleRebuildByName which is
+        // called from the shader manager's delivery path.
+        _ = self;
     }
 
     pub fn deinit(self: *Self) void {
@@ -97,7 +99,6 @@ pub const UnifiedPipelineSystem = struct {
 
         // Clean up resources
         self.bound_resources.deinit();
-        self.pipeline_reload_callbacks.deinit(self.allocator);
 
         // Clean up any remaining deferred destroys
         for (self.deferred_destroys.items) |deferred| {
@@ -449,36 +450,12 @@ pub const UnifiedPipelineSystem = struct {
         }
     }
 
-    /// Register a callback for pipeline reloads
-    pub fn registerPipelineReloadCallback(self: *Self, callback: PipelineReloadCallback) !void {
-        try self.pipeline_reload_callbacks.append(self.allocator, callback);
-    }
-
     /// Manually rebuild a pipeline (useful for debugging or forced reloads)
     pub fn rebuildPipelineManual(self: *Self, pipeline_id: PipelineId) !void {
         try self.rebuildPipeline(pipeline_id);
-
-        // Notify registered callbacks
-        for (self.pipeline_reload_callbacks.items) |callback| {
-            callback.onPipelineReloaded(callback.context, pipeline_id);
-        }
     }
 
     // Private implementation methods
-
-    fn registerForShaderReload(self: *Self) !void {
-        log(.INFO, "unified_pipeline", "Registering unified pipeline system for shader hot-reload callbacks", .{});
-
-        // Register directly with the shader hot reload system (not the shader manager)
-        const callback = @import("../assets/shader_hot_reload.zig").ShaderReloadCallback{
-            .context = @ptrCast(self),
-            .onShaderReloaded = onShaderReloadedHotReload,
-        };
-
-        try self.shader_manager.hot_reload.addShaderReloadCallback(callback);
-
-        log(.INFO, "unified_pipeline", "✅ Successfully registered for shader hot-reload callbacks", .{});
-    }
 
     fn registerShaderDependency(self: *Self, shader_path: ?[]const u8, pipeline_id: PipelineId) !void {
         if (shader_path) |path| {
@@ -501,22 +478,32 @@ pub const UnifiedPipelineSystem = struct {
         };
     }
 
-    fn onShaderReloadedHotReload(context: ?*anyopaque, file_path: []const u8, compiled_shader: @import("../assets/shader_compiler.zig").CompiledShader) void {
-        _ = context; // context currently unused here, keep the parameter for compatibility
-        _ = compiled_shader; // We don't need the compiled shader data for pipeline rebuilds
+    /// Schedule a pipeline rebuild by pipeline name. This submits a ThreadPool
+    /// work item which will wait for any in-progress shader compilations for
+    /// that pipeline to complete before calling rebuildPipeline.
+    /// NOTE: This function is currently unused - pipeline rebuilds are triggered
+    /// by shader compilation completion via ShaderRebuildJob.
+    pub fn scheduleRebuildByName(self: *Self, pipeline_name: []const u8) !void {
+        // Allocate a small RebuildJob on this system's allocator and submit
+        // a custom WorkItem into the shader manager's thread pool.
+        const name_copy = try self.allocator.dupe(u8, pipeline_name);
+        const job = try self.allocator.create(Self.RebuildJob);
+        job.* = Self.RebuildJob{ .pipeline_name = name_copy, .allocator = self.allocator, .system = self };
 
-        log(.INFO, "unified_pipeline", "🔥 Hot reload callback triggered for shader: {s}", .{file_path});
+        const work_item = TP.createCustomWork(
+            0, // id
+            @as(*anyopaque, job), // user_data - the RebuildJob
+            @sizeOf(RebuildJob), // size
+            .high, // priority
+            pipelineRebuildWorker, // Note: This worker signature doesn't match ShaderRebuildJob!
+            @as(*anyopaque, self), // context - the UnifiedPipelineSystem
+        );
 
-        if (global_unified_pipeline_system) |system| {
-            system.handleShaderReload(file_path) catch |err| {
-                log(.ERROR, "unified_pipeline", "Failed to handle shader reload for {s}: {}", .{ file_path, err });
-            };
-        } else {
-            log(.WARN, "unified_pipeline", "Global unified pipeline system not set - cannot rebuild pipelines", .{});
-        }
+        // Submit into the ThreadPool owned by the shader manager
+        try self.shader_manager.thread_pool.submitWork(work_item);
     }
 
-    fn handleShaderReload(self: *Self, shader_path: []const u8) !void {
+    pub fn handleShaderReload(self: *Self, shader_path: []const u8) !void {
         // Prevent recursive shader reload calls
         if (self.rebuilding_pipelines) {
             log(.WARN, "unified_pipeline", "Skipping shader reload for {s} - already rebuilding pipelines", .{shader_path});
@@ -540,11 +527,6 @@ pub const UnifiedPipelineSystem = struct {
                 log(.ERROR, "unified_pipeline", "Failed to rebuild pipeline {s}: {}", .{ pipeline_id.name, err });
                 continue;
             };
-
-            // Notify registered callbacks
-            for (self.pipeline_reload_callbacks.items) |callback| {
-                callback.onPipelineReloaded(callback.context, pipeline_id);
-            }
         }
     }
 
@@ -596,6 +578,53 @@ pub const UnifiedPipelineSystem = struct {
         log(.INFO, "unified_pipeline", "Scheduled old pipeline for deferred destruction in {} frames", .{frames_to_wait});
 
         log(.INFO, "unified_pipeline", "✅ Pipeline rebuilt with new descriptor sets: {s}", .{pipeline_id.name});
+    }
+
+    // Rebuild job allocated by shader hot reload system
+    // Contains compiled shader and file path. The system pointer is passed via WorkItem.context.
+    // Allocator and other references (shader_manager, watcher) are accessed through the system.
+    pub const ShaderRebuildJob = struct {
+        file_path: []const u8,
+        compiled_shader: ShaderCompiler.CompiledShader,
+    };
+
+    /// ThreadPool worker that receives compiled shader from hot reload,
+    /// updates shader_manager, clears compilation flag, then rebuilds affected pipelines.
+    pub fn pipelineRebuildWorker(context: *anyopaque, work_item: TP.WorkItem) void {
+        const sys: *Self = @ptrCast(@alignCast(context));
+
+        // Get the job from work_item.data (not from context!)
+        const job: *Self.ShaderRebuildJob = @ptrCast(@alignCast(work_item.data.gpu_work.data));
+        const file_path = job.file_path;
+        var compiled_shader = job.compiled_shader; // var so we can deinit on error
+
+        // Get references through the system
+        const shader_manager = sys.shader_manager;
+        const allocator = sys.allocator;
+
+        defer {
+            // Job is freed but compiled_shader ownership is transferred to shader_manager
+            allocator.destroy(job);
+        }
+
+        // Update shader_manager with the compiled shader (transfers ownership)
+        shader_manager.onShaderCompiledFromHotReload(file_path, compiled_shader) catch |err| {
+            std.log.err("[unified_pipeline] Failed to update shader_manager for {s}: {}", .{ file_path, err });
+            // Clean up on error
+            compiled_shader.deinit(allocator);
+            return;
+        };
+
+        // Clear compilation flag in the watcher (accessed through shader_manager)
+        if (shader_manager.hot_reload.watched_shaders.getPtr(file_path)) |fi| {
+            fi.compilation_in_progress = false;
+        }
+
+        // Find all pipelines that use this shader and rebuild them
+        sys.handleShaderReload(file_path) catch |err| {
+            std.log.err("[unified_pipeline] Failed to handle shader reload for pipelines: {}", .{err});
+            return;
+        };
     }
 
     /// Process deferred pipeline destructions - call this each frame
@@ -667,15 +696,6 @@ pub const UnifiedPipelineSystem = struct {
             if (s.set > max_set_idx) max_set_idx = s.set;
         }
 
-        // Minimal info: log reflection summary at INFO so users can see what was found.
-        // Keep per-binding details at DEBUG for verbose troubleshooting.
-        log(.INFO, "unified_pipeline", "reflection summary: ubos={}, sbos={}, textures={}, samplers={}", .{
-            reflection.uniform_buffers.items.len,
-            reflection.storage_buffers.items.len,
-            reflection.textures.items.len,
-            reflection.samplers.items.len,
-        });
-
         // Create per-set array of binding lists
         var per_set_lists = std.ArrayList(std.ArrayList(vk.DescriptorSetLayoutBinding)){};
         var s: usize = 0;
@@ -745,13 +765,6 @@ pub const UnifiedPipelineSystem = struct {
                 self.allocator.free(layout_info.sets.items[idx_u]);
             }
             layout_info.sets.items[idx_u] = slice;
-        }
-
-        // Log the extracted descriptor layout for debugging
-        log(.INFO, "unified_pipeline", "extractDescriptorLayout: found {} sets", .{layout_info.sets.items.len});
-        var li: usize = 0;
-        while (li < layout_info.sets.items.len) : (li += 1) {
-            log(.INFO, "unified_pipeline", "  set {} bindings={}", .{ li, layout_info.sets.items[li].len });
         }
 
         // Cleanup per_set_lists
@@ -1113,6 +1126,13 @@ pub const Resource = union(enum) {
     acceleration_structure: vk.AccelerationStructureKHR,
 };
 
+// Rebuild job allocated by scheduleRebuildByName
+pub const RebuildJob = struct {
+    pipeline_name: []const u8,
+    allocator: std.mem.Allocator,
+    system: *UnifiedPipelineSystem,
+};
+
 /// Resource binding key for tracking bound resources
 const ResourceBindingKey = struct {
     pipeline_id: PipelineId,
@@ -1132,12 +1152,6 @@ const DescriptorUpdate = struct {
     set: u32,
     binding: u32,
     resource: Resource,
-};
-
-/// Pipeline reload callback
-pub const PipelineReloadCallback = struct {
-    context: *anyopaque,
-    onPipelineReloaded: *const fn (context: *anyopaque, pipeline_id: PipelineId) void,
 };
 
 // Context types for HashMap

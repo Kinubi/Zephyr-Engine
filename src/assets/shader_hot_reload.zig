@@ -6,6 +6,8 @@ const AssetManager = @import("asset_manager.zig").AssetManager;
 const TP = @import("../threading/thread_pool.zig");
 const ThreadPool = TP.ThreadPool;
 const AssetId = @import("asset_types.zig").AssetId;
+const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
+const log = @import("../utils/log.zig").log;
 
 // Real-time multithreaded shader hot reload system
 // Watches shader files for changes and automatically recompiles them
@@ -14,45 +16,46 @@ pub const ShaderWatcher = struct {
     allocator: std.mem.Allocator,
     thread_pool: *ThreadPool,
     shader_compiler: ShaderCompiler,
-    asset_manager: *AssetManager,
 
     // File watching and hot reload state
     watch_directories: std.ArrayList([]const u8),
     watched_shaders: std.HashMap([]const u8, ShaderFileInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
-    compilation_mutex: std.Thread.Mutex = .{},
-    compilation_queue: std.ArrayList(CompilationJob),
-    // For compatibility with existing stats reporting (no internal compiler threads when using ThreadPool)
-    compiler_threads: std.ArrayList(?std.Thread),
     // Compilation is handled via the global ThreadPool - we submit work items for compile + delivery
 
-    // Hot reload callbacks
-    shader_reloaded_callbacks: std.ArrayList(ShaderReloadCallback),
+    // Threading and lifecycle (no local threads; rely on app FileWatcher + ThreadPool)
+    // Optional external FileWatcher (owned by the application). If set,
+    // ShaderWatcher will register directories with the FileWatcher so the
+    // centralized watcher can enqueue WorkItems into the ThreadPool.
+    external_watcher: ?*FileWatcher = null,
 
-    // Threading and lifecycle
-    watcher_thread: ?std.Thread,
-    should_stop: std.atomic.Value(bool),
+    // Optional pipeline system for shader rebuilds (owned by the application)
+    pipeline_system: ?*anyopaque = null,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool, asset_manager: *AssetManager) !Self {
+    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) !Self {
         var watcher = Self{
             .allocator = allocator,
             .thread_pool = thread_pool,
             .shader_compiler = try ShaderCompiler.init(allocator),
-            .asset_manager = asset_manager,
             .watch_directories = undefined,
             .watched_shaders = std.HashMap([]const u8, ShaderFileInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .compilation_queue = std.ArrayList(CompilationJob){},
-            .compiler_threads = std.ArrayList(?std.Thread){},
-            .shader_reloaded_callbacks = undefined,
-            .watcher_thread = null,
-            .should_stop = std.atomic.Value(bool).init(false),
+            .external_watcher = null,
         };
 
         watcher.watch_directories = std.ArrayList([]const u8){};
-        watcher.shader_reloaded_callbacks = std.ArrayList(ShaderReloadCallback){};
 
         return watcher;
+    }
+
+    /// Configure an external FileWatcher (owned by the application).
+    pub fn setFileWatcher(self: *Self, watcher: *FileWatcher) void {
+        self.external_watcher = watcher;
+    }
+
+    /// Configure the pipeline system for shader rebuilds (owned by the application).
+    pub fn setPipelineSystem(self: *Self, pipeline_system: *anyopaque) void {
+        self.pipeline_system = pipeline_system;
     }
 
     pub fn deinit(self: *Self) void {
@@ -61,42 +64,44 @@ pub const ShaderWatcher = struct {
         self.shader_compiler.deinit();
         self.watch_directories.deinit(self.allocator);
         self.watched_shaders.deinit();
-        self.shader_reloaded_callbacks.deinit(self.allocator);
-        self.compilation_queue.deinit(self.allocator);
-        self.compiler_threads.deinit(self.allocator);
     }
 
     pub fn start(self: *Self) !void {
-        self.should_stop.store(false, .monotonic);
-
-        // Start file watcher thread
-        self.watcher_thread = try std.Thread.spawn(.{}, watcherThreadFn, .{self});
-
-        // Compilation handled by ThreadPool - submit compile work items from watcher
+        // ShaderWatcher uses the project's ThreadPool for compilation and
+        // relies on an external FileWatcher (if configured) to deliver
+        // file events into the pool. Do not spawn an internal thread here.
+        _ = self;
+        // no local should_stop state when using external FileWatcher.
+        // If an external watcher is present, it must be started by the
+        // application or the HotReloadManager. We only initialize internal
+        // state here.
     }
 
     pub fn stop(self: *Self) void {
-        self.should_stop.store(true, .monotonic);
-
-        // Wait for watcher thread
-        if (self.watcher_thread) |thread| {
-            thread.join();
-            self.watcher_thread = null;
-        }
-
-        // No internal compiler threads to join (ThreadPool handles compilation workers)
+        _ = self;
+        // No internal watcher thread to join when running under FileWatcher
     }
 
     pub fn addWatchDirectory(self: *Self, directory: []const u8) !void {
         const dir_copy = try self.allocator.dupe(u8, directory);
         try self.watch_directories.append(self.allocator, dir_copy);
 
-        // Scan for existing shaders in the directory
-        try self.scanDirectory(directory);
-    }
+        // If an external FileWatcher is configured, register the directory with it
+        // and also scan the directory to register individual shader files so
+        // events include precise file paths and per-file workers can be used.
+        if (self.external_watcher) |fw| {
+            // Register the directory with a per-watch worker so directory
+            // events are delivered to this ShaderWatcher's threadPoolFileEventWorker
+            // (mirrors how HotReloadManager registers its per-watch worker).
+            try fw.addWatchWithWorker(dir_copy, true, threadPoolFileEventWorker, @as(*anyopaque, self));
 
-    pub fn addShaderReloadCallback(self: *Self, callback: ShaderReloadCallback) !void {
-        try self.shader_reloaded_callbacks.append(self.allocator, callback);
+            // Scan directory and add individual shader files (this will
+            // call addShaderFile which registers per-file watches)
+            try self.scanDirectory(directory);
+        } else {
+            // No external watcher: scan and use internal watcher thread
+            try self.scanDirectory(directory);
+        }
     }
 
     fn scanDirectory(self: *Self, directory_path: []const u8) !void {
@@ -108,6 +113,11 @@ pub const ShaderWatcher = struct {
 
         var iterator = dir.iterate();
         while (try iterator.next()) |entry| {
+            // Skip the cached directory to avoid watching compiled shader cache
+            if (entry.kind == .directory and std.mem.eql(u8, entry.name, "cached")) {
+                continue;
+            }
+
             if (entry.kind == .file) {
                 if (isShaderFile(entry.name)) {
                     const full_path = try std.fs.path.join(self.allocator, &.{ directory_path, entry.name });
@@ -131,159 +141,105 @@ pub const ShaderWatcher = struct {
         };
 
         try self.watched_shaders.put(file_info.path, file_info);
+
+        if (self.external_watcher) |fw| {
+            fw.addWatchWithWorker(file_info.path, false, threadPoolFileEventWorker, @as(*anyopaque, self)) catch |err| {
+                std.log.warn("Failed to register shader file with FileWatcher {s}: {}", .{ file_info.path, err });
+            };
+        }
     }
 
-    fn watcherThreadFn(self: *Self) void {
-        while (!self.should_stop.load(.monotonic)) {
-            self.checkForFileChanges() catch |err| {
-                std.log.err("Error checking for file changes: {}", .{err});
+    /// Handle a file-change event delivered from the FileWatcher inside the ThreadPool.
+    /// Compiles the shader immediately and signals the pipeline to rebuild when finished.
+    /// This follows the same pattern as hot_reload_manager.onFileChanged.
+    pub fn onFileChanged(self: *Self, file_path: []const u8) void {
+        // Skip the cached directory - we don't want to recompile cache files
+        if (std.mem.indexOf(u8, file_path, "cached") != null) {
+            return;
+        }
+
+        // Lookup watched shader entry
+        if (self.watched_shaders.getPtr(file_path)) |fi| {
+            if (fi.compilation_in_progress) {
+                std.log.debug("[hot_reload] Shader {s} already compiling, skipping", .{file_path});
+                return;
+            }
+
+            // Mark compilation in progress and attempt to update metadata
+            fi.compilation_in_progress = true;
+            const stat = std.fs.cwd().statFile(file_path) catch |err| {
+                std.log.warn("Failed to stat shader on change {s}: {}", .{ file_path, err });
+                // clear flag so future events can retry
+                fi.compilation_in_progress = false;
+                return;
+            };
+            fi.last_modified = stat.mtime;
+            fi.size = stat.size;
+
+            // Compile immediately (we're already on a ThreadPool worker thread)
+            const options = CompilationOptions{
+                .target = .vulkan,
+                .optimization_level = .none,
+                .debug_info = true,
+                .vulkan_semantics = true,
             };
 
-            // Drain compilation queue and submit compile work to the ThreadPool
-            self.compilation_mutex.lock();
-            while (self.compilation_queue.items.len > 0) {
-                const job = self.compilation_queue.orderedRemove(0);
-                // Build a WorkItem for hot_reload compilation
-                const work_item = TP.WorkItem{
-                    .id = 0,
-                    .item_type = TP.WorkItemType.hot_reload,
-                    .priority = TP.WorkPriority.high,
-                    .data = .{ .hot_reload = .{ .file_path = job.file_path, .asset_id = AssetId.fromU64(0) } },
-                    .worker_fn = compileWorker,
-                    .context = @as(*anyopaque, self),
-                };
-
-                // Submit compile job to the thread pool
-                self.compilation_mutex.unlock();
-                self.thread_pool.submitWork(work_item) catch |err| {
-                    std.log.err("Failed to submit shader compile job for {s}: {}", .{ job.file_path, err });
-                    // mark compilation as not in progress so watcher can retry
-                    if (self.watched_shaders.getPtr(job.file_path)) |fi| fi.compilation_in_progress = false;
-                };
-                self.compilation_mutex.lock();
-            }
-            self.compilation_mutex.unlock();
-
-            // Check every 100ms for file changes
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-        }
-    }
-
-    fn checkForFileChanges(self: *Self) !void {
-        var iterator = self.watched_shaders.iterator();
-        while (iterator.next()) |entry| {
-            const file_info = entry.value_ptr;
-
-            // Skip if compilation is already in progress
-            if (file_info.compilation_in_progress) continue;
-
-            const current_stat = std.fs.cwd().statFile(file_info.path) catch |err| {
-                switch (err) {
-                    error.FileNotFound => {
-                        std.log.warn("Shader file deleted: {s}", .{file_info.path});
-                        continue;
-                    },
-                    else => {
-                        std.log.err("Failed to stat file {s}: {}", .{ file_info.path, err });
-                        continue;
-                    },
-                }
+            var compiled = self.shader_compiler.compileFromFile(file_path, options) catch |err| {
+                std.log.err("[hot_reload] Shader compilation failed for {s}: {}", .{ file_path, err });
+                fi.compilation_in_progress = false;
+                return;
             };
 
-            // Check if file was modified
-            if (current_stat.mtime > file_info.last_modified or current_stat.size != file_info.size) {
-                // Mark as compilation in progress
-                file_info.compilation_in_progress = true;
-                file_info.last_modified = current_stat.mtime;
-                file_info.size = current_stat.size;
+            // Submit to pipeline rebuild worker directly
+            const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig");
+            if (self.pipeline_system) |pipeline_system_opaque| {
+                const pipeline_system: *UnifiedPipelineSystem.UnifiedPipelineSystem = @ptrCast(@alignCast(pipeline_system_opaque));
 
-                // Queue for compilation
-                const job = CompilationJob{
-                    .file_path = file_info.path,
-                    .priority = .high, // File changes get high priority
-                    .queued_time = std.time.timestamp(),
+                // Allocate rebuild job to transfer ownership of compiled shader
+                // Job only contains file_path and compiled_shader; everything else accessed via system
+                const job = pipeline_system.allocator.create(UnifiedPipelineSystem.UnifiedPipelineSystem.ShaderRebuildJob) catch |err| {
+                    std.log.err("Failed to allocate shader rebuild job: {}", .{err});
+                    compiled.deinit(self.allocator);
+                    fi.compilation_in_progress = false;
+                    return;
+                };
+                job.* = UnifiedPipelineSystem.UnifiedPipelineSystem.ShaderRebuildJob{
+                    .file_path = file_path,
+                    .compiled_shader = compiled,
                 };
 
-                self.compilation_mutex.lock();
-                defer self.compilation_mutex.unlock();
+                // Submit to pipeline rebuild worker using GPU work (shader_rebuild type)
+                const rebuild_work = TP.createGPUWork(
+                    0, // id
+                    .shader_rebuild, // staging_type
+                    AssetId.fromU64(0), // asset_id (unused for shader rebuilds)
+                    @as(*anyopaque, job), // staging_data - the ShaderRebuildJob
+                    .high, // priority
+                    UnifiedPipelineSystem.UnifiedPipelineSystem.pipelineRebuildWorker,
+                    @as(*anyopaque, pipeline_system), // context - the UnifiedPipelineSystem
+                );
 
-                try self.compilation_queue.append(self.allocator, job);
+                self.thread_pool.submitWork(rebuild_work) catch |err| {
+                    std.log.err("Failed to submit pipeline rebuild work for {s}: {}", .{ file_path, err });
+                    compiled.deinit(self.allocator);
+                    pipeline_system.allocator.destroy(job);
+                    fi.compilation_in_progress = false;
+                    return;
+                };
+
+                log(.INFO, "shader_hot_reload", "Pipeline rebuild work submitted for: {s}", .{file_path});
+            } else {
+                // No pipeline system available, clean up
+                std.log.warn("[hot_reload] No pipeline system available for {s}", .{file_path});
+                compiled.deinit(self.allocator);
+                fi.compilation_in_progress = false;
             }
+        } else {
+            // Not currently watching this file — try to add it so future events are tracked
+            self.addShaderFile(file_path) catch |err| {
+                std.log.warn("Failed to add shader file on change {s}: {}", .{ file_path, err });
+            };
         }
-    }
-
-    // Removed internal compiler thread function; compilation is submitted to ThreadPool
-
-    // Worker run by ThreadPool to compile a shader. Runs on a pool thread.
-    pub fn compileWorker(context: *anyopaque, _work_item: TP.WorkItem) void {
-        const watcher: *ShaderWatcher = @ptrCast(@alignCast(context));
-        const file_path = _work_item.data.hot_reload.file_path;
-        const options = CompilationOptions{
-            .target = .vulkan,
-            .optimization_level = .none,
-            .debug_info = true,
-            .vulkan_semantics = true,
-        };
-
-        var compiled = watcher.shader_compiler.compileFromFile(file_path, options) catch |err| {
-            std.log.err("[hot_reload] Shader compilation failed for {s}: {}", .{ file_path, err });
-            // clear flag
-            if (watcher.watched_shaders.getPtr(file_path)) |fi| fi.compilation_in_progress = false;
-            return;
-        };
-
-        // Allocate delivery job (owned by the GPU worker job)
-        const delivery = watcher.allocator.create(DeliveryJob) catch |err| {
-            // If allocation fails, clean up compiled shader and clear flag
-            compiled.deinit(watcher.allocator);
-            if (watcher.watched_shaders.getPtr(file_path)) |fi| fi.compilation_in_progress = false;
-            std.log.err("Failed to allocate delivery job: {}", .{err});
-            return;
-        };
-        delivery.* = DeliveryJob{ .file_path = file_path, .compiled_shader = compiled };
-
-        // Submit GPU/worker job to perform pipeline rebuild (may use thread-local command pool)
-        const gpu_work_item = TP.createGPUWork(
-            0,
-            TP.GPUWork.texture,
-            AssetId.fromU64(0),
-            @as(*anyopaque, delivery),
-            TP.WorkPriority.high,
-            rebuildWorker,
-            @as(*anyopaque, watcher),
-        );
-
-        watcher.thread_pool.submitWork(gpu_work_item) catch |err| {
-            // On submit failure, cleanup
-            delivery.compiled_shader.deinit(watcher.allocator);
-            watcher.allocator.destroy(delivery);
-            if (watcher.watched_shaders.getPtr(file_path)) |fi| fi.compilation_in_progress = false;
-            std.log.err("Failed to submit rebuild work: {}", .{err});
-            return;
-        };
-
-        // optional timing omitted
-    }
-
-    // Delivery job structure (heap allocated) to transfer ownership into ThreadPool worker
-    const DeliveryJob = struct {
-        file_path: []const u8,
-        compiled_shader: CompiledShader,
-    };
-
-    // Worker run by ThreadPool (GPU worker) to call pipeline rebuild callbacks and perform GPU work
-    pub fn rebuildWorker(context: *anyopaque, work_item: TP.WorkItem) void {
-        const watcher: *ShaderWatcher = @ptrCast(@alignCast(context));
-        const delivery: *DeliveryJob = @ptrCast(@alignCast(work_item.data.gpu_work.data));
-
-        for (watcher.shader_reloaded_callbacks.items) |callback| {
-            callback.onShaderReloaded(callback.context, delivery.file_path, delivery.compiled_shader);
-        }
-
-        // Clean up and clear compilation flag
-        delivery.compiled_shader.deinit(watcher.allocator);
-        watcher.allocator.destroy(delivery);
-        if (watcher.watched_shaders.getPtr(delivery.file_path)) |fi| fi.compilation_in_progress = false;
     }
 
     fn isShaderFile(filename: []const u8) bool {
@@ -298,7 +254,20 @@ pub const ShaderWatcher = struct {
     }
 };
 
-// Supporting types for the shader hot reload system
+// Module-level ThreadPool worker is declared below the struct
+
+/// Module-level ThreadPool worker that forwards FileWatcher events into
+/// the ShaderWatcher instance. This is registered with FileWatcher so
+/// the watcher can enqueue a function pointer (free function).
+pub fn threadPoolFileEventWorker(context: *anyopaque, work_item: TP.WorkItem) void {
+    const watcher: *ShaderWatcher = @ptrCast(@alignCast(context));
+
+    // Extract file path from custom work item data
+    const file_path_ptr: [*]const u8 = @ptrCast(@alignCast(work_item.data.custom.user_data));
+    const file_path = file_path_ptr[0..work_item.data.custom.size];
+
+    watcher.onFileChanged(file_path);
+} // Supporting types for the shader hot reload system
 pub const ShaderFileInfo = struct {
     path: []const u8,
     last_modified: i128,
@@ -319,11 +288,6 @@ pub const CompilationJob = struct {
     };
 };
 
-pub const ShaderReloadCallback = struct {
-    context: ?*anyopaque = null,
-    onShaderReloaded: *const fn (context: ?*anyopaque, file_path: []const u8, compiled_shader: CompiledShader) void,
-};
-
 // Performance metrics
 pub const ShaderWatcherStats = struct {
     files_watched: u32,
@@ -341,9 +305,6 @@ test "ShaderWatcher creation" {
     var thread_pool = try ThreadPool.init(gpa, 4);
     defer thread_pool.deinit();
 
-    var asset_manager = AssetManager.init(gpa);
-    defer asset_manager.deinit();
-
-    var watcher = try ShaderWatcher.init(gpa, &thread_pool, &asset_manager);
+    var watcher = try ShaderWatcher.init(gpa, &thread_pool);
     defer watcher.deinit();
 }

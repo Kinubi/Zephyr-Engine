@@ -737,7 +737,7 @@ pub fn createComputeWork(
     };
 }
 
-pub const GPUWork = enum { texture, mesh };
+pub const GPUWork = enum { texture, mesh, shader_rebuild };
 
 /// Create a GPU work item for processing staged assets
 pub fn createGPUWork(
@@ -757,6 +757,28 @@ pub fn createGPUWork(
             .staging_type = staging_type,
             .asset_id = asset_id,
             .data = staging_data,
+        } },
+        .worker_fn = worker_fn,
+        .context = context,
+    };
+}
+
+/// Create a custom work item (for specialized tasks like file watching)
+pub fn createCustomWork(
+    id: u64,
+    user_data: *anyopaque,
+    data_size: usize,
+    priority: WorkPriority,
+    worker_fn: *const fn (*anyopaque, WorkItem) void,
+    context: *anyopaque,
+) WorkItem {
+    return WorkItem{
+        .id = id,
+        .item_type = .custom,
+        .priority = priority,
+        .data = .{ .custom = .{
+            .user_data = user_data,
+            .size = data_size,
         } },
         .worker_fn = worker_fn,
         .context = context,

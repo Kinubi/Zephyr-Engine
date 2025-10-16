@@ -38,9 +38,6 @@ pub const UnifiedTexturedRenderer = struct {
         sampler: vk.Sampler,
     },
 
-    // Hot-reload context
-    reload_context: PipelineReloadContext,
-
     const Self = @This();
 
     pub fn init(
@@ -110,19 +107,7 @@ pub const UnifiedTexturedRenderer = struct {
             .mvp_buffers = mvp_buffers,
             .light_buffers = light_buffers,
             .default_texture = default_texture,
-            .reload_context = undefined,
         };
-
-        // Set up hot-reload context
-        renderer.reload_context = PipelineReloadContext{
-            .renderer = &renderer,
-        };
-
-        // Register for pipeline hot-reload
-        try pipeline_system.registerPipelineReloadCallback(.{
-            .context = &renderer.reload_context,
-            .onPipelineReloaded = PipelineReloadContext.onPipelineReloaded,
-        });
 
         // Bind default resources for all frames
         try renderer.setupDefaultResources();
@@ -397,20 +382,4 @@ const LightUniformBuffer = extern struct {
 const ObjectUniformBuffer = extern struct {
     model: [16]f32,
     normal_matrix: [16]f32,
-};
-
-/// Pipeline reload context for hot-reload integration
-const PipelineReloadContext = struct {
-    renderer: *UnifiedTexturedRenderer,
-
-    fn onPipelineReloaded(context: *anyopaque, pipeline_id: PipelineId) void {
-        const self: *PipelineReloadContext = @ptrCast(@alignCast(context));
-
-        log(.INFO, "unified_textured_renderer", "Pipeline reloaded: {s}", .{pipeline_id.name});
-
-        // Re-setup default resources after pipeline reload
-        self.renderer.setupDefaultResources() catch |err| {
-            log(.ERROR, "unified_textured_renderer", "Failed to re-setup resources after reload: {}", .{err});
-        };
-    }
 };

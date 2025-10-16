@@ -220,23 +220,39 @@ pub const App = struct {
             .work_item_type = .bvh_building,
         });
 
+        try thread_pool.registerSubsystem(.{
+            .name = "custom_work",
+            .min_workers = 1,
+            .max_workers = 2,
+            .priority = .low,
+            .work_item_type = .custom,
+        });
+
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 4 workers
 
         // Initialize Asset Manager on heap for stable pointer address
         asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
 
+        // Create application-owned FileWatcher and hand it to hot-reload systems
+        file_watcher = try self.allocator.create(FileWatcher);
+        file_watcher.* = FileWatcher.init(self.allocator, thread_pool);
+        try file_watcher.start();
+
         // Initialize Shader Manager for hot reload and compilation
-        shader_manager = try ShaderManager.init(self.allocator, asset_manager, thread_pool);
+        shader_manager = try ShaderManager.init(self.allocator, thread_pool, file_watcher);
         try shader_manager.addShaderDirectory("shaders");
-        try shader_manager.addShaderDirectory("shaders/cached");
+        // Don't watch shaders/cached - we don't want to recompile cache files
         try shader_manager.start();
         log(.INFO, "app", "Shader hot reload system initialized", .{});
 
         // Initialize Unified Pipeline System
         unified_pipeline_system = try UnifiedPipelineSystem.init(self.allocator, &self.gc, &shader_manager);
         resource_binder = ResourceBinder.init(self.allocator, &unified_pipeline_system);
-        @import("rendering/unified_pipeline_system.zig").setGlobalUnifiedPipelineSystem(&unified_pipeline_system);
+
+        // Connect pipeline system to shader manager for hot reload
+        shader_manager.setPipelineSystem(&unified_pipeline_system);
+
         log(.INFO, "app", "Unified pipeline system initialized", .{});
 
         // Initialize Dynamic Pipeline Manager
@@ -249,10 +265,6 @@ pub const App = struct {
         scene = Scene.init(&self.gc, self.allocator, asset_manager);
 
         // Enhanced Scene registers for asset completion callbacks during its init
-
-        // Create application-owned FileWatcher and hand it to hot-reload systems
-        file_watcher = try self.allocator.create(FileWatcher);
-        file_watcher.* = FileWatcher.init(self.allocator);
 
         scene.enableHotReload(file_watcher) catch |err| {
             log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
@@ -395,7 +407,7 @@ pub const App = struct {
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
         // SBT will be created by raytracing renderer when pipeline is ready
 
-        // --- Initialize Unified Particle Renderer ---
+        log(.INFO, "app", "Creating unified particle renderer...", .{});
         particle_renderer = try ParticleRenderer.init(
             self.allocator,
             &self.gc,
@@ -404,9 +416,6 @@ pub const App = struct {
             swapchain.render_pass,
             1024, // max particles
         );
-
-        // Register for hot reload after renderer is in final memory location
-        try particle_renderer.registerHotReload();
 
         // Initialize particles with random data
         try particle_renderer.initializeParticles();
@@ -955,7 +964,7 @@ pub const App = struct {
         shader_manager.deinit();
         asset_manager.deinit();
         file_watcher.deinit();
-        // Shutdown thread pool first to prevent threading conflicts
+        // Shutdown thread pool last to prevent threading conflicts
         thread_pool.deinit();
         self.allocator.destroy(thread_pool);
         swapchain.deinit();
