@@ -42,6 +42,9 @@ pub const UnifiedPipelineSystem = struct {
     // Resource binding state
     bound_resources: std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage),
 
+    // Descriptor update tracking - signals when descriptors have been updated for each frame
+    descriptor_update_signals: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
+
     // Hot-reload integration
     // Flag to skip descriptor updates during hot reload
     hot_reload_in_progress: bool = false,
@@ -420,6 +423,11 @@ pub const UnifiedPipelineSystem = struct {
         try self.bound_resources.put(key, bound_resource);
     }
 
+    /// Check if descriptors have been updated for a specific frame
+    pub fn areDescriptorsUpdated(self: *Self, frame_index: u32) bool {
+        return self.descriptor_update_signals[frame_index];
+    }
+
     /// Mark all bound resources for a pipeline as dirty (useful after pipeline recreation)
     pub fn markPipelineResourcesDirty(self: *Self, pipeline_id: PipelineId) void {
         var resource_iter = self.bound_resources.iterator();
@@ -432,12 +440,55 @@ pub const UnifiedPipelineSystem = struct {
     }
 
     /// Update all dirty descriptor sets
+    /// Update descriptors for a specific pipeline only
+    pub fn updateDescriptorSetsForPipeline(self: *Self, pipeline_id: PipelineId, frame_index: u32) !void {
+        if (self.hot_reload_in_progress) {
+            return;
+        }
+
+        var updates = std.ArrayList(DescriptorUpdate){};
+        defer updates.deinit(self.allocator);
+
+        // Collect dirty bindings for this specific pipeline and frame
+        var resource_iter = self.bound_resources.iterator();
+        while (resource_iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const bound_resource = entry.value_ptr.*;
+
+            if (key.frame_index == frame_index and
+                key.pipeline_id.hash == pipeline_id.hash and
+                std.mem.eql(u8, key.pipeline_id.name, pipeline_id.name) and
+                bound_resource.dirty)
+            {
+                const update = DescriptorUpdate{
+                    .set = key.set,
+                    .binding = key.binding,
+                    .resource = bound_resource.resource,
+                };
+
+                try updates.append(self.allocator, update);
+                entry.value_ptr.dirty = false;
+            }
+        }
+
+        if (updates.items.len > 0) {
+            log(.INFO, "unified_pipeline", "Updating {} descriptors for pipeline {s} frame {}", .{ updates.items.len, pipeline_id.name, frame_index });
+            try self.applyDescriptorUpdates(pipeline_id, updates.items, frame_index);
+        }
+
+        self.descriptor_update_signals[frame_index] = true;
+    }
+
+    /// Update descriptors for ALL pipelines (legacy method)
     pub fn updateDescriptorSets(self: *Self, frame_index: u32) !void {
 
         // Skip descriptor updates if hot reload is in progress to avoid validation errors
         if (self.hot_reload_in_progress) {
+            log(.DEBUG, "unified_pipeline", "Skipping descriptor updates for frame {} (hot reload in progress)", .{frame_index});
             return;
         }
+
+        log(.DEBUG, "unified_pipeline", "=== Starting descriptor update for frame {} ===", .{frame_index});
 
         // Group updates by pipeline and set
         var updates_by_pipeline = std.HashMap(PipelineId, std.ArrayList(DescriptorUpdate), PipelineIdContext, std.hash_map.default_max_load_percentage).init(self.allocator);
@@ -459,6 +510,13 @@ pub const UnifiedPipelineSystem = struct {
             if (key.frame_index == frame_index and bound_resource.dirty) {
                 dirty_count += 1;
 
+                log(.DEBUG, "unified_pipeline", "Found dirty resource: pipeline={s}, set={}, binding={}, frame={}", .{
+                    key.pipeline_id.name,
+                    key.set,
+                    key.binding,
+                    key.frame_index,
+                });
+
                 const update = DescriptorUpdate{
                     .set = key.set,
                     .binding = key.binding,
@@ -476,14 +534,25 @@ pub const UnifiedPipelineSystem = struct {
             }
         }
 
+        log(.DEBUG, "unified_pipeline", "Found {} dirty descriptors for frame {}", .{ dirty_count, frame_index });
+
         // Apply updates
+        var update_count: u32 = 0;
         var update_iter = updates_by_pipeline.iterator();
         while (update_iter.next()) |entry| {
             const pipeline_id = entry.key_ptr.*;
             const updates = entry.value_ptr.*;
 
+            log(.DEBUG, "unified_pipeline", "Applying {} updates to pipeline {s}", .{ updates.items.len, pipeline_id.name });
+
             try self.applyDescriptorUpdates(pipeline_id, updates.items, frame_index);
+            update_count += 1;
         }
+
+        // Signal that descriptors have been updated for this frame
+        self.descriptor_update_signals[frame_index] = true;
+
+        log(.DEBUG, "unified_pipeline", "=== Completed descriptor update for frame {}: {} pipelines, {} descriptors ===", .{ frame_index, update_count, dirty_count });
     }
 
     /// Manually rebuild a pipeline (useful for debugging or forced reloads)
@@ -757,7 +826,8 @@ pub const UnifiedPipelineSystem = struct {
         for (reflection.uniform_buffers.items) |ub| {
             const set_idx = ub.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, ub.binding, .uniform_buffer, stage_flags, 1);
+            const array_size = if (ub.array_size == 0) 0x10000 else ub.array_size; // Use large number for unbounded arrays
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, ub.binding, .uniform_buffer, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
@@ -765,7 +835,8 @@ pub const UnifiedPipelineSystem = struct {
         for (reflection.storage_buffers.items) |sb| {
             const set_idx = sb.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, sb.binding, .storage_buffer, stage_flags, 1);
+            const array_size = if (sb.array_size == 0) 0x10000 else sb.array_size; // Use large number for unbounded arrays
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, sb.binding, .storage_buffer, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
@@ -773,7 +844,8 @@ pub const UnifiedPipelineSystem = struct {
         for (reflection.textures.items) |tex| {
             const set_idx = tex.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, tex.binding, .combined_image_sampler, stage_flags, 1);
+            const array_size = if (tex.array_size == 0) 0x10000 else tex.array_size; // Use large number for unbounded arrays
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, tex.binding, .combined_image_sampler, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
@@ -781,7 +853,8 @@ pub const UnifiedPipelineSystem = struct {
         for (reflection.samplers.items) |samp| {
             const set_idx = samp.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, samp.binding, .sampler, stage_flags, 1);
+            const array_size = if (samp.array_size == 0) 0x10000 else samp.array_size; // Use large number for unbounded arrays
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, samp.binding, .sampler, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
@@ -815,8 +888,23 @@ pub const UnifiedPipelineSystem = struct {
         var layouts = std.ArrayList(vk.DescriptorSetLayout){};
         defer layouts.deinit(self.allocator);
 
-        for (layout_info.sets.items) |set_bindings| {
-            if (set_bindings.len == 0) continue;
+        log(.INFO, "unified_pipeline", "Creating descriptor set layouts: {} sets", .{layout_info.sets.items.len});
+
+        for (layout_info.sets.items, 0..) |set_bindings, set_idx| {
+            if (set_bindings.len == 0) {
+                log(.DEBUG, "unified_pipeline", "  Set {}: EMPTY (skipped)", .{set_idx});
+                continue;
+            }
+
+            log(.INFO, "unified_pipeline", "  Set {}: {} bindings", .{ set_idx, set_bindings.len });
+            for (set_bindings) |binding| {
+                log(.INFO, "unified_pipeline", "    Binding {}: type={s}, count={}, stages=0x{x}", .{
+                    binding.binding,
+                    @tagName(binding.descriptor_type),
+                    binding.descriptor_count,
+                    @as(u32, @bitCast(binding.stage_flags)),
+                });
+            }
 
             const layout_create_info = vk.DescriptorSetLayoutCreateInfo{
                 .binding_count = @intCast(set_bindings.len),
@@ -826,6 +914,8 @@ pub const UnifiedPipelineSystem = struct {
             const layout = try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &layout_create_info, null);
             try layouts.append(self.allocator, layout);
         }
+
+        log(.INFO, "unified_pipeline", "Created {} descriptor set layouts", .{layouts.items.len});
 
         return try layouts.toOwnedSlice(self.allocator);
     }
@@ -876,16 +966,24 @@ pub const UnifiedPipelineSystem = struct {
             sets.deinit(self.allocator);
         }
 
+        log(.INFO, "unified_pipeline", "Creating descriptor sets for {} sets", .{layout_info.sets.items.len});
+
         // For each descriptor set in the layout
-        for (layout_info.sets.items) |set_bindings| {
-            if (set_bindings.len == 0) continue;
+        for (layout_info.sets.items, 0..) |set_bindings, set_idx| {
+            if (set_bindings.len == 0) {
+                log(.DEBUG, "unified_pipeline", "  Set {}: EMPTY (skipped)", .{set_idx});
+                continue;
+            }
 
             // Count descriptor types for pool sizing
             var uniform_buffers: u32 = 0;
             var storage_buffers: u32 = 0;
             var combined_samplers: u32 = 0;
 
+            log(.INFO, "unified_pipeline", "  Set {}: {} bindings", .{ set_idx, set_bindings.len });
             for (set_bindings) |binding| {
+                log(.INFO, "unified_pipeline", "    Binding {}: type={s}, count={}", .{ binding.binding, @tagName(binding.descriptor_type), binding.descriptor_count });
+
                 switch (binding.descriptor_type) {
                     .uniform_buffer => uniform_buffers += binding.descriptor_count,
                     .storage_buffer => storage_buffers += binding.descriptor_count,
@@ -893,6 +991,8 @@ pub const UnifiedPipelineSystem = struct {
                     else => {},
                 }
             }
+
+            log(.INFO, "unified_pipeline", "  Set {}: Pool sizing - UBO: {}, SSBO: {}, Sampler: {}", .{ set_idx, uniform_buffers, storage_buffers, combined_samplers });
 
             // Create descriptor pool using builder pattern
             var pool_builder = DescriptorPool.Builder{
@@ -905,11 +1005,17 @@ pub const UnifiedPipelineSystem = struct {
             defer pool_builder.poolSizes.deinit(self.allocator);
 
             const pool = try self.allocator.create(DescriptorPool);
+            const ubo_pool_size = @max(uniform_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1);
+            const ssbo_pool_size = @max(storage_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1);
+            const sampler_pool_size = @max(combined_samplers * MAX_FRAMES_IN_FLIGHT * 2, 1);
+
+            log(.INFO, "unified_pipeline", "  Set {}: Allocating pool - UBO: {}, SSBO: {}, Sampler: {}", .{ set_idx, ubo_pool_size, ssbo_pool_size, sampler_pool_size });
+
             pool.* = try pool_builder
                 .setMaxSets(MAX_FRAMES_IN_FLIGHT * 4) // Allow for multiple pipelines per frame
-                .addPoolSize(.uniform_buffer, @max(uniform_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1))
-                .addPoolSize(.storage_buffer, @max(storage_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1))
-                .addPoolSize(.combined_image_sampler, @max(combined_samplers * MAX_FRAMES_IN_FLIGHT * 2, 1))
+                .addPoolSize(.uniform_buffer, ubo_pool_size)
+                .addPoolSize(.storage_buffer, ssbo_pool_size)
+                .addPoolSize(.combined_image_sampler, sampler_pool_size)
                 .build();
 
             try pools.append(self.allocator, pool);
@@ -928,6 +1034,8 @@ pub const UnifiedPipelineSystem = struct {
             layout.* = try layout_builder.build();
             try layouts.append(self.allocator, layout);
 
+            log(.INFO, "unified_pipeline", "  Set {}: Allocating {} descriptor sets", .{ set_idx, MAX_FRAMES_IN_FLIGHT });
+
             // Allocate descriptor sets for all frames
             const frame_sets = try self.allocator.alloc(vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT);
             for (frame_sets) |*set| {
@@ -935,6 +1043,8 @@ pub const UnifiedPipelineSystem = struct {
             }
             try sets.append(self.allocator, frame_sets);
         }
+
+        log(.INFO, "unified_pipeline", "Created {} descriptor pools, {} layouts, {} set arrays", .{ pools.items.len, layouts.items.len, sets.items.len });
 
         return .{
             .pools = pools,
@@ -953,8 +1063,8 @@ pub const UnifiedPipelineSystem = struct {
 
         // Get the pipeline to access its descriptor sets
         const pipeline_ptr = self.pipelines.getPtr(pipeline_id) orelse {
-            std.log.err("Pipeline {} not found when applying descriptor updates", .{pipeline_id});
-            return;
+            log(.ERROR, "unified_pipeline", "Pipeline {s} not found when applying descriptor updates", .{pipeline_id.name});
+            return error.PipelineNotFound;
         };
 
         // Group updates by descriptor set
@@ -983,14 +1093,14 @@ pub const UnifiedPipelineSystem = struct {
             const set_updates = entry.value_ptr.*;
 
             if (set_index >= pipeline_ptr.descriptor_sets.items.len) {
-                std.log.err("Descriptor set index {} out of range for pipeline {s} (has {} sets)", .{ set_index, pipeline_id.name, pipeline_ptr.descriptor_sets.items.len });
+                log(.ERROR, "unified_pipeline", "Descriptor set index {} out of range for pipeline {s} (has {} sets)", .{ set_index, pipeline_id.name, pipeline_ptr.descriptor_sets.items.len });
                 continue;
             }
 
             // Get the descriptor set for this frame
             const descriptor_sets = pipeline_ptr.descriptor_sets.items[set_index];
             if (frame_index >= descriptor_sets.len) {
-                std.log.err("Frame index {} out of range for descriptor set", .{frame_index});
+                log(.ERROR, "unified_pipeline", "Frame index {} out of range for descriptor set", .{frame_index});
                 continue;
             }
 
@@ -1018,6 +1128,9 @@ pub const UnifiedPipelineSystem = struct {
                             .image_layout = image.layout,
                         };
                         _ = writer.writeImage(update.binding, @constCast(&image_info));
+                    },
+                    .image_array => |image_infos| {
+                        _ = writer.writeImages(update.binding, image_infos);
                     },
                     .acceleration_structure => |accel_struct| {
                         const accel_info = vk.WriteDescriptorSetAccelerationStructureKHR{
@@ -1258,6 +1371,7 @@ pub const Resource = union(enum) {
         sampler: vk.Sampler,
         layout: vk.ImageLayout = .shader_read_only_optimal,
     },
+    image_array: []const vk.DescriptorImageInfo,
     acceleration_structure: vk.AccelerationStructureKHR,
 };
 

@@ -52,7 +52,7 @@ const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").U
 const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
 // Renderer imports
-const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
+const TexturedRenderer = @import("renderers/unified_textured_renderer.zig").UnifiedTexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
 const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
@@ -108,7 +108,9 @@ pub const App = struct {
 
     gc: GraphicsContext = undefined,
     allocator: std.mem.Allocator = undefined,
-    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
+
+    // Initialize to true so descriptors are updated on first frames
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
     as_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
 
     // FPS tracking variables (instance variables)
@@ -341,23 +343,19 @@ pub const App = struct {
         try self.registerPipelineTemplates();
         log(.INFO, "app", "Pipeline templates registered", .{});
 
-        var shader_library = ShaderLibrary.init(self.gc, self.allocator);
-
-        try shader_library.add(&.{
-            &textured_frag,
-            &textured_vert,
-        }, &.{
-            vk.ShaderStageFlags{ .fragment_bit = true },
-            vk.ShaderStageFlags{ .vertex_bit = true },
-        }, &.{
-            entry_point_definition{},
-            entry_point_definition{},
-        });
         _ = try scene.updateSyncResources(self.allocator);
-        textured_renderer = try TexturedRenderer.init(@constCast(&self.gc), swapchain.render_pass, shader_library, self.allocator, global_ubo_set.layout.descriptor_set_layout, &dynamic_pipeline_manager);
-        for (0..MAX_FRAMES_IN_FLIGHT) |FF_index| {
-            try textured_renderer.updateMaterialData(@intCast(FF_index), scene.asset_manager.material_buffer.?.descriptor_info, scene.asset_manager.getTextureDescriptorArray());
-        }
+
+        // Initialize unified textured renderer with shared pipeline system
+        textured_renderer = try TexturedRenderer.init(
+            self.allocator,
+            @constCast(&self.gc),
+            &shader_manager,
+            &unified_pipeline_system,
+            swapchain.render_pass,
+        );
+
+        // Material data is now managed by the asset_manager and bound via UnifiedPipelineSystem
+        // No need for separate updateMaterialData calls
 
         var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
 
@@ -533,7 +531,8 @@ pub const App = struct {
         // Before rendering each frame, check if descriptors need updating
         if (self.descriptor_dirty_flags[(current_frame + 1) % MAX_FRAMES_IN_FLIGHT]) {
             log(.DEBUG, "app", "Updating descriptors for frame {d}", .{(current_frame + 1) % MAX_FRAMES_IN_FLIGHT});
-            // Update descriptors for the next frame (prepare resources ahead of time)
+
+            // Update textured renderer's material/texture descriptors
             try textured_renderer.updateMaterialData(
                 (current_frame + 1) % MAX_FRAMES_IN_FLIGHT,
                 scene.asset_manager.material_buffer.?.descriptor_info,
@@ -674,99 +673,8 @@ pub const App = struct {
     fn registerPipelineTemplates(self: *App) !void {
         _ = self; // Method for future expansion, currently uses global dynamic_pipeline_manager
 
-        // Descriptor set 0: Global uniforms
-        const textured_descriptor_set_0 = [_]DescriptorBinding{
-            DescriptorBinding{
-                .binding = 0,
-                .descriptor_type = .uniform_buffer,
-                .descriptor_count = 1,
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-            },
-        };
-
-        // Descriptor set 1: Material buffer and textures
-        const textured_descriptor_set_1 = [_]DescriptorBinding{
-            DescriptorBinding{
-                .binding = 0,
-                .descriptor_type = .storage_buffer,
-                .descriptor_count = 1,
-                .stage_flags = .{ .fragment_bit = true },
-            },
-            DescriptorBinding{
-                .binding = 1,
-                .descriptor_type = .combined_image_sampler,
-                .descriptor_count = 16,
-                .stage_flags = .{ .fragment_bit = true },
-            },
-        };
-
-        // Combine sets into array
-        const textured_descriptor_sets = [_][]const DescriptorBinding{
-            &textured_descriptor_set_0,
-            &textured_descriptor_set_1,
-        };
-
-        const textured_vertex_bindings = [_]VertexInputBinding{
-            VertexInputBinding{
-                .binding = 0,
-                .stride = @sizeOf(Vertex),
-                .input_rate = .vertex,
-            },
-        };
-
-        const textured_vertex_attributes = [_]VertexInputAttribute{
-            VertexInputAttribute{
-                .location = 0,
-                .binding = 0,
-                .format = .r32g32b32_sfloat,
-                .offset = @offsetOf(Vertex, "pos"),
-            },
-            VertexInputAttribute{
-                .location = 1,
-                .binding = 0,
-                .format = .r32g32b32_sfloat,
-                .offset = @offsetOf(Vertex, "color"),
-            },
-            VertexInputAttribute{
-                .location = 2,
-                .binding = 0,
-                .format = .r32g32b32_sfloat,
-                .offset = @offsetOf(Vertex, "normal"),
-            },
-            VertexInputAttribute{
-                .location = 3,
-                .binding = 0,
-                .format = .r32g32_sfloat,
-                .offset = @offsetOf(Vertex, "uv"),
-            },
-        };
-
-        const textured_push_constants = [_]PushConstantRange{
-            PushConstantRange{
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-                .offset = 0,
-                .size = @sizeOf(@import("renderers/textured_renderer.zig").TexturedPushConstantData),
-            },
-        };
-
-        // Textured renderer pipeline template
-        const textured_template = PipelineTemplate{
-            .name = "textured_renderer",
-            .vertex_shader = "shaders/textured.vert",
-            .fragment_shader = "shaders/textured.frag",
-
-            .vertex_bindings = &textured_vertex_bindings,
-            .vertex_attributes = &textured_vertex_attributes,
-            .descriptor_sets = &textured_descriptor_sets,
-            .push_constant_ranges = &textured_push_constants,
-
-            .depth_test_enable = true,
-            .depth_write_enable = true,
-            .cull_mode = .{ .back_bit = true },
-            .front_face = .counter_clockwise,
-        };
-
-        try dynamic_pipeline_manager.registerPipeline(textured_template);
+        // NOTE: Textured renderer now uses UnifiedPipelineSystem and creates its own pipeline
+        // No need to register textured_template with DynamicPipelineManager anymore
 
         // Static arrays for point light renderer
         const point_light_vertex_bindings = [_]VertexInputBinding{
@@ -886,7 +794,8 @@ pub const App = struct {
 
         try dynamic_pipeline_manager.registerPipeline(particle_render_template);
 
-        log(.INFO, "app", "Registered pipeline templates: textured_renderer, point_light_renderer, particle_renderer", .{});
+        log(.INFO, "app", "Registered pipeline templates with DynamicPipelineManager: point_light_renderer, particle_renderer", .{});
+        log(.INFO, "app", "NOTE: textured_renderer now uses UnifiedPipelineSystem and manages its own pipeline", .{});
     }
 
     pub fn deinit(self: *App) void {

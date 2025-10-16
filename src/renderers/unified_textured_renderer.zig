@@ -1,42 +1,35 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Camera = @import("../core/camera.zig").Camera;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const PipelineConfig = @import("../rendering/unified_pipeline_system.zig").PipelineConfig;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const PipelineId = @import("../rendering/unified_pipeline_system.zig").PipelineId;
-const Buffer = @import("../core/buffer.zig").Buffer;
-const Image = @import("../core/image.zig").Image;
+const Resource = @import("../rendering/unified_pipeline_system.zig").Resource;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const RasterizationData = @import("../rendering/scene_view.zig").RasterizationData;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const Vertex = @import("../rendering/mesh.zig").Vertex;
 const log = @import("../utils/log.zig").log;
+const Math = @import("../utils/math.zig");
 
-/// Example textured renderer using the unified pipeline system
+/// Textured renderer using the unified pipeline system
 ///
-/// This shows how to migrate from the old fragmented approach to the new
-/// unified pipeline and descriptor management system.
+/// This renderer replaces the old textured_renderer but uses UnifiedPipelineSystem
+/// like ParticleRenderer does, while maintaining API compatibility.
 pub const UnifiedTexturedRenderer = struct {
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
     shader_manager: *ShaderManager,
+    render_pass: vk.RenderPass,
 
-    // Unified pipeline system
-    pipeline_system: UnifiedPipelineSystem,
+    // Unified pipeline system (shared, not owned)
+    pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
 
     // Pipeline for textured objects
     textured_pipeline: PipelineId,
-
-    // Uniform buffers (per frame in flight)
-    mvp_buffers: [MAX_FRAMES_IN_FLIGHT]*Buffer,
-    light_buffers: [MAX_FRAMES_IN_FLIGHT]*Buffer,
-
-    // Default resources
-    default_texture: struct {
-        image: *Image,
-        view: vk.ImageView,
-        sampler: vk.Sampler,
-    },
 
     const Self = @This();
 
@@ -44,52 +37,32 @@ pub const UnifiedTexturedRenderer = struct {
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         shader_manager: *ShaderManager,
+        pipeline_system: *UnifiedPipelineSystem,
         render_pass: vk.RenderPass,
     ) !Self {
-        log(.INFO, "unified_textured_renderer", "Initializing unified textured renderer");
+        log(.INFO, "unified_textured_renderer", "Initializing unified textured renderer", .{});
 
-        // Initialize unified pipeline system
-        var pipeline_system = try UnifiedPipelineSystem.init(allocator, graphics_context, shader_manager);
-        const resource_binder = ResourceBinder.init(allocator, &pipeline_system);
+        // Use the provided pipeline system
+        const resource_binder = ResourceBinder.init(allocator, pipeline_system);
 
-        // Create per-frame uniform buffers
-        var mvp_buffers: [MAX_FRAMES_IN_FLIGHT]*Buffer = undefined;
-        var light_buffers: [MAX_FRAMES_IN_FLIGHT]*Buffer = undefined;
-
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            mvp_buffers[i] = try Buffer.create(
-                allocator,
-                graphics_context,
-                @sizeOf(MVPUniformBuffer),
-                .{ .uniform_buffer_bit = true },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
-            );
-
-            light_buffers[i] = try Buffer.create(
-                allocator,
-                graphics_context,
-                @sizeOf(LightUniformBuffer),
-                .{ .uniform_buffer_bit = true },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
-            );
-        }
-
-        // Create default texture
-        const default_texture = try createDefaultTexture(allocator, graphics_context);
-
-        // Create textured pipeline with automatic descriptor layout extraction
-        const pipeline_config = UnifiedPipelineSystem.PipelineConfig{
-            .name = "textured_objects",
+        // Create textured pipeline with push constants for per-object transforms
+        const pipeline_config = PipelineConfig{
+            .name = "textured_renderer",
             .vertex_shader = "shaders/textured.vert",
             .fragment_shader = "shaders/textured.frag",
             .render_pass = render_pass,
             .vertex_input_bindings = &[_]@import("../rendering/pipeline_builder.zig").VertexInputBinding{
-                .{ .binding = 0, .stride = @sizeOf(TexturedVertex), .input_rate = .vertex },
+                // Match the old Vertex format from scene
+                .{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = .vertex },
             },
             .vertex_input_attributes = &[_]@import("../rendering/pipeline_builder.zig").VertexInputAttribute{
-                .{ .location = 0, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(TexturedVertex, "position") },
-                .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(TexturedVertex, "normal") },
-                .{ .location = 2, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(TexturedVertex, "tex_coord") },
+                .{ .location = 0, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "pos") },
+                .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "color") },
+                .{ .location = 2, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "normal") },
+                .{ .location = 3, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Vertex, "uv") },
+            },
+            .push_constant_ranges = &[_]vk.PushConstantRange{
+                .{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(TexturedPushConstantData) },
             },
             .cull_mode = .{ .back_bit = true },
             .front_face = .counter_clockwise,
@@ -97,289 +70,142 @@ pub const UnifiedTexturedRenderer = struct {
 
         const textured_pipeline = try pipeline_system.createPipeline(pipeline_config);
 
-        var renderer = Self{
+        const renderer = Self{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .shader_manager = shader_manager,
+            .render_pass = render_pass,
             .pipeline_system = pipeline_system,
             .resource_binder = resource_binder,
             .textured_pipeline = textured_pipeline,
-            .mvp_buffers = mvp_buffers,
-            .light_buffers = light_buffers,
-            .default_texture = default_texture,
         };
 
-        // Bind default resources for all frames
-        try renderer.setupDefaultResources();
-
-        log(.INFO, "unified_textured_renderer", "✅ Unified textured renderer initialized");
+        log(.INFO, "unified_textured_renderer", "✅ Unified textured renderer initialized", .{});
 
         return renderer;
     }
 
     pub fn deinit(self: *Self) void {
-        log(.INFO, "unified_textured_renderer", "Cleaning up unified textured renderer");
+        log(.INFO, "unified_textured_renderer", "Cleaning up unified textured renderer", .{});
 
-        // Clean up uniform buffers
-        for (self.mvp_buffers) |buffer| {
-            buffer.destroy();
-            self.allocator.destroy(buffer);
-        }
-
-        for (self.light_buffers) |buffer| {
-            buffer.destroy();
-            self.allocator.destroy(buffer);
-        }
-
-        // Clean up default texture
-        self.graphics_context.vkd.destroyImageView(self.graphics_context.dev, self.default_texture.view, null);
-        self.graphics_context.vkd.destroySampler(self.graphics_context.dev, self.default_texture.sampler, null);
-        self.default_texture.image.destroy();
-        self.allocator.destroy(self.default_texture.image);
-
-        // Clean up pipeline system
+        // Clean up resource binder (but not pipeline system - it's shared)
         self.resource_binder.deinit();
-        self.pipeline_system.deinit();
     }
 
-    /// Render textured objects
-    pub fn render(
+    /// Update material data for current frame (maintains API compatibility with old renderer)
+    /// This binds the material buffer and texture array to the pipeline's descriptor sets
+    pub fn updateMaterialData(
         self: *Self,
-        command_buffer: vk.CommandBuffer,
-        camera: *const Camera,
-        objects: []const TexturedObject,
         frame_index: u32,
+        material_buffer_info: vk.DescriptorBufferInfo,
+        texture_image_infos: []const vk.DescriptorImageInfo,
     ) !void {
+        // Bind material storage buffer (set 1, binding 0)
+        const material_resource = Resource{
+            .buffer = .{
+                .buffer = material_buffer_info.buffer,
+                .offset = material_buffer_info.offset,
+                .range = material_buffer_info.range,
+            },
+        };
+        try self.pipeline_system.bindResource(self.textured_pipeline, 1, 0, material_resource, frame_index);
+
+        // Bind texture array (set 1, binding 1) as a single image_array resource
+        const texture_resource = Resource{
+            .image_array = texture_image_infos,
+        };
+        try self.pipeline_system.bindResource(self.textured_pipeline, 1, 1, texture_resource, frame_index);
+    }
+
+    /// Render textured objects (matches old API signature)
+    pub fn render(self: *Self, frame_info: FrameInfo, raster_data: RasterizationData) !void {
+        const objects = raster_data.objects;
         if (objects.len == 0) return;
 
-        log(.DEBUG, "unified_textured_renderer", "Rendering {} textured objects (frame {})", .{ objects.len, frame_index });
+        // Update descriptor sets for this frame (materials and textures)
+        try self.pipeline_system.updateDescriptorSetsForPipeline(self.textured_pipeline, frame_info.current_frame);
 
-        // Update frame-specific uniform data
-        try self.updateFrameUniforms(camera, frame_index);
+        // Get pipeline layout BEFORE binding (we'll bind manually)
+        const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.textured_pipeline);
 
-        // Update descriptor sets for this frame
-        try self.resource_binder.updateFrame(frame_index);
+        // Get the pipeline's Vulkan handle
+        const pipeline = self.pipeline_system.pipelines.get(self.textured_pipeline) orelse return error.PipelineNotFound;
 
-        // Bind the unified pipeline
-        try self.pipeline_system.bindPipeline(command_buffer, self.textured_pipeline);
+        // Bind the Vulkan pipeline directly (skip automatic descriptor binding)
+        self.graphics_context.vkd.cmdBindPipeline(frame_info.command_buffer, .graphics, pipeline.vulkan_pipeline);
 
-        // Render all objects
-        for (objects) |object| {
-            try self.renderObject(command_buffer, object, frame_index);
-        }
-    }
+        // Manually bind descriptor sets like the old renderer
+        // Set 0: Global UBO (from frame_info) - contains view/projection matrices
+        // Set 1: Material buffer and texture array (from pipeline system)
 
-    /// Add a textured object with custom texture
-    pub fn bindObjectTexture(
-        self: *Self,
-        image_view: vk.ImageView,
-        sampler: vk.Sampler,
-        frame_index: u32,
-    ) !void {
-        // Bind custom texture to set 1, binding 0 (per-object texture)
-        try self.resource_binder.bindTextureDefault(
-            self.textured_pipeline,
-            1,
-            0, // set 1, binding 0
-            image_view,
-            sampler,
-            frame_index,
-        );
-    }
+        // Get set 1 descriptor from the pipeline (materials/textures)
+        // descriptor_sets is [set_index][frame_index]
+        if (pipeline.descriptor_sets.items.len > 1) {
+            const set_1_frames = pipeline.descriptor_sets.items[1]; // Set 1 (materials/textures)
+            const material_descriptor_set = set_1_frames[frame_info.current_frame];
 
-    /// Update per-object transform data
-    pub fn updateObjectTransform(
-        self: *Self,
-        transform: @import("../math/transform.zig").Transform,
-        frame_index: u32,
-    ) !void {
-        _ = self; // TODO: Implement per-object uniform buffer management
+            const descriptor_sets = [_]vk.DescriptorSet{
+                frame_info.global_descriptor_set, // Set 0: Global
+                material_descriptor_set, // Set 1: Materials/Textures
+            };
 
-        // Create object uniform data
-        const object_ubo = ObjectUniformBuffer{
-            .model = transform.getMatrix(),
-            .normal_matrix = transform.getNormalMatrix(),
-        };
-
-        // Update object uniform buffer
-        // This would require per-object uniform buffers in a real implementation
-        _ = object_ubo;
-        _ = frame_index;
-
-        // TODO: Implement per-object uniform buffer management
-        // For now, we'll use push constants or vertex attributes for per-object data
-    }
-
-    // Private implementation
-
-    fn setupDefaultResources(self: *Self) !void {
-        log(.DEBUG, "unified_textured_renderer", "Setting up default resources");
-
-        // Bind default resources for all frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
-            const frame_idx = @as(u32, @intCast(frame_index));
-
-            // Set 0: Frame-global data
-            try self.resource_binder.bindFullUniformBuffer(
-                self.textured_pipeline,
+            self.graphics_context.vkd.cmdBindDescriptorSets(
+                frame_info.command_buffer,
+                .graphics,
+                pipeline_layout,
+                0, // First set
+                descriptor_sets.len,
+                &descriptor_sets,
                 0,
-                0, // set 0, binding 0 - MVP data
-                self.mvp_buffers[frame_index],
-                frame_idx,
+                null,
             );
-
-            try self.resource_binder.bindFullUniformBuffer(
-                self.textured_pipeline,
-                0,
-                1, // set 0, binding 1 - Light data
-                self.light_buffers[frame_index],
-                frame_idx,
-            );
-
-            // Set 1: Default texture (will be overridden per object)
-            try self.resource_binder.bindTextureDefault(
-                self.textured_pipeline,
-                1,
-                0, // set 1, binding 0 - Diffuse texture
-                self.default_texture.view,
-                self.default_texture.sampler,
-                frame_idx,
-            );
-        }
-    }
-
-    fn updateFrameUniforms(self: *Self, camera: *const Camera, frame_index: u32) !void {
-        // Update MVP uniform buffer
-        const mvp_data = MVPUniformBuffer{
-            .view = camera.getViewMatrix(),
-            .projection = camera.getProjectionMatrix(),
-            .view_projection = camera.getViewProjectionMatrix(),
-        };
-
-        try self.mvp_buffers[frame_index].writeData(&mvp_data, 0);
-
-        // Update light uniform buffer
-        const light_data = LightUniformBuffer{
-            .light_position = .{ 5.0, 5.0, 5.0, 1.0 },
-            .light_color = .{ 1.0, 1.0, 1.0, 1.0 },
-            .ambient_strength = 0.1,
-            .light_intensity = 1.0,
-        };
-
-        try self.light_buffers[frame_index].writeData(&light_data, 0);
-    }
-
-    fn renderObject(self: *Self, command_buffer: vk.CommandBuffer, object: TexturedObject, frame_index: u32) !void {
-        _ = frame_index;
-
-        // Bind vertex and index buffers
-        const vertex_buffers = [_]vk.Buffer{object.vertex_buffer};
-        const offsets = [_]vk.DeviceSize{0};
-
-        self.graphics_context.vkd.cmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
-
-        if (object.index_buffer) |index_buffer| {
-            self.graphics_context.vkd.cmdBindIndexBuffer(command_buffer, index_buffer, 0, .uint32);
-            self.graphics_context.vkd.cmdDrawIndexed(command_buffer, object.index_count, 1, 0, 0, 0);
         } else {
-            self.graphics_context.vkd.cmdDraw(command_buffer, object.vertex_count, 1, 0, 0);
+            // Fallback: only bind global descriptor set if materials aren't ready
+            const descriptor_sets = [_]vk.DescriptorSet{
+                frame_info.global_descriptor_set, // Set 0: Global
+            };
+
+            self.graphics_context.vkd.cmdBindDescriptorSets(
+                frame_info.command_buffer,
+                .graphics,
+                pipeline_layout,
+                0, // First set
+                descriptor_sets.len,
+                &descriptor_sets,
+                0,
+                null,
+            );
+        }
+
+        // Render each object
+        for (raster_data.objects) |object| {
+            if (!object.visible) continue;
+
+            // Set up push constants with transform and material index (matches old API)
+            const push_constants = TexturedPushConstantData{
+                .transform = object.transform,
+                .normal_matrix = object.transform, // TODO: Calculate proper normal matrix
+                .material_index = object.material_index,
+            };
+
+            self.graphics_context.vkd.cmdPushConstants(
+                frame_info.command_buffer,
+                pipeline_layout,
+                .{ .vertex_bit = true, .fragment_bit = true },
+                0,
+                @sizeOf(TexturedPushConstantData),
+                &push_constants,
+            );
+
+            // Draw the mesh
+            object.mesh_handle.getMesh().draw(self.graphics_context.*, frame_info.command_buffer);
         }
     }
-
-    fn createDefaultTexture(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) !@TypeOf(@as(UnifiedTexturedRenderer, undefined).default_texture) {
-        // Create a simple white 1x1 texture as default
-        const image = try Image.create2D(
-            allocator,
-            graphics_context,
-            1,
-            1, // 1x1 pixel
-            .r8g8b8a8_srgb,
-            .{ .sampled_bit = true },
-            .optimal,
-        );
-
-        // Upload white pixel data
-        const white_pixel = [_]u8{ 255, 255, 255, 255 };
-        try image.transitionLayout(.undefined, .transfer_dst_optimal);
-        try image.uploadData(&white_pixel);
-        try image.transitionLayout(.transfer_dst_optimal, .shader_read_only_optimal);
-
-        // Create image view
-        const view = try graphics_context.vkd.createImageView(graphics_context.dev, &vk.ImageViewCreateInfo{
-            .image = image.handle,
-            .view_type = .@"2d",
-            .format = .r8g8b8a8_srgb,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        }, null);
-
-        // Create sampler
-        const sampler = try graphics_context.vkd.createSampler(graphics_context.dev, &vk.SamplerCreateInfo{
-            .mag_filter = .linear,
-            .min_filter = .linear,
-            .address_mode_u = .repeat,
-            .address_mode_v = .repeat,
-            .address_mode_w = .repeat,
-            .anisotropy_enable = vk.TRUE,
-            .max_anisotropy = 16.0,
-            .border_color = .int_opaque_black,
-            .unnormalized_coordinates = vk.FALSE,
-            .compare_enable = vk.FALSE,
-            .compare_op = .always,
-            .mipmap_mode = .linear,
-            .mip_lod_bias = 0.0,
-            .min_lod = 0.0,
-            .max_lod = 0.0,
-        }, null);
-
-        return .{
-            .image = image,
-            .view = view,
-            .sampler = sampler,
-        };
-    }
 };
 
-/// Vertex format for textured objects
-const TexturedVertex = extern struct {
-    position: [3]f32,
-    normal: [3]f32,
-    tex_coord: [2]f32,
-};
-
-/// Object to be rendered
-pub const TexturedObject = struct {
-    vertex_buffer: vk.Buffer,
-    index_buffer: ?vk.Buffer = null,
-    vertex_count: u32,
-    index_count: u32 = 0,
-    texture_view: ?vk.ImageView = null,
-    texture_sampler: ?vk.Sampler = null,
-};
-
-/// MVP uniform buffer layout
-const MVPUniformBuffer = extern struct {
-    view: [16]f32,
-    projection: [16]f32,
-    view_projection: [16]f32,
-};
-
-/// Light uniform buffer layout
-const LightUniformBuffer = extern struct {
-    light_position: [4]f32,
-    light_color: [4]f32,
-    ambient_strength: f32,
-    light_intensity: f32,
-    _padding: [2]f32 = .{ 0.0, 0.0 },
-};
-
-/// Object uniform buffer layout (for per-object data)
-const ObjectUniformBuffer = extern struct {
-    model: [16]f32,
-    normal_matrix: [16]f32,
+/// Push constant data for per-object transforms (matches old textured_renderer API)
+pub const TexturedPushConstantData = extern struct {
+    transform: [16]f32 = Math.Mat4x4.identity().data,
+    normal_matrix: [16]f32 = Math.Mat4x4.identity().data,
+    material_index: u32 = 0,
 };

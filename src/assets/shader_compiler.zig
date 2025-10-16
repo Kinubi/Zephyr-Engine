@@ -100,6 +100,7 @@ pub const ShaderBuffer = struct {
     binding: u32,
     set: u32,
     size: u32,
+    array_size: u32 = 1, // Number of array elements (1 for non-arrays, 0 for unbounded)
     members: std.ArrayList(ShaderBufferMember),
 };
 
@@ -116,12 +117,14 @@ pub const ShaderTexture = struct {
     set: u32,
     dimension: TextureDimension,
     format: ?TextureFormat = null,
+    array_size: u32 = 1, // Number of array elements (1 for non-arrays, 0 for unbounded)
 };
 
 pub const ShaderSampler = struct {
     name: []const u8,
     binding: u32,
     set: u32,
+    array_size: u32 = 1, // Number of array elements (1 for non-arrays, 0 for unbounded)
 };
 
 pub const ShaderPushConstants = struct {
@@ -480,6 +483,12 @@ pub const ShaderCompiler = struct {
         const json_owned = try self.allocator.dupe(u8, json_cstr);
         defer self.allocator.free(json_owned);
 
+        // DEBUG: Write JSON to file for inspection
+        if (std.mem.indexOf(u8, json_owned, "textures") != null) {
+            std.fs.cwd().writeFile(.{ .sub_path = "spirv_reflection_debug.json", .data = json_owned }) catch {};
+            std.log.warn("=== SPIRV-Cross JSON dumped to spirv_reflection_debug.json ===", .{});
+        }
+
         var parser = std.json.parseFromSlice(std.json.Value, self.allocator, json_owned, .{}) catch |err| {
             std.log.err("Failed to parse SPIRV-Cross JSON reflection: {}", .{err});
             return error.ReflectionGenerationFailed;
@@ -558,6 +567,7 @@ pub const ShaderCompiler = struct {
                                 const set_opt = elem.object.get("set");
                                 const binding_opt = elem.object.get("binding");
                                 const size_opt = elem.object.get("size");
+                                const array_size_opt = elem.object.get("array");
                                 if (name_opt) |name_v| {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
@@ -571,11 +581,35 @@ pub const ShaderCompiler = struct {
                                                         size = @as(u32, @intCast(s_v.integer));
                                                     }
                                                 }
+
+                                                // Extract array size
+                                                var array_size: u32 = 1;
+                                                if (array_size_opt) |as_v| {
+                                                    if (as_v == .array and as_v.array.items.len > 0) {
+                                                        if (as_v.array.items[0] == .integer) {
+                                                            const arr_size = as_v.array.items[0].integer;
+                                                            array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
+                                                        } else {
+                                                            array_size = 0; // Unbounded
+                                                        }
+                                                    } else if (as_v == .integer) {
+                                                        const arr_size = as_v.integer;
+                                                        array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
+                                                    }
+                                                }
+
                                                 const name_copy = try self.allocator.dupe(u8, name);
                                                 var members = std.ArrayList(ShaderBufferMember){};
                                                 _ = &members;
 
-                                                try refl.uniform_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                                try refl.uniform_buffers.append(self.allocator, ShaderBuffer{
+                                                    .name = name_copy,
+                                                    .binding = binding,
+                                                    .set = set,
+                                                    .size = size,
+                                                    .array_size = array_size,
+                                                    .members = members,
+                                                });
                                             }
                                         }
                                     }
@@ -594,6 +628,7 @@ pub const ShaderCompiler = struct {
                                 const set_opt = elem.object.get("set");
                                 const binding_opt = elem.object.get("binding");
                                 const size_opt = elem.object.get("size");
+                                const array_size_opt = elem.object.get("array");
                                 if (name_opt) |name_v| {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
@@ -607,10 +642,34 @@ pub const ShaderCompiler = struct {
                                                         size = @as(u32, @intCast(s_v.integer));
                                                     }
                                                 }
+
+                                                // Extract array size
+                                                var array_size: u32 = 1;
+                                                if (array_size_opt) |as_v| {
+                                                    if (as_v == .array and as_v.array.items.len > 0) {
+                                                        if (as_v.array.items[0] == .integer) {
+                                                            const arr_size = as_v.array.items[0].integer;
+                                                            array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
+                                                        } else {
+                                                            array_size = 0; // Unbounded
+                                                        }
+                                                    } else if (as_v == .integer) {
+                                                        const arr_size = as_v.integer;
+                                                        array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
+                                                    }
+                                                }
+
                                                 const name_copy = try self.allocator.dupe(u8, name);
                                                 var members = std.ArrayList(ShaderBufferMember){};
                                                 _ = &members;
-                                                try refl.storage_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                                try refl.storage_buffers.append(self.allocator, ShaderBuffer{
+                                                    .name = name_copy,
+                                                    .binding = binding,
+                                                    .set = set,
+                                                    .size = size,
+                                                    .array_size = array_size,
+                                                    .members = members,
+                                                });
                                             }
                                         }
                                     }
@@ -666,6 +725,8 @@ pub const ShaderCompiler = struct {
                                 const name_opt = elem.object.get("name");
                                 const set_opt = elem.object.get("set");
                                 const binding_opt = elem.object.get("binding");
+                                const array_opt = elem.object.get("array");
+
                                 if (name_opt) |name_v| {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
@@ -673,8 +734,29 @@ pub const ShaderCompiler = struct {
                                                 const name = name_v.string;
                                                 const set = @as(u32, @intCast(set_v.integer));
                                                 const binding = @as(u32, @intCast(bind_v.integer));
+
+                                                // Extract array size from "array" field
+                                                var array_size: u32 = 1;
+                                                if (array_opt) |arr_v| {
+                                                    if (arr_v == .array and arr_v.array.items.len > 0) {
+                                                        if (arr_v.array.items[0] == .integer) {
+                                                            const size = arr_v.array.items[0].integer;
+                                                            // 0 means unbounded array in SPIRV-Cross
+                                                            array_size = if (size == 0) 0 else @as(u32, @intCast(size));
+                                                            std.log.warn("Parsed texture '{s}' array size: {} (0=unbounded)", .{ name, array_size });
+                                                        }
+                                                    }
+                                                }
+
                                                 const name_copy = try self.allocator.dupe(u8, name);
-                                                try refl.textures.append(self.allocator, ShaderTexture{ .name = name_copy, .binding = binding, .set = set, .dimension = TextureDimension.texture_2d, .format = null });
+                                                try refl.textures.append(self.allocator, ShaderTexture{
+                                                    .name = name_copy,
+                                                    .binding = binding,
+                                                    .set = set,
+                                                    .dimension = TextureDimension.texture_2d,
+                                                    .format = null,
+                                                    .array_size = array_size,
+                                                });
                                             }
                                         }
                                     }
@@ -682,6 +764,65 @@ pub const ShaderCompiler = struct {
                             }
                         }
                     }
+                }
+
+                // Process "textures" field (alternative location in JSON)
+                if (res_obj.get("textures")) |v| {
+                    std.log.warn("DEBUG: Found 'textures' field in JSON, type = {s}", .{@tagName(v)});
+                    if (v == .array) {
+                        std.log.warn("DEBUG: textures is array with {} items", .{v.array.items.len});
+                        for (v.array.items) |elem| {
+                            std.log.warn("DEBUG: Processing texture element, type = {s}", .{@tagName(elem)});
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const array_opt = elem.object.get("array");
+
+                                std.log.warn("DEBUG: name={any}, set={any}, binding={any}, array={any}", .{ name_opt != null, set_opt != null, binding_opt != null, array_opt != null });
+
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const name = name_v.string;
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+
+                                                // Extract array size from "array" field
+                                                var array_size: u32 = 1;
+                                                if (array_opt) |arr_v| {
+                                                    if (arr_v == .array and arr_v.array.items.len > 0) {
+                                                        if (arr_v.array.items[0] == .integer) {
+                                                            const size = arr_v.array.items[0].integer;
+                                                            // 0 means unbounded array in SPIRV-Cross
+                                                            array_size = if (size == 0) 0 else @as(u32, @intCast(size));
+                                                            std.log.warn("Parsed texture '{s}' (from 'textures' field) array size: {} (0=unbounded)", .{ name, array_size });
+                                                        }
+                                                    }
+                                                }
+
+                                                const name_copy = try self.allocator.dupe(u8, name);
+                                                try refl.textures.append(self.allocator, ShaderTexture{
+                                                    .name = name_copy,
+                                                    .binding = binding,
+                                                    .set = set,
+                                                    .dimension = TextureDimension.texture_2d,
+                                                    .format = null,
+                                                    .array_size = array_size,
+                                                });
+                                                std.log.warn("DEBUG: Successfully added texture '{s}' to reflection", .{name});
+                                            } else {
+                                                std.log.warn("DEBUG: Type mismatch - name is string? {}, set is int? {}, binding is int? {}", .{ name_v == .string, set_v == .integer, bind_v == .integer });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    std.log.warn("DEBUG: NO 'textures' field found in resources object", .{});
                 }
 
                 // separate_samplers
@@ -692,6 +833,7 @@ pub const ShaderCompiler = struct {
                                 const name_opt = elem.object.get("name");
                                 const set_opt = elem.object.get("set");
                                 const binding_opt = elem.object.get("binding");
+                                const array_size_opt = elem.object.get("array");
                                 if (name_opt) |name_v| {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
@@ -699,8 +841,30 @@ pub const ShaderCompiler = struct {
                                                 const name = name_v.string;
                                                 const set = @as(u32, @intCast(set_v.integer));
                                                 const binding = @as(u32, @intCast(bind_v.integer));
+
+                                                // Extract array size
+                                                var array_size: u32 = 1;
+                                                if (array_size_opt) |as_v| {
+                                                    if (as_v == .array and as_v.array.items.len > 0) {
+                                                        if (as_v.array.items[0] == .integer) {
+                                                            const arr_size = as_v.array.items[0].integer;
+                                                            array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
+                                                        } else {
+                                                            array_size = 0; // Unbounded
+                                                        }
+                                                    } else if (as_v == .integer) {
+                                                        const arr_size = as_v.integer;
+                                                        array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
+                                                    }
+                                                }
+
                                                 const name_copy = try self.allocator.dupe(u8, name);
-                                                try refl.samplers.append(self.allocator, ShaderSampler{ .name = name_copy, .binding = binding, .set = set });
+                                                try refl.samplers.append(self.allocator, ShaderSampler{
+                                                    .name = name_copy,
+                                                    .binding = binding,
+                                                    .set = set,
+                                                    .array_size = array_size,
+                                                });
                                             }
                                         }
                                     }
@@ -954,6 +1118,55 @@ pub const ShaderCompiler = struct {
                                         var members = std.ArrayList(ShaderBufferMember){};
                                         _ = &members;
                                         try refl.storage_buffers.append(self.allocator, ShaderBuffer{ .name = name_copy, .binding = binding, .set = set, .size = size, .members = members });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // textures (top-level) - SPIRV-Cross JSON backend emits 'textures' at top level
+        if (root.object.get("textures")) |textures_val| {
+            if (textures_val == .array) {
+                for (textures_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const name = name_v.string;
+                                        const set = @as(u32, @intCast(set_v.integer));
+                                        const binding = @as(u32, @intCast(bind_v.integer));
+
+                                        // Extract array size from "array" field
+                                        var array_size: u32 = 1;
+                                        if (array_opt) |arr_v| {
+                                            if (arr_v == .array and arr_v.array.items.len > 0) {
+                                                if (arr_v.array.items[0] == .integer) {
+                                                    const size = arr_v.array.items[0].integer;
+                                                    // 0 means unbounded array in SPIRV-Cross
+                                                    array_size = if (size == 0) 0 else @as(u32, @intCast(size));
+                                                }
+                                            }
+                                        }
+
+                                        const name_copy = try self.allocator.dupe(u8, name);
+                                        try refl.textures.append(self.allocator, ShaderTexture{
+                                            .name = name_copy,
+                                            .binding = binding,
+                                            .set = set,
+                                            .dimension = TextureDimension.texture_2d,
+                                            .format = null,
+                                            .array_size = array_size,
+                                        });
+                                        std.log.info("Parsed texture '{s}' from shader (set={}, binding={}, array_size={})", .{ name, set, binding, array_size });
                                     }
                                 }
                             }

@@ -192,14 +192,14 @@ pub const ParticleRenderer = struct {
         const compute_ubo_bytes = std.mem.asBytes(&compute_ubo);
         self.compute_uniform_buffers[frame_index].writeToBuffer(compute_ubo_bytes, @sizeOf(ComputeUniformBuffer), 0);
 
-        // Update descriptor sets for all resources (includes ComputeUniformBuffer and storage buffers)
-        try self.resource_binder.updateFrame(frame_index);
+        // Update descriptor sets for the compute pipeline resources only
+        try self.resource_binder.updateFrame(self.compute_pipeline, frame_index);
 
         // Dispatch compute shader
         try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
 
-        // Update descriptor sets first
-        try self.pipeline_system.updateDescriptorSets(frame_index);
+        // Update descriptor sets first (compute pipeline only)
+        try self.pipeline_system.updateDescriptorSetsForPipeline(self.compute_pipeline, frame_index);
 
         // Memory barrier to ensure compute writes are visible to vertex stage
         const memory_barrier = vk.MemoryBarrier{
@@ -282,8 +282,9 @@ pub const ParticleRenderer = struct {
             return;
         }
 
-        // Note: The particle shaders don't use uniform buffers, so we skip uniform updates        // Update descriptor sets (though render pipeline doesn't need them)
-        try self.resource_binder.updateFrame(frame_index);
+        // Note: The particle shaders don't use uniform buffers, so we skip uniform updates
+        // Update descriptor sets for the render pipeline (no-op if nothing dirty)
+        try self.resource_binder.updateFrame(self.render_pipeline, frame_index);
 
         // Bind render pipeline
         try self.pipeline_system.bindPipeline(command_buffer, self.render_pipeline);

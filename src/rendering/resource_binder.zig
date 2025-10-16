@@ -189,9 +189,9 @@ pub const ResourceBinder = struct {
         try self.bindTexture(pipeline_id, set, binding, image_view, sampler, .shader_read_only_optimal, frame_index);
     }
 
-    /// Update all bindings for a specific frame
-    pub fn updateFrame(self: *Self, frame_index: u32) !void {
-        try self.pipeline_system.updateDescriptorSets(frame_index);
+    /// Update descriptor bindings for a specific pipeline and frame
+    pub fn updateFrame(self: *Self, pipeline_id: PipelineId, frame_index: u32) !void {
+        try self.pipeline_system.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
     }
 
     /// Get information about a bound uniform buffer
