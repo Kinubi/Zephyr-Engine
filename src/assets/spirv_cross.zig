@@ -71,27 +71,25 @@ extern "c" fn spvc_compiler_get_declared_struct_size(compiler: Compiler, base_ty
 pub const SpvCross = struct {
     context: Context,
 
-    const Self = @This();
-
-    pub fn init() !Self {
+    pub fn init() !SpvCross {
         var context: Context = undefined;
         const result = spvc_context_create(&context);
 
         return switch (result) {
-            .success => Self{ .context = context },
+            .success => SpvCross{ .context = context },
             .out_of_memory => error.OutOfMemory,
             else => error.SpvCrossInitFailed,
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *SpvCross) void {
         if (self.context) |ctx| {
             spvc_context_destroy(ctx);
         }
         self.context = null;
     }
 
-    pub fn compileSpirv(self: *Self, spirv_data: []const u32, backend: Backend, options: CompileOptions) ![]const u8 {
+    pub fn compileSpirv(self: *SpvCross, spirv_data: []const u32, backend: Backend, options: CompileOptions) ![]const u8 {
         // Parse SPIR-V bytecode
         var parsed_ir: ParsedIr = undefined;
         var result = spvc_context_parse_spirv(self.context, spirv_data.ptr, spirv_data.len, &parsed_ir);
@@ -142,7 +140,7 @@ pub const SpvCross = struct {
         return std.mem.span(source_ptr);
     }
 
-    fn applyCompileOptions(self: *Self, options: CompilerOptions, backend: Backend, compile_options: CompileOptions) !void {
+    fn applyCompileOptions(self: *SpvCross, options: CompilerOptions, backend: Backend, compile_options: CompileOptions) !void {
         _ = self;
 
         switch (backend) {

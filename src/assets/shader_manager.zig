@@ -31,10 +31,8 @@ pub const ShaderManager = struct {
 
     // Pipeline integration
 
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool, file_watcher: ?*FileWatcher) !Self {
-        var manager = Self{
+    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool, file_watcher: ?*FileWatcher) !ShaderManager {
+        var manager = ShaderManager{
             .allocator = allocator,
             .compiler = try ShaderCompiler.ShaderCompiler.init(allocator),
             .hot_reload = try ShaderHotReload.ShaderWatcher.init(allocator, thread_pool),
@@ -50,7 +48,7 @@ pub const ShaderManager = struct {
         return manager;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *ShaderManager) void {
         self.hot_reload.deinit();
         self.cache.deinit();
         self.compiler.deinit();
@@ -77,24 +75,24 @@ pub const ShaderManager = struct {
         self.manager_mutex.unlock();
     }
 
-    pub fn start(self: *Self) !void {
+    pub fn start(self: *ShaderManager) !void {
         // Start hot reload system
         try self.hot_reload.start();
     }
 
-    pub fn stop(self: *Self) void {
+    pub fn stop(self: *ShaderManager) void {
         self.hot_reload.stop();
     }
 
-    pub fn setPipelineSystem(self: *Self, pipeline_system: *anyopaque) void {
+    pub fn setPipelineSystem(self: *ShaderManager, pipeline_system: *anyopaque) void {
         self.hot_reload.setPipelineSystem(pipeline_system);
     }
 
-    pub fn addShaderDirectory(self: *Self, directory: []const u8) !void {
+    pub fn addShaderDirectory(self: *ShaderManager, directory: []const u8) !void {
         try self.hot_reload.addWatchDirectory(directory);
     }
 
-    pub fn loadShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
+    pub fn loadShader(self: *ShaderManager, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         const path_key = try self.allocator.dupe(u8, file_path);
 
         // Check if already loaded
@@ -127,7 +125,7 @@ pub const ShaderManager = struct {
     }
 
     /// Load shader from raw GLSL/HLSL source code
-    pub fn loadShaderFromSource(self: *Self, source: ShaderCompiler.ShaderSource, identifier: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
+    pub fn loadShaderFromSource(self: *ShaderManager, source: ShaderCompiler.ShaderSource, identifier: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         const id_key = try self.allocator.dupe(u8, identifier);
 
         // Check if already loaded
@@ -159,14 +157,14 @@ pub const ShaderManager = struct {
         return loaded;
     }
 
-    pub fn getShader(self: *Self, file_path: []const u8) ?*LoadedShader {
+    pub fn getShader(self: *ShaderManager, file_path: []const u8) ?*LoadedShader {
         self.manager_mutex.lock();
         const res = self.loaded_shaders.get(file_path);
         self.manager_mutex.unlock();
         return res;
     }
 
-    pub fn registerPipelineDependency(self: *Self, shader_path: []const u8, pipeline_id: []const u8) !void {
+    pub fn registerPipelineDependency(self: *ShaderManager, shader_path: []const u8, pipeline_id: []const u8) !void {
         const shader_key = try self.allocator.dupe(u8, shader_path);
         const pipeline_key = try self.allocator.dupe(u8, pipeline_id);
 
@@ -182,12 +180,12 @@ pub const ShaderManager = struct {
     }
 
     /// Clear all cached shaders (useful for development/debugging)
-    pub fn clearShaderCache(self: *Self) !void {
+    pub fn clearShaderCache(self: *ShaderManager) !void {
         try self.cache.clearCache();
     }
 
     /// Force recompilation of a specific shader (bypasses cache)
-    pub fn forceRecompileShader(self: *Self, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
+    pub fn forceRecompileShader(self: *ShaderManager, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         // Invalidate and unload the shader (if loaded), then recompile
         try self.invalidateShader(file_path);
 
@@ -210,7 +208,7 @@ pub const ShaderManager = struct {
     }
 
     /// Invalidate a shader: remove loaded entry, clear cache, and notify dependent pipelines
-    pub fn invalidateShader(self: *Self, file_path: []const u8) !void {
+    pub fn invalidateShader(self: *ShaderManager, file_path: []const u8) !void {
         // Remove from loaded_shaders if present (guarded)
         self.manager_mutex.lock();
         // Check if the shader exists before trying to remove it
@@ -232,7 +230,7 @@ pub const ShaderManager = struct {
 
     /// Public method called by the pipeline rebuild worker after shader compilation
     /// Takes ownership of the compiled_shader
-    pub fn onShaderCompiledFromHotReload(self: *Self, file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) !void {
+    pub fn onShaderCompiledFromHotReload(self: *ShaderManager, file_path: []const u8, compiled_shader: ShaderCompiler.CompiledShader) !void {
         // Invalidate cache and unload old shader if present
         self.invalidateShader(file_path) catch |err| {
             std.log.warn("Failed to invalidate shader on reload for {s}: {}", .{ file_path, err });
@@ -262,7 +260,7 @@ pub const ShaderManager = struct {
         try self.loaded_shaders.put(path_key, loaded);
     }
 
-    pub fn recompileAllShaders(self: *Self) !void {
+    pub fn recompileAllShaders(self: *ShaderManager) !void {
         var iterator = self.loaded_shaders.iterator();
         var recompiled_count: u32 = 0;
 
@@ -286,7 +284,7 @@ pub const ShaderManager = struct {
         }
     }
 
-    pub fn getStats(self: *Self) ShaderManagerStats {
+    pub fn getStats(self: *ShaderManager) ShaderManagerStats {
         const cache_stats = self.cache.getCacheStats();
         return ShaderManagerStats{
             .loaded_shaders = @intCast(self.loaded_shaders.count()),
@@ -299,7 +297,7 @@ pub const ShaderManager = struct {
     }
 
     // Utility functions for common shader loading patterns
-    pub fn loadVertexFragmentPair(self: *Self, vertex_path: []const u8, fragment_path: []const u8, options: ShaderCompiler.CompilationOptions) !ShaderPair {
+    pub fn loadVertexFragmentPair(self: *ShaderManager, vertex_path: []const u8, fragment_path: []const u8, options: ShaderCompiler.CompilationOptions) !ShaderPair {
         const vertex = try self.loadShader(vertex_path, options);
         const fragment = try self.loadShader(fragment_path, options);
 
@@ -309,7 +307,7 @@ pub const ShaderManager = struct {
         };
     }
 
-    pub fn loadComputeShader(self: *Self, compute_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
+    pub fn loadComputeShader(self: *ShaderManager, compute_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         return try self.loadShader(compute_path, options);
     }
 };

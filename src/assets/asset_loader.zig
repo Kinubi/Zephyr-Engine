@@ -53,8 +53,6 @@ pub const AssetLoader = struct {
     // Integration with asset manager
     asset_manager: *AssetManager,
 
-    const Self = @This();
-
     /// Statistics for monitoring loader performance
     pub const LoaderStatistics = struct {
         total_requests: std.atomic.Value(u64),
@@ -236,7 +234,7 @@ pub const AssetLoader = struct {
     }
 
     /// Deinitialize the loader
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *AssetLoader) void {
         log(.INFO, "enhanced_asset_loader", "Shutting down AssetLoader", .{});
 
         // Clean up staging queues
@@ -247,12 +245,12 @@ pub const AssetLoader = struct {
     }
 
     /// Set the asset manager for integration
-    pub fn setAssetManager(self: *Self, asset_manager: *AssetManager) void {
+    pub fn setAssetManager(self: *AssetLoader, asset_manager: *AssetManager) void {
         self.asset_manager = asset_manager;
     }
 
     /// Request async loading of an asset with specified priority
-    pub fn requestLoad(self: *Self, asset_id: AssetId, priority: WorkPriority) !void {
+    pub fn requestLoad(self: *AssetLoader, asset_id: AssetId, priority: WorkPriority) !void {
         // Atomically check and mark as loading to prevent race conditions
         if (!self.registry.markAsLoadingAtomic(asset_id)) {
             // Asset is already being processed by another thread
@@ -300,17 +298,17 @@ pub const AssetLoader = struct {
     }
 
     /// Request high-priority loading (for critical assets)
-    pub fn requestHighPriorityLoad(self: *Self, asset_id: AssetId) !void {
+    pub fn requestHighPriorityLoad(self: *AssetLoader, asset_id: AssetId) !void {
         try self.requestLoad(asset_id, .high);
     }
 
     /// Request critical loading (for frame-critical assets)
-    pub fn requestCriticalLoad(self: *Self, asset_id: AssetId) !void {
+    pub fn requestCriticalLoad(self: *AssetLoader, asset_id: AssetId) !void {
         try self.requestLoad(asset_id, .critical);
     }
 
     /// Get current loader statistics
-    pub fn getStatistics(self: *Self) LoaderStatistics {
+    pub fn getStatistics(self: *AssetLoader) LoaderStatistics {
         // Update queue size
         self.stats.queue_size.store(self.thread_pool.work_queue.size(), .release);
 
@@ -322,7 +320,7 @@ pub const AssetLoader = struct {
     }
 
     /// Process texture staging on GPU thread
-    fn processTextureStaging(self: *Self, staging: *TextureStaging) !void {
+    fn processTextureStaging(self: *AssetLoader, staging: *TextureStaging) !void {
         defer {
             self.allocator.free(staging.image_data);
             self.allocator.free(staging.path);
@@ -358,7 +356,7 @@ pub const AssetLoader = struct {
     }
 
     /// Process mesh staging on GPU thread
-    fn processMeshStaging(self: *Self, staging: *MeshStaging) !void {
+    fn processMeshStaging(self: *AssetLoader, staging: *MeshStaging) !void {
         defer {
             self.allocator.free(staging.obj_data);
             self.allocator.free(staging.path);

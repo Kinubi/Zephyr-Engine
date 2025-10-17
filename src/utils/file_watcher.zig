@@ -21,8 +21,6 @@ pub const FileWatcher = struct {
     // ThreadPool WorkItems of type `hot_reload` instead of direct callbacks.
     thread_pool: ?*ThreadPool = null,
 
-    const Self = @This();
-
     /// Information about a watched path
     const WatchedPath = struct {
         path: []const u8,
@@ -52,8 +50,8 @@ pub const FileWatcher = struct {
     };
 
     /// Initialize the file watcher
-    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) Self {
-        return Self{
+    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) FileWatcher {
+        return FileWatcher{
             .allocator = allocator,
             .watched_paths = std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .thread_pool = thread_pool,
@@ -61,7 +59,7 @@ pub const FileWatcher = struct {
     }
 
     /// Clean up resources
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *FileWatcher) void {
         self.stop();
 
         // Free all watched path strings
@@ -79,7 +77,7 @@ pub const FileWatcher = struct {
     // functions to receive file events inside the engine ThreadPool.
 
     /// Add a path to watch for changes
-    pub fn addWatch(self: *Self, path: []const u8, recursive: bool) !void {
+    pub fn addWatch(self: *FileWatcher, path: []const u8, recursive: bool) !void {
         // Default addWatch uses no per-watch worker (falls back to global)
         try self.addWatchWithWorker(path, recursive, null, null);
     }
@@ -87,7 +85,7 @@ pub const FileWatcher = struct {
     /// Add a path to watch for changes and optionally supply a pool worker
     /// function + context which will be used when submitting the hot_reload
     /// WorkItem for this specific watched path.
-    pub fn addWatchWithWorker(self: *Self, path: []const u8, recursive: bool, worker_fn: ?*const fn (*anyopaque, TP.WorkItem) void, context: ?*anyopaque) !void {
+    pub fn addWatchWithWorker(self: *FileWatcher, path: []const u8, recursive: bool, worker_fn: ?*const fn (*anyopaque, TP.WorkItem) void, context: ?*anyopaque) !void {
         // Check if path exists and determine if it's a directory
         const stat = std.fs.cwd().statFile(path) catch |err| {
             log(.WARN, "file_watcher", "Cannot stat path to watch: {s} ({})", .{ path, err });
@@ -115,7 +113,7 @@ pub const FileWatcher = struct {
     }
 
     /// Remove a path from watching
-    pub fn removeWatch(self: *Self, path: []const u8) void {
+    pub fn removeWatch(self: *FileWatcher, path: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.watched_paths.fetchRemove(path)) |entry| {
@@ -126,7 +124,7 @@ pub const FileWatcher = struct {
     }
 
     /// Start the file watcher. This MUST be called after `setThreadPoolTarget`.
-    pub fn start(self: *Self) !void {
+    pub fn start(self: *FileWatcher) !void {
         if (self.running) return;
 
         // FileWatcher requires a ThreadPool target; we don't spawn local threads.
@@ -152,7 +150,7 @@ pub const FileWatcher = struct {
     }
 
     /// Stop the file watcher. Signals the pool worker loop to exit.
-    pub fn stop(self: *Self) void {
+    pub fn stop(self: *FileWatcher) void {
         if (!self.running) return;
         self.running = false;
         log(.INFO, "file_watcher", "FileWatcher stopping", .{});
@@ -177,7 +175,7 @@ pub const FileWatcher = struct {
     }
 
     /// Check all watched paths for changes
-    fn checkForChanges(self: *Self) void {
+    fn checkForChanges(self: *FileWatcher) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -254,7 +252,7 @@ pub const FileWatcher = struct {
     }
 
     /// Utility function to check if a path matches any watched pattern
-    pub fn isWatched(self: *Self, path: []const u8) bool {
+    pub fn isWatched(self: *FileWatcher, path: []const u8) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
 

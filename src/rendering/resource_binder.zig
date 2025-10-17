@@ -20,10 +20,8 @@ pub const ResourceBinder = struct {
     bound_textures: std.HashMap(BindingKey, BoundTexture, BindingKeyContext, std.hash_map.default_max_load_percentage),
     bound_storage_buffers: std.HashMap(BindingKey, BoundStorageBuffer, BindingKeyContext, std.hash_map.default_max_load_percentage),
 
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator, pipeline_system: *UnifiedPipelineSystem) Self {
-        return Self{
+    pub fn init(allocator: std.mem.Allocator, pipeline_system: *UnifiedPipelineSystem) ResourceBinder {
+        return ResourceBinder{
             .pipeline_system = pipeline_system,
             .allocator = allocator,
             .bound_uniform_buffers = std.HashMap(BindingKey, BoundUniformBuffer, BindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
@@ -32,7 +30,7 @@ pub const ResourceBinder = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *ResourceBinder) void {
         self.bound_uniform_buffers.deinit();
         self.bound_textures.deinit();
         self.bound_storage_buffers.deinit();
@@ -40,7 +38,7 @@ pub const ResourceBinder = struct {
 
     /// Bind a uniform buffer to a pipeline
     pub fn bindUniformBuffer(
-        self: *Self,
+        self: *ResourceBinder,
         pipeline_id: PipelineId,
         set: u32,
         binding: u32,
@@ -78,7 +76,7 @@ pub const ResourceBinder = struct {
 
     /// Bind a texture (image + sampler) to a pipeline
     pub fn bindTexture(
-        self: *Self,
+        self: *ResourceBinder,
         pipeline_id: PipelineId,
         set: u32,
         binding: u32,
@@ -116,7 +114,7 @@ pub const ResourceBinder = struct {
 
     /// Bind a storage buffer to a pipeline
     pub fn bindStorageBuffer(
-        self: *Self,
+        self: *ResourceBinder,
         pipeline_id: PipelineId,
         set: u32,
         binding: u32,
@@ -154,7 +152,7 @@ pub const ResourceBinder = struct {
 
     /// Convenience function to bind a full uniform buffer
     pub fn bindFullUniformBuffer(
-        self: *Self,
+        self: *ResourceBinder,
         pipeline_id: PipelineId,
         set: u32,
         binding: u32,
@@ -166,7 +164,7 @@ pub const ResourceBinder = struct {
 
     /// Convenience function to bind a full storage buffer
     pub fn bindFullStorageBuffer(
-        self: *Self,
+        self: *ResourceBinder,
         pipeline_id: PipelineId,
         set: u32,
         binding: u32,
@@ -178,7 +176,7 @@ pub const ResourceBinder = struct {
 
     /// Bind a texture with default shader-read-only layout
     pub fn bindTextureDefault(
-        self: *Self,
+        self: *ResourceBinder,
         pipeline_id: PipelineId,
         set: u32,
         binding: u32,
@@ -190,12 +188,12 @@ pub const ResourceBinder = struct {
     }
 
     /// Update descriptor bindings for a specific pipeline and frame
-    pub fn updateFrame(self: *Self, pipeline_id: PipelineId, frame_index: u32) !void {
+    pub fn updateFrame(self: *ResourceBinder, pipeline_id: PipelineId, frame_index: u32) !void {
         try self.pipeline_system.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
     }
 
     /// Get information about a bound uniform buffer
-    pub fn getBoundUniformBuffer(self: *Self, pipeline_id: PipelineId, set: u32, binding: u32, frame_index: u32) ?BoundUniformBuffer {
+    pub fn getBoundUniformBuffer(self: *ResourceBinder, pipeline_id: PipelineId, set: u32, binding: u32, frame_index: u32) ?BoundUniformBuffer {
         const key = BindingKey{
             .pipeline_id = pipeline_id,
             .set = set,
@@ -207,7 +205,7 @@ pub const ResourceBinder = struct {
     }
 
     /// Get information about a bound texture
-    pub fn getBoundTexture(self: *Self, pipeline_id: PipelineId, set: u32, binding: u32, frame_index: u32) ?BoundTexture {
+    pub fn getBoundTexture(self: *ResourceBinder, pipeline_id: PipelineId, set: u32, binding: u32, frame_index: u32) ?BoundTexture {
         const key = BindingKey{
             .pipeline_id = pipeline_id,
             .set = set,
@@ -219,7 +217,7 @@ pub const ResourceBinder = struct {
     }
 
     /// Get information about a bound storage buffer
-    pub fn getBoundStorageBuffer(self: *Self, pipeline_id: PipelineId, set: u32, binding: u32, frame_index: u32) ?BoundStorageBuffer {
+    pub fn getBoundStorageBuffer(self: *ResourceBinder, pipeline_id: PipelineId, set: u32, binding: u32, frame_index: u32) ?BoundStorageBuffer {
         const key = BindingKey{
             .pipeline_id = pipeline_id,
             .set = set,
@@ -231,7 +229,7 @@ pub const ResourceBinder = struct {
     }
 
     /// Clear all bindings for a specific frame (useful for frame reset)
-    pub fn clearFrame(self: *Self, frame_index: u32) void {
+    pub fn clearFrame(self: *ResourceBinder, frame_index: u32) void {
         // Remove all bindings for this frame
         var uniform_iter = self.bound_uniform_buffers.iterator();
         while (uniform_iter.next()) |entry| {
@@ -256,7 +254,7 @@ pub const ResourceBinder = struct {
     }
 
     /// Clear all bindings for a specific pipeline
-    pub fn clearPipeline(self: *Self, pipeline_id: PipelineId) void {
+    pub fn clearPipeline(self: *ResourceBinder, pipeline_id: PipelineId) void {
         var uniform_iter = self.bound_uniform_buffers.iterator();
         while (uniform_iter.next()) |entry| {
             if (std.mem.eql(u8, entry.key_ptr.pipeline_id.name, pipeline_id.name)) {

@@ -33,15 +33,13 @@ pub const UnifiedTexturedRenderer = struct {
     cached_pipeline_handle: vk.Pipeline,
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
-    const Self = @This();
-
     pub fn init(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         shader_manager: *ShaderManager,
         pipeline_system: *UnifiedPipelineSystem,
         render_pass: vk.RenderPass,
-    ) !Self {
+    ) !UnifiedTexturedRenderer {
         log(.INFO, "unified_textured_renderer", "Initializing unified textured renderer", .{});
 
         // Use the provided pipeline system
@@ -73,7 +71,7 @@ pub const UnifiedTexturedRenderer = struct {
         const textured_pipeline = try pipeline_system.createPipeline(pipeline_config);
         const pipeline_entry = pipeline_system.pipelines.get(textured_pipeline) orelse return error.PipelineNotFound;
 
-        const renderer = Self{
+        const renderer = UnifiedTexturedRenderer{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .shader_manager = shader_manager,
@@ -89,20 +87,20 @@ pub const UnifiedTexturedRenderer = struct {
         return renderer;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *UnifiedTexturedRenderer) void {
         log(.INFO, "unified_textured_renderer", "Cleaning up unified textured renderer", .{});
 
         // Clean up resource binder (but not pipeline system - it's shared)
         self.resource_binder.deinit();
     }
 
-    fn markAllFramesDirty(self: *Self) void {
+    fn markAllFramesDirty(self: *UnifiedTexturedRenderer) void {
         for (&self.descriptor_dirty_flags) |*flag| {
             flag.* = true;
         }
     }
 
-    pub fn onCreate(self: *Self, scene_bridge: *SceneBridge) !void {
+    pub fn onCreate(self: *UnifiedTexturedRenderer, scene_bridge: *SceneBridge) !void {
         var any_bindings = false;
 
         if (scene_bridge.getMaterialBufferInfo()) |material_info| {
@@ -162,7 +160,7 @@ pub const UnifiedTexturedRenderer = struct {
     }
 
     /// Update material and texture bindings for the current frame
-    pub fn update(self: *Self, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+    pub fn update(self: *UnifiedTexturedRenderer, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
         const frame_index = frame_info.current_frame;
 
         const materials_dirty = scene_bridge.materialsUpdated(frame_index);
@@ -226,7 +224,7 @@ pub const UnifiedTexturedRenderer = struct {
     }
 
     /// Render textured objects using scene bridge data
-    pub fn render(self: *Self, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+    pub fn render(self: *UnifiedTexturedRenderer, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
         const frame_index = frame_info.current_frame;
         const meshes_dirty = scene_bridge.meshesUpdated(frame_index);
         const objects = scene_bridge.getMeshes();

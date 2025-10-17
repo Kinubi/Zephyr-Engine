@@ -114,8 +114,6 @@ pub const DynamicPipeline = struct {
 
 /// Manager for dynamic pipeline creation and hot reload
 pub const DynamicPipelineManager = struct {
-    const Self = @This();
-
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
     asset_manager: *AssetManager,
@@ -130,8 +128,8 @@ pub const DynamicPipelineManager = struct {
     current_frame: u32 = 0,
     rebuild_pending: std.ArrayList([]const u8), // Pipeline names pending rebuild
 
-    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, asset_manager: *AssetManager, shader_manager: *ShaderManager) !Self {
-        const manager = Self{
+    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, asset_manager: *AssetManager, shader_manager: *ShaderManager) !DynamicPipelineManager {
+        const manager = DynamicPipelineManager{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .asset_manager = asset_manager,
@@ -145,7 +143,7 @@ pub const DynamicPipelineManager = struct {
         return manager;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *DynamicPipelineManager) void {
         // Clean up all pipelines
         var pipeline_iter = self.pipelines.iterator();
         while (pipeline_iter.next()) |entry| {
@@ -165,7 +163,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Register a pipeline template for dynamic creation
-    pub fn registerPipeline(self: *Self, template: PipelineTemplate) !void {
+    pub fn registerPipeline(self: *DynamicPipelineManager, template: PipelineTemplate) !void {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 
@@ -186,7 +184,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Get a pipeline by name, building it if necessary
-    pub fn getPipeline(self: *Self, name: []const u8, render_pass: vk.RenderPass) !?vk.Pipeline {
+    pub fn getPipeline(self: *DynamicPipelineManager, name: []const u8, render_pass: vk.RenderPass) !?vk.Pipeline {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 
@@ -219,7 +217,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Process pending pipeline rebuilds (call once per frame)
-    pub fn processRebuildQueue(self: *Self, render_pass: vk.RenderPass) void {
+    pub fn processRebuildQueue(self: *DynamicPipelineManager, render_pass: vk.RenderPass) void {
         self.current_frame += 1;
 
         if (self.rebuild_pending.items.len == 0) return;
@@ -241,7 +239,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Mark pipelines for rebuild based on shader path (called by hot reload system)
-    pub fn markPipelinesForRebuildByShader(self: *Self, shader_path: []const u8) !void {
+    pub fn markPipelinesForRebuildByShader(self: *DynamicPipelineManager, shader_path: []const u8) !void {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 
@@ -285,7 +283,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Mark a pipeline for rebuild by name (internal use)
-    pub fn markForRebuild(self: *Self, pipeline_name: []const u8) !void {
+    pub fn markForRebuild(self: *DynamicPipelineManager, pipeline_name: []const u8) !void {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 
@@ -299,7 +297,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Register shader assets for hot reload monitoring
-    fn registerShaderAssets(self: *Self, dynamic_pipeline: *DynamicPipeline) !void {
+    fn registerShaderAssets(self: *DynamicPipelineManager, dynamic_pipeline: *DynamicPipeline) !void {
         const template = &dynamic_pipeline.template;
 
         // Register vertex shader
@@ -335,7 +333,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Rebuild a pipeline from its template
-    fn rebuildPipeline(self: *Self, dynamic_pipeline: *DynamicPipeline, render_pass: vk.RenderPass) !void {
+    fn rebuildPipeline(self: *DynamicPipelineManager, dynamic_pipeline: *DynamicPipeline, render_pass: vk.RenderPass) !void {
         const template = &dynamic_pipeline.template;
 
         log(.INFO, "dynamic_pipeline", "Rebuilding pipeline: {s}", .{template.name});
@@ -525,7 +523,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Get pipeline layout for a named pipeline
-    pub fn getPipelineLayout(self: *Self, name: []const u8) ?vk.PipelineLayout {
+    pub fn getPipelineLayout(self: *DynamicPipelineManager, name: []const u8) ?vk.PipelineLayout {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 
@@ -536,7 +534,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Get descriptor set layout for a named pipeline
-    pub fn getDescriptorSetLayout(self: *Self, name: []const u8) ?vk.DescriptorSetLayout {
+    pub fn getDescriptorSetLayout(self: *DynamicPipelineManager, name: []const u8) ?vk.DescriptorSetLayout {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 
@@ -547,7 +545,7 @@ pub const DynamicPipelineManager = struct {
     }
 
     /// Get usage statistics for all pipelines
-    pub fn getStatistics(self: *Self) PipelineStatistics {
+    pub fn getStatistics(self: *DynamicPipelineManager) PipelineStatistics {
         self.pipeline_mutex.lock();
         defer self.pipeline_mutex.unlock();
 

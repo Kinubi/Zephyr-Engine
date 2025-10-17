@@ -6,7 +6,7 @@
         }
     ],
     "types" : {
-        "_10" : {
+        "_9" : {
             "name" : "Material",
             "members" : [
                 {
@@ -31,7 +31,7 @@
                 }
             ]
         },
-        "_13" : {
+        "_12" : {
             "name" : "Material",
             "members" : [
                 {
@@ -61,12 +61,12 @@
                 }
             ]
         },
-        "_15" : {
+        "_14" : {
             "name" : "MaterialBuffer",
             "members" : [
                 {
                     "name" : "materials",
-                    "type" : "_13",
+                    "type" : "_12",
                     "array" : [
                         0
                     ],
@@ -78,7 +78,7 @@
                 }
             ]
         },
-        "_76" : {
+        "_75" : {
             "name" : "PointLight",
             "members" : [
                 {
@@ -93,7 +93,7 @@
                 }
             ]
         },
-        "_79" : {
+        "_78" : {
             "name" : "GlobalUbo",
             "members" : [
                 {
@@ -115,7 +115,7 @@
                 },
                 {
                     "name" : "pointLights",
-                    "type" : "_76",
+                    "type" : "_75",
                     "array" : [
                         16
                     ],
@@ -132,7 +132,7 @@
                 }
             ]
         },
-        "_82" : {
+        "_81" : {
             "name" : "Push",
             "members" : [
                 {
@@ -205,7 +205,7 @@
     ],
     "ssbos" : [
         {
-            "type" : "_15",
+            "type" : "_14",
             "name" : "MaterialBuffer",
             "readonly" : true,
             "block_size" : 0,
@@ -215,7 +215,7 @@
     ],
     "ubos" : [
         {
-            "type" : "_79",
+            "type" : "_78",
             "name" : "GlobalUbo",
             "block_size" : 660,
             "set" : 0,
@@ -224,7 +224,7 @@
     ],
     "push_constants" : [
         {
-            "type" : "_82",
+            "type" : "_81",
             "name" : "push",
             "push_constant" : true
         }

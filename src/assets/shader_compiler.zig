@@ -66,10 +66,8 @@ pub const ShaderReflection = struct {
     specialization_constants: std.ArrayList(ShaderSpecializationConstant),
     acceleration_structures: std.ArrayList(ShaderAccelerationStructure),
 
-    const Self = @This();
-
-    pub fn init() Self {
-        return Self{
+    pub fn init() ShaderReflection {
+        return ShaderReflection{
             .inputs = std.ArrayList(ShaderVariable){},
             .outputs = std.ArrayList(ShaderVariable){},
             .uniform_buffers = std.ArrayList(ShaderBuffer){},
@@ -82,7 +80,7 @@ pub const ShaderReflection = struct {
         };
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ShaderReflection, allocator: std.mem.Allocator) void {
         self.inputs.deinit(allocator);
         self.outputs.deinit(allocator);
         self.uniform_buffers.deinit(allocator);
@@ -397,9 +395,7 @@ pub const CompiledShader = struct {
     // Asset integration (placeholder for now)
     // asset_data: AssetTypes.AssetData,
 
-    const Self = @This();
-
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *CompiledShader, allocator: std.mem.Allocator) void {
         allocator.free(self.spirv_code);
         self.reflection.deinit(allocator);
     }
@@ -409,20 +405,18 @@ pub const ShaderCompiler = struct {
     allocator: std.mem.Allocator,
     spv_cross: spirv_cross.SpvCross,
 
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator) !Self {
-        return Self{
+    pub fn init(allocator: std.mem.Allocator) !ShaderCompiler {
+        return ShaderCompiler{
             .allocator = allocator,
             .spv_cross = try spirv_cross.SpvCross.init(),
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *ShaderCompiler) void {
         self.spv_cross.deinit();
     }
 
-    pub fn compile(self: *Self, source: ShaderSource, options: CompilationOptions) !CompiledShader {
+    pub fn compile(self: *ShaderCompiler, source: ShaderSource, options: CompilationOptions) !CompiledShader {
         // Compile source to SPIR-V based on input language
         const spirv_data = switch (source.language) {
             .spirv => try self.parseSpirv(source.code),
@@ -460,7 +454,7 @@ pub const ShaderCompiler = struct {
         };
     }
 
-    fn compileGlslExternal(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
+    fn compileGlslExternal(self: *ShaderCompiler, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         _ = options; // Currently unused but kept for future use
 
         // Create a temporary file for the GLSL source
@@ -525,7 +519,7 @@ pub const ShaderCompiler = struct {
         return try self.parseSpirv(spirv_bytes);
     }
 
-    fn parseSpirv(self: *Self, spirv_bytes: []const u8) ![]const u32 {
+    fn parseSpirv(self: *ShaderCompiler, spirv_bytes: []const u8) ![]const u32 {
         if (spirv_bytes.len % 4 != 0) {
             return error.InvalidSpirvFormat;
         }
@@ -546,7 +540,7 @@ pub const ShaderCompiler = struct {
     }
 
     /// Public helper: generate reflection directly from SPIR-V bytes.
-    pub fn generateReflectionFromSpirv(self: *Self, spirv_bytes: []const u8) !ShaderReflection {
+    pub fn generateReflectionFromSpirv(self: *ShaderCompiler, spirv_bytes: []const u8) !ShaderReflection {
         const spirv_words = try self.parseSpirv(spirv_bytes);
         const reflection = try self.generateReflection(spirv_words);
         // Free the parsed words allocated by parseSpirv
@@ -554,7 +548,7 @@ pub const ShaderCompiler = struct {
         return reflection;
     }
 
-    fn compileGlslEmbedded(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
+    fn compileGlslEmbedded(self: *ShaderCompiler, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         // Use the embedded libshaderc compiler
         var compiler = glsl_compiler.Compiler.init(self.allocator) catch |err| {
             std.log.warn("Failed to initialize embedded GLSL compiler: {}, falling back to external glslc", .{err});
@@ -638,7 +632,7 @@ pub const ShaderCompiler = struct {
         return std.fmt.bufPrint(buffer, "{s}_{d}_{d}", .{ prefix, major, minor });
     }
 
-    fn compileHlsl(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
+    fn compileHlsl(self: *ShaderCompiler, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         const file_path = source.file_path orelse return error.HlslFilePathRequired;
 
         const cache_dir = "shaders/cached";
@@ -707,7 +701,7 @@ pub const ShaderCompiler = struct {
         return try self.parseSpirv(spv_bytes);
     }
 
-    fn crossCompile(self: *Self, spirv_data: []const u32, options: CompilationOptions) ![]const u8 {
+    fn crossCompile(self: *ShaderCompiler, spirv_data: []const u32, options: CompilationOptions) ![]const u8 {
         const backend = switch (options.target) {
             .vulkan => spirv_cross.Backend.glsl,
             .opengl => spirv_cross.Backend.glsl,
@@ -733,7 +727,7 @@ pub const ShaderCompiler = struct {
         return result;
     }
 
-    fn generateReflection(self: *Self, spirv_data: []const u32) !ShaderReflection {
+    fn generateReflection(self: *ShaderCompiler, spirv_data: []const u32) !ShaderReflection {
         // Ask SPIRV-Cross for JSON reflection using the JSON backend
         const sc_opts = spirv_cross.CompileOptions{
             .glsl_version = null,
@@ -1719,7 +1713,7 @@ pub const ShaderCompiler = struct {
     }
 
     // Hot reload support
-    pub fn compileFromFile(self: *Self, file_path: []const u8, options: CompilationOptions) !CompiledShader {
+    pub fn compileFromFile(self: *ShaderCompiler, file_path: []const u8, options: CompilationOptions) !CompiledShader {
         const file_content = try std.fs.cwd().readFileAlloc(self.allocator, file_path, 1024 * 1024); // 1MB max
         defer self.allocator.free(file_content);
 

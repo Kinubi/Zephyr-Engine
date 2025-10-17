@@ -42,8 +42,6 @@ const PipelineConfig = struct {
 
 /// Pipeline cache for storing and reusing pipelines
 pub const PipelineCache = struct {
-    const Self = @This();
-
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
     cache: std.AutoHashMap(u64, PipelineCacheEntry),
@@ -54,12 +52,12 @@ pub const PipelineCache = struct {
     cache_hits: u32 = 0,
     cache_misses: u32 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) !Self {
+    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) !PipelineCache {
         return try initWithCache(allocator, graphics_context, "cache/pipeline_cache.bin");
     }
 
     /// Initialize pipeline cache and optionally load from disk
-    pub fn initWithCache(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, cache_path: []const u8) !Self {
+    pub fn initWithCache(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, cache_path: []const u8) !PipelineCache {
         // Try to load existing cache data
         var cache_data: ?[]u8 = null;
         defer if (cache_data) |data| allocator.free(data);
@@ -91,7 +89,7 @@ pub const PipelineCache = struct {
 
         const vulkan_cache = try graphics_context.vkd.createPipelineCache(graphics_context.dev, &cache_create_info, null);
 
-        return Self{
+        return PipelineCache{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .cache = std.AutoHashMap(u64, PipelineCacheEntry).init(allocator),
@@ -99,7 +97,7 @@ pub const PipelineCache = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *PipelineCache) void {
         // Save cache to disk before cleanup
         self.saveToDisk("cache/pipeline_cache.bin") catch |err| {
             log(.WARN, "pipeline_cache", "Failed to save pipeline cache: {}", .{err});
@@ -120,7 +118,7 @@ pub const PipelineCache = struct {
     }
 
     /// Get or create a pipeline using the builder
-    pub fn getOrCreatePipeline(self: *Self, builder: *PipelineBuilder, config_hash: u64) !PipelineCacheEntry {
+    pub fn getOrCreatePipeline(self: *PipelineCache, builder: *PipelineBuilder, config_hash: u64) !PipelineCacheEntry {
         self.current_frame += 1;
 
         if (self.cache.getPtr(config_hash)) |entry| {
@@ -174,7 +172,7 @@ pub const PipelineCache = struct {
     }
 
     /// Create a configuration hash from builder state
-    pub fn createConfigHash(self: *Self, builder: *PipelineBuilder) !u64 {
+    pub fn createConfigHash(self: *PipelineCache, builder: *PipelineBuilder) !u64 {
 
         // Collect shader names/paths for hashing
         var shader_names = std.ArrayList([]const u8).init(self.allocator);
@@ -235,7 +233,7 @@ pub const PipelineCache = struct {
     }
 
     /// Garbage collect unused pipelines
-    pub fn garbageCollect(self: *Self, max_unused_frames: u32) !void {
+    pub fn garbageCollect(self: *PipelineCache, max_unused_frames: u32) !void {
         var to_remove = std.ArrayList(u64).init(self.allocator);
         defer to_remove.deinit();
 
@@ -259,7 +257,7 @@ pub const PipelineCache = struct {
     }
 
     /// Save cache data to disk for faster startup
-    pub fn saveToDisk(self: *Self, path: []const u8) !void {
+    pub fn saveToDisk(self: *PipelineCache, path: []const u8) !void {
         // Ensure cache directory exists
         const cache_dir = std.fs.path.dirname(path) orelse ".";
         std.fs.cwd().makePath(cache_dir) catch |err| {
@@ -290,7 +288,7 @@ pub const PipelineCache = struct {
     }
 
     /// Load cache data from disk
-    pub fn loadFromDisk(self: *Self, path: []const u8) !void {
+    pub fn loadFromDisk(self: *PipelineCache, path: []const u8) !void {
         const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 log(.INFO, "pipeline_cache", "No cache file found at {s}", .{path});
@@ -320,7 +318,7 @@ pub const PipelineCache = struct {
     }
 
     /// Get cache statistics
-    pub fn getStatistics(self: *const Self) struct {
+    pub fn getStatistics(self: *const PipelineCache) struct {
         total_pipelines: usize,
         cache_hits: u32,
         cache_misses: u32,
@@ -338,7 +336,7 @@ pub const PipelineCache = struct {
     }
 
     /// Print debug information
-    pub fn printDebugInfo(self: *const Self) void {
+    pub fn printDebugInfo(self: *const PipelineCache) void {
         const stats = self.getStatistics();
         log(.DEBUG, "pipeline_cache", "=== Pipeline Cache Debug Info ===", .{});
         log(.DEBUG, "pipeline_cache", "Total Pipelines: {d}", .{stats.total_pipelines});

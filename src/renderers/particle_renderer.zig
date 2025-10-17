@@ -45,8 +45,6 @@ pub const ParticleRenderer = struct {
     // Hot reload state
     needs_resource_setup: bool = false,
 
-    const Self = @This();
-
     pub fn init(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
@@ -54,7 +52,7 @@ pub const ParticleRenderer = struct {
         pipeline_system: *UnifiedPipelineSystem,
         render_pass: vk.RenderPass,
         max_particles: u32,
-    ) !Self {
+    ) !ParticleRenderer {
         // Use the provided unified pipeline system
         const resource_binder = ResourceBinder.init(allocator, pipeline_system);
 
@@ -119,7 +117,7 @@ pub const ParticleRenderer = struct {
 
         const render_pipeline = try pipeline_system.createPipeline(render_pipeline_config);
 
-        var renderer = Self{
+        var renderer = ParticleRenderer{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .shader_manager = shader_manager,
@@ -144,7 +142,7 @@ pub const ParticleRenderer = struct {
         return renderer;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *ParticleRenderer) void {
         log(.INFO, "particle_renderer", "Cleaning up particle renderer", .{});
 
         // Clean up particle buffers
@@ -163,7 +161,7 @@ pub const ParticleRenderer = struct {
 
     /// Update particle simulation
     /// Update particle simulation using frame/scene data
-    pub fn update(self: *Self, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+    pub fn update(self: *ParticleRenderer, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
         _ = scene_bridge;
         const command_buffer = frame_info.compute_buffer;
         const frame_index = frame_info.current_frame;
@@ -275,7 +273,7 @@ pub const ParticleRenderer = struct {
 
     /// Render particles
     pub fn renderParticles(
-        self: *Self,
+        self: *ParticleRenderer,
         command_buffer: vk.CommandBuffer,
         camera: *const Camera,
         frame_index: u32,
@@ -305,13 +303,13 @@ pub const ParticleRenderer = struct {
 
     // Private helper methods
 
-    fn updateUniformBuffer(self: *Self, data: anytype, buffer: *Buffer) !void {
+    fn updateUniformBuffer(self: *ParticleRenderer, data: anytype, buffer: *Buffer) !void {
         _ = self;
         buffer.writeToIndex(std.mem.asBytes(&data), 0);
     }
 
     /// Add particles at emitter position
-    pub fn emitParticles(self: *Self, count: u32, position: [3]f32, velocity: [3]f32) void {
+    pub fn emitParticles(self: *ParticleRenderer, count: u32, position: [3]f32, velocity: [3]f32) void {
         _ = self;
         _ = count;
         _ = position;
@@ -323,7 +321,7 @@ pub const ParticleRenderer = struct {
     }
 
     /// Reset all particles
-    pub fn resetParticles(self: *Self) void {
+    pub fn resetParticles(self: *ParticleRenderer) void {
         self.particle_count = 0;
 
         // TODO: Clear particle buffers
@@ -331,7 +329,7 @@ pub const ParticleRenderer = struct {
     }
 
     /// Initialize particles with random positions and velocities (like the old system)
-    pub fn initializeParticles(self: *Self) !void {
+    pub fn initializeParticles(self: *ParticleRenderer) !void {
         log(.INFO, "particle_renderer", "Initializing {} particles with random data", .{self.max_particles});
 
         // Start with all particles active
@@ -393,7 +391,7 @@ pub const ParticleRenderer = struct {
     }
 
     /// Debug method to read back the first particle's position
-    fn debugReadFirstParticle(self: *Self, frame_index: u32) !void {
+    fn debugReadFirstParticle(self: *ParticleRenderer, frame_index: u32) !void {
         // Create a staging buffer to read back the first particle
         var staging_buffer = try Buffer.init(
             self.graphics_context,
@@ -419,7 +417,7 @@ pub const ParticleRenderer = struct {
 
     // Private implementation
 
-    fn setupResources(self: *Self) !void {
+    fn setupResources(self: *ParticleRenderer) !void {
         // Bind resources for all frames following old system approach
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
             const frame_idx = @as(u32, @intCast(frame_index));

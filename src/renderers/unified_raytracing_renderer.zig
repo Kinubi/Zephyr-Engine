@@ -93,7 +93,6 @@ pub const RaytracingRenderer = struct {
     tlas: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
     tlas_valid: bool = false,
 
-    const Self = @This();
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -102,7 +101,7 @@ pub const RaytracingRenderer = struct {
         swapchain: *Swapchain,
         thread_pool: *ThreadPool,
         global_ubo_set: *GlobalUboSet,
-    ) !Self {
+    ) !RaytracingRenderer {
         log(.INFO, "unified_raytracing_renderer", "Initializing unified raytracing renderer", .{});
 
         const pipeline_config = PipelineConfig{
@@ -145,7 +144,7 @@ pub const RaytracingRenderer = struct {
 
         log(.INFO, "unified_raytracing_renderer", "✅ Unified raytracing renderer initialized", .{});
 
-        return Self{
+        return RaytracingRenderer{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
@@ -161,7 +160,7 @@ pub const RaytracingRenderer = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *RaytracingRenderer) void {
         log(.INFO, "unified_raytracing_renderer", "Cleaning up unified raytracing renderer", .{});
 
         self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev) catch |err| {
@@ -178,13 +177,13 @@ pub const RaytracingRenderer = struct {
         self.allocator.destroy(self.rt_system);
     }
 
-    fn markAllFramesDirty(self: *Self) void {
+    fn markAllFramesDirty(self: *RaytracingRenderer) void {
         for (&self.descriptor_dirty_flags) |*flag| {
             flag.* = true;
         }
     }
 
-    pub fn updateTLAS(self: *Self, tlas: vk.AccelerationStructureKHR) void {
+    pub fn updateTLAS(self: *RaytracingRenderer, tlas: vk.AccelerationStructureKHR) void {
         self.tlas = tlas;
         self.tlas_valid = (tlas != vk.AccelerationStructureKHR.null_handle);
         self.markAllFramesDirty();
@@ -311,7 +310,7 @@ pub const RaytracingRenderer = struct {
         return true;
     }
 
-    pub fn render(self: *Self, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+    pub fn render(self: *RaytracingRenderer, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
         _ = scene_bridge;
 
         if (self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
@@ -431,7 +430,7 @@ pub const RaytracingRenderer = struct {
         try self.copyOutputToSwapchain(frame_info.command_buffer, self.swapchain);
     }
 
-    fn resizeOutput(self: *Self, swapchain: *Swapchain) !void {
+    fn resizeOutput(self: *RaytracingRenderer, swapchain: *Swapchain) !void {
         if (swapchain.extent.width == self.width and swapchain.extent.height == self.height) {
             return;
         }
@@ -464,7 +463,7 @@ pub const RaytracingRenderer = struct {
         self.markAllFramesDirty();
     }
 
-    fn copyOutputToSwapchain(self: *Self, command_buffer: vk.CommandBuffer, swapchain: *Swapchain) !void {
+    fn copyOutputToSwapchain(self: *RaytracingRenderer, command_buffer: vk.CommandBuffer, swapchain: *Swapchain) !void {
         const gc = self.graphics_context;
 
         try self.output_texture.transitionImageLayout(

@@ -77,11 +77,9 @@ pub const HotReloadManager = struct {
         asset_type: AssetType,
     };
 
-    const Self = @This();
-
     /// Initialize enhanced hot reload manager
-    pub fn init(allocator: std.mem.Allocator, asset_manager: *AssetManager, watcher: *FileWatcher) !Self {
-        const manager = Self{
+    pub fn init(allocator: std.mem.Allocator, asset_manager: *AssetManager, watcher: *FileWatcher) !HotReloadManager {
+        const manager = HotReloadManager{
             .allocator = allocator,
             .asset_manager = asset_manager,
             .file_watcher = watcher,
@@ -101,7 +99,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Clean up resources
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *HotReloadManager) void {
         // Signal shutdown first
         self.shutdown_requested.store(true, .release);
 
@@ -134,7 +132,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Enable or disable hot reloading
-    pub fn setEnabled(self: *Self, enabled: bool) void {
+    pub fn setEnabled(self: *HotReloadManager, enabled: bool) void {
         self.enabled = enabled;
         if (enabled) {
             self.file_watcher.start() catch |err| {
@@ -147,7 +145,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Start hot reloading system with directory watching
-    pub fn start(self: *Self) !void {
+    pub fn start(self: *HotReloadManager) !void {
         if (!self.enabled) {
             log(.WARN, "enhanced_hot_reload", "Hot reloading is disabled, not starting", .{});
             return;
@@ -174,13 +172,13 @@ pub const HotReloadManager = struct {
     }
 
     /// Watch a directory for file changes
-    pub fn watchDirectory(self: *Self, dir_path: []const u8) !void {
+    pub fn watchDirectory(self: *HotReloadManager, dir_path: []const u8) !void {
         try self.file_watcher.addWatch(dir_path, true);
         log(.INFO, "enhanced_hot_reload", "Watching directory for changes: {s}", .{dir_path});
     }
 
     /// Register an asset for hot reloading when its file changes
-    pub fn registerAsset(self: *Self, asset_id: AssetId, file_path: []const u8, asset_type: AssetType) !void {
+    pub fn registerAsset(self: *HotReloadManager, asset_id: AssetId, file_path: []const u8, asset_type: AssetType) !void {
         // Start FileWatcher with directory watching on first asset registration
         if (!self.watcher_started) {
             self.start() catch |err| {
@@ -221,17 +219,17 @@ pub const HotReloadManager = struct {
     }
 
     /// Add callback for reload notifications
-    pub fn addReloadCallback(self: *Self, callback: AssetReloadCallback) !void {
+    pub fn addReloadCallback(self: *HotReloadManager, callback: AssetReloadCallback) !void {
         try self.reload_callbacks.append(callback);
     }
 
     /// Set debounce time for file change detection
-    pub fn setDebounceTime(self: *Self, ms: u64) void {
+    pub fn setDebounceTime(self: *HotReloadManager, ms: u64) void {
         self.debounce_ms = ms;
     }
 
     /// Process file change event (called by file watcher)
-    pub fn onFileChanged(self: *Self, file_path: []const u8) void {
+    pub fn onFileChanged(self: *HotReloadManager, file_path: []const u8) void {
         if (!self.enabled) return;
 
         // Early safety check - avoid processing if we're not fully initialized
@@ -277,7 +275,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Calculate reload priority based on asset type and usage
-    fn calculateReloadPriority(self: *Self, asset_type: AssetType, file_path: []const u8) LoadPriority {
+    fn calculateReloadPriority(self: *HotReloadManager, asset_type: AssetType, file_path: []const u8) LoadPriority {
         _ = self;
 
         // UI and shader assets get highest priority
@@ -296,7 +294,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Check if file has actually changed
-    fn hasFileChanged(self: *Self, file_path: []const u8, asset_type: AssetType) bool {
+    fn hasFileChanged(self: *HotReloadManager, file_path: []const u8, asset_type: AssetType) bool {
         const current_metadata = self.getFileMetadata(file_path, asset_type) catch return false;
 
         if (self.file_metadata.get(file_path)) |stored_metadata| {
@@ -308,7 +306,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Get current file metadata
-    fn getFileMetadata(self: *Self, file_path: []const u8, asset_type: AssetType) !FileMetadata {
+    fn getFileMetadata(self: *HotReloadManager, file_path: []const u8, asset_type: AssetType) !FileMetadata {
         _ = self;
         const file = std.fs.cwd().openFile(file_path, .{}) catch return error.FileNotFound;
         defer file.close();
@@ -322,7 +320,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Scan directory for asset files that might match registered assets
-    fn scanDirectoryForAssets(self: *Self, dir_path: []const u8) void {
+    fn scanDirectoryForAssets(self: *HotReloadManager, dir_path: []const u8) void {
         self.asset_map_mutex.lock();
         defer self.asset_map_mutex.unlock();
 
@@ -341,7 +339,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Reload a single asset
-    fn reloadAsset(self: *Self, request: ReloadRequest) !bool {
+    fn reloadAsset(self: *HotReloadManager, request: ReloadRequest) !bool {
         // Update file metadata first
         const new_metadata = self.getFileMetadata(request.file_path, request.asset_type) catch return false;
 
@@ -357,7 +355,7 @@ pub const HotReloadManager = struct {
     }
 
     /// Get hot reload statistics
-    pub fn getStatistics(self: *Self) struct {
+    pub fn getStatistics(self: *HotReloadManager) struct {
         files_watched: u64,
         reload_events: u64,
         successful_reloads: u64,

@@ -49,11 +49,9 @@ pub const Scene = struct {
     gc: *GraphicsContext,
     allocator: std.mem.Allocator,
 
-    const Self = @This();
-
     /// Initialize the Scene
-    pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, asset_manager: *AssetManager) Self {
-        return Self{
+    pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, asset_manager: *AssetManager) Scene {
+        return Scene{
             .objects = std.ArrayList(GameObject){},
             .next_object_id = 1,
             .asset_manager = asset_manager,
@@ -64,7 +62,7 @@ pub const Scene = struct {
     }
 
     /// Deinitialize the Enhanced Scene
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Scene) void {
         log(.INFO, "enhanced_scene", "Deinitializing Enhanced Scene with {} objects", .{self.objects.items.len});
 
         // Deinit GameObjects
@@ -77,20 +75,20 @@ pub const Scene = struct {
     }
 
     /// Convert Enhanced Scene to Scene for compatibility with legacy renderers
-    pub fn asScene(self: *Self) *Scene {
+    pub fn asScene(self: *Scene) *Scene {
         return @ptrCast(self);
     }
 
     // === Legacy API Compatibility ===
 
-    pub fn addEmpty(self: *Self) !*GameObject {
+    pub fn addEmpty(self: *Scene) !*GameObject {
         const object_id = self.next_object_id;
         self.next_object_id += 1;
         try self.objects.append(self.allocator, .{ .id = object_id, .model = null, .point_light = null });
         return &self.objects.items[self.objects.items.len - 1];
     }
 
-    pub fn addObject(self: *Self, model: ?*Model, point_light: ?PointLightComponent) !*GameObject {
+    pub fn addObject(self: *Scene, model: ?*Model, point_light: ?PointLightComponent) !*GameObject {
         const object_id = self.next_object_id;
         self.next_object_id += 1;
         try self.objects.append(.{
@@ -103,7 +101,7 @@ pub const Scene = struct {
 
     /// Add model with async asset loading (API compatible method signature)
     pub fn addModelAssetAsync(
-        self: *Self,
+        self: *Scene,
         model_path: []const u8,
         texture_path: []const u8,
         position: Math.Vec3,
@@ -139,24 +137,24 @@ pub const Scene = struct {
     }
 
     /// Create a material with Enhanced Asset Manager integration
-    pub fn createMaterial(self: *Self, albedo_texture_id: AssetId) !AssetId {
+    pub fn createMaterial(self: *Scene, albedo_texture_id: AssetId) !AssetId {
         // For now, we'll create a simple material reference
         // This could be expanded to use the asset manager's material system
         return try self.asset_manager.createMaterial(albedo_texture_id);
     }
 
     /// Load texture with priority
-    pub fn preloadTextureAsync(self: *Self, texture_path: []const u8) !AssetId {
+    pub fn preloadTextureAsync(self: *Scene, texture_path: []const u8) !AssetId {
         return try self.asset_manager.loadAssetAsync(texture_path, .texture, .normal);
     }
 
     /// Load mesh with priority
-    pub fn preloadModelAsync(self: *Self, mesh_path: []const u8) !AssetId {
+    pub fn preloadModelAsync(self: *Scene, mesh_path: []const u8) !AssetId {
         return try self.asset_manager.loadAssetAsync(mesh_path, .mesh, .normal);
     }
 
     /// Update async resources (required by app.zig) - detects when dirty flags transition to clean
-    pub fn updateAsyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
+    pub fn updateAsyncResources(self: *Scene, allocator: std.mem.Allocator) !bool {
         _ = allocator; // unused since AssetManager handles resource updates
 
         // Track dirty states to detect when work completes
@@ -191,7 +189,7 @@ pub const Scene = struct {
 
     /// Synchronous resource update - waits for all pending async operations to complete
     /// Use this during initialization when you need guaranteed completion before proceeding
-    pub fn updateSyncResources(self: *Self, allocator: std.mem.Allocator) !bool {
+    pub fn updateSyncResources(self: *Scene, allocator: std.mem.Allocator) !bool {
         _ = allocator; // unused since AssetManager handles resource updates
         var any_updates = false;
 
@@ -225,7 +223,7 @@ pub const Scene = struct {
     }
 
     /// Enhanced texture descriptor updates for backward compatibility
-    pub fn updateTextureImageInfos(self: *Self) !bool {
+    pub fn updateTextureImageInfos(self: *Scene) !bool {
         // Enhanced asset manager handles this internally
         const was_dirty = self.asset_manager.texture_descriptors_dirty;
 
@@ -244,22 +242,22 @@ pub const Scene = struct {
     }
 
     /// Register raytracing system for texture updates
-    pub fn setRaytracingSystem(self: *Self, rt_system: *@import("../systems/raytracing_system.zig").RaytracingSystem) void {
+    pub fn setRaytracingSystem(self: *Scene, rt_system: *@import("../systems/raytracing_system.zig").RaytracingSystem) void {
         self.raytracing_system = rt_system;
     }
 
     /// Enable hot reloading (requires an app-owned FileWatcher)
-    pub fn enableHotReload(self: *Self, watcher: *FileWatcher) !void {
+    pub fn enableHotReload(self: *Scene, watcher: *FileWatcher) !void {
         try self.asset_manager.initHotReload(watcher);
     }
 
     /// Get texture descriptor array (API compatibility)
-    pub fn getTextureDescriptorArray(self: *Self) []const vk.DescriptorImageInfo {
+    pub fn getTextureDescriptorArray(self: *Scene) []const vk.DescriptorImageInfo {
         return self.asset_manager.texture_image_infos;
     }
 
     /// Render the scene
-    pub fn render(self: Self, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
+    pub fn render(self: Scene, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) !void {
         // Only render ready objects
         for (self.objects.items) |object| {
             try object.render(gc, cmdbuf);
@@ -267,7 +265,7 @@ pub const Scene = struct {
     }
 
     /// Get scene statistics for debugging
-    pub fn getStatistics(self: *Self) struct {
+    pub fn getStatistics(self: *Scene) struct {
         objects: usize,
         asset_manager_stats: @TypeOf(self.asset_manager.getStatistics()),
     } {
@@ -278,7 +276,7 @@ pub const Scene = struct {
     }
 
     /// Create scene view for rendering passes
-    pub fn createSceneView(self: *Self) @import("../rendering/render_pass.zig").SceneView {
+    pub fn createSceneView(self: *Scene) @import("../rendering/render_pass.zig").SceneView {
         // Initialize SceneBridge if not already done
         if (self.scene_bridge == null) {
             self.scene_bridge = @import("../rendering/scene_bridge.zig").SceneBridge.init(self, self.allocator);
@@ -289,7 +287,7 @@ pub const Scene = struct {
     }
 
     fn getRasterizationDataImpl(scene_ptr: *anyopaque) RasterizationData {
-        const self: *Self = @ptrCast(@alignCast(scene_ptr));
+        const self: *Scene = @ptrCast(@alignCast(scene_ptr));
         const allocator = std.heap.c_allocator;
 
         // Allocate arrays on the heap
@@ -350,7 +348,7 @@ pub const Scene = struct {
     }
 
     fn getRaytracingDataImpl(scene_ptr: *anyopaque) @import("../rendering/scene_view.zig").RaytracingData {
-        const self: *Self = @ptrCast(@alignCast(scene_ptr));
+        const self: *Scene = @ptrCast(@alignCast(scene_ptr));
 
         const allocator = std.heap.c_allocator;
 
@@ -442,7 +440,7 @@ pub const Scene = struct {
     }
 
     fn getComputeDataImpl(scene_ptr: *anyopaque) ComputeData {
-        const self: *Self = @ptrCast(@alignCast(scene_ptr));
+        const self: *Scene = @ptrCast(@alignCast(scene_ptr));
         _ = self;
         // TODO: Implement compute data extraction
         return ComputeData{
@@ -452,7 +450,7 @@ pub const Scene = struct {
     }
 
     /// Process pending hot reloads
-    pub fn processPendingReloads(self: *Self) void {
+    pub fn processPendingReloads(self: *Scene) void {
         self.asset_manager.processPendingReloads();
     }
 };

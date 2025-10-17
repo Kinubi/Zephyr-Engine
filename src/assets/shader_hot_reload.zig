@@ -31,10 +31,8 @@ pub const ShaderWatcher = struct {
     // Optional pipeline system for shader rebuilds (owned by the application)
     pipeline_system: ?*anyopaque = null,
 
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) !Self {
-        var watcher = Self{
+    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) !ShaderWatcher {
+        var watcher = ShaderWatcher{
             .allocator = allocator,
             .thread_pool = thread_pool,
             .shader_compiler = try ShaderCompiler.init(allocator),
@@ -49,16 +47,16 @@ pub const ShaderWatcher = struct {
     }
 
     /// Configure an external FileWatcher (owned by the application).
-    pub fn setFileWatcher(self: *Self, watcher: *FileWatcher) void {
+    pub fn setFileWatcher(self: *ShaderWatcher, watcher: *FileWatcher) void {
         self.external_watcher = watcher;
     }
 
     /// Configure the pipeline system for shader rebuilds (owned by the application).
-    pub fn setPipelineSystem(self: *Self, pipeline_system: *anyopaque) void {
+    pub fn setPipelineSystem(self: *ShaderWatcher, pipeline_system: *anyopaque) void {
         self.pipeline_system = pipeline_system;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *ShaderWatcher) void {
         self.stop();
 
         self.shader_compiler.deinit();
@@ -66,7 +64,7 @@ pub const ShaderWatcher = struct {
         self.watched_shaders.deinit();
     }
 
-    pub fn start(self: *Self) !void {
+    pub fn start(self: *ShaderWatcher) !void {
         // ShaderWatcher uses the project's ThreadPool for compilation and
         // relies on an external FileWatcher (if configured) to deliver
         // file events into the pool. Do not spawn an internal thread here.
@@ -77,12 +75,12 @@ pub const ShaderWatcher = struct {
         // state here.
     }
 
-    pub fn stop(self: *Self) void {
+    pub fn stop(self: *ShaderWatcher) void {
         _ = self;
         // No internal watcher thread to join when running under FileWatcher
     }
 
-    pub fn addWatchDirectory(self: *Self, directory: []const u8) !void {
+    pub fn addWatchDirectory(self: *ShaderWatcher, directory: []const u8) !void {
         const dir_copy = try self.allocator.dupe(u8, directory);
         try self.watch_directories.append(self.allocator, dir_copy);
 
@@ -104,7 +102,7 @@ pub const ShaderWatcher = struct {
         }
     }
 
-    fn scanDirectory(self: *Self, directory_path: []const u8) !void {
+    fn scanDirectory(self: *ShaderWatcher, directory_path: []const u8) !void {
         var dir = std.fs.cwd().openDir(directory_path, .{ .iterate = true }) catch |err| {
             std.log.warn("Failed to open shader directory {s}: {}", .{ directory_path, err });
             return;
@@ -131,7 +129,7 @@ pub const ShaderWatcher = struct {
         }
     }
 
-    fn addShaderFile(self: *Self, file_path: []const u8) !void {
+    fn addShaderFile(self: *ShaderWatcher, file_path: []const u8) !void {
         const stat = std.fs.cwd().statFile(file_path) catch |err| {
             std.log.warn("Failed to stat shader file {s}: {}", .{ file_path, err });
             return;
@@ -156,7 +154,7 @@ pub const ShaderWatcher = struct {
     /// Handle a file-change event delivered from the FileWatcher inside the ThreadPool.
     /// Compiles the shader immediately and signals the pipeline to rebuild when finished.
     /// This follows the same pattern as hot_reload_manager.onFileChanged.
-    pub fn onFileChanged(self: *Self, file_path: []const u8) void {
+    pub fn onFileChanged(self: *ShaderWatcher, file_path: []const u8) void {
         // Skip cached outputs - only rebuild from source shaders
         if (std.mem.indexOf(u8, file_path, "shaders/cached") != null) {
             log(.DEBUG, "shader_hot_reload", "Ignoring cached shader artifact {s}", .{file_path});

@@ -282,8 +282,6 @@ pub const ShaderStage = struct {
 
 /// Complete pipeline builder
 pub const PipelineBuilder = struct {
-    const Self = @This();
-
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
 
@@ -329,8 +327,8 @@ pub const PipelineBuilder = struct {
     miss_shaders: std.ArrayList(*const Shader),
     hit_shaders: std.ArrayList(*const Shader),
 
-    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) Self {
-        return Self{
+    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext) PipelineBuilder {
+        return PipelineBuilder{
             .allocator = allocator,
             .graphics_context = graphics_context,
             .shader_stages = .{},
@@ -345,7 +343,7 @@ pub const PipelineBuilder = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *PipelineBuilder) void {
         self.shader_stages.deinit(self.allocator);
         self.vertex_bindings.deinit(self.allocator);
         self.vertex_attributes.deinit(self.allocator);
@@ -358,29 +356,29 @@ pub const PipelineBuilder = struct {
     }
 
     /// Set the pipeline cache to use for pipeline creation
-    pub fn setPipelineCache(self: *Self, cache: vk.PipelineCache) *Self {
+    pub fn setPipelineCache(self: *PipelineBuilder, cache: vk.PipelineCache) *PipelineBuilder {
         self.pipeline_cache = cache;
         return self;
     }
 
     // Pipeline type configuration
-    pub fn graphics(self: *Self) *Self {
+    pub fn graphics(self: *PipelineBuilder) *PipelineBuilder {
         self.pipeline_type = .graphics;
         return self;
     }
 
-    pub fn compute(self: *Self) *Self {
+    pub fn compute(self: *PipelineBuilder) *PipelineBuilder {
         self.pipeline_type = .compute;
         return self;
     }
 
-    pub fn raytracing(self: *Self) *Self {
+    pub fn raytracing(self: *PipelineBuilder) *PipelineBuilder {
         self.pipeline_type = .raytracing;
         return self;
     }
 
     // Shader stage configuration
-    pub fn addShaderStage(self: *Self, stage: vk.ShaderStageFlags, shader: *const Shader) !*Self {
+    pub fn addShaderStage(self: *PipelineBuilder, stage: vk.ShaderStageFlags, shader: *const Shader) !*PipelineBuilder {
         try self.shader_stages.append(self.allocator, ShaderStage{
             .stage = stage,
             .shader = shader,
@@ -388,54 +386,54 @@ pub const PipelineBuilder = struct {
         return self;
     }
 
-    pub fn vertexShader(self: *Self, shader: *const Shader) !*Self {
+    pub fn vertexShader(self: *PipelineBuilder, shader: *const Shader) !*PipelineBuilder {
         return self.addShaderStage(.{ .vertex_bit = true }, shader);
     }
 
-    pub fn fragmentShader(self: *Self, shader: *const Shader) !*Self {
+    pub fn fragmentShader(self: *PipelineBuilder, shader: *const Shader) !*PipelineBuilder {
         return self.addShaderStage(.{ .fragment_bit = true }, shader);
     }
 
-    pub fn computeShader(self: *Self, shader: *const Shader) !*Self {
+    pub fn computeShader(self: *PipelineBuilder, shader: *const Shader) !*PipelineBuilder {
         self.compute_shader = shader;
         self.pipeline_type = .compute;
         return self;
     }
 
     // Vertex input configuration
-    pub fn addVertexBinding(self: *Self, binding: VertexInputBinding) !*Self {
+    pub fn addVertexBinding(self: *PipelineBuilder, binding: VertexInputBinding) !*PipelineBuilder {
         try self.vertex_bindings.append(self.allocator, binding);
         return self;
     }
 
-    pub fn addVertexAttribute(self: *Self, attribute: VertexInputAttribute) !*Self {
+    pub fn addVertexAttribute(self: *PipelineBuilder, attribute: VertexInputAttribute) !*PipelineBuilder {
         try self.vertex_attributes.append(self.allocator, attribute);
         return self;
     }
 
     // Input assembly
-    pub fn triangleList(self: *Self) *Self {
+    pub fn triangleList(self: *PipelineBuilder) *PipelineBuilder {
         self.topology = .triangle_list;
         return self;
     }
 
-    pub fn triangleStrip(self: *Self) *Self {
+    pub fn triangleStrip(self: *PipelineBuilder) *PipelineBuilder {
         self.topology = .triangle_strip;
         return self;
     }
 
-    pub fn lineList(self: *Self) *Self {
+    pub fn lineList(self: *PipelineBuilder) *PipelineBuilder {
         self.topology = .line_list;
         return self;
     }
 
-    pub fn pointList(self: *Self) *Self {
+    pub fn pointList(self: *PipelineBuilder) *PipelineBuilder {
         self.topology = .point_list;
         return self;
     }
 
     // Descriptor layout
-    pub fn addDescriptorBinding(self: *Self, binding: DescriptorBinding) !*Self {
+    pub fn addDescriptorBinding(self: *PipelineBuilder, binding: DescriptorBinding) !*PipelineBuilder {
         // Ensure the ArrayList is properly initialized
         if (self.descriptor_bindings.capacity == 0) {
             try self.descriptor_bindings.ensureTotalCapacity(self.allocator, 8);
@@ -444,34 +442,34 @@ pub const PipelineBuilder = struct {
         return self;
     }
 
-    pub fn addPushConstantRange(self: *Self, range: PushConstantRange) !*Self {
+    pub fn addPushConstantRange(self: *PipelineBuilder, range: PushConstantRange) !*PipelineBuilder {
         try self.push_constant_ranges.append(self.allocator, range);
         return self;
     }
 
     // Pipeline state
-    pub fn withRasterizationState(self: *Self, state: RasterizationState) *Self {
+    pub fn withRasterizationState(self: *PipelineBuilder, state: RasterizationState) *PipelineBuilder {
         self.rasterization_state = state;
         return self;
     }
 
-    pub fn withMultisampleState(self: *Self, state: MultisampleState) *Self {
+    pub fn withMultisampleState(self: *PipelineBuilder, state: MultisampleState) *PipelineBuilder {
         self.multisample_state = state;
         return self;
     }
 
-    pub fn withDepthStencilState(self: *Self, state: DepthStencilState) *Self {
+    pub fn withDepthStencilState(self: *PipelineBuilder, state: DepthStencilState) *PipelineBuilder {
         self.depth_stencil_state = state;
         return self;
     }
 
-    pub fn addColorBlendAttachment(self: *Self, attachment: ColorBlendAttachment) !*Self {
+    pub fn addColorBlendAttachment(self: *PipelineBuilder, attachment: ColorBlendAttachment) !*PipelineBuilder {
         try self.color_blend_attachments.append(self.allocator, attachment);
         return self;
     }
 
     // Dynamic state
-    pub fn addDynamicState(self: *Self, state: vk.DynamicState) !*Self {
+    pub fn addDynamicState(self: *PipelineBuilder, state: vk.DynamicState) !*PipelineBuilder {
         // Check if this dynamic state is already added to avoid duplicates
         for (self.dynamic_states.items) |existing_state| {
             if (existing_state == state) {
@@ -482,21 +480,21 @@ pub const PipelineBuilder = struct {
         return self;
     }
 
-    pub fn dynamicViewportScissor(self: *Self) !*Self {
+    pub fn dynamicViewportScissor(self: *PipelineBuilder) !*PipelineBuilder {
         _ = try self.addDynamicState(.viewport);
         _ = try self.addDynamicState(.scissor);
         return self;
     }
 
     // Render pass
-    pub fn withRenderPass(self: *Self, render_pass: vk.RenderPass, subpass: u32) *Self {
+    pub fn withRenderPass(self: *PipelineBuilder, render_pass: vk.RenderPass, subpass: u32) *PipelineBuilder {
         self.render_pass = render_pass;
         self.subpass = subpass;
         return self;
     }
 
     // Build methods
-    pub fn buildDescriptorSetLayout(self: *Self) !vk.DescriptorSetLayout {
+    pub fn buildDescriptorSetLayout(self: *PipelineBuilder) !vk.DescriptorSetLayout {
         var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
         try bindings.ensureTotalCapacity(self.allocator, self.descriptor_bindings.items.len);
         defer bindings.deinit(self.allocator);
@@ -519,7 +517,7 @@ pub const PipelineBuilder = struct {
         return try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &create_info, null);
     }
 
-    pub fn buildDescriptorSetLayouts(self: *Self, descriptor_sets: []const []const DescriptorBinding, allocator: std.mem.Allocator) ![]vk.DescriptorSetLayout {
+    pub fn buildDescriptorSetLayouts(self: *PipelineBuilder, descriptor_sets: []const []const DescriptorBinding, allocator: std.mem.Allocator) ![]vk.DescriptorSetLayout {
         var layouts = try allocator.alloc(vk.DescriptorSetLayout, descriptor_sets.len);
 
         for (descriptor_sets, 0..) |set_bindings, set_index| {
@@ -548,7 +546,7 @@ pub const PipelineBuilder = struct {
         return layouts;
     }
 
-    pub fn buildPipelineLayout(self: *Self, descriptor_set_layouts: []const vk.DescriptorSetLayout) !vk.PipelineLayout {
+    pub fn buildPipelineLayout(self: *PipelineBuilder, descriptor_set_layouts: []const vk.DescriptorSetLayout) !vk.PipelineLayout {
         var push_constants: std.ArrayList(vk.PushConstantRange) = .{};
         try push_constants.ensureTotalCapacity(self.allocator, self.push_constant_ranges.items.len);
         defer push_constants.deinit(self.allocator);
@@ -571,7 +569,7 @@ pub const PipelineBuilder = struct {
         return try self.graphics_context.vkd.createPipelineLayout(self.graphics_context.dev, &create_info, null);
     }
 
-    pub fn buildGraphicsPipeline(self: *Self, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
+    pub fn buildGraphicsPipeline(self: *PipelineBuilder, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
         if (self.pipeline_type != .graphics) return error.InvalidPipelineType;
         if (self.render_pass == null) return error.MissingRenderPass;
 
@@ -729,7 +727,7 @@ pub const PipelineBuilder = struct {
         return pipeline;
     }
 
-    pub fn buildComputePipeline(self: *Self, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
+    pub fn buildComputePipeline(self: *PipelineBuilder, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
         if (self.pipeline_type != .compute) return error.InvalidPipelineType;
         if (self.compute_shader == null) return error.MissingComputeShader;
 
@@ -755,7 +753,7 @@ pub const PipelineBuilder = struct {
     /// - Shader binding table setup
     /// - Ray generation, miss, and hit shader groups
     /// - Proper raytracing pipeline creation info
-    pub fn buildRaytracingPipeline(self: *Self, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
+    pub fn buildRaytracingPipeline(self: *PipelineBuilder, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
         _ = self;
         _ = pipeline_layout;
 
