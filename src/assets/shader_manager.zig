@@ -260,8 +260,6 @@ pub const ShaderManager = struct {
         defer self.manager_mutex.unlock();
 
         try self.loaded_shaders.put(path_key, loaded);
-
-        std.log.info("[shader_manager] Shader {s} reloaded successfully", .{file_path});
     }
 
     pub fn recompileAllShaders(self: *Self) !void {

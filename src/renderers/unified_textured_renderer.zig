@@ -18,8 +18,6 @@ const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIG
 ///
 /// This renderer replaces the old textured_renderer but uses UnifiedPipelineSystem
 /// like ParticleRenderer does, while maintaining API compatibility.
-///
-/// TODO: REbuilding pipeline after shader recomp breaks binding, it does work flawlessly for ray tracing.
 pub const UnifiedTexturedRenderer = struct {
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
@@ -32,6 +30,8 @@ pub const UnifiedTexturedRenderer = struct {
 
     // Pipeline for textured objects
     textured_pipeline: PipelineId,
+    cached_pipeline_handle: vk.Pipeline,
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
     const Self = @This();
 
@@ -71,6 +71,7 @@ pub const UnifiedTexturedRenderer = struct {
         };
 
         const textured_pipeline = try pipeline_system.createPipeline(pipeline_config);
+        const pipeline_entry = pipeline_system.pipelines.get(textured_pipeline) orelse return error.PipelineNotFound;
 
         const renderer = Self{
             .allocator = allocator,
@@ -80,6 +81,7 @@ pub const UnifiedTexturedRenderer = struct {
             .pipeline_system = pipeline_system,
             .resource_binder = resource_binder,
             .textured_pipeline = textured_pipeline,
+            .cached_pipeline_handle = pipeline_entry.vulkan_pipeline,
         };
 
         log(.INFO, "unified_textured_renderer", "✅ Unified textured renderer initialized", .{});
@@ -94,66 +96,133 @@ pub const UnifiedTexturedRenderer = struct {
         self.resource_binder.deinit();
     }
 
+    fn markAllFramesDirty(self: *Self) void {
+        for (&self.descriptor_dirty_flags) |*flag| {
+            flag.* = true;
+        }
+    }
+
+    pub fn onCreate(self: *Self, scene_bridge: *SceneBridge) !void {
+        var any_bindings = false;
+
+        if (scene_bridge.getMaterialBufferInfo()) |material_info| {
+            const material_resource = Resource{
+                .buffer = .{
+                    .buffer = material_info.buffer,
+                    .offset = material_info.offset,
+                    .range = material_info.range,
+                },
+            };
+
+            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                try self.pipeline_system.bindResource(
+                    self.textured_pipeline,
+                    1,
+                    0,
+                    material_resource,
+                    @intCast(frame_idx),
+                );
+            }
+
+            any_bindings = true;
+        }
+
+        const texture_image_infos = scene_bridge.getTextures();
+        var textures_ready = false;
+        if (texture_image_infos.len > 0) {
+            textures_ready = true;
+            for (texture_image_infos) |info| {
+                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) {
+                    textures_ready = false;
+                    break;
+                }
+            }
+        }
+
+        if (textures_ready) {
+            const texture_resource = Resource{ .image_array = texture_image_infos };
+            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                try self.pipeline_system.bindResource(
+                    self.textured_pipeline,
+                    1,
+                    1,
+                    texture_resource,
+                    @intCast(frame_idx),
+                );
+            }
+
+            any_bindings = true;
+        }
+
+        if (any_bindings) {
+            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                try self.pipeline_system.updateDescriptorSetsForPipeline(self.textured_pipeline, @intCast(frame_idx));
+            }
+        }
+    }
+
     /// Update material and texture bindings for the current frame
     pub fn update(self: *Self, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
         const frame_index = frame_info.current_frame;
+
         const materials_dirty = scene_bridge.materialsUpdated(frame_index);
         const textures_dirty = scene_bridge.texturesUpdated(frame_index);
 
-        if (!materials_dirty and !textures_dirty) {
+        const needs_update =
+            materials_dirty or
+            textures_dirty or
+            self.descriptor_dirty_flags[frame_index];
+
+        if (!needs_update) {
             return false;
         }
 
-        var descriptors_updated = false;
+        const material_info = scene_bridge.getMaterialBufferInfo() orelse {
+            log(.WARN, "unified_textured_renderer", "Material buffer not ready, deferring descriptor update", .{});
+            self.markAllFramesDirty();
+            return false;
+        };
 
-        if (materials_dirty) {
-            if (scene_bridge.getMaterialBufferInfo()) |material_info| {
-                const material_resource = Resource{
-                    .buffer = .{
-                        .buffer = material_info.buffer,
-                        .offset = material_info.offset,
-                        .range = material_info.range,
-                    },
-                };
-                for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                    try self.pipeline_system.bindResource(
-                        self.textured_pipeline,
-                        1,
-                        0,
-                        material_resource,
-                        @intCast(frame_idx),
-                    );
+        const texture_image_infos = scene_bridge.getTextures();
+        const textures_ready = blk: {
+            if (texture_image_infos.len == 0) break :blk false;
+            for (texture_image_infos) |info| {
+                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) {
+                    break :blk false;
                 }
-                descriptors_updated = true;
-            } else {
-                log(.WARN, "unified_textured_renderer", "Cannot update descriptors: material buffer not ready", .{});
             }
-        }
+            break :blk true;
+        };
 
-        if (textures_dirty) {
-            const texture_image_infos = scene_bridge.getTextures();
-            if (texture_image_infos.len > 0) {
-                const texture_resource = Resource{ .image_array = texture_image_infos };
-                for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                    try self.pipeline_system.bindResource(
-                        self.textured_pipeline,
-                        1,
-                        1,
-                        texture_resource,
-                        @intCast(frame_idx),
-                    );
-                }
-                descriptors_updated = true;
-            } else {
-                log(.WARN, "unified_textured_renderer", "Cannot update descriptors: texture descriptors not ready", .{});
+        const material_resource = Resource{
+            .buffer = .{
+                .buffer = material_info.buffer,
+                .offset = material_info.offset,
+                .range = material_info.range,
+            },
+        };
+
+        const textures_resource = if (textures_ready)
+            Resource{ .image_array = texture_image_infos }
+        else
+            null;
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const target_frame: u32 = @intCast(frame_idx);
+            try self.pipeline_system.bindResource(self.textured_pipeline, 1, 0, material_resource, target_frame);
+
+            if (textures_resource) |res| {
+                try self.pipeline_system.bindResource(self.textured_pipeline, 1, 1, res, target_frame);
             }
+
+            self.descriptor_dirty_flags[frame_idx] = false;
         }
 
-        if (descriptors_updated) {
-            try self.pipeline_system.updateDescriptorSetsForPipeline(self.textured_pipeline, frame_index);
+        if (!textures_ready) {
+            log(.WARN, "unified_textured_renderer", "Texture descriptors not ready, reusing previous bindings", .{});
         }
 
-        return descriptors_updated;
+        return true;
     }
 
     /// Render textured objects using scene bridge data
@@ -165,6 +234,20 @@ pub const UnifiedTexturedRenderer = struct {
             if (meshes_dirty) {
                 scene_bridge.markMeshesSynced(frame_index);
             }
+            return;
+        }
+
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.textured_pipeline) orelse return error.PipelineNotFound;
+        const pipeline_changed = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+        if (pipeline_changed) {
+            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.pipeline_system.markPipelineResourcesDirty(self.textured_pipeline);
+            log(.INFO, "unified_textured_renderer", "Pipeline changed, marking resources dirty", .{});
+            self.markAllFramesDirty();
+        }
+
+        if (self.descriptor_dirty_flags[frame_index]) {
+            log(.DEBUG, "unified_textured_renderer", "Descriptors dirty for frame {}, skipping render", .{frame_index});
             return;
         }
 

@@ -433,6 +433,9 @@ pub const App = struct {
         try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
         try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
 
+    // Prime renderer descriptor bindings once all raster renderers are registered
+    try forward_renderer.onCreate();
+
         // Initialize Raytracing Render Pass (separate from forward renderer)
         rt_render_pass = GenericRenderer.init(self.allocator);
 
@@ -442,6 +445,9 @@ pub const App = struct {
 
         // Add raytracing renderer to its own render pass
         try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+
+    // Ensure raytracing renderer receives initial descriptor bindings before the first frame
+    try rt_render_pass.onCreate();
 
         // Future renderers can be added here:
         // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);

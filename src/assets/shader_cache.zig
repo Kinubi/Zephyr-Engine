@@ -425,8 +425,6 @@ pub const ShaderCache = struct {
 
         // Write to file
         try std.fs.cwd().writeFile(.{ .sub_path = metadata_path, .data = buffer.items });
-
-        std.log.debug("Saved shader cache metadata with {} entries to: {s}", .{ self.cache_metadata.count(), metadata_path });
     }
 };
 

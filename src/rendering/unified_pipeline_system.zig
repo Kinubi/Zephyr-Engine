@@ -935,13 +935,6 @@ pub const UnifiedPipelineSystem = struct {
             .pipeline = old_pipeline_to_destroy,
             .frames_to_wait = frames_to_wait,
         });
-
-        log(
-            .INFO,
-            "unified_pipeline",
-            "Pipeline {s} hot-reloaded; deferring old pipeline destruction for {} frames",
-            .{ pipeline_id.name, frames_to_wait },
-        );
     }
 
     // Rebuild job allocated by shader hot reload system
@@ -989,7 +982,6 @@ pub const UnifiedPipelineSystem = struct {
             std.log.err("[unified_pipeline] Failed to handle shader reload for pipelines: {}", .{err});
             return;
         };
-        log(.INFO, "unified_pipeline", "✅ Successfully rebuilt pipelines using shader {s}", .{file_path});
     }
 
     /// Process deferred pipeline destructions - call this each frame

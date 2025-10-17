@@ -60,6 +60,7 @@ pub const GenericRenderer = struct {
     allocator: std.mem.Allocator,
     scene_bridge_ptr: ?*anyopaque = null, // Store scene bridge for renderers that need scene data
     swapchain_ptr: ?*anyopaque = null, // Store swapchain for renderers that need it (like raytracing)
+    on_create_ran: bool = false,
 
     // Execution order for renderer types
     execution_order: []const RendererType = &[_]RendererType{
@@ -81,13 +82,7 @@ pub const GenericRenderer = struct {
     /// Set the scene bridge for renderers that need scene data
     pub fn setSceneBridge(self: *GenericRenderer, scene_bridge: anytype) void {
         self.scene_bridge_ptr = @ptrCast(scene_bridge);
-
-        const bridge_ptr: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr.?));
-        for (self.renderers.items) |*renderer| {
-            renderer.onCreate(bridge_ptr) catch |err| {
-                std.log.err("GenericRenderer: Failed to run onCreate for '{s}': {}", .{ renderer.name, err });
-            };
-        }
+        self.on_create_ran = false;
     }
 
     /// Set the swapchain for renderers that need it (like raytracing)
@@ -149,9 +144,26 @@ pub const GenericRenderer = struct {
         try self.renderers.append(self.allocator, entry);
 
         if (self.scene_bridge_ptr) |ptr| {
-            const scene_bridge: *SceneBridge = @ptrCast(@alignCast(ptr));
-            try self.renderers.items[self.renderers.items.len - 1].onCreate(scene_bridge);
+            if (self.on_create_ran) {
+                const scene_bridge: *SceneBridge = @ptrCast(@alignCast(ptr));
+                self.renderers.items[self.renderers.items.len - 1].onCreate(scene_bridge) catch |err| {
+                    std.log.err("GenericRenderer: Failed to run onCreate for '{s}': {}", .{ name, err });
+                };
+            }
         }
+    }
+
+    /// Invoke onCreate for all registered renderers once the scene bridge is available
+    pub fn onCreate(self: *GenericRenderer) !void {
+        const scene_bridge: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr orelse return error.NoSceneBridge));
+
+        for (self.renderers.items) |*renderer| {
+            renderer.onCreate(scene_bridge) catch |err| {
+                std.log.err("GenericRenderer: Failed to run onCreate for '{s}': {}", .{ renderer.name, err });
+            };
+        }
+
+        self.on_create_ran = true;
     }
 
     /// Update descriptor sets for all renderers that need material/texture updates
