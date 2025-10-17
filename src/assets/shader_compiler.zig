@@ -38,6 +38,7 @@ pub const ShaderSource = struct {
     language: ShaderLanguage,
     stage: ShaderStage,
     entry_point: []const u8,
+    file_path: ?[]const u8 = null,
 
     // Optional metadata
     includes: ?[]const []const u8 = null,
@@ -55,6 +56,7 @@ pub const ShaderReflection = struct {
 
     // Textures and samplers
     textures: std.ArrayList(ShaderTexture),
+    storage_images: std.ArrayList(ShaderStorageImage),
     samplers: std.ArrayList(ShaderSampler),
 
     // Push constants
@@ -62,6 +64,7 @@ pub const ShaderReflection = struct {
 
     // Specialization constants
     specialization_constants: std.ArrayList(ShaderSpecializationConstant),
+    acceleration_structures: std.ArrayList(ShaderAccelerationStructure),
 
     const Self = @This();
 
@@ -72,8 +75,10 @@ pub const ShaderReflection = struct {
             .uniform_buffers = std.ArrayList(ShaderBuffer){},
             .storage_buffers = std.ArrayList(ShaderBuffer){},
             .textures = std.ArrayList(ShaderTexture){},
+            .storage_images = std.ArrayList(ShaderStorageImage){},
             .samplers = std.ArrayList(ShaderSampler){},
             .specialization_constants = std.ArrayList(ShaderSpecializationConstant){},
+            .acceleration_structures = std.ArrayList(ShaderAccelerationStructure){},
         };
     }
 
@@ -83,8 +88,10 @@ pub const ShaderReflection = struct {
         self.uniform_buffers.deinit(allocator);
         self.storage_buffers.deinit(allocator);
         self.textures.deinit(allocator);
+        self.storage_images.deinit(allocator);
         self.samplers.deinit(allocator);
         self.specialization_constants.deinit(allocator);
+        self.acceleration_structures.deinit(allocator);
     }
 };
 
@@ -120,11 +127,25 @@ pub const ShaderTexture = struct {
     array_size: u32 = 1, // Number of array elements (1 for non-arrays, 0 for unbounded)
 };
 
+pub const ShaderStorageImage = struct {
+    name: []const u8,
+    binding: u32,
+    set: u32,
+    array_size: u32 = 1,
+};
+
 pub const ShaderSampler = struct {
     name: []const u8,
     binding: u32,
     set: u32,
     array_size: u32 = 1, // Number of array elements (1 for non-arrays, 0 for unbounded)
+};
+
+pub const ShaderAccelerationStructure = struct {
+    name: []const u8,
+    binding: u32,
+    set: u32,
+    array_size: u32 = 1,
 };
 
 pub const ShaderPushConstants = struct {
@@ -192,6 +213,157 @@ pub const TextureFormat = enum {
     d24_unorm_s8_uint,
 };
 
+fn parseDescriptorArraySize(array_value_opt: ?std.json.Value) u32 {
+    if (array_value_opt) |value| {
+        switch (value) {
+            .integer => {
+                const raw_size = value.integer;
+                return if (raw_size == 0) 0 else @as(u32, @intCast(raw_size));
+            },
+            .array => {
+                if (value.array.items.len > 0) {
+                    const first = value.array.items[0];
+                    if (first == .integer) {
+                        const raw_size = first.integer;
+                        return if (raw_size == 0) 0 else @as(u32, @intCast(raw_size));
+                    }
+                }
+                return 0;
+            },
+            else => return 1,
+        }
+    }
+    return 1;
+}
+
+fn hasTokenIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or haystack.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var matched = true;
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
+fn mapTextureDimension(type_name: []const u8) TextureDimension {
+    if (hasTokenIgnoreCase(type_name, "cube")) {
+        if (hasTokenIgnoreCase(type_name, "array")) return .texture_cube_array;
+        return .texture_cube;
+    }
+    if (hasTokenIgnoreCase(type_name, "3d")) return .texture_3d;
+    if (hasTokenIgnoreCase(type_name, "2d")) {
+        if (hasTokenIgnoreCase(type_name, "array")) return .texture_2d_array;
+        return .texture_2d;
+    }
+    if (hasTokenIgnoreCase(type_name, "1d")) return .texture_1d;
+    return .texture_2d;
+}
+
+fn appendTextureResource(
+    reflection: *ShaderReflection,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    set: u32,
+    binding: u32,
+    dimension: TextureDimension,
+    array_size: u32,
+) !void {
+    for (reflection.textures.items) |*existing| {
+        if (existing.set == set and existing.binding == binding) {
+            if (existing.array_size < array_size) existing.array_size = array_size;
+            return;
+        }
+    }
+
+    const name_copy = try allocator.dupe(u8, name);
+    try reflection.textures.append(allocator, ShaderTexture{
+        .name = name_copy,
+        .binding = binding,
+        .set = set,
+        .dimension = dimension,
+        .format = null,
+        .array_size = array_size,
+    });
+}
+
+fn appendStorageImageResource(
+    reflection: *ShaderReflection,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    set: u32,
+    binding: u32,
+    array_size: u32,
+) !void {
+    for (reflection.storage_images.items) |*existing| {
+        if (existing.set == set and existing.binding == binding) {
+            if (existing.array_size < array_size) existing.array_size = array_size;
+            return;
+        }
+    }
+
+    const name_copy = try allocator.dupe(u8, name);
+    try reflection.storage_images.append(allocator, ShaderStorageImage{
+        .name = name_copy,
+        .binding = binding,
+        .set = set,
+        .array_size = array_size,
+    });
+}
+
+fn appendAccelerationStructureResource(
+    reflection: *ShaderReflection,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    set: u32,
+    binding: u32,
+    array_size: u32,
+) !void {
+    for (reflection.acceleration_structures.items) |*existing| {
+        if (existing.set == set and existing.binding == binding) {
+            if (existing.array_size < array_size) existing.array_size = array_size;
+            return;
+        }
+    }
+
+    const name_copy = try allocator.dupe(u8, name);
+    try reflection.acceleration_structures.append(allocator, ShaderAccelerationStructure{
+        .name = name_copy,
+        .binding = binding,
+        .set = set,
+        .array_size = array_size,
+    });
+}
+
+const PendingCombinedTexture = struct {
+    name: []const u8,
+    set: u32,
+    binding: u32,
+    array_size: u32,
+    dimension: TextureDimension,
+    has_sampler: bool,
+};
+
+fn findPendingCombinedTexture(
+    list: *std.ArrayList(PendingCombinedTexture),
+    set: u32,
+    binding: u32,
+) ?*PendingCombinedTexture {
+    for (list.items) |*entry| {
+        if (entry.set == set and entry.binding == binding) {
+            return entry;
+        }
+    }
+    return null;
+}
+
 pub const CompilationOptions = struct {
     target: CompilationTarget,
     optimization_level: OptimizationLevel = .none,
@@ -258,7 +430,7 @@ pub const ShaderCompiler = struct {
                 try self.compileGlslEmbedded(source, options)
             else
                 try self.compileGlslExternal(source, options),
-            .hlsl => return error.HlslCompilationNotImplemented, // Would use DXC or similar
+            .hlsl => try self.compileHlsl(source, options),
         };
 
         // Cross-compile using SPIRV-Cross if needed
@@ -443,6 +615,98 @@ pub const ShaderCompiler = struct {
         return spirv_copy;
     }
 
+    fn hlslProfileForStage(stage: ShaderStage, options: CompilationOptions, buffer: *[16]u8) ![]const u8 {
+        var major = options.hlsl_shader_model / 10;
+        var minor = options.hlsl_shader_model % 10;
+
+        const prefix = switch (stage) {
+            .vertex => "vs",
+            .fragment => "ps",
+            .compute => "cs",
+            .geometry => "gs",
+            .tessellation_control => "hs",
+            .tessellation_evaluation => "ds",
+            .raygen, .any_hit, .closest_hit, .miss, .intersection, .callable => blk: {
+                if (major < 6 or (major == 6 and minor < 3)) {
+                    major = 6;
+                    minor = 3;
+                }
+                break :blk "lib";
+            },
+        };
+
+        return std.fmt.bufPrint(buffer, "{s}_{d}_{d}", .{ prefix, major, minor });
+    }
+
+    fn compileHlsl(self: *Self, source: ShaderSource, options: CompilationOptions) ![]const u32 {
+        const file_path = source.file_path orelse return error.HlslFilePathRequired;
+
+        const cache_dir = "shaders/cached";
+        std.fs.cwd().makePath(cache_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const basename = std.fs.path.basename(file_path);
+        const output_name = try std.fmt.allocPrint(self.allocator, "{s}.spv", .{basename});
+        defer self.allocator.free(output_name);
+
+        const output_path = try std.fs.path.join(self.allocator, &[_][]const u8{ cache_dir, output_name });
+        defer self.allocator.free(output_path);
+
+        var args = std.ArrayList([]const u8){};
+        defer args.deinit(self.allocator);
+
+        try args.appendSlice(self.allocator, &[_][]const u8{ "dxc", "-spirv", "-fspv-target-env=vulkan1.2" });
+
+        try args.append(self.allocator, "-I");
+        try args.append(self.allocator, "vendor/NRIFramework/External/NRI/Include");
+
+        if (source.includes) |extra_includes| {
+            for (extra_includes) |inc| {
+                try args.append(self.allocator, "-I");
+                try args.append(self.allocator, inc);
+            }
+        }
+
+        try args.append(self.allocator, "-E");
+        try args.append(self.allocator, source.entry_point);
+
+        var profile_buffer: [16]u8 = undefined;
+        const profile = try hlslProfileForStage(source.stage, options, &profile_buffer);
+        try args.append(self.allocator, "-T");
+        try args.append(self.allocator, profile);
+
+        try args.append(self.allocator, "-Fo");
+        try args.append(self.allocator, output_path);
+        try args.append(self.allocator, file_path);
+
+        var child = std.process.Child.init(args.items, self.allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+
+        child.spawn() catch |err| {
+            std.log.err("Failed to invoke dxc: {}", .{err});
+            return error.HlslCompilationFailed;
+        };
+
+        const result = child.wait() catch |err| {
+            std.log.err("dxc invocation failed: {}", .{err});
+            return error.HlslCompilationFailed;
+        };
+
+        if (result != .Exited or result.Exited != 0) {
+            std.log.err("dxc returned non-zero exit status ({}) for {s}", .{ result, file_path });
+            return error.HlslCompilationFailed;
+        }
+
+        const spv_bytes = try std.fs.cwd().readFileAlloc(self.allocator, output_path, 16 * 1024 * 1024);
+        defer self.allocator.free(spv_bytes);
+
+        return try self.parseSpirv(spv_bytes);
+    }
+
     fn crossCompile(self: *Self, spirv_data: []const u32, options: CompilationOptions) ![]const u8 {
         const backend = switch (options.target) {
             .vulkan => spirv_cross.Backend.glsl,
@@ -486,7 +750,6 @@ pub const ShaderCompiler = struct {
         // DEBUG: Write JSON to file for inspection
         if (std.mem.indexOf(u8, json_owned, "textures") != null) {
             std.fs.cwd().writeFile(.{ .sub_path = "spirv_reflection_debug.json", .data = json_owned }) catch {};
-            std.log.warn("=== SPIRV-Cross JSON dumped to spirv_reflection_debug.json ===", .{});
         }
 
         var parser = std.json.parseFromSlice(std.json.Value, self.allocator, json_owned, .{}) catch |err| {
@@ -508,8 +771,13 @@ pub const ShaderCompiler = struct {
         refl.uniform_buffers = std.ArrayList(ShaderBuffer){};
         refl.storage_buffers = std.ArrayList(ShaderBuffer){};
         refl.textures = std.ArrayList(ShaderTexture){};
+        refl.storage_images = std.ArrayList(ShaderStorageImage){};
         refl.samplers = std.ArrayList(ShaderSampler){};
         refl.specialization_constants = std.ArrayList(ShaderSpecializationConstant){};
+        refl.acceleration_structures = std.ArrayList(ShaderAccelerationStructure){};
+
+        var pending_combined = std.ArrayList(PendingCombinedTexture){};
+        defer pending_combined.deinit(self.allocator);
 
         // SPIRV-Cross may emit a `resources` object with arrays of resources
         if (root.object.get("resources")) |res_val| {
@@ -717,7 +985,7 @@ pub const ShaderCompiler = struct {
                     }
                 }
 
-                // sampled_images -> textures
+                // sampled_images -> combined textures
                 if (res_obj.get("sampled_images")) |v| {
                     if (v == .array) {
                         for (v.array.items) |elem| {
@@ -731,32 +999,17 @@ pub const ShaderCompiler = struct {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
                                             if (name_v == .string and set_v == .integer and bind_v == .integer) {
-                                                const name = name_v.string;
                                                 const set = @as(u32, @intCast(set_v.integer));
                                                 const binding = @as(u32, @intCast(bind_v.integer));
-
-                                                // Extract array size from "array" field
-                                                var array_size: u32 = 1;
-                                                if (array_opt) |arr_v| {
-                                                    if (arr_v == .array and arr_v.array.items.len > 0) {
-                                                        if (arr_v.array.items[0] == .integer) {
-                                                            const size = arr_v.array.items[0].integer;
-                                                            // 0 means unbounded array in SPIRV-Cross
-                                                            array_size = if (size == 0) 0 else @as(u32, @intCast(size));
-                                                            std.log.warn("Parsed texture '{s}' array size: {} (0=unbounded)", .{ name, array_size });
-                                                        }
+                                                const array_size = parseDescriptorArraySize(array_opt);
+                                                const dimension = blk: {
+                                                    if (elem.object.get("type")) |type_v| {
+                                                        if (type_v == .string) break :blk mapTextureDimension(type_v.string);
                                                     }
-                                                }
+                                                    break :blk TextureDimension.texture_2d;
+                                                };
 
-                                                const name_copy = try self.allocator.dupe(u8, name);
-                                                try refl.textures.append(self.allocator, ShaderTexture{
-                                                    .name = name_copy,
-                                                    .binding = binding,
-                                                    .set = set,
-                                                    .dimension = TextureDimension.texture_2d,
-                                                    .format = null,
-                                                    .array_size = array_size,
-                                                });
+                                                try appendTextureResource(&refl, self.allocator, name_v.string, set, binding, dimension, array_size);
                                             }
                                         }
                                     }
@@ -766,54 +1019,31 @@ pub const ShaderCompiler = struct {
                     }
                 }
 
-                // Process "textures" field (alternative location in JSON)
+                // Process alternate "textures" field (e.g. from --reflect output)
                 if (res_obj.get("textures")) |v| {
-                    std.log.warn("DEBUG: Found 'textures' field in JSON, type = {s}", .{@tagName(v)});
                     if (v == .array) {
-                        std.log.warn("DEBUG: textures is array with {} items", .{v.array.items.len});
                         for (v.array.items) |elem| {
-                            std.log.warn("DEBUG: Processing texture element, type = {s}", .{@tagName(elem)});
                             if (elem == .object) {
                                 const name_opt = elem.object.get("name");
                                 const set_opt = elem.object.get("set");
                                 const binding_opt = elem.object.get("binding");
                                 const array_opt = elem.object.get("array");
 
-                                std.log.warn("DEBUG: name={any}, set={any}, binding={any}, array={any}", .{ name_opt != null, set_opt != null, binding_opt != null, array_opt != null });
-
                                 if (name_opt) |name_v| {
                                     if (set_opt) |set_v| {
                                         if (binding_opt) |bind_v| {
                                             if (name_v == .string and set_v == .integer and bind_v == .integer) {
-                                                const name = name_v.string;
                                                 const set = @as(u32, @intCast(set_v.integer));
                                                 const binding = @as(u32, @intCast(bind_v.integer));
-
-                                                // Extract array size from "array" field
-                                                var array_size: u32 = 1;
-                                                if (array_opt) |arr_v| {
-                                                    if (arr_v == .array and arr_v.array.items.len > 0) {
-                                                        if (arr_v.array.items[0] == .integer) {
-                                                            const size = arr_v.array.items[0].integer;
-                                                            // 0 means unbounded array in SPIRV-Cross
-                                                            array_size = if (size == 0) 0 else @as(u32, @intCast(size));
-                                                            std.log.warn("Parsed texture '{s}' (from 'textures' field) array size: {} (0=unbounded)", .{ name, array_size });
-                                                        }
+                                                const array_size = parseDescriptorArraySize(array_opt);
+                                                const dimension = blk: {
+                                                    if (elem.object.get("type")) |type_v| {
+                                                        if (type_v == .string) break :blk mapTextureDimension(type_v.string);
                                                     }
-                                                }
+                                                    break :blk TextureDimension.texture_2d;
+                                                };
 
-                                                const name_copy = try self.allocator.dupe(u8, name);
-                                                try refl.textures.append(self.allocator, ShaderTexture{
-                                                    .name = name_copy,
-                                                    .binding = binding,
-                                                    .set = set,
-                                                    .dimension = TextureDimension.texture_2d,
-                                                    .format = null,
-                                                    .array_size = array_size,
-                                                });
-                                                std.log.warn("DEBUG: Successfully added texture '{s}' to reflection", .{name});
-                                            } else {
-                                                std.log.warn("DEBUG: Type mismatch - name is string? {}, set is int? {}, binding is int? {}", .{ name_v == .string, set_v == .integer, bind_v == .integer });
+                                                try appendTextureResource(&refl, self.allocator, name_v.string, set, binding, dimension, array_size);
                                             }
                                         }
                                     }
@@ -821,8 +1051,131 @@ pub const ShaderCompiler = struct {
                             }
                         }
                     }
-                } else {
-                    std.log.warn("DEBUG: NO 'textures' field found in resources object", .{});
+                }
+
+                // Storage images (typically RW images)
+                if (res_obj.get("images")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const array_opt = elem.object.get("array");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const array_size = parseDescriptorArraySize(array_opt);
+                                                try appendStorageImageResource(&refl, self.allocator, name_v.string, @as(u32, @intCast(set_v.integer)), @as(u32, @intCast(bind_v.integer)), array_size);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // storage_images field (some JSON variants)
+                if (res_obj.get("storage_images")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const array_opt = elem.object.get("array");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const array_size = parseDescriptorArraySize(array_opt);
+                                                try appendStorageImageResource(&refl, self.allocator, name_v.string, @as(u32, @intCast(set_v.integer)), @as(u32, @intCast(bind_v.integer)), array_size);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Acceleration structures (ray tracing)
+                if (res_obj.get("acceleration_structures")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const array_opt = elem.object.get("array");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const array_size = parseDescriptorArraySize(array_opt);
+                                                try appendAccelerationStructureResource(
+                                                    &refl,
+                                                    self.allocator,
+                                                    name_v.string,
+                                                    @as(u32, @intCast(set_v.integer)),
+                                                    @as(u32, @intCast(bind_v.integer)),
+                                                    array_size,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Separate images (to be paired with samplers later)
+                if (res_obj.get("separate_images")) |v| {
+                    if (v == .array) {
+                        for (v.array.items) |elem| {
+                            if (elem == .object) {
+                                const name_opt = elem.object.get("name");
+                                const set_opt = elem.object.get("set");
+                                const binding_opt = elem.object.get("binding");
+                                const array_opt = elem.object.get("array");
+                                if (name_opt) |name_v| {
+                                    if (set_opt) |set_v| {
+                                        if (binding_opt) |bind_v| {
+                                            if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                                const set = @as(u32, @intCast(set_v.integer));
+                                                const binding = @as(u32, @intCast(bind_v.integer));
+                                                const array_size = parseDescriptorArraySize(array_opt);
+                                                const dimension = blk: {
+                                                    if (elem.object.get("type")) |type_v| {
+                                                        if (type_v == .string) break :blk mapTextureDimension(type_v.string);
+                                                    }
+                                                    break :blk TextureDimension.texture_2d;
+                                                };
+
+                                                if (findPendingCombinedTexture(&pending_combined, set, binding)) |entry| {
+                                                    if (array_size > entry.array_size) entry.array_size = array_size;
+                                                    entry.dimension = dimension;
+                                                    if (name_v.string.len != 0) entry.name = name_v.string;
+                                                } else {
+                                                    try pending_combined.append(self.allocator, PendingCombinedTexture{
+                                                        .name = name_v.string,
+                                                        .set = set,
+                                                        .binding = binding,
+                                                        .array_size = array_size,
+                                                        .dimension = dimension,
+                                                        .has_sampler = false,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // separate_samplers
@@ -842,29 +1195,19 @@ pub const ShaderCompiler = struct {
                                                 const set = @as(u32, @intCast(set_v.integer));
                                                 const binding = @as(u32, @intCast(bind_v.integer));
 
-                                                // Extract array size
-                                                var array_size: u32 = 1;
-                                                if (array_size_opt) |as_v| {
-                                                    if (as_v == .array and as_v.array.items.len > 0) {
-                                                        if (as_v.array.items[0] == .integer) {
-                                                            const arr_size = as_v.array.items[0].integer;
-                                                            array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
-                                                        } else {
-                                                            array_size = 0; // Unbounded
-                                                        }
-                                                    } else if (as_v == .integer) {
-                                                        const arr_size = as_v.integer;
-                                                        array_size = if (arr_size == 0) 0 else @as(u32, @intCast(arr_size));
-                                                    }
+                                                const array_size = parseDescriptorArraySize(array_size_opt);
+                                                if (findPendingCombinedTexture(&pending_combined, set, binding)) |entry| {
+                                                    entry.has_sampler = true;
+                                                    if (array_size > entry.array_size) entry.array_size = array_size;
+                                                } else {
+                                                    const name_copy = try self.allocator.dupe(u8, name);
+                                                    try refl.samplers.append(self.allocator, ShaderSampler{
+                                                        .name = name_copy,
+                                                        .binding = binding,
+                                                        .set = set,
+                                                        .array_size = array_size,
+                                                    });
                                                 }
-
-                                                const name_copy = try self.allocator.dupe(u8, name);
-                                                try refl.samplers.append(self.allocator, ShaderSampler{
-                                                    .name = name_copy,
-                                                    .binding = binding,
-                                                    .set = set,
-                                                    .array_size = array_size,
-                                                });
                                             }
                                         }
                                     }
@@ -959,6 +1302,198 @@ pub const ShaderCompiler = struct {
                                     const location = @as(u32, @intCast(loc_v.integer));
                                     const name_copy = try self.allocator.dupe(u8, name);
                                     try refl.outputs.append(self.allocator, ShaderVariable{ .name = name_copy, .location = location, .type = ShaderDataType.struct_type, .size = 0 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Combined textures at top-level
+        if (root.object.get("textures")) |tex_val| {
+            if (tex_val == .array) {
+                for (tex_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const set = @as(u32, @intCast(set_v.integer));
+                                        const binding = @as(u32, @intCast(bind_v.integer));
+                                        const array_size = parseDescriptorArraySize(array_opt);
+                                        const dimension = blk: {
+                                            if (elem.object.get("type")) |type_v| {
+                                                if (type_v == .string) break :blk mapTextureDimension(type_v.string);
+                                            }
+                                            break :blk TextureDimension.texture_2d;
+                                        };
+                                        try appendTextureResource(&refl, self.allocator, name_v.string, set, binding, dimension, array_size);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Storage images at top-level
+        if (root.object.get("images")) |img_val| {
+            if (img_val == .array) {
+                for (img_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const array_size = parseDescriptorArraySize(array_opt);
+                                        try appendStorageImageResource(&refl, self.allocator, name_v.string, @as(u32, @intCast(set_v.integer)), @as(u32, @intCast(bind_v.integer)), array_size);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (root.object.get("storage_images")) |img_val| {
+            if (img_val == .array) {
+                for (img_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const array_size = parseDescriptorArraySize(array_opt);
+                                        try appendStorageImageResource(&refl, self.allocator, name_v.string, @as(u32, @intCast(set_v.integer)), @as(u32, @intCast(bind_v.integer)), array_size);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Acceleration structures at top-level
+        if (root.object.get("acceleration_structures")) |accel_val| {
+            if (accel_val == .array) {
+                for (accel_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const array_size = parseDescriptorArraySize(array_opt);
+                                        try appendAccelerationStructureResource(
+                                            &refl,
+                                            self.allocator,
+                                            name_v.string,
+                                            @as(u32, @intCast(set_v.integer)),
+                                            @as(u32, @intCast(bind_v.integer)),
+                                            array_size,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Separate image/sampler pairs at top-level
+        if (root.object.get("separate_images")) |img_val| {
+            if (img_val == .array) {
+                for (img_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const set = @as(u32, @intCast(set_v.integer));
+                                        const binding = @as(u32, @intCast(bind_v.integer));
+                                        const array_size = parseDescriptorArraySize(array_opt);
+                                        const dimension = blk: {
+                                            if (elem.object.get("type")) |type_v| {
+                                                if (type_v == .string) break :blk mapTextureDimension(type_v.string);
+                                            }
+                                            break :blk TextureDimension.texture_2d;
+                                        };
+
+                                        if (findPendingCombinedTexture(&pending_combined, set, binding)) |entry| {
+                                            if (array_size > entry.array_size) entry.array_size = array_size;
+                                            entry.dimension = dimension;
+                                            if (name_v.string.len != 0) entry.name = name_v.string;
+                                        } else {
+                                            try pending_combined.append(self.allocator, PendingCombinedTexture{
+                                                .name = name_v.string,
+                                                .set = set,
+                                                .binding = binding,
+                                                .array_size = array_size,
+                                                .dimension = dimension,
+                                                .has_sampler = false,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (root.object.get("separate_samplers")) |sam_val| {
+            if (sam_val == .array) {
+                for (sam_val.array.items) |elem| {
+                    if (elem == .object) {
+                        const name_opt = elem.object.get("name");
+                        const set_opt = elem.object.get("set");
+                        const binding_opt = elem.object.get("binding");
+                        const array_opt = elem.object.get("array");
+                        if (name_opt) |name_v| {
+                            if (set_opt) |set_v| {
+                                if (binding_opt) |bind_v| {
+                                    if (name_v == .string and set_v == .integer and bind_v == .integer) {
+                                        const set = @as(u32, @intCast(set_v.integer));
+                                        const binding = @as(u32, @intCast(bind_v.integer));
+                                        const array_size = parseDescriptorArraySize(array_opt);
+                                        if (findPendingCombinedTexture(&pending_combined, set, binding)) |entry| {
+                                            entry.has_sampler = true;
+                                            if (array_size > entry.array_size) entry.array_size = array_size;
+                                        } else {
+                                            const name_copy = try self.allocator.dupe(u8, name_v.string);
+                                            try refl.samplers.append(self.allocator, ShaderSampler{
+                                                .name = name_copy,
+                                                .binding = binding,
+                                                .set = set,
+                                                .array_size = array_size,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1166,7 +1701,6 @@ pub const ShaderCompiler = struct {
                                             .format = null,
                                             .array_size = array_size,
                                         });
-                                        std.log.info("Parsed texture '{s}' from shader (set={}, binding={}, array_size={})", .{ name, set, binding, array_size });
                                     }
                                 }
                             }
@@ -1174,6 +1708,11 @@ pub const ShaderCompiler = struct {
                     }
                 }
             }
+        }
+
+        // Fold any pending combined image/sampler pairs into the texture list so descriptor layouts see them.
+        for (pending_combined.items) |entry| {
+            try appendTextureResource(&refl, self.allocator, entry.name, entry.set, entry.binding, entry.dimension, entry.array_size);
         }
 
         return refl;
@@ -1192,6 +1731,7 @@ pub const ShaderCompiler = struct {
             .language = language,
             .stage = stage,
             .entry_point = "main", // Default entry point
+            .file_path = file_path,
         };
 
         return try self.compile(source, options);
@@ -1221,6 +1761,12 @@ pub const ShaderCompiler = struct {
         if (std.mem.indexOf(u8, path, "geom")) |_| return .geometry;
         if (std.mem.indexOf(u8, path, "tesc")) |_| return .tessellation_control;
         if (std.mem.indexOf(u8, path, "tese")) |_| return .tessellation_evaluation;
+        if (std.mem.indexOf(u8, path, "rgen")) |_| return .raygen;
+        if (std.mem.indexOf(u8, path, "rmiss")) |_| return .miss;
+        if (std.mem.indexOf(u8, path, "rchit")) |_| return .closest_hit;
+        if (std.mem.indexOf(u8, path, "rahit")) |_| return .any_hit;
+        if (std.mem.indexOf(u8, path, "rint")) |_| return .intersection;
+        if (std.mem.indexOf(u8, path, "rcall")) |_| return .callable;
         return .vertex; // Default
     }
 };
@@ -1231,6 +1777,8 @@ pub const ShaderCompilerError = error{
     InvalidSpirvMagic,
     GlslCompilationNotImplemented,
     HlslCompilationNotImplemented,
+    HlslCompilationFailed,
+    HlslFilePathRequired,
     ReflectionGenerationFailed,
     CrossCompilationFailed,
 } || spirv_cross.SpvCrossError || std.mem.Allocator.Error;

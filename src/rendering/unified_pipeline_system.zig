@@ -9,6 +9,7 @@ const PipelineBuilder = @import("pipeline_builder.zig").PipelineBuilder;
 const RasterizationState = @import("pipeline_builder.zig").RasterizationState;
 const MultisampleState = @import("pipeline_builder.zig").MultisampleState;
 const Shader = @import("../core/shader.zig").Shader;
+const entry_point_definition = @import("../core/shader.zig").entry_point_definition;
 const ShaderCompiler = @import("../assets/shader_compiler.zig");
 const DescriptorPool = @import("../core/descriptors.zig").DescriptorPool;
 const DescriptorSetLayout = @import("../core/descriptors.zig").DescriptorSetLayout;
@@ -17,6 +18,7 @@ const Buffer = @import("../core/buffer.zig").Buffer;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const log = @import("../utils/log.zig").log;
 const DescriptorUtils = @import("../utils/descriptor_utils.zig");
+const math = std.math;
 
 // (merge logic inlined into loops below)
 
@@ -57,6 +59,7 @@ pub const UnifiedPipelineSystem = struct {
 
     // Vulkan pipeline cache for faster pipeline creation
     vulkan_pipeline_cache: vk.PipelineCache,
+    binding_overrides: std.AutoHashMap(u64, BindingOverrideMap),
 
     const Self = @This();
 
@@ -106,6 +109,7 @@ pub const UnifiedPipelineSystem = struct {
             .shader_to_pipelines = std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .deferred_destroys = .{},
             .vulkan_pipeline_cache = vulkan_cache,
+            .binding_overrides = std.AutoHashMap(u64, BindingOverrideMap).init(allocator),
         };
 
         return self;
@@ -155,6 +159,12 @@ pub const UnifiedPipelineSystem = struct {
             self.allocator.free(key.*);
         }
         self.shader_to_pipelines.deinit();
+
+        var overrides_iter = self.binding_overrides.valueIterator();
+        while (overrides_iter.next()) |override_map| {
+            override_map.deinit();
+        }
+        self.binding_overrides.deinit();
     }
 
     /// Create a unified pipeline with automatic descriptor layout extraction
@@ -177,8 +187,6 @@ pub const UnifiedPipelineSystem = struct {
         config: PipelineConfig,
         pipeline_id: PipelineId,
     ) !PipelineId {
-        log(.INFO, "unified_pipeline", "Creating pipeline: {s}", .{config.name});
-
         // Load shaders and collect for pipeline building
         var shaders = std.ArrayList(*Shader){};
         var shaders_transferred = false;
@@ -194,38 +202,97 @@ pub const UnifiedPipelineSystem = struct {
         }
 
         var descriptor_layout_info = DescriptorLayoutInfo.init(self.allocator);
-        defer descriptor_layout_info.deinit();
+        errdefer descriptor_layout_info.deinit();
 
-        // Load compute shader
-        if (config.compute_shader) |compute_path| {
-            const compiled_shader = try self.shader_manager.loadShader(compute_path, config.shader_options);
-            const shader = try self.allocator.create(Shader);
-            shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .compute_bit = true }, null);
-            try shaders.append(self.allocator, shader);
+        const is_raytracing_pipeline = config.raygen_shader != null;
+        const is_compute_pipeline = (config.compute_shader != null) and !is_raytracing_pipeline;
 
-            // Extract descriptor layout from shader reflection
-            try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .compute_bit = true });
-        } // Load vertex shader
-        if (config.vertex_shader) |vertex_path| {
-            const compiled_shader = try self.shader_manager.loadShader(vertex_path, config.shader_options);
-            const shader = try self.allocator.create(Shader);
-            shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
-            try shaders.append(self.allocator, shader);
+        // Track shader indices for raytracing groups
+        var raygen_stage_index: ?u32 = null;
+        var miss_stage_index: ?u32 = null;
+        var closest_hit_stage_index: ?u32 = null;
+        var any_hit_stage_index: ?u32 = null;
+        var intersection_stage_index: ?u32 = null;
 
-            // Extract descriptor layout from shader reflection
-            try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .vertex_bit = true });
+        if (is_raytracing_pipeline) {
+            if (config.raygen_shader) |raygen_path| {
+                const compiled_shader = try self.shader_manager.loadShader(raygen_path, config.shader_options);
+                const shader = try self.allocator.create(Shader);
+                const entry_point = if (config.raygen_entry_point) |name| entry_point_definition{ .name = name } else null;
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .raygen_bit_khr = true }, entry_point);
+                try shaders.append(self.allocator, shader);
+                raygen_stage_index = @as(u32, @intCast(shaders.items.len - 1));
+                try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .raygen_bit_khr = true });
+            }
+
+            if (config.miss_shader) |miss_path| {
+                const compiled_shader = try self.shader_manager.loadShader(miss_path, config.shader_options);
+                const shader = try self.allocator.create(Shader);
+                const entry_point = if (config.miss_entry_point) |name| entry_point_definition{ .name = name } else null;
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .miss_bit_khr = true }, entry_point);
+                try shaders.append(self.allocator, shader);
+                miss_stage_index = @as(u32, @intCast(shaders.items.len - 1));
+                try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .miss_bit_khr = true });
+            }
+
+            if (config.closest_hit_shader) |chit_path| {
+                const compiled_shader = try self.shader_manager.loadShader(chit_path, config.shader_options);
+                const shader = try self.allocator.create(Shader);
+                const entry_point = if (config.closest_hit_entry_point) |name| entry_point_definition{ .name = name } else null;
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .closest_hit_bit_khr = true }, entry_point);
+                try shaders.append(self.allocator, shader);
+                closest_hit_stage_index = @as(u32, @intCast(shaders.items.len - 1));
+                try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .closest_hit_bit_khr = true });
+            }
+
+            if (config.any_hit_shader) |ahit_path| {
+                const compiled_shader = try self.shader_manager.loadShader(ahit_path, config.shader_options);
+                const shader = try self.allocator.create(Shader);
+                const entry_point = if (config.any_hit_entry_point) |name| entry_point_definition{ .name = name } else null;
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .any_hit_bit_khr = true }, entry_point);
+                try shaders.append(self.allocator, shader);
+                any_hit_stage_index = @as(u32, @intCast(shaders.items.len - 1));
+                try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .any_hit_bit_khr = true });
+            }
+
+            if (config.intersection_shader) |intersection_path| {
+                const compiled_shader = try self.shader_manager.loadShader(intersection_path, config.shader_options);
+                const shader = try self.allocator.create(Shader);
+                const entry_point = if (config.intersection_entry_point) |name| entry_point_definition{ .name = name } else null;
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .intersection_bit_khr = true }, entry_point);
+                try shaders.append(self.allocator, shader);
+                intersection_stage_index = @as(u32, @intCast(shaders.items.len - 1));
+                try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .intersection_bit_khr = true });
+            }
+        } else {
+            if (is_compute_pipeline) {
+                if (config.compute_shader) |compute_path| {
+                    const compiled_shader = try self.shader_manager.loadShader(compute_path, config.shader_options);
+                    const shader = try self.allocator.create(Shader);
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .compute_bit = true }, null);
+                    try shaders.append(self.allocator, shader);
+                    try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .compute_bit = true });
+                }
+            } else {
+                if (config.vertex_shader) |vertex_path| {
+                    const compiled_shader = try self.shader_manager.loadShader(vertex_path, config.shader_options);
+                    const shader = try self.allocator.create(Shader);
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
+                    try shaders.append(self.allocator, shader);
+                    try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .vertex_bit = true });
+                }
+
+                if (config.fragment_shader) |fragment_path| {
+                    const compiled_shader = try self.shader_manager.loadShader(fragment_path, config.shader_options);
+                    const shader = try self.allocator.create(Shader);
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
+                    try shaders.append(self.allocator, shader);
+                    try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .fragment_bit = true });
+                }
+            }
         }
 
-        // Load fragment shader
-        if (config.fragment_shader) |fragment_path| {
-            const compiled_shader = try self.shader_manager.loadShader(fragment_path, config.shader_options);
-            const shader = try self.allocator.create(Shader);
-            shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
-            try shaders.append(self.allocator, shader);
-
-            // Extract and merge descriptor layout from shader reflection
-            try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .fragment_bit = true });
-        }
+        self.applyBindingOverrides(&descriptor_layout_info, pipeline_id);
 
         // Create descriptor set layouts from extracted information
         const descriptor_set_layouts = try self.createDescriptorSetLayouts(&descriptor_layout_info);
@@ -234,37 +301,125 @@ pub const UnifiedPipelineSystem = struct {
         // Create pipeline layout
         const pipeline_layout = try self.createPipelineLayout(descriptor_set_layouts, config.push_constant_ranges);
 
-        // Determine pipeline type
-        const is_compute_pipeline = config.compute_shader != null;
-
-        // Build the actual Vulkan pipeline
-        var builder = PipelineBuilder.init(self.allocator, self.graphics_context);
-        defer builder.deinit();
-        _ = builder.setPipelineCache(self.vulkan_pipeline_cache);
-
         var vulkan_pipeline: vk.Pipeline = undefined;
 
-        if (is_compute_pipeline) {
-            // For compute pipelines, set compute mode and shader
+        if (is_raytracing_pipeline) {
+            if (raygen_stage_index == null or miss_stage_index == null or closest_hit_stage_index == null) {
+                return error.InvalidPipelineConfig;
+            }
+
+            var stage_infos = std.ArrayList(vk.PipelineShaderStageCreateInfo){};
+            defer stage_infos.deinit(self.allocator);
+
+            for (shaders.items) |shader| {
+                try stage_infos.append(self.allocator, vk.PipelineShaderStageCreateInfo{
+                    .flags = .{},
+                    .stage = shader.shader_type,
+                    .module = shader.module,
+                    .p_name = @ptrCast(shader.entry_point.name.ptr),
+                    .p_specialization_info = null,
+                });
+            }
+
+            var group_infos = std.ArrayList(vk.RayTracingShaderGroupCreateInfoKHR){};
+            defer group_infos.deinit(self.allocator);
+
+            const raygen_idx = raygen_stage_index.?;
+            const miss_idx = miss_stage_index.?;
+            const closest_hit_idx = closest_hit_stage_index.?;
+
+            try group_infos.append(self.allocator, vk.RayTracingShaderGroupCreateInfoKHR{
+                .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
+                .p_next = null,
+                .type = vk.RayTracingShaderGroupTypeKHR.general_khr,
+                .general_shader = raygen_idx,
+                .closest_hit_shader = vk.SHADER_UNUSED_KHR,
+                .any_hit_shader = vk.SHADER_UNUSED_KHR,
+                .intersection_shader = vk.SHADER_UNUSED_KHR,
+                .p_shader_group_capture_replay_handle = null,
+            });
+
+            try group_infos.append(self.allocator, vk.RayTracingShaderGroupCreateInfoKHR{
+                .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
+                .p_next = null,
+                .type = vk.RayTracingShaderGroupTypeKHR.general_khr,
+                .general_shader = miss_idx,
+                .closest_hit_shader = vk.SHADER_UNUSED_KHR,
+                .any_hit_shader = vk.SHADER_UNUSED_KHR,
+                .intersection_shader = vk.SHADER_UNUSED_KHR,
+                .p_shader_group_capture_replay_handle = null,
+            });
+
+            const hit_group_type: vk.RayTracingShaderGroupTypeKHR = if (intersection_stage_index != null)
+                vk.RayTracingShaderGroupTypeKHR.procedural_hit_group_khr
+            else
+                vk.RayTracingShaderGroupTypeKHR.triangles_hit_group_khr;
+
+            const any_hit_idx_value: u32 = if (any_hit_stage_index) |idx| idx else vk.SHADER_UNUSED_KHR;
+            const intersection_idx_value: u32 = if (intersection_stage_index) |idx| idx else vk.SHADER_UNUSED_KHR;
+
+            try group_infos.append(self.allocator, vk.RayTracingShaderGroupCreateInfoKHR{
+                .s_type = vk.StructureType.ray_tracing_shader_group_create_info_khr,
+                .p_next = null,
+                .type = hit_group_type,
+                .general_shader = vk.SHADER_UNUSED_KHR,
+                .closest_hit_shader = closest_hit_idx,
+                .any_hit_shader = any_hit_idx_value,
+                .intersection_shader = intersection_idx_value,
+                .p_shader_group_capture_replay_handle = null,
+            });
+
+            var pipeline_ci = vk.RayTracingPipelineCreateInfoKHR{
+                .s_type = vk.StructureType.ray_tracing_pipeline_create_info_khr,
+                .p_next = null,
+                .flags = .{},
+                .stage_count = @intCast(stage_infos.items.len),
+                .p_stages = stage_infos.items.ptr,
+                .group_count = @intCast(group_infos.items.len),
+                .p_groups = group_infos.items.ptr,
+                .max_pipeline_ray_recursion_depth = 1,
+                .layout = pipeline_layout,
+                .base_pipeline_handle = vk.Pipeline.null_handle,
+                .base_pipeline_index = -1,
+                .p_library_info = null,
+                .p_library_interface = null,
+                .p_dynamic_state = null,
+            };
+
+            var pipeline_handle: vk.Pipeline = undefined;
+            _ = try self.graphics_context.vkd.createRayTracingPipelinesKHR(
+                self.graphics_context.dev,
+                vk.DeferredOperationKHR.null_handle,
+                self.vulkan_pipeline_cache,
+                1,
+                @as([*]const vk.RayTracingPipelineCreateInfoKHR, @ptrCast(&pipeline_ci)),
+                null,
+                @as([*]vk.Pipeline, @ptrCast(&pipeline_handle)),
+            );
+
+            vulkan_pipeline = pipeline_handle;
+        } else if (is_compute_pipeline) {
+            var builder = PipelineBuilder.init(self.allocator, self.graphics_context);
+            defer builder.deinit();
+            _ = builder.setPipelineCache(self.vulkan_pipeline_cache);
             _ = builder.compute();
 
             for (shaders.items) |shader| {
                 if (shader.shader_type.compute_bit) {
                     _ = try builder.computeShader(shader);
-                    break; // Only one compute shader allowed
+                    break;
                 }
             }
 
-            // Build compute pipeline
             vulkan_pipeline = try builder.buildComputePipeline(pipeline_layout);
         } else {
-            // For graphics pipelines, configure vertex input and state
+            var builder = PipelineBuilder.init(self.allocator, self.graphics_context);
+            defer builder.deinit();
+            _ = builder.setPipelineCache(self.vulkan_pipeline_cache);
 
-            // Add required graphics pipeline configuration
             _ = try builder.dynamicViewportScissor();
             _ = try builder.addColorBlendAttachment(@import("pipeline_builder.zig").ColorBlendAttachment.disabled());
 
-            // Configure vertex input
             if (config.vertex_input_bindings) |bindings| {
                 for (bindings) |binding| {
                     _ = try builder.addVertexBinding(binding);
@@ -276,34 +431,26 @@ pub const UnifiedPipelineSystem = struct {
                 }
             }
 
-            // Configure pipeline state
-
-            // Set topology
             switch (config.topology) {
                 .triangle_list => _ = builder.triangleList(),
                 .triangle_strip => _ = builder.triangleStrip(),
                 .line_list => _ = builder.lineList(),
                 .point_list => _ = builder.pointList(),
-                else => _ = builder.triangleList(), // Default fallback
+                else => _ = builder.triangleList(),
             }
 
-            // Configure rasterization state
             var raster_state = RasterizationState.default();
             raster_state.polygon_mode = config.polygon_mode;
             raster_state.cull_mode = config.cull_mode;
             raster_state.front_face = config.front_face;
             _ = builder.withRasterizationState(raster_state);
 
-            // Configure multisample state
             if (config.multisample_state) |ms_state| {
                 _ = builder.withMultisampleState(MultisampleState{ .rasterization_samples = ms_state.rasterization_samples });
             }
 
-            // Set render pass
             _ = builder.withRenderPass(config.render_pass, config.subpass);
 
-            // Add shader stages (vertex and fragment only) in the correct order
-            // Skip compute shaders for graphics pipelines
             for (shaders.items) |shader| {
                 if (shader.shader_type.vertex_bit and !shader.shader_type.compute_bit) {
                     _ = try builder.addShaderStage(shader.shader_type, shader);
@@ -315,7 +462,6 @@ pub const UnifiedPipelineSystem = struct {
                 }
             }
 
-            // Build graphics pipeline
             vulkan_pipeline = try builder.buildGraphicsPipeline(pipeline_layout);
         }
 
@@ -337,6 +483,7 @@ pub const UnifiedPipelineSystem = struct {
             .shaders = owned_shaders,
             .config = config,
             .is_compute = is_compute_pipeline,
+            .is_raytracing = is_raytracing_pipeline,
         };
 
         // Use the provided pipeline ID
@@ -346,8 +493,11 @@ pub const UnifiedPipelineSystem = struct {
         try self.registerShaderDependency(config.compute_shader, pipeline_id);
         try self.registerShaderDependency(config.vertex_shader, pipeline_id);
         try self.registerShaderDependency(config.fragment_shader, pipeline_id);
-
-        log(.INFO, "unified_pipeline", "✅ Created pipeline: {s} (hash: {})", .{ config.name, pipeline_id.hash });
+        try self.registerShaderDependency(config.raygen_shader, pipeline_id);
+        try self.registerShaderDependency(config.miss_shader, pipeline_id);
+        try self.registerShaderDependency(config.closest_hit_shader, pipeline_id);
+        try self.registerShaderDependency(config.any_hit_shader, pipeline_id);
+        try self.registerShaderDependency(config.intersection_shader, pipeline_id);
 
         return pipeline_id;
     }
@@ -365,7 +515,12 @@ pub const UnifiedPipelineSystem = struct {
         };
 
         // Bind the Vulkan pipeline with correct bind point
-        const bind_point: vk.PipelineBindPoint = if (pipeline.is_compute) .compute else .graphics;
+        const bind_point: vk.PipelineBindPoint = if (pipeline.is_raytracing)
+            .ray_tracing_khr
+        else if (pipeline.is_compute)
+            .compute
+        else
+            .graphics;
         self.graphics_context.vkd.cmdBindPipeline(command_buffer, bind_point, pipeline.vulkan_pipeline);
 
         // Bind descriptor sets
@@ -408,6 +563,20 @@ pub const UnifiedPipelineSystem = struct {
         resource: Resource,
         frame_index: u32,
     ) !void {
+        switch (resource) {
+            .buffer_array => |buffer_infos| {
+                if (buffer_infos.len > 0) {
+                    try self.ensureDescriptorCapacity(pipeline_id, set, binding, buffer_infos.len);
+                }
+            },
+            .image_array => |image_infos| {
+                if (image_infos.len > 0) {
+                    try self.ensureDescriptorCapacity(pipeline_id, set, binding, image_infos.len);
+                }
+            },
+            else => {},
+        }
+
         const key = ResourceBindingKey{
             .pipeline_id = pipeline_id,
             .set = set,
@@ -421,6 +590,86 @@ pub const UnifiedPipelineSystem = struct {
         };
 
         try self.bound_resources.put(key, bound_resource);
+    }
+
+    fn getBindingDescriptorCount(_: *Self, pipeline: *const Pipeline, set: u32, binding_index: u32) ?u32 {
+        if (set >= pipeline.descriptor_layout_info.sets.items.len) return null;
+        const bindings_slice = pipeline.descriptor_layout_info.sets.items[set];
+        for (bindings_slice) |binding_info| {
+            if (binding_info.binding == binding_index) {
+                return binding_info.descriptor_count;
+            }
+        }
+        return null;
+    }
+
+    fn ensureDescriptorCapacity(
+        self: *Self,
+        pipeline_id: PipelineId,
+        set: u32,
+        binding: u32,
+        required_len: usize,
+    ) !void {
+        if (required_len == 0) return;
+
+        const required_u32 = math.clamp(@as(u32, @intCast(required_len)), 1, MAX_DESCRIPTOR_BINDING_COUNT);
+        const pipeline_ptr = self.pipelines.getPtr(pipeline_id) orelse return error.PipelineNotFound;
+
+        const current_count: u32 = self.getBindingDescriptorCount(pipeline_ptr, set, binding) orelse 0;
+        var existing_override: u32 = current_count;
+
+        if (self.binding_overrides.get(pipeline_id.hash)) |override_map| {
+            if (override_map.get(BindingKey{ .set = set, .binding = binding })) |override_value| {
+                existing_override = @max(existing_override, override_value);
+            }
+        }
+
+        const current_capacity = if (existing_override > 0) existing_override else current_count;
+        const target = math.clamp(@max(required_u32, 1), 1, MAX_DESCRIPTOR_BINDING_COUNT);
+
+        if (target == current_capacity) return;
+
+        const overrides_entry = try self.binding_overrides.getOrPut(pipeline_id.hash);
+        if (!overrides_entry.found_existing) {
+            overrides_entry.value_ptr.* = BindingOverrideMap.init(self.allocator);
+        }
+
+        const map_ptr = overrides_entry.value_ptr;
+        const binding_key = BindingKey{ .set = set, .binding = binding };
+        const override_entry = try map_ptr.getOrPut(binding_key);
+        override_entry.value_ptr.* = target;
+
+        try self.rebuildPipeline(pipeline_id);
+        self.markPipelineResourcesDirty(pipeline_id);
+        try self.forceUpdateAllFrames(pipeline_id);
+    }
+
+    fn forceUpdateAllFrames(self: *Self, pipeline_id: PipelineId) !void {
+        var frame_index: u32 = 0;
+        while (frame_index < MAX_FRAMES_IN_FLIGHT) : (frame_index += 1) {
+            self.descriptor_update_signals[frame_index] = false;
+            try self.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
+        }
+    }
+
+    fn applyBindingOverrides(self: *Self, layout_info: *DescriptorLayoutInfo, pipeline_id: PipelineId) void {
+        if (self.binding_overrides.get(pipeline_id.hash)) |override_map| {
+            var iter = override_map.iterator();
+            while (iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const desired_count = entry.value_ptr.*;
+                if (key.set >= layout_info.sets.items.len) continue;
+                if (layout_info.sets.items[key.set].len == 0) continue;
+
+                const bindings_slice = @constCast(layout_info.sets.items[key.set]);
+                for (bindings_slice) |*binding_info| {
+                    if (binding_info.binding == key.binding) {
+                        binding_info.descriptor_count = desired_count;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Check if descriptors have been updated for a specific frame
@@ -472,7 +721,6 @@ pub const UnifiedPipelineSystem = struct {
         }
 
         if (updates.items.len > 0) {
-            log(.INFO, "unified_pipeline", "Updating {} descriptors for pipeline {s} frame {}", .{ updates.items.len, pipeline_id.name, frame_index });
             try self.applyDescriptorUpdates(pipeline_id, updates.items, frame_index);
         }
 
@@ -615,8 +863,6 @@ pub const UnifiedPipelineSystem = struct {
             return;
         }
 
-        log(.INFO, "unified_pipeline", "🔥 Handling shader reload: {s}", .{shader_path});
-
         // Set flag to prevent recursive calls
         self.rebuilding_pipelines = true;
         defer self.rebuilding_pipelines = false;
@@ -624,20 +870,25 @@ pub const UnifiedPipelineSystem = struct {
         // Find all pipelines that use this shader
         const affected_pipelines = self.shader_to_pipelines.get(shader_path) orelse return;
 
-        log(.INFO, "unified_pipeline", "Found {} pipelines affected by shader reload", .{affected_pipelines.items.len});
+        log(
+            .INFO,
+            "unified_pipeline",
+            "Shader reload detected for {s}; rebuilding {} pipelines",
+            .{ shader_path, affected_pipelines.items.len },
+        );
 
         // Rebuild each affected pipeline
         for (affected_pipelines.items) |pipeline_id| {
+            log(.INFO, "unified_pipeline", "Rebuilding pipeline {s}", .{pipeline_id.name});
             self.rebuildPipeline(pipeline_id) catch |err| {
                 log(.ERROR, "unified_pipeline", "Failed to rebuild pipeline {s}: {}", .{ pipeline_id.name, err });
                 continue;
             };
+            log(.INFO, "unified_pipeline", "Pipeline {s} rebuilt successfully", .{pipeline_id.name});
         }
     }
 
     fn rebuildPipeline(self: *Self, pipeline_id: PipelineId) !void {
-        log(.INFO, "unified_pipeline", "🔄 Rebuilding pipeline: {s} (hot-reload)", .{pipeline_id.name});
-
         // Set hot reload flag to prevent descriptor updates during rebuild
         self.hot_reload_in_progress = true;
         defer self.hot_reload_in_progress = false;
@@ -660,7 +911,12 @@ pub const UnifiedPipelineSystem = struct {
             }
         }
 
-        log(.INFO, "unified_pipeline", "Cleared {} dirty flags for pipeline: {s}", .{ cleared_count, pipeline_id.name });
+        log(
+            .INFO,
+            "unified_pipeline",
+            "Preparing rebuild for {s}: cleared {} stale resource bindings",
+            .{ pipeline_id.name, cleared_count },
+        );
 
         // Get reference to the old pipeline before we replace it
         const old_pipeline_to_destroy = self.pipelines.get(pipeline_id).?;
@@ -674,15 +930,18 @@ pub const UnifiedPipelineSystem = struct {
 
         // Schedule the old pipeline for destruction after a few frames
         // This ensures any in-flight command buffers finish using it
-        const frames_to_wait = MAX_FRAMES_IN_FLIGHT + 1; // Wait for all frames in flight plus one more
+        const frames_to_wait: u32 = MAX_FRAMES_IN_FLIGHT + 1; // Wait for all frames in flight plus one more
         try self.deferred_destroys.append(self.allocator, DeferredPipeline{
             .pipeline = old_pipeline_to_destroy,
             .frames_to_wait = frames_to_wait,
         });
 
-        log(.INFO, "unified_pipeline", "Scheduled old pipeline for deferred destruction in {} frames", .{frames_to_wait});
-
-        log(.INFO, "unified_pipeline", "✅ Pipeline rebuilt with new descriptor sets: {s}", .{pipeline_id.name});
+        log(
+            .INFO,
+            "unified_pipeline",
+            "Pipeline {s} hot-reloaded; deferring old pipeline destruction for {} frames",
+            .{ pipeline_id.name, frames_to_wait },
+        );
     }
 
     // Rebuild job allocated by shader hot reload system
@@ -730,6 +989,7 @@ pub const UnifiedPipelineSystem = struct {
             std.log.err("[unified_pipeline] Failed to handle shader reload for pipelines: {}", .{err});
             return;
         };
+        log(.INFO, "unified_pipeline", "✅ Successfully rebuilt pipelines using shader {s}", .{file_path});
     }
 
     /// Process deferred pipeline destructions - call this each frame
@@ -778,105 +1038,135 @@ pub const UnifiedPipelineSystem = struct {
         // Build per-set lists by scanning existing layout_info and reflection
         var max_set_idx: u32 = 0;
 
-        // Scan existing layout_info for max set
         var idx: usize = 0;
         while (idx < layout_info.sets.items.len) : (idx += 1) {
             if (layout_info.sets.items[idx].len != 0) {
-                const s = @as(u32, @intCast(idx));
-                if (s > max_set_idx) max_set_idx = s;
+                const set_index = @as(u32, @intCast(idx));
+                if (set_index > max_set_idx) max_set_idx = set_index;
             }
         }
 
-        // Scan reflection for max set
         for (reflection.uniform_buffers.items) |ub| {
             if (ub.set > max_set_idx) max_set_idx = ub.set;
         }
         for (reflection.storage_buffers.items) |sb| {
             if (sb.set > max_set_idx) max_set_idx = sb.set;
         }
-        for (reflection.textures.items) |t| {
-            if (t.set > max_set_idx) max_set_idx = t.set;
+        for (reflection.textures.items) |tex| {
+            if (tex.set > max_set_idx) max_set_idx = tex.set;
         }
-        for (reflection.samplers.items) |s| {
-            if (s.set > max_set_idx) max_set_idx = s.set;
+        for (reflection.storage_images.items) |img| {
+            if (img.set > max_set_idx) max_set_idx = img.set;
+        }
+        for (reflection.acceleration_structures.items) |accel| {
+            if (accel.set > max_set_idx) max_set_idx = accel.set;
+        }
+        for (reflection.samplers.items) |samp| {
+            if (samp.set > max_set_idx) max_set_idx = samp.set;
         }
 
-        // Create per-set array of binding lists
         var per_set_lists = std.ArrayList(std.ArrayList(vk.DescriptorSetLayoutBinding)){};
-        var s: usize = 0;
-        while (s <= @as(usize, max_set_idx)) : (s += 1) {
+        var set_i: usize = 0;
+        while (set_i <= @as(usize, max_set_idx)) : (set_i += 1) {
             try per_set_lists.append(self.allocator, std.ArrayList(vk.DescriptorSetLayoutBinding){});
         }
 
-        // Copy existing layout_info bindings into per_set_lists
         idx = 0;
         while (idx < layout_info.sets.items.len) : (idx += 1) {
             const bindings = layout_info.sets.items[idx];
             if (bindings.len == 0) continue;
             var list = per_set_lists.items[idx];
-            for (bindings) |b| {
-                try list.append(self.allocator, b);
+            for (bindings) |binding_info| {
+                try list.append(self.allocator, binding_info);
             }
             per_set_lists.items[idx] = list;
         }
 
-        // Merge helper: use shared util to merge/append bindings
-
-        // Walk uniform buffers
         for (reflection.uniform_buffers.items) |ub| {
             const set_idx = ub.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            const array_size = if (ub.array_size == 0) 0x10000 else ub.array_size; // Use large number for unbounded arrays
+            const array_size = if (ub.array_size == 0) 0x10000 else ub.array_size;
             try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, ub.binding, .uniform_buffer, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
-        // Walk storage buffers
         for (reflection.storage_buffers.items) |sb| {
             const set_idx = sb.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            const array_size = if (sb.array_size == 0) 0x10000 else sb.array_size; // Use large number for unbounded arrays
+            const array_size = if (sb.array_size == 0) 0x10000 else sb.array_size;
             try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, sb.binding, .storage_buffer, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
-        // Walk textures (sampled images) -> combined_image_sampler by default
         for (reflection.textures.items) |tex| {
             const set_idx = tex.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            const array_size = if (tex.array_size == 0) 0x10000 else tex.array_size; // Use large number for unbounded arrays
+            const array_size = if (tex.array_size == 0) 0x10000 else tex.array_size;
             try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, tex.binding, .combined_image_sampler, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
-        // Walk separate samplers
+        for (reflection.storage_images.items) |img| {
+            const set_idx = img.set;
+            var list = per_set_lists.items[@as(usize, set_idx)];
+            const array_size = if (img.array_size == 0) 0x10000 else img.array_size;
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, img.binding, .storage_image, stage_flags, array_size);
+            per_set_lists.items[@as(usize, set_idx)] = list;
+        }
+
+        for (reflection.acceleration_structures.items) |accel| {
+            const set_idx = accel.set;
+            var list = per_set_lists.items[@as(usize, set_idx)];
+            const array_size = if (accel.array_size == 0) 0x10000 else accel.array_size;
+            try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, accel.binding, .acceleration_structure_khr, stage_flags, array_size);
+            per_set_lists.items[@as(usize, set_idx)] = list;
+        }
+
+        // Skip separate samplers if the same binding already maps to a combined image sampler.
         for (reflection.samplers.items) |samp| {
             const set_idx = samp.set;
             var list = per_set_lists.items[@as(usize, set_idx)];
-            const array_size = if (samp.array_size == 0) 0x10000 else samp.array_size; // Use large number for unbounded arrays
+
+            var skip_sampler = false;
+            var found_matching_binding = false;
+            var existing_i: usize = 0;
+            while (existing_i < list.items.len) : (existing_i += 1) {
+                const existing = list.items[existing_i];
+                if (existing.binding == samp.binding) {
+                    found_matching_binding = true;
+
+                    switch (existing.descriptor_type) {
+                        .combined_image_sampler, .sampled_image => skip_sampler = true,
+                        else => {},
+                    }
+                    if (skip_sampler) break;
+                }
+            }
+
+            if (skip_sampler) {
+                per_set_lists.items[@as(usize, set_idx)] = list;
+                continue;
+            }
+
+            const array_size = if (samp.array_size == 0) 0x10000 else samp.array_size;
             try DescriptorUtils.mergeDescriptorBinding(self.allocator, &list, samp.binding, .sampler, stage_flags, array_size);
             per_set_lists.items[@as(usize, set_idx)] = list;
         }
 
-        // Convert per_set_lists into layout_info.sets (owned slices)
         var idx_u: usize = 0;
         while (idx_u < per_set_lists.items.len) : (idx_u += 1) {
             var list_ptr = &per_set_lists.items[idx_u];
             if (list_ptr.items.len == 0) continue;
             const slice = try list_ptr.toOwnedSlice(self.allocator);
-            // Ensure layout_info.sets has enough entries
             if (layout_info.sets.items.len <= idx_u) {
-                // Append an empty slice placeholder
                 try layout_info.sets.append(self.allocator, &[_]vk.DescriptorSetLayoutBinding{});
             }
-            // free previous placeholder if any
             if (layout_info.sets.items[idx_u].len != 0) {
                 self.allocator.free(layout_info.sets.items[idx_u]);
             }
             layout_info.sets.items[idx_u] = slice;
         }
 
-        // Cleanup per_set_lists
         var cleanup_i: usize = 0;
         while (cleanup_i < per_set_lists.items.len) : (cleanup_i += 1) {
             per_set_lists.items[cleanup_i].deinit(self.allocator);
@@ -888,23 +1178,8 @@ pub const UnifiedPipelineSystem = struct {
         var layouts = std.ArrayList(vk.DescriptorSetLayout){};
         defer layouts.deinit(self.allocator);
 
-        log(.INFO, "unified_pipeline", "Creating descriptor set layouts: {} sets", .{layout_info.sets.items.len});
-
-        for (layout_info.sets.items, 0..) |set_bindings, set_idx| {
-            if (set_bindings.len == 0) {
-                log(.DEBUG, "unified_pipeline", "  Set {}: EMPTY (skipped)", .{set_idx});
-                continue;
-            }
-
-            log(.INFO, "unified_pipeline", "  Set {}: {} bindings", .{ set_idx, set_bindings.len });
-            for (set_bindings) |binding| {
-                log(.INFO, "unified_pipeline", "    Binding {}: type={s}, count={}, stages=0x{x}", .{
-                    binding.binding,
-                    @tagName(binding.descriptor_type),
-                    binding.descriptor_count,
-                    @as(u32, @bitCast(binding.stage_flags)),
-                });
-            }
+        for (layout_info.sets.items) |set_bindings| {
+            if (set_bindings.len == 0) continue;
 
             const layout_create_info = vk.DescriptorSetLayoutCreateInfo{
                 .binding_count = @intCast(set_bindings.len),
@@ -914,8 +1189,6 @@ pub const UnifiedPipelineSystem = struct {
             const layout = try self.graphics_context.vkd.createDescriptorSetLayout(self.graphics_context.dev, &layout_create_info, null);
             try layouts.append(self.allocator, layout);
         }
-
-        log(.INFO, "unified_pipeline", "Created {} descriptor set layouts", .{layouts.items.len});
 
         return try layouts.toOwnedSlice(self.allocator);
     }
@@ -966,33 +1239,29 @@ pub const UnifiedPipelineSystem = struct {
             sets.deinit(self.allocator);
         }
 
-        log(.INFO, "unified_pipeline", "Creating descriptor sets for {} sets", .{layout_info.sets.items.len});
-
         // For each descriptor set in the layout
-        for (layout_info.sets.items, 0..) |set_bindings, set_idx| {
-            if (set_bindings.len == 0) {
-                log(.DEBUG, "unified_pipeline", "  Set {}: EMPTY (skipped)", .{set_idx});
-                continue;
-            }
+        for (layout_info.sets.items) |set_bindings| {
+            if (set_bindings.len == 0) continue;
 
             // Count descriptor types for pool sizing
             var uniform_buffers: u32 = 0;
             var storage_buffers: u32 = 0;
             var combined_samplers: u32 = 0;
+            var sampler_only: u32 = 0;
+            var storage_images: u32 = 0;
+            var accel_structures: u32 = 0;
 
-            log(.INFO, "unified_pipeline", "  Set {}: {} bindings", .{ set_idx, set_bindings.len });
             for (set_bindings) |binding| {
-                log(.INFO, "unified_pipeline", "    Binding {}: type={s}, count={}", .{ binding.binding, @tagName(binding.descriptor_type), binding.descriptor_count });
-
                 switch (binding.descriptor_type) {
                     .uniform_buffer => uniform_buffers += binding.descriptor_count,
                     .storage_buffer => storage_buffers += binding.descriptor_count,
                     .combined_image_sampler => combined_samplers += binding.descriptor_count,
+                    .sampler => sampler_only += binding.descriptor_count,
+                    .storage_image => storage_images += binding.descriptor_count,
+                    .acceleration_structure_khr => accel_structures += binding.descriptor_count,
                     else => {},
                 }
             }
-
-            log(.INFO, "unified_pipeline", "  Set {}: Pool sizing - UBO: {}, SSBO: {}, Sampler: {}", .{ set_idx, uniform_buffers, storage_buffers, combined_samplers });
 
             // Create descriptor pool using builder pattern
             var pool_builder = DescriptorPool.Builder{
@@ -1005,18 +1274,35 @@ pub const UnifiedPipelineSystem = struct {
             defer pool_builder.poolSizes.deinit(self.allocator);
 
             const pool = try self.allocator.create(DescriptorPool);
-            const ubo_pool_size = @max(uniform_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1);
-            const ssbo_pool_size = @max(storage_buffers * MAX_FRAMES_IN_FLIGHT * 2, 1);
-            const sampler_pool_size = @max(combined_samplers * MAX_FRAMES_IN_FLIGHT * 2, 1);
+            const scale = MAX_FRAMES_IN_FLIGHT * 2;
 
-            log(.INFO, "unified_pipeline", "  Set {}: Allocating pool - UBO: {}, SSBO: {}, Sampler: {}", .{ set_idx, ubo_pool_size, ssbo_pool_size, sampler_pool_size });
+            _ = pool_builder.setMaxSets(MAX_FRAMES_IN_FLIGHT * 4); // Allow for multiple pipelines per frame
+            if (uniform_buffers > 0) {
+                const pool_size = @max(uniform_buffers * scale, 1);
+                _ = pool_builder.addPoolSize(.uniform_buffer, pool_size);
+            }
+            if (storage_buffers > 0) {
+                const pool_size = @max(storage_buffers * scale, 1);
+                _ = pool_builder.addPoolSize(.storage_buffer, pool_size);
+            }
+            if (combined_samplers > 0) {
+                const pool_size = @max(combined_samplers * scale, 1);
+                _ = pool_builder.addPoolSize(.combined_image_sampler, pool_size);
+            }
+            if (sampler_only > 0) {
+                const pool_size = @max(sampler_only * scale, 1);
+                _ = pool_builder.addPoolSize(.sampler, pool_size);
+            }
+            if (storage_images > 0) {
+                const pool_size = @max(storage_images * scale, 1);
+                _ = pool_builder.addPoolSize(.storage_image, pool_size);
+            }
+            if (accel_structures > 0) {
+                const pool_size = @max(accel_structures * scale, 1);
+                _ = pool_builder.addPoolSize(.acceleration_structure_khr, pool_size);
+            }
 
-            pool.* = try pool_builder
-                .setMaxSets(MAX_FRAMES_IN_FLIGHT * 4) // Allow for multiple pipelines per frame
-                .addPoolSize(.uniform_buffer, ubo_pool_size)
-                .addPoolSize(.storage_buffer, ssbo_pool_size)
-                .addPoolSize(.combined_image_sampler, sampler_pool_size)
-                .build();
+            pool.* = try pool_builder.build();
 
             try pools.append(self.allocator, pool);
 
@@ -1034,8 +1320,6 @@ pub const UnifiedPipelineSystem = struct {
             layout.* = try layout_builder.build();
             try layouts.append(self.allocator, layout);
 
-            log(.INFO, "unified_pipeline", "  Set {}: Allocating {} descriptor sets", .{ set_idx, MAX_FRAMES_IN_FLIGHT });
-
             // Allocate descriptor sets for all frames
             const frame_sets = try self.allocator.alloc(vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT);
             for (frame_sets) |*set| {
@@ -1043,8 +1327,6 @@ pub const UnifiedPipelineSystem = struct {
             }
             try sets.append(self.allocator, frame_sets);
         }
-
-        log(.INFO, "unified_pipeline", "Created {} descriptor pools, {} layouts, {} set arrays", .{ pools.items.len, layouts.items.len, sets.items.len });
 
         return .{
             .pools = pools,
@@ -1130,7 +1412,20 @@ pub const UnifiedPipelineSystem = struct {
                         _ = writer.writeImage(update.binding, @constCast(&image_info));
                     },
                     .image_array => |image_infos| {
+                        for (image_infos, 0..) |info, idx| {
+                            if (info.sampler == vk.Sampler.null_handle) {
+                                log(
+                                    .WARN,
+                                    "unified_pipeline",
+                                    "Descriptor image array binding {} index {} has null sampler",
+                                    .{ update.binding, idx },
+                                );
+                            }
+                        }
                         _ = writer.writeImages(update.binding, image_infos);
+                    },
+                    .buffer_array => |buffer_infos| {
+                        _ = writer.writeBuffers(update.binding, buffer_infos);
                     },
                     .acceleration_structure => |accel_struct| {
                         const accel_info = vk.WriteDescriptorSetAccelerationStructureKHR{
@@ -1264,11 +1559,21 @@ pub const PipelineConfig = struct {
     fragment_shader: ?[]const u8 = null,
     geometry_shader: ?[]const u8 = null,
     compute_shader: ?[]const u8 = null,
+    raygen_shader: ?[]const u8 = null,
+    miss_shader: ?[]const u8 = null,
+    closest_hit_shader: ?[]const u8 = null,
+    any_hit_shader: ?[]const u8 = null,
+    intersection_shader: ?[]const u8 = null,
 
     vertex_entry_point: ?[]const u8 = null,
     fragment_entry_point: ?[]const u8 = null,
     geometry_entry_point: ?[]const u8 = null,
     compute_entry_point: ?[]const u8 = null,
+    raygen_entry_point: ?[]const u8 = null,
+    miss_entry_point: ?[]const u8 = null,
+    closest_hit_entry_point: ?[]const u8 = null,
+    any_hit_entry_point: ?[]const u8 = null,
+    intersection_entry_point: ?[]const u8 = null,
 
     shader_options: @import("../assets/shader_compiler.zig").CompilationOptions = .{ .target = .vulkan },
 
@@ -1302,6 +1607,7 @@ const Pipeline = struct {
     shaders: []*Shader,
     config: PipelineConfig,
     is_compute: bool,
+    is_raytracing: bool,
 
     fn deinit(self: *Pipeline, graphics_context: *GraphicsContext, allocator: std.mem.Allocator) void {
         // Clean up Vulkan objects
@@ -1325,6 +1631,8 @@ const Pipeline = struct {
             shader.deinit(graphics_context.*);
             allocator.destroy(shader);
         }
+
+        self.descriptor_layout_info.deinit();
 
         self.descriptor_pools.deinit(allocator);
         self.descriptor_layouts.deinit(allocator);
@@ -1372,6 +1680,7 @@ pub const Resource = union(enum) {
         layout: vk.ImageLayout = .shader_read_only_optimal,
     },
     image_array: []const vk.DescriptorImageInfo,
+    buffer_array: []const vk.DescriptorBufferInfo,
     acceleration_structure: vk.AccelerationStructureKHR,
 };
 
@@ -1402,6 +1711,27 @@ const DescriptorUpdate = struct {
     binding: u32,
     resource: Resource,
 };
+
+const BindingKey = struct {
+    set: u32,
+    binding: u32,
+};
+
+const BindingKeyContext = struct {
+    pub fn hash(_: @This(), key: BindingKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&key.set));
+        hasher.update(std.mem.asBytes(&key.binding));
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), a: BindingKey, b: BindingKey) bool {
+        return a.set == b.set and a.binding == b.binding;
+    }
+};
+
+const BindingOverrideMap = std.HashMap(BindingKey, u32, BindingKeyContext, std.hash_map.default_max_load_percentage);
+const MAX_DESCRIPTOR_BINDING_COUNT: u32 = 0x10000;
 
 // Context types for HashMap
 const PipelineIdContext = struct {

@@ -10,6 +10,8 @@ const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const log = @import("../utils/log.zig").log;
 const math = @import("../utils/math.zig");
@@ -160,13 +162,13 @@ pub const ParticleRenderer = struct {
     }
 
     /// Update particle simulation
-    pub fn updateParticles(
-        self: *Self,
-        command_buffer: vk.CommandBuffer,
-        frame_index: u32,
-        delta_time: f32,
-        emitter_position: math.Vec3,
-    ) !void {
+    /// Update particle simulation using frame/scene data
+    pub fn update(self: *Self, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+        _ = scene_bridge;
+        const command_buffer = frame_info.compute_buffer;
+        const frame_index = frame_info.current_frame;
+        const delta_time = frame_info.dt;
+        const emitter_position = math.Vec3.init(0.0, 0.0, 0.0);
 
         // Check if we need to re-setup resources after hot reload
         if (self.needs_resource_setup) {
@@ -267,6 +269,8 @@ pub const ParticleRenderer = struct {
             1,
             @ptrCast(&copy_region),
         );
+
+        return false;
     }
 
     /// Render particles
@@ -416,12 +420,6 @@ pub const ParticleRenderer = struct {
     // Private implementation
 
     fn setupResources(self: *Self) !void {
-        log(.DEBUG, "particle_renderer", "Setting up particle renderer resources", .{});
-
-        // Defensive check: ensure pipeline IDs are valid
-        log(.DEBUG, "particle_renderer", "Compute pipeline: {s} (hash: {})", .{ self.compute_pipeline.name, self.compute_pipeline.hash });
-        log(.DEBUG, "particle_renderer", "Render pipeline: {s} (hash: {})", .{ self.render_pipeline.name, self.render_pipeline.hash });
-
         // Bind resources for all frames following old system approach
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
             const frame_idx = @as(u32, @intCast(frame_index));

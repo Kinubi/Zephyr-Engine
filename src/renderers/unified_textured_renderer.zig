@@ -8,16 +8,18 @@ const PipelineId = @import("../rendering/unified_pipeline_system.zig").PipelineI
 const Resource = @import("../rendering/unified_pipeline_system.zig").Resource;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
-const RasterizationData = @import("../rendering/scene_view.zig").RasterizationData;
-const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
 const Vertex = @import("../rendering/mesh.zig").Vertex;
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
+const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 /// Textured renderer using the unified pipeline system
 ///
 /// This renderer replaces the old textured_renderer but uses UnifiedPipelineSystem
 /// like ParticleRenderer does, while maintaining API compatibility.
+///
+/// TODO: REbuilding pipeline after shader recomp breaks binding, it does work flawlessly for ray tracing.
 pub const UnifiedTexturedRenderer = struct {
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
@@ -92,35 +94,79 @@ pub const UnifiedTexturedRenderer = struct {
         self.resource_binder.deinit();
     }
 
-    /// Update material data for current frame (maintains API compatibility with old renderer)
-    /// This binds the material buffer and texture array to the pipeline's descriptor sets
-    pub fn updateMaterialData(
-        self: *Self,
-        frame_index: u32,
-        material_buffer_info: vk.DescriptorBufferInfo,
-        texture_image_infos: []const vk.DescriptorImageInfo,
-    ) !void {
-        // Bind material storage buffer (set 1, binding 0)
-        const material_resource = Resource{
-            .buffer = .{
-                .buffer = material_buffer_info.buffer,
-                .offset = material_buffer_info.offset,
-                .range = material_buffer_info.range,
-            },
-        };
-        try self.pipeline_system.bindResource(self.textured_pipeline, 1, 0, material_resource, frame_index);
+    /// Update material and texture bindings for the current frame
+    pub fn update(self: *Self, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+        const frame_index = frame_info.current_frame;
+        const materials_dirty = scene_bridge.materialsUpdated(frame_index);
+        const textures_dirty = scene_bridge.texturesUpdated(frame_index);
 
-        // Bind texture array (set 1, binding 1) as a single image_array resource
-        const texture_resource = Resource{
-            .image_array = texture_image_infos,
-        };
-        try self.pipeline_system.bindResource(self.textured_pipeline, 1, 1, texture_resource, frame_index);
+        if (!materials_dirty and !textures_dirty) {
+            return false;
+        }
+
+        var descriptors_updated = false;
+
+        if (materials_dirty) {
+            if (scene_bridge.getMaterialBufferInfo()) |material_info| {
+                const material_resource = Resource{
+                    .buffer = .{
+                        .buffer = material_info.buffer,
+                        .offset = material_info.offset,
+                        .range = material_info.range,
+                    },
+                };
+                for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                    try self.pipeline_system.bindResource(
+                        self.textured_pipeline,
+                        1,
+                        0,
+                        material_resource,
+                        @intCast(frame_idx),
+                    );
+                }
+                descriptors_updated = true;
+            } else {
+                log(.WARN, "unified_textured_renderer", "Cannot update descriptors: material buffer not ready", .{});
+            }
+        }
+
+        if (textures_dirty) {
+            const texture_image_infos = scene_bridge.getTextures();
+            if (texture_image_infos.len > 0) {
+                const texture_resource = Resource{ .image_array = texture_image_infos };
+                for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                    try self.pipeline_system.bindResource(
+                        self.textured_pipeline,
+                        1,
+                        1,
+                        texture_resource,
+                        @intCast(frame_idx),
+                    );
+                }
+                descriptors_updated = true;
+            } else {
+                log(.WARN, "unified_textured_renderer", "Cannot update descriptors: texture descriptors not ready", .{});
+            }
+        }
+
+        if (descriptors_updated) {
+            try self.pipeline_system.updateDescriptorSetsForPipeline(self.textured_pipeline, frame_index);
+        }
+
+        return descriptors_updated;
     }
 
-    /// Render textured objects (matches old API signature)
-    pub fn render(self: *Self, frame_info: FrameInfo, raster_data: RasterizationData) !void {
-        const objects = raster_data.objects;
-        if (objects.len == 0) return;
+    /// Render textured objects using scene bridge data
+    pub fn render(self: *Self, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+        const frame_index = frame_info.current_frame;
+        const meshes_dirty = scene_bridge.meshesUpdated(frame_index);
+        const objects = scene_bridge.getMeshes();
+        if (objects.len == 0) {
+            if (meshes_dirty) {
+                scene_bridge.markMeshesSynced(frame_index);
+            }
+            return;
+        }
 
         // Update descriptor sets for this frame (materials and textures)
         try self.pipeline_system.updateDescriptorSetsForPipeline(self.textured_pipeline, frame_info.current_frame);
@@ -178,7 +224,7 @@ pub const UnifiedTexturedRenderer = struct {
         }
 
         // Render each object
-        for (raster_data.objects) |object| {
+        for (objects) |object| {
             if (!object.visible) continue;
 
             // Set up push constants with transform and material index (matches old API)
@@ -199,6 +245,10 @@ pub const UnifiedTexturedRenderer = struct {
 
             // Draw the mesh
             object.mesh_handle.getMesh().draw(self.graphics_context.*, frame_info.command_buffer);
+        }
+
+        if (meshes_dirty) {
+            scene_bridge.markMeshesSynced(frame_index);
         }
     }
 };

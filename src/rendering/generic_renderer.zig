@@ -1,7 +1,6 @@
 const std = @import("std");
-const vk = @import("vulkan");
 const FrameInfo = @import("frameinfo.zig").FrameInfo;
-const RenderContext = @import("render_pass.zig").RenderContext;
+const SceneBridge = @import("scene_bridge.zig").SceneBridge;
 
 /// Renderer execution type classification
 pub const RendererType = enum {
@@ -12,18 +11,47 @@ pub const RendererType = enum {
     postprocess, // Post-processing effects
 };
 
-/// Individual renderer entry
+/// Renderer entry storing callbacks for a specific renderer instance
 pub const RendererEntry = struct {
     name: []const u8,
     renderer_type: RendererType,
-    renderer_ptr: *anyopaque,
-    vtable: VTable,
+    data_ptr: *anyopaque,
+    callbacks: Callbacks,
 
-    pub const VTable = struct {
-        render: *const fn (renderer_ptr: *anyopaque, frame_info: FrameInfo, scene_data: *anyopaque) anyerror!void,
-        shouldExecute: ?*const fn (renderer_ptr: *anyopaque, frame_info: FrameInfo) bool = null,
-        deinit: ?*const fn (renderer_ptr: *anyopaque) void = null,
+    pub const Callbacks = struct {
+        update: *const fn (data_ptr: *anyopaque, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) anyerror!bool,
+        render: *const fn (data_ptr: *anyopaque, frame_info: FrameInfo, scene_bridge: *SceneBridge) anyerror!void,
+        on_create: ?*const fn (data_ptr: *anyopaque, scene_bridge: *SceneBridge) anyerror!void = null,
+        should_execute: ?*const fn (data_ptr: *anyopaque, frame_info: FrameInfo) bool = null,
+        deinit: ?*const fn (data_ptr: *anyopaque) void = null,
     };
+
+    pub fn update(self: *RendererEntry, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+        return self.callbacks.update(self.data_ptr, frame_info, scene_bridge);
+    }
+
+    pub fn render(self: *RendererEntry, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+        try self.callbacks.render(self.data_ptr, frame_info, scene_bridge);
+    }
+
+    pub fn onCreate(self: *RendererEntry, scene_bridge: *SceneBridge) !void {
+        if (self.callbacks.on_create) |func| {
+            try func(self.data_ptr, scene_bridge);
+        }
+    }
+
+    pub fn shouldExecute(self: *RendererEntry, frame_info: FrameInfo) bool {
+        if (self.callbacks.should_execute) |func| {
+            return func(self.data_ptr, frame_info);
+        }
+        return true;
+    }
+
+    pub fn deinit(self: *RendererEntry) void {
+        if (self.callbacks.deinit) |func| {
+            func(self.data_ptr);
+        }
+    }
 };
 
 /// Generic renderer that can execute multiple sub-renderers based on type
@@ -53,6 +81,13 @@ pub const GenericRenderer = struct {
     /// Set the scene bridge for renderers that need scene data
     pub fn setSceneBridge(self: *GenericRenderer, scene_bridge: anytype) void {
         self.scene_bridge_ptr = @ptrCast(scene_bridge);
+
+        const bridge_ptr: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr.?));
+        for (self.renderers.items) |*renderer| {
+            renderer.onCreate(bridge_ptr) catch |err| {
+                std.log.err("GenericRenderer: Failed to run onCreate for '{s}': {}", .{ renderer.name, err });
+            };
+        }
     }
 
     /// Set the swapchain for renderers that need it (like raytracing)
@@ -68,145 +103,81 @@ pub const GenericRenderer = struct {
         renderer_ptr: anytype,
         comptime RendererT: type,
     ) !void {
+        comptime {
+            if (!@hasDecl(RendererT, "update")) @compileError("Renderer must implement update(frame_info, scene_bridge)");
+            if (!@hasDecl(RendererT, "render")) @compileError("Renderer must implement render(frame_info, scene_bridge)");
+        }
+
         const entry = RendererEntry{
             .name = name,
             .renderer_type = renderer_type,
-            .renderer_ptr = @ptrCast(renderer_ptr),
-            .vtable = RendererEntry.VTable{
-                .render = struct {
-                    fn render(ptr: *anyopaque, frame_info: FrameInfo, scene_data_ptr: *anyopaque) !void {
+            .data_ptr = @ptrCast(renderer_ptr),
+            .callbacks = RendererEntry.Callbacks{
+                .update = struct {
+                    fn call(ptr: *anyopaque, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
                         const renderer: *RendererT = @ptrCast(@alignCast(ptr));
-
-                        // Handle different renderer signatures based on the renderer type
-                        // This is determined by the renderer type stored in the entry
-                        if (@hasDecl(RendererT, "render")) {
-                            const render_fn = @field(RendererT, "render");
-                            const render_info = @typeInfo(@TypeOf(render_fn));
-
-                            if (render_info == .@"fn") {
-                                const params = render_info.@"fn".params;
-
-                                // Handle render(self, frame_info) - most renderers (PointLightRenderer, RaytracingRenderer, etc)
-                                if (params.len == 2) {
-                                    return renderer.render(frame_info);
-                                }
-
-                                // Handle render(self, frame_info, raster_data) - TexturedRenderer
-                                if (params.len == 3) {
-                                    const RasterizationData = @import("scene_view.zig").RasterizationData;
-                                    const raster_data: *RasterizationData = @ptrCast(@alignCast(scene_data_ptr));
-                                    return renderer.render(frame_info, raster_data.*);
-                                }
-                            }
-                        }
-
-                        return error.UnsupportedRenderSignature;
+                        return renderer.update(frame_info, scene_bridge);
                     }
-                }.render,
-                .shouldExecute = if (@hasDecl(RendererT, "shouldExecute")) struct {
-                    fn shouldExecute(ptr: *anyopaque, frame_info: FrameInfo) bool {
+                }.call,
+                .render = struct {
+                    fn call(ptr: *anyopaque, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+                        const renderer: *RendererT = @ptrCast(@alignCast(ptr));
+                        return renderer.render(frame_info, scene_bridge);
+                    }
+                }.call,
+                .on_create = if (@hasDecl(RendererT, "onCreate")) struct {
+                    fn call(ptr: *anyopaque, scene_bridge: *SceneBridge) !void {
+                        const renderer: *RendererT = @ptrCast(@alignCast(ptr));
+                        return renderer.onCreate(scene_bridge);
+                    }
+                }.call else null,
+                .should_execute = if (@hasDecl(RendererT, "shouldExecute")) struct {
+                    fn call(ptr: *anyopaque, frame_info: FrameInfo) bool {
                         const renderer: *RendererT = @ptrCast(@alignCast(ptr));
                         return renderer.shouldExecute(frame_info);
                     }
-                }.shouldExecute else null,
+                }.call else null,
+                .deinit = if (@hasDecl(RendererT, "deinit")) struct {
+                    fn call(ptr: *anyopaque) void {
+                        const renderer: *RendererT = @ptrCast(@alignCast(ptr));
+                        renderer.deinit();
+                    }
+                }.call else null,
             },
         };
 
         try self.renderers.append(self.allocator, entry);
+
+        if (self.scene_bridge_ptr) |ptr| {
+            const scene_bridge: *SceneBridge = @ptrCast(@alignCast(ptr));
+            try self.renderers.items[self.renderers.items.len - 1].onCreate(scene_bridge);
+        }
     }
 
     /// Update descriptor sets for all renderers that need material/texture updates
     /// Checks SceneBridge to determine if updates are needed for this frame
-    pub fn update(self: *GenericRenderer, frame_index: u32) !void {
-        // Get scene bridge to check if updates are needed
-        const SceneBridge = @import("scene_bridge.zig").SceneBridge;
+    pub fn update(self: *GenericRenderer, frame_info: *const FrameInfo) !void {
         const scene_bridge: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr orelse return error.NoSceneBridge));
-        
-        // Check if this frame needs descriptor updates
-        if (!scene_bridge.needsDescriptorUpdate(frame_index)) {
-            return; // Nothing to update for this frame
-        }
 
-        const Scene = @import("../scene/scene.zig").Scene;
-        const scene: *Scene = scene_bridge.scene;
-        const asset_manager = scene.asset_manager;
-
-        // Update all renderers that need material/texture descriptor updates
         for (self.renderers.items) |*renderer| {
-            // Currently only textured renderer needs material/texture updates
-            // In the future, this could be extended with a vtable update method
-            if (std.mem.eql(u8, renderer.name, "textured")) {
-                const UnifiedTexturedRenderer = @import("../renderers/unified_textured_renderer.zig").UnifiedTexturedRenderer;
-                const textured_renderer: *UnifiedTexturedRenderer = @ptrCast(@alignCast(renderer.renderer_ptr));
-
-                // Only update if we have a material buffer
-                if (asset_manager.material_buffer) |material_buffer| {
-                    const material_buffer_info = vk.DescriptorBufferInfo{
-                        .buffer = material_buffer.buffer,
-                        .offset = 0,
-                        .range = vk.WHOLE_SIZE,
-                    };
-
-                    const texture_image_infos = asset_manager.getTextureDescriptorArray();
-
-                    try textured_renderer.updateMaterialData(
-                        frame_index,
-                        material_buffer_info,
-                        texture_image_infos,
-                    );
-                }
-            }
+            _ = try renderer.update(frame_info, scene_bridge);
         }
-
-        // Mark that this frame's descriptors have been updated
-        scene_bridge.markDescriptorUpdated(frame_index);
     }
 
     /// Execute all renderers in type order
     pub fn render(self: *GenericRenderer, frame_info: FrameInfo) !void {
         // Get scene bridge
-        const SceneBridge = @import("scene_bridge.zig").SceneBridge;
         const scene_bridge: *SceneBridge = @ptrCast(@alignCast(self.scene_bridge_ptr orelse return error.NoSceneBridge));
-        var scene_view = scene_bridge.createSceneView();
 
         for (self.execution_order) |renderer_type| {
             for (self.renderers.items) |*renderer| {
                 if (renderer.renderer_type == renderer_type) {
                     // Check if renderer should execute
-                    if (renderer.vtable.shouldExecute) |should_execute_fn| {
-                        const should_execute = should_execute_fn(renderer.renderer_ptr, frame_info);
-                        if (!should_execute) {
-                            continue;
-                        }
+                    if (!renderer.shouldExecute(frame_info)) {
+                        continue;
                     }
 
-                    // Get appropriate scene data based on renderer type
-                    const scene_data_ptr: *anyopaque = switch (renderer_type) {
-                        .raster => blk: {
-                            var raster_data = scene_view.getRasterizationData();
-                            break :blk @ptrCast(&raster_data);
-                        },
-                        .compute => blk: {
-                            var compute_data = scene_view.getComputeData();
-                            break :blk @ptrCast(&compute_data);
-                        },
-                        .raytracing => blk: {
-                            // Raytracing renderers use standard render(frame_info) signature now
-                            var dummy_data: u8 = 0;
-                            break :blk @ptrCast(&dummy_data);
-                        },
-                        .lighting => blk: {
-                            var raster_data = scene_view.getRasterizationData(); // Lighting uses raster data for lights
-                            break :blk @ptrCast(&raster_data);
-                        },
-                        .postprocess => blk: {
-                            var raster_data = scene_view.getRasterizationData(); // Post-process typically uses raster data
-                            break :blk @ptrCast(&raster_data);
-                        },
-                    };
-
-                    // Execute the renderer
-                    renderer.vtable.render(renderer.renderer_ptr, frame_info, scene_data_ptr) catch |err| {
+                    renderer.render(frame_info, scene_bridge) catch |err| {
                         std.log.err("GenericRenderer: Failed to render with '{s}': {}", .{ renderer.name, err });
                         return err;
                     };
@@ -218,9 +189,7 @@ pub const GenericRenderer = struct {
     /// Clean up all renderers
     pub fn deinit(self: *GenericRenderer) void {
         for (self.renderers.items) |*renderer| {
-            if (renderer.vtable.deinit) |deinit_fn| {
-                deinit_fn(renderer.renderer_ptr);
-            }
+            renderer.deinit();
         }
         self.renderers.deinit(self.allocator);
     }

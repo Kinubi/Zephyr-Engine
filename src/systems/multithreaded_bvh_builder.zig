@@ -188,8 +188,6 @@ pub const MultithreadedBvhBuilder = struct {
         );
 
         try self.thread_pool.submitWork(work_item);
-
-        log(.INFO, "bvh_builder", "Submitted BLAS build work (ID: {})", .{work_id});
         return work_id;
     }
 
@@ -231,8 +229,6 @@ pub const MultithreadedBvhBuilder = struct {
         );
 
         try self.thread_pool.submitWork(work_item);
-
-        log(.INFO, "bvh_builder", "Submitted TLAS build work (ID: {}) with {} instances", .{ work_id, instances.len });
         return work_id;
     }
 
@@ -243,8 +239,6 @@ pub const MultithreadedBvhBuilder = struct {
         completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
         callback_context: ?*anyopaque,
     ) !void {
-        log(.INFO, "bvh_builder", "Starting async BVH build for {} geometries using RT data with mesh pointers", .{rt_data.geometries.len});
-
         // Use the RT geometries directly for worker item creation - extract mesh data on main thread
         for (rt_data.geometries, 0..) |rt_geometry, geom_idx| {
             const mesh = rt_geometry.mesh_ptr;
@@ -321,8 +315,6 @@ pub const MultithreadedBvhBuilder = struct {
         callback_context: ?*anyopaque,
     ) !void {
         _ = completion_callback; // TODO: Implement scene-level completion callback
-        log(.INFO, "bvh_builder", "Starting async BVH build for scene with {} objects", .{scene.objects.items.len});
-
         // Clear and prepare persistent geometry storage
         self.geometry_mutex.lock();
         defer self.geometry_mutex.unlock();
@@ -371,8 +363,6 @@ pub const MultithreadedBvhBuilder = struct {
                 }
             }
         }
-
-        log(.INFO, "bvh_builder", "Submitted {} BLAS build jobs", .{self.persistent_geometry.items.len});
     }
 
     /// Check if all pending work is complete
@@ -464,8 +454,6 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
             _ = builder.total_blas_built.fetchAdd(1, .monotonic);
             _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
             _ = builder.pending_work.fetchSub(1, .monotonic);
-
-            log(.INFO, "bvh_builder", "BLAS build completed (ID: {}) in {d:.2}ms", .{ work_item.id, @as(f64, @floatFromInt(build_time)) / 1_000_000.0 });
 
             // Call completion callback if provided
             if (work_data.completion_callback) |callback| {
@@ -811,8 +799,6 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
 fn blasCallbackWrapper(context: *anyopaque, result: BvhBuildResult) void {
     switch (result) {
         .build_blas => |blas_result| {
-            log(.INFO, "bvh_builder", "BLAS wrapper callback: geometry_id={}, build_time={d:.2}ms", .{ blas_result.geometry_id, @as(f64, @floatFromInt(blas_result.build_time_ns)) / 1_000_000.0 });
-
             // Extract the wrapper from the context
             const wrapper = @as(*CallbackWrapper, @ptrCast(@alignCast(context)));
 
@@ -833,7 +819,7 @@ fn sceneBlasBuildCallback(context: *anyopaque, result: BvhBuildResult) void {
     _ = context;
     switch (result) {
         .build_blas => |blas_result| {
-            log(.INFO, "bvh_builder", "Scene BLAS completed: geometry_id={}, build_time={d:.2}ms", .{ blas_result.geometry_id, @as(f64, @floatFromInt(blas_result.build_time_ns)) / 1_000_000.0 });
+            _ = blas_result;
         },
         else => {},
     }

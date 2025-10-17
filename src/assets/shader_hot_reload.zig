@@ -157,11 +157,26 @@ pub const ShaderWatcher = struct {
     /// Compiles the shader immediately and signals the pipeline to rebuild when finished.
     /// This follows the same pattern as hot_reload_manager.onFileChanged.
     pub fn onFileChanged(self: *Self, file_path: []const u8) void {
-        // Skip the cached directory - we don't want to recompile cache files
-        if (std.mem.indexOf(u8, file_path, "cached") != null) {
+        // Skip cached outputs - only rebuild from source shaders
+        if (std.mem.indexOf(u8, file_path, "shaders/cached") != null) {
+            log(.DEBUG, "shader_hot_reload", "Ignoring cached shader artifact {s}", .{file_path});
             return;
         }
-        if (std.mem.indexOf(u8, file_path, "shaders") != null) {
+
+        const base_name = std.fs.path.basename(file_path);
+
+        // Handle directory-level events by rescanning for new shader files
+        if (!isShaderFile(base_name)) {
+            // If the path refers to a directory, rescan it to pick up new shaders
+            const dir_path = file_path;
+            if (std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch null) |dir_val| {
+                var dir = dir_val;
+                defer dir.close();
+                self.scanDirectory(dir_path) catch |err| {
+                    std.log.warn("[hot_reload] Failed to rescan shader directory {s}: {}", .{ dir_path, err });
+                };
+            }
+            log(.DEBUG, "shader_hot_reload", "Skipping non-shader file change {s}", .{file_path});
             return;
         }
 

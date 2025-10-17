@@ -8,12 +8,24 @@ pub fn mergeDescriptorBinding(allocator: std.mem.Allocator, list: *std.ArrayList
             list.items[j].stage_flags = vk.ShaderStageFlags.merge(list.items[j].stage_flags, sflags);
             if (list.items[j].descriptor_count < descriptor_count) list.items[j].descriptor_count = descriptor_count;
             if (list.items[j].descriptor_type != dtype) {
-                if (list.items[j].descriptor_type == .sampler and dtype == .combined_image_sampler) {
-                    list.items[j].descriptor_type = .combined_image_sampler;
-                } else if (list.items[j].descriptor_type == .uniform_buffer and dtype == .storage_buffer) {
-                    list.items[j].descriptor_type = .storage_buffer;
-                } else {
-                    list.items[j].descriptor_type = dtype;
+                const current = list.items[j].descriptor_type;
+                switch (current) {
+                    .sampler => switch (dtype) {
+                        .combined_image_sampler, .sampled_image => list.items[j].descriptor_type = .combined_image_sampler,
+                        else => list.items[j].descriptor_type = dtype,
+                    },
+                    .combined_image_sampler => switch (dtype) {
+                        .sampler, .sampled_image => {},
+                        else => list.items[j].descriptor_type = dtype,
+                    },
+                    .uniform_buffer => {
+                        if (dtype == .storage_buffer) {
+                            list.items[j].descriptor_type = .storage_buffer;
+                        } else {
+                            list.items[j].descriptor_type = dtype;
+                        }
+                    },
+                    else => list.items[j].descriptor_type = dtype,
                 }
             }
             return;

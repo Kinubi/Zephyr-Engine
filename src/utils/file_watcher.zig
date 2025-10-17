@@ -112,7 +112,6 @@ pub const FileWatcher = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.watched_paths.put(owned_key, watched_path);
-        log(.INFO, "file_watcher", "Added watch for: {s} (recursive: {}, kind: {})", .{ path, recursive, stat.kind });
     }
 
     /// Remove a path from watching

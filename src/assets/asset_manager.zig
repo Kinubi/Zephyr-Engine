@@ -140,7 +140,6 @@ pub const FallbackAssets = struct {
             // Mark as loaded in registry
             asset_manager.registry.markAsLoaded(asset_id, 1024); // Fake size
 
-            log(.INFO, "asset_manager", "Created fallback cube model with asset ID {}", .{asset_id.toU64()});
             break :blk asset_id;
         };
 
@@ -148,7 +147,6 @@ pub const FallbackAssets = struct {
         fallbacks.failed_model = fallbacks.missing_model;
         fallbacks.default_model = fallbacks.missing_model;
 
-        log(.INFO, "enhanced_asset_manager", "Fallback assets initialized: missing_texture={?}, missing_model={?}", .{ fallbacks.missing_texture, fallbacks.missing_model });
         try asset_manager.buildTextureDescriptorArray();
         try asset_manager.createMaterialBuffer(asset_manager.loader.graphics_context);
         return fallbacks;
@@ -473,6 +471,7 @@ pub const AssetManager = struct {
 
         // Mark texture descriptors as dirty for lazy rebuild
         self.texture_descriptors_dirty = true;
+        self.materials_dirty = true; // Recompute material buffer once real texture is available
 
         // Complete the request
         self.completeRequest(asset_id, true);

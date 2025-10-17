@@ -9,6 +9,7 @@ const ComputeData = @import("scene_view.zig").ComputeData;
 const Mesh = @import("mesh.zig").Mesh;
 const Math = @import("../utils/math.zig");
 const log = @import("../utils/log.zig").log;
+const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 /// Bridge between existing Scene and new SceneView system
 pub const SceneBridge = struct {
@@ -25,18 +26,47 @@ pub const SceneBridge = struct {
     last_model_asset_ids: std.ArrayList(u64), // Track model asset IDs to detect changes
     bvh_needs_rebuild: bool = true, // Start with needing rebuild
 
-    // Material/texture descriptor update tracking (per frame in flight)
-    descriptor_update_needed: [3]bool = [_]bool{true, true, true}, // Start with needing updates
+    // Per-resource update tracking
+    mesh_update_needed: [MAX_FRAMES_IN_FLIGHT]bool,
+    material_update_needed: [MAX_FRAMES_IN_FLIGHT]bool,
+    texture_update_needed: [MAX_FRAMES_IN_FLIGHT]bool,
+    raytracing_update_needed: [MAX_FRAMES_IN_FLIGHT]bool,
+    compute_update_needed: [MAX_FRAMES_IN_FLIGHT]bool,
+
+    // Track previous dirty/updating states so we can detect async completion reliably
+    last_material_dirty: bool,
+    last_texture_dirty: bool,
+    last_material_updating: bool,
+    last_texture_updating: bool,
 
     const Self = @This();
 
     /// Initialize scene bridge
     pub fn init(scene: *Scene, allocator: std.mem.Allocator) Self {
-        return Self{
+        const asset_manager = scene.asset_manager;
+
+        var bridge = Self{
             .scene = scene,
             .allocator = allocator,
             .last_model_asset_ids = std.ArrayList(u64){},
+            .mesh_update_needed = undefined,
+            .material_update_needed = undefined,
+            .texture_update_needed = undefined,
+            .raytracing_update_needed = undefined,
+            .compute_update_needed = undefined,
+            .last_material_dirty = asset_manager.materials_dirty,
+            .last_texture_dirty = asset_manager.texture_descriptors_dirty,
+            .last_material_updating = asset_manager.material_buffer_updating.load(.acquire),
+            .last_texture_updating = asset_manager.texture_descriptors_updating.load(.acquire),
         };
+
+        Self.setAllTrue(&bridge.mesh_update_needed);
+        Self.setAllTrue(&bridge.material_update_needed);
+        Self.setAllTrue(&bridge.texture_update_needed);
+        Self.setAllTrue(&bridge.raytracing_update_needed);
+        Self.setAllTrue(&bridge.compute_update_needed);
+
+        return bridge;
     }
 
     /// Create SceneView that bridges to existing Scene
@@ -53,11 +83,69 @@ pub const SceneBridge = struct {
         };
     }
 
+    /// Kick the scene's async resource updates and propagate completion to renderers
+    pub fn updateAsyncResources(self: *Self) !bool {
+        const asset_manager = self.scene.asset_manager;
+
+        // Reset per-frame descriptor dirty flags; we'll set them if new data arrives this tick.
+        Self.setAllFalse(&self.material_update_needed);
+        Self.setAllFalse(&self.texture_update_needed);
+
+        const prev_tex_dirty = self.last_texture_dirty;
+        const prev_mat_dirty = self.last_material_dirty;
+        const prev_tex_updating = self.last_texture_updating;
+        const prev_mat_updating = self.last_material_updating;
+
+        var work_started = false;
+
+        const tex_updating = asset_manager.texture_descriptors_updating.load(.acquire);
+        const mat_updating = asset_manager.material_buffer_updating.load(.acquire);
+
+        if (asset_manager.texture_descriptors_dirty and !tex_updating) {
+            try asset_manager.queueTextureDescriptorUpdate();
+            work_started = true;
+        }
+
+        if (asset_manager.materials_dirty and !mat_updating) {
+            try asset_manager.queueMaterialBufferUpdate();
+            work_started = true;
+        }
+
+        const curr_tex_dirty = asset_manager.texture_descriptors_dirty;
+        const curr_mat_dirty = asset_manager.materials_dirty;
+        const curr_tex_updating = asset_manager.texture_descriptors_updating.load(.acquire);
+        const curr_mat_updating = asset_manager.material_buffer_updating.load(.acquire);
+
+        self.last_texture_dirty = curr_tex_dirty;
+        self.last_material_dirty = curr_mat_dirty;
+        self.last_texture_updating = curr_tex_updating;
+        self.last_material_updating = curr_mat_updating;
+
+        const texture_completed = (prev_tex_dirty or prev_tex_updating) and !curr_tex_dirty and !curr_tex_updating;
+        const material_completed = (prev_mat_dirty or prev_mat_updating) and !curr_mat_dirty and !curr_mat_updating;
+
+        if (texture_completed) {
+            Self.setAllTrue(&self.texture_update_needed);
+            Self.setAllTrue(&self.raytracing_update_needed);
+            if (self.scene.raytracing_system) |rt_system| {
+                rt_system.requestTextureDescriptorUpdate();
+            }
+        }
+
+        if (material_completed) {
+            Self.setAllTrue(&self.material_update_needed);
+        }
+
+        return work_started or texture_completed or material_completed;
+    }
+
     /// Mark scene data as dirty (call when objects/assets change)
     pub fn invalidateCache(self: *Self) void {
         self.cache_dirty = true;
         self.rasterization_cache = null;
         self.compute_cache = null;
+        Self.setAllTrue(&self.mesh_update_needed);
+        Self.setAllTrue(&self.compute_update_needed);
     }
 
     /// Mark only geometry as dirty (for BVH rebuilding) - textures/materials don't need BVH rebuild
@@ -65,25 +153,115 @@ pub const SceneBridge = struct {
         self.bvh_needs_rebuild = true;
         // Only invalidate raytracing cache since geometry changed
         self.raytracing_cache = null;
+        Self.setAllTrue(&self.raytracing_update_needed);
+        Self.setAllTrue(&self.mesh_update_needed);
     }
 
     /// Check if material/texture descriptors need updating for a given frame
     pub fn needsDescriptorUpdate(self: *Self, frame_index: u32) bool {
-        // Check if asset manager has new materials or textures
-        const asset_manager = self.scene.asset_manager;
-        if (asset_manager.materials_dirty or asset_manager.texture_descriptors_dirty) {
-            // Mark all frames as needing updates
-            for (&self.descriptor_update_needed) |*needs_update| {
-                needs_update.* = true;
-            }
-        }
-        
-        return self.descriptor_update_needed[frame_index];
+        const needs_material = self.materialsUpdated(frame_index);
+        const needs_texture = self.texturesUpdated(frame_index);
+        return needs_material or needs_texture;
     }
 
     /// Mark that descriptor update has been completed for a given frame
     pub fn markDescriptorUpdated(self: *Self, frame_index: u32) void {
-        self.descriptor_update_needed[frame_index] = false;
+        self.markMaterialsSynced(frame_index);
+        self.markTexturesSynced(frame_index);
+    }
+
+    /// Mesh accessors
+    pub fn getMeshes(self: *Self) []const RasterizationData.RenderableObject {
+        return self.getRasterizationData().objects;
+    }
+
+    pub fn meshesUpdated(self: *Self, frame_index: u32) bool {
+        const idx = @as(usize, @intCast(frame_index));
+        if (idx >= MAX_FRAMES_IN_FLIGHT) return false;
+        return self.mesh_update_needed[idx];
+    }
+
+    pub fn markMeshesSynced(self: *Self, frame_index: u32) void {
+        Self.markFrameClean(&self.mesh_update_needed, frame_index);
+    }
+
+    /// Material accessors
+    pub fn getMaterialBufferInfo(self: *Self) ?vk.DescriptorBufferInfo {
+        if (self.scene.asset_manager.material_buffer) |buffer| {
+            return buffer.descriptor_info;
+        }
+        return null;
+    }
+
+    pub fn materialsUpdated(self: *Self, frame_index: u32) bool {
+        if (self.scene.asset_manager.materials_dirty) {
+            Self.setAllTrue(&self.material_update_needed);
+        }
+        const idx = @as(usize, @intCast(frame_index));
+        if (idx >= MAX_FRAMES_IN_FLIGHT) return false;
+        return self.material_update_needed[idx];
+    }
+
+    pub fn markMaterialsSynced(self: *Self, frame_index: u32) void {
+        Self.markFrameClean(&self.material_update_needed, frame_index);
+    }
+
+    /// Texture accessors
+    pub fn getTextures(self: *Self) []const vk.DescriptorImageInfo {
+        return self.scene.asset_manager.getTextureDescriptorArray();
+    }
+
+    pub fn texturesUpdated(self: *Self, frame_index: u32) bool {
+        if (self.scene.asset_manager.texture_descriptors_dirty) {
+            Self.setAllTrue(&self.texture_update_needed);
+        }
+        const idx = @as(usize, @intCast(frame_index));
+        if (idx >= MAX_FRAMES_IN_FLIGHT) return false;
+        return self.texture_update_needed[idx];
+    }
+
+    pub fn markTexturesSynced(self: *Self, frame_index: u32) void {
+        Self.markFrameClean(&self.texture_update_needed, frame_index);
+    }
+
+    /// Raytracing accessors
+    pub fn getRaytracingInstances(self: *Self) []const RaytracingData.RTInstance {
+        return self.getRaytracingData().instances;
+    }
+
+    pub fn getRaytracingGeometries(self: *Self) []const RaytracingData.RTGeometry {
+        return self.getRaytracingData().geometries;
+    }
+
+    pub fn raytracingUpdated(self: *Self, frame_index: u32) bool {
+        const idx = @as(usize, @intCast(frame_index));
+        if (idx >= MAX_FRAMES_IN_FLIGHT) return false;
+        if (self.bvh_needs_rebuild) {
+            Self.setAllTrue(&self.raytracing_update_needed);
+        }
+        return self.raytracing_update_needed[idx];
+    }
+
+    pub fn markRaytracingSynced(self: *Self, frame_index: u32) void {
+        Self.markFrameClean(&self.raytracing_update_needed, frame_index);
+    }
+
+    /// Compute accessors
+    pub fn getParticleSystems(self: *Self) []const ComputeData.ParticleSystem {
+        return self.getComputeData().particle_systems;
+    }
+
+    pub fn computeUpdated(self: *Self, frame_index: u32) bool {
+        if (self.cache_dirty) {
+            Self.setAllTrue(&self.compute_update_needed);
+        }
+        const idx = @as(usize, @intCast(frame_index));
+        if (idx >= MAX_FRAMES_IN_FLIGHT) return false;
+        return self.compute_update_needed[idx];
+    }
+
+    pub fn markComputeSynced(self: *Self, frame_index: u32) void {
+        Self.markFrameClean(&self.compute_update_needed, frame_index);
     }
 
     /// Check if BVH needs rebuilding based on geometry changes (not texture/material changes)
@@ -174,7 +352,7 @@ pub const SceneBridge = struct {
     }
 
     /// Get rasterization data from scene
-    fn getRasterizationData(self: *Self) RasterizationData {
+    pub fn getRasterizationData(self: *Self) RasterizationData {
         self.buildRasterizationCache() catch |err| {
             log(.ERROR, "scene_bridge", "Failed to build rasterization cache: {}", .{err});
             return RasterizationData{
@@ -185,7 +363,7 @@ pub const SceneBridge = struct {
     }
 
     /// Get raytracing data from scene - with BVH change tracking integration
-    fn getRaytracingData(self: *Self) RaytracingData {
+    pub fn getRaytracingData(self: *Self) RaytracingData {
         // Only rebuild raytracing cache if geometry actually changed, not just textures/materials
         if (self.raytracing_cache == null) {
             self.buildRaytracingCache() catch |err| {
@@ -203,7 +381,7 @@ pub const SceneBridge = struct {
     }
 
     /// Get compute data from scene
-    fn getComputeData(self: *Self) ComputeData {
+    pub fn getComputeData(self: *Self) ComputeData {
         if (self.compute_cache == null or self.cache_dirty) {
             self.buildComputeCache() catch |err| {
                 log(.ERROR, "scene_bridge", "Failed to build compute cache: {}", .{err});
@@ -389,5 +567,23 @@ pub const SceneBridge = struct {
     fn getComputeDataImpl(scene_ptr: *anyopaque) ComputeData {
         const self: *Self = @ptrCast(@alignCast(scene_ptr));
         return self.getComputeData();
+    }
+
+    fn setAllTrue(flags: *[MAX_FRAMES_IN_FLIGHT]bool) void {
+        for (flags, 0..) |_, idx| {
+            flags[idx] = true;
+        }
+    }
+
+    fn setAllFalse(flags: *[MAX_FRAMES_IN_FLIGHT]bool) void {
+        for (flags, 0..) |_, idx| {
+            flags[idx] = false;
+        }
+    }
+
+    fn markFrameClean(flags: *[MAX_FRAMES_IN_FLIGHT]bool, frame_index: u32) void {
+        const idx = @as(usize, @intCast(frame_index));
+        if (idx >= flags.len) return;
+        flags[idx] = false;
     }
 };

@@ -3,15 +3,14 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Scene = @import("../scene/scene.zig").Scene;
-const Pipeline = @import("../core/pipeline.zig").Pipeline;
 const ShaderLibrary = @import("../core/shader.zig").ShaderLibrary;
 const Math = @import("../utils/math.zig");
 const Camera = @import("../rendering/camera.zig").Camera;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
-const RenderSystem = @import("../systems/render_system.zig").RenderSystem;
 const DynamicPipelineManager = @import("../rendering/dynamic_pipeline_manager.zig").DynamicPipelineManager;
 const log = @import("../utils/log.zig").log;
+const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
 
 pub const PointLightPushConstant = struct {
     position: Math.Vec4 = Math.Vec4.init(0, 0, 0, 1),
@@ -60,12 +59,20 @@ pub const PointLightRenderer = struct {
         global_ubo.num_point_lights = num_lights;
     }
 
+    pub fn update(self: *PointLightRenderer, _frame_info: *const FrameInfo, _scene_bridge: *SceneBridge) !bool {
+        _ = self;
+        _ = _frame_info;
+        _ = _scene_bridge;
+        return false;
+    }
+
     pub fn deinit(self: *PointLightRenderer) void {
         // Pipeline is managed by DynamicPipelineManager, no cleanup needed
         _ = self;
     }
 
-    pub fn render(self: *PointLightRenderer, frame_info: FrameInfo) !void {
+    pub fn render(self: *PointLightRenderer, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+        _ = scene_bridge;
         // Get dynamic pipeline
         const pipeline = self.pipeline_manager.getPipeline(self.pipeline_name, self.render_pass) catch |err| {
             log(.ERROR, "point_light_renderer", "Failed to get pipeline: {}", .{err});

@@ -447,8 +447,6 @@ pub const ThreadPool = struct {
         const pool = worker_info.pool;
         worker_info.state.store(.idle, .release);
 
-        log(.INFO, "enhanced_thread_pool", "Worker {} started", .{worker_info.worker_id});
-
         while (pool.running) {
             // Try to get work
             if (pool.getWork()) |work_item| {
@@ -500,8 +498,6 @@ pub const ThreadPool = struct {
 
                 // Check if we should shut down due to being idle too long (only when no work available)
                 if (pool.shouldShutdownWorker(worker_info)) {
-                    log(.INFO, "enhanced_thread_pool", "Worker {} shutting down due to idle timeout", .{worker_info.worker_id});
-
                     // Decrement the worker count since this worker is shutting down
                     _ = pool.current_worker_count.fetchSub(1, .acq_rel);
                     break;
@@ -530,10 +526,8 @@ pub const ThreadPool = struct {
                 worker.pool = self;
                 worker.thread = try std.Thread.spawn(.{}, workerThreadMain, .{worker});
             }
-            log(.INFO, "enhanced_thread_pool", "Scaled up from {} to {} workers", .{ current_count, actual_target });
         } else {
             // Scale down - workers will shut themselves down when idle
-            log(.INFO, "enhanced_thread_pool", "Scaling down from {} to {} workers (gradual)", .{ current_count, actual_target });
             self.current_worker_count.store(actual_target, .release);
         }
 
