@@ -194,7 +194,7 @@ pub const App = struct {
         // Initialize Thread Pool with dynamic scaling
         thread_pool = try self.allocator.create(ThreadPool);
         thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
-    thread_pool.setThreadExitHook(graphics_context.workerThreadExitHook, @ptrCast(&self.gc));
+        thread_pool.setThreadExitHook(graphics_context.workerThreadExitHook, @ptrCast(&self.gc));
 
         // Register subsystems with thread pool
 
@@ -530,12 +530,12 @@ pub const App = struct {
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Execute rasterization renderers through the forward renderer
-        try forward_renderer.render(frame_info);
+        //try forward_renderer.render(frame_info);
 
         render_system.endRender(frame_info);
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
-        //try rt_render_pass.render(frame_info);
+        try rt_render_pass.render(frame_info);
 
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
@@ -561,8 +561,7 @@ pub const App = struct {
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
 
-        // Clean up unified systems
-        particle_renderer.deinit();
+        // Clean up unified systems (forward_renderer already deinit'd particle renderer)
         resource_binder.deinit();
         unified_pipeline_system.deinit();
 
@@ -571,15 +570,13 @@ pub const App = struct {
         //particle_renderer.deinit();
         scene.deinit();
 
-        // Clean up dynamic pipeline system
-        dynamic_pipeline_manager.deinit();
-
         shader_manager.deinit();
         asset_manager.deinit();
         file_watcher.deinit();
         // Shutdown thread pool last to prevent threading conflicts
         thread_pool.deinit();
         self.allocator.destroy(thread_pool);
+        log(.INFO, "app", "Thread pool shut down", .{});
         swapchain.deinit();
         self.gc.deinit();
 

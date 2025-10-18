@@ -370,21 +370,27 @@ pub const MultithreadedBvhBuilder = struct {
         return self.pending_work.load(.monotonic) == 0;
     }
 
-    /// Get current BLAS results (thread-safe)
-    pub fn getCompletedBlas(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
+    /// Take current BLAS results (thread-safe) and clear builder ownership
+    pub fn takeCompletedBlas(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
         self.blas_mutex.lock();
         defer self.blas_mutex.unlock();
 
         const results = try allocator.alloc(BlasResult, self.completed_blas.items.len);
         @memcpy(results, self.completed_blas.items);
+        self.completed_blas.clearRetainingCapacity();
         return results;
     }
 
-    /// Get TLAS result if available (thread-safe)
-    pub fn getCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
+    /// Take TLAS result if available (thread-safe) and clear builder ownership
+    pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
         self.tlas_mutex.lock();
         defer self.tlas_mutex.unlock();
-        return self.completed_tlas;
+
+        const result = self.completed_tlas;
+        if (result != null) {
+            self.completed_tlas = null;
+        }
+        return result;
     }
 
     /// Get performance metrics
@@ -485,9 +491,9 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
 
             // Store result thread-safely
             builder.tlas_mutex.lock();
-            defer builder.tlas_mutex.unlock();
-
             builder.completed_tlas = final_result;
+            builder.tlas_mutex.unlock();
+
             _ = builder.pending_work.fetchSub(1, .monotonic);
 
             // Call completion callback if provided

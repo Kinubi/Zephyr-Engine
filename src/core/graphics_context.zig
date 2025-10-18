@@ -210,6 +210,15 @@ pub const GraphicsContext = struct {
         self.worker_command_pools.deinit(self.allocator);
         self.command_pool_mutex.unlock();
 
+        log(.INFO, "graphics_context", "Cleaning up pending secondary command buffers", .{});
+        for (pending_secondary_buffers.items) |*secondary_buf| {
+            secondary_buf.deinit(self);
+        }
+
+        for (submitted_secondary_buffers.items) |*secondary_buf| {
+            secondary_buf.deinit(self);
+        }
+
         self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
         self.vkd.destroyDevice(self.dev, null);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
@@ -336,6 +345,7 @@ pub const GraphicsContext = struct {
         // Check if we're on a worker thread
         if (std.Thread.getCurrentId() != self.main_thread_id) {
             // Use secondary command buffer with staging buffer lifetime management
+            staging_buffer.unmap();
             var secondary_cmd = try self.beginWorkerCommandBuffer();
             const region = vk.BufferCopy{
                 .src_offset = 0,
@@ -346,6 +356,9 @@ pub const GraphicsContext = struct {
             // Add staging buffer to pending resources (will be cleaned up after command execution)
             try secondary_cmd.addPendingResource(staging_buffer.buffer, staging_buffer.memory);
             try self.endWorkerCommandBuffer(&secondary_cmd);
+            staging_buffer.buffer = vk.Buffer.null_handle;
+            staging_buffer.memory = vk.DeviceMemory.null_handle;
+            staging_buffer.descriptor_info.buffer = vk.Buffer.null_handle;
             // Don't call staging_buffer.deinit() - it will be cleaned up after command execution
         } else {
             // Main thread executes command synchronously
@@ -505,6 +518,7 @@ pub const GraphicsContext = struct {
         memory: vk.DeviceMemory,
 
         pub fn cleanup(self: PendingResource, gc: *GraphicsContext) void {
+            log(.DEBUG, "graphics_context", "Cleaning up pending resource buffer {x} and memory {x}", .{ self.buffer, self.memory });
             gc.vkd.destroyBuffer(gc.dev, self.buffer, null);
             gc.vkd.freeMemory(gc.dev, self.memory, null);
         }

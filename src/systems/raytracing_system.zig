@@ -66,11 +66,6 @@ pub const RaytracingSystem = struct {
     // New descriptor manager
     descriptor_manager: RenderPassDescriptorManager = undefined,
 
-    // Legacy descriptor fields (kept for compatibility during transition)
-    descriptor_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet = [_]vk.DescriptorSet{.null_handle} ** MAX_FRAMES_IN_FLIGHT,
-    descriptor_sets_created: bool = false,
-    descriptor_set_layout: *DescriptorSetLayout = undefined, // pointer, not value
-    descriptor_pool: *DescriptorPool = undefined,
     width: u32 = 1280,
     height: u32 = 720,
 
@@ -106,9 +101,6 @@ pub const RaytracingSystem = struct {
             .completed_tlas = null,
             .bvh_build_in_progress = false,
             .bvh_rebuild_pending = false,
-            .descriptor_manager = undefined, // No longer managed by system
-            .descriptor_set_layout = undefined, // No longer managed by system
-            .descriptor_pool = undefined, // No longer managed by system
             .width = width,
             .height = height,
             .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 8),
@@ -288,7 +280,7 @@ pub const RaytracingSystem = struct {
         // }
 
         // Get completed BLAS results
-        const blas_results = try self.bvh_builder.getCompletedBlas(self.allocator);
+        const blas_results = try self.bvh_builder.takeCompletedBlas(self.allocator);
         defer self.allocator.free(blas_results);
 
         if (blas_results.len == 0) {
@@ -347,7 +339,7 @@ pub const RaytracingSystem = struct {
         }
 
         // Get completed BLAS results
-        const blas_results = try self.bvh_builder.getCompletedBlas(self.allocator);
+        const blas_results = try self.bvh_builder.takeCompletedBlas(self.allocator);
         defer self.allocator.free(blas_results);
 
         if (blas_results.len == 0) {
@@ -435,7 +427,7 @@ pub const RaytracingSystem = struct {
 
         if (self.bvh_builder.isWorkComplete()) {
             // Update our internal state with completed results
-            const blas_results = try self.bvh_builder.getCompletedBlas(self.allocator);
+            const blas_results = try self.bvh_builder.takeCompletedBlas(self.allocator);
 
             // Update legacy arrays for compatibility
             self.blas_handles.clearRetainingCapacity();
@@ -451,7 +443,7 @@ pub const RaytracingSystem = struct {
             self.allocator.free(blas_results);
 
             // Update TLAS if available
-            if (self.bvh_builder.getCompletedTlas()) |tlas_result| {
+            if (self.bvh_builder.takeCompletedTlas()) |tlas_result| {
                 self.tlas = tlas_result.acceleration_structure;
                 self.tlas_buffer = tlas_result.buffer;
                 self.tlas_instance_buffer = tlas_result.instance_buffer;
@@ -526,8 +518,6 @@ pub const RaytracingSystem = struct {
         const has_blas = blas_count > 0;
         const should_create_tlas = counts_match and !has_tlas and has_blas;
 
-        //log(.DEBUG, "raytracing", "🔍 TLAS creation check: blas_count={}, geometry_count={}, counts_match={}, has_tlas={}, has_blas={}, should_create_tlas={}", .{ blas_count, geometry_count, counts_match, has_tlas, has_blas, should_create_tlas });
-
         if (should_create_tlas) {
             // Use RT data-based TLAS creation for consistency with callback
             self.createTlasAsyncFromRtData(rt_data, tlasCompletionCallback, self) catch |err| {
@@ -587,6 +577,9 @@ pub const RaytracingSystem = struct {
 
                 // Mark descriptors as needing update since we have a new TLASRenderPassDescriptorManager
                 self.descriptors_need_update = true;
+
+                // Clear builder ownership now that the system tracks this TLAS
+                _ = self.bvh_builder.takeCompletedTlas();
 
                 // Check if there was a pending rebuild and trigger it
                 if (self.bvh_rebuild_pending) {
@@ -1043,6 +1036,7 @@ pub const RaytracingSystem = struct {
             buf.deinit();
             if (blas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas, null);
         }
+
         self.blas_buffers.deinit(self.allocator);
         self.blas_handles.deinit(self.allocator);
         // Destroy TLAS acceleration structure and deinit TLAS buffer
@@ -1052,16 +1046,7 @@ pub const RaytracingSystem = struct {
         if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
         // Destroy output image/texture
-        self.output_texture.deinit();
-        // Clean up descriptor manager
-        self.descriptor_manager.deinit();
 
-        // Clean up legacy descriptor sets, pool, and layout
-        deinitDescriptorResources(self.descriptor_pool, self.descriptor_set_layout, @ptrCast(&self.descriptor_sets), null) catch |err| {
-            log(.ERROR, "RaytracingSystem", "Failed to deinit descriptor resources: {}", .{err});
-        };
-        // Destroy pipeline and associated resources
-        self.pipeline.deinit();
     }
 
     pub fn getAccelerationStructureDescriptorInfo(self: *RaytracingSystem) !vk.WriteDescriptorSetAccelerationStructureKHR {
