@@ -394,30 +394,11 @@ pub const App = struct {
             1024, // max particles
         );
 
-        // Initialize particles with random data
-        try particle_renderer.initializeParticles();
-
         log(.INFO, "app", "Unified particle renderer initialized", .{});
 
         // --- Compute shader system initialization ---
         compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
 
-        // // Create UBO infos for old particle renderer
-        // var ubo_infos = try self.allocator.alloc(vk.DescriptorBufferInfo, global_ubo_set.buffers.len);
-        // defer self.allocator.free(ubo_infos);
-        // for (global_ubo_set.buffers, 0..) |buf, i| {
-        //     ubo_infos[i] = buf.descriptor_info;
-        // }
-
-        // particle_renderer = try ParticleRenderer.init(
-        //     &self.gc,
-        //     swapchain.render_pass,
-        //     particle_render_shader_library,
-        //     particle_comp_shader_library,
-        //     self.allocator,
-        //     1024,
-        //     ubo_infos,
-        // );
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
         // Initialize Generic Forward Renderer (rasterization only)
@@ -432,9 +413,10 @@ pub const App = struct {
         // Add rasterization renderers to the forward renderer
         try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
         try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
+        try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
 
-    // Prime renderer descriptor bindings once all raster renderers are registered
-    try forward_renderer.onCreate();
+        // Prime renderer descriptor bindings once all raster renderers are registered
+        try forward_renderer.onCreate();
 
         // Initialize Raytracing Render Pass (separate from forward renderer)
         rt_render_pass = GenericRenderer.init(self.allocator);
@@ -446,8 +428,8 @@ pub const App = struct {
         // Add raytracing renderer to its own render pass
         try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
 
-    // Ensure raytracing renderer receives initial descriptor bindings before the first frame
-    try rt_render_pass.onCreate();
+        // Ensure raytracing renderer receives initial descriptor bindings before the first frame
+        try rt_render_pass.onCreate();
 
         // Future renderers can be added here:
         // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
@@ -462,7 +444,10 @@ pub const App = struct {
             log(.WARN, "app", "Initial async resource update failed: {}", .{err});
         };
         var init_frame_info = frame_info;
-        init_frame_info.current_frame = current_frame;
+    init_frame_info.current_frame = current_frame;
+    init_frame_info.command_buffer = cmdbufs[current_frame];
+    init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
+        init_frame_info.camera = &camera;
         try forward_renderer.update(&init_frame_info);
         try rt_render_pass.update(&init_frame_info);
 
@@ -498,12 +483,6 @@ pub const App = struct {
         dynamic_pipeline_manager.processRebuildQueue(swapchain.render_pass);
 
         _ = try scene_bridge.updateAsyncResources();
-
-        var next_frame_info = frame_info;
-        next_frame_info.current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-        try forward_renderer.update(&next_frame_info);
-
-        try rt_render_pass.update(&frame_info);
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
@@ -548,8 +527,12 @@ pub const App = struct {
 
         compute_shader_system.beginCompute(frame_info);
 
+    try forward_renderer.update(&frame_info);
+
+        try rt_render_pass.update(&frame_info);
+
         // Update and render particles using the unified system
-        _ = try particle_renderer.update(&frame_info, &scene_bridge);
+        //_ = try particle_renderer.update(&frame_info, &scene_bridge);
 
         compute_shader_system.endCompute(frame_info);
 
@@ -568,9 +551,6 @@ pub const App = struct {
         };
         // try point_light_renderer.update_point_lights(&frame_info, &ubo);
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
-
-        // Render particles using unified system
-        try particle_renderer.renderParticles(frame_info.command_buffer, &camera, frame_info.current_frame);
 
         // Execute rasterization renderers through the forward renderer
         try forward_renderer.render(frame_info);

@@ -1,7 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Camera = @import("../rendering/camera.zig").Camera;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const PipelineConfig = @import("../rendering/unified_pipeline_system.zig").PipelineConfig;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
@@ -163,6 +162,12 @@ pub const ParticleRenderer = struct {
     /// Update particle simulation using frame/scene data
     pub fn update(self: *ParticleRenderer, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
         _ = scene_bridge;
+
+        if (frame_info.compute_buffer == vk.CommandBuffer.null_handle) {
+            log(.DEBUG, "particle_renderer", "Skipping compute update; compute command buffer unavailable", .{});
+            return false;
+        }
+
         const command_buffer = frame_info.compute_buffer;
         const frame_index = frame_info.current_frame;
         const delta_time = frame_info.dt;
@@ -196,7 +201,7 @@ pub const ParticleRenderer = struct {
         try self.resource_binder.updateFrame(self.compute_pipeline, frame_index);
 
         // Dispatch compute shader
-        try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
+    try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
 
         // Update descriptor sets first (compute pipeline only)
         try self.pipeline_system.updateDescriptorSetsForPipeline(self.compute_pipeline, frame_index);
@@ -223,7 +228,7 @@ pub const ParticleRenderer = struct {
         // Dispatch compute workgroups
         const workgroup_size = 256; // Match shader local_size_x
         const workgroups = (self.max_particles + workgroup_size - 1) / workgroup_size;
-        self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
+    self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
 
         // Memory barrier to ensure compute writes are complete before copy
         const memory_barrier_after_compute = vk.MemoryBarrier{
@@ -272,23 +277,21 @@ pub const ParticleRenderer = struct {
     }
 
     /// Render particles
-    pub fn renderParticles(
-        self: *ParticleRenderer,
-        command_buffer: vk.CommandBuffer,
-        camera: *const Camera,
-        frame_index: u32,
-    ) !void {
-        _ = camera; // Unused since particle shaders don't need camera transforms
+    pub fn render(self: *ParticleRenderer, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+        _ = scene_bridge; // Particle renderer does not currently read scene data
 
         if (self.particle_count == 0) {
             return;
         }
 
+        const frame_index = frame_info.current_frame;
+        const command_buffer = frame_info.command_buffer;
+
         // Note: The particle shaders don't use uniform buffers, so we skip uniform updates
         // Update descriptor sets for the render pipeline (no-op if nothing dirty)
         try self.resource_binder.updateFrame(self.render_pipeline, frame_index);
 
-        // Bind render pipeline
+        // Bind render pipeline for particle draw
         try self.pipeline_system.bindPipeline(command_buffer, self.render_pipeline);
 
         // Bind particle vertex buffer (use input buffer for rendering like old system)
@@ -329,7 +332,8 @@ pub const ParticleRenderer = struct {
     }
 
     /// Initialize particles with random positions and velocities (like the old system)
-    pub fn initializeParticles(self: *ParticleRenderer) !void {
+    pub fn onCreate(self: *ParticleRenderer, scene_bridge: *SceneBridge) !void {
+        _ = scene_bridge;
         log(.INFO, "particle_renderer", "Initializing {} particles with random data", .{self.max_particles});
 
         // Start with all particles active

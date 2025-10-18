@@ -245,7 +245,6 @@ pub const UnifiedTexturedRenderer = struct {
         }
 
         if (self.descriptor_dirty_flags[frame_index]) {
-            log(.DEBUG, "unified_textured_renderer", "Descriptors dirty for frame {}, skipping render", .{frame_index});
             return;
         }
 
