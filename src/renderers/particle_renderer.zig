@@ -8,6 +8,7 @@ const PipelineId = @import("../rendering/unified_pipeline_system.zig").PipelineI
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
+const Resource = @import("../rendering/unified_pipeline_system.zig").Resource;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
@@ -31,6 +32,8 @@ pub const ParticleRenderer = struct {
     // Particle pipelines
     compute_pipeline: PipelineId,
     render_pipeline: PipelineId,
+    cached_compute_pipeline_handle: vk.Pipeline = vk.Pipeline.null_handle,
+    cached_render_pipeline_handle: vk.Pipeline = vk.Pipeline.null_handle,
 
     // Particle data
     particle_buffers: [MAX_FRAMES_IN_FLIGHT]ParticleBuffers,
@@ -42,7 +45,10 @@ pub const ParticleRenderer = struct {
     render_uniform_buffers: [MAX_FRAMES_IN_FLIGHT]Buffer,
 
     // Hot reload state
-    needs_resource_setup: bool = false,
+
+    compute_needs_resource_setup: bool = false,
+
+    compute_descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -95,6 +101,7 @@ pub const ParticleRenderer = struct {
         };
 
         const compute_pipeline = try pipeline_system.createPipeline(compute_pipeline_config);
+        const compute_pipeline_entry = pipeline_system.pipelines.get(compute_pipeline) orelse return error.PipelineNotFound;
 
         // Create graphics pipeline for particle rendering
         const render_pipeline_config = PipelineConfig{
@@ -115,6 +122,7 @@ pub const ParticleRenderer = struct {
         };
 
         const render_pipeline = try pipeline_system.createPipeline(render_pipeline_config);
+        const render_pipeline_entry = pipeline_system.pipelines.get(render_pipeline) orelse return error.PipelineNotFound;
 
         var renderer = ParticleRenderer{
             .allocator = allocator,
@@ -124,15 +132,14 @@ pub const ParticleRenderer = struct {
             .resource_binder = resource_binder,
             .compute_pipeline = compute_pipeline,
             .render_pipeline = render_pipeline,
+            .cached_compute_pipeline_handle = compute_pipeline_entry.vulkan_pipeline,
+            .cached_render_pipeline_handle = render_pipeline_entry.vulkan_pipeline,
             .particle_buffers = particle_buffers,
             .particle_count = 0,
             .max_particles = max_particles,
             .compute_uniform_buffers = compute_uniform_buffers,
             .render_uniform_buffers = render_uniform_buffers,
         };
-
-        // Bind resources for all frames
-        try renderer.setupResources();
 
         // Mark compute pipeline resources as dirty to ensure they get updated
         // Note: render pipeline doesn't use descriptor sets, only vertex attributes
@@ -158,6 +165,12 @@ pub const ParticleRenderer = struct {
         self.resource_binder.deinit();
     }
 
+    fn markAllFramesDirty(self: *ParticleRenderer) void {
+        for (&self.compute_descriptor_dirty_flags) |*flag| {
+            flag.* = true;
+        }
+    }
+
     /// Update particle simulation
     /// Update particle simulation using frame/scene data
     pub fn update(self: *ParticleRenderer, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
@@ -173,16 +186,18 @@ pub const ParticleRenderer = struct {
         const delta_time = frame_info.dt;
         const emitter_position = math.Vec3.init(0.0, 0.0, 0.0);
 
-        // Check if we need to re-setup resources after hot reload
-        if (self.needs_resource_setup) {
-            // Wait for GPU to finish current work before re-binding resources
-            // This ensures no descriptor sets are in use when we bind new ones
-            try self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev);
-
-            try self.setupResources();
-            self.needs_resource_setup = false;
+        const compute_pipeline_entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
+        if (compute_pipeline_entry.vulkan_pipeline != self.cached_compute_pipeline_handle) {
+            log(.INFO, "particle_renderer", "Compute pipeline changed, scheduling resource rebind", .{});
+            self.cached_compute_pipeline_handle = compute_pipeline_entry.vulkan_pipeline;
+            self.resource_binder.clearPipeline(self.compute_pipeline);
+            self.markAllFramesDirty();
+            self.compute_needs_resource_setup = true;
         }
 
+        if (self.compute_descriptor_dirty_flags[frame_index]) {
+            return false;
+        }
         // Update ComputeUniformBuffer with current frame data
         const compute_ubo = ComputeUniformBuffer{
             .delta_time = delta_time,
@@ -286,6 +301,49 @@ pub const ParticleRenderer = struct {
 
         const frame_index = frame_info.current_frame;
         const command_buffer = frame_info.command_buffer;
+
+        const render_pipeline_entry = self.pipeline_system.pipelines.get(self.render_pipeline) orelse return error.PipelineNotFound;
+        if (render_pipeline_entry.vulkan_pipeline != self.cached_render_pipeline_handle) {
+            log(.INFO, "particle_renderer", "Render pipeline changed, updating cached handle", .{});
+            self.cached_render_pipeline_handle = render_pipeline_entry.vulkan_pipeline;
+            self.pipeline_system.markPipelineResourcesDirty(self.render_pipeline);
+            self.markAllFramesDirty();
+        }
+
+        if (self.compute_needs_resource_setup) {
+            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                const target_frame: u32 = @intCast(frame_idx);
+                const compute_ubo_resource = Resource{
+                    .buffer = .{
+                        .buffer = self.compute_uniform_buffers[target_frame].buffer,
+                        .offset = 0,
+                        .range = vk.WHOLE_SIZE,
+                    },
+                };
+
+                const ssbo_in_resource = Resource{
+                    .buffer = .{
+                        .buffer = self.particle_buffers[target_frame].particle_buffer_in.buffer,
+                        .offset = 0,
+                        .range = vk.WHOLE_SIZE,
+                    },
+                };
+
+                const ssbo_out_resource = Resource{
+                    .buffer = .{
+                        .buffer = self.particle_buffers[target_frame].particle_buffer_out.buffer,
+                        .offset = 0,
+                        .range = vk.WHOLE_SIZE,
+                    },
+                };
+                try self.pipeline_system.bindResource(self.compute_pipeline, 0, 0, compute_ubo_resource, target_frame);
+                try self.pipeline_system.bindResource(self.compute_pipeline, 0, 1, ssbo_in_resource, target_frame);
+                try self.pipeline_system.bindResource(self.compute_pipeline, 0, 2, ssbo_out_resource, target_frame);
+
+                self.compute_descriptor_dirty_flags[frame_idx] = false;
+            }
+            self.compute_needs_resource_setup = false;
+        }
 
         // Note: The particle shaders don't use uniform buffers, so we skip uniform updates
         // Update descriptor sets for the render pipeline (no-op if nothing dirty)
@@ -392,6 +450,39 @@ pub const ParticleRenderer = struct {
             try self.graphics_context.copyBuffer(self.particle_buffers[frame_index].particle_buffer_in.buffer, staging_buffer.buffer, buffer_size);
             try self.graphics_context.copyBuffer(self.particle_buffers[frame_index].particle_buffer_out.buffer, staging_buffer.buffer, buffer_size);
         }
+
+        self.markAllFramesDirty();
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const target_frame: u32 = @intCast(frame_idx);
+            const compute_ubo_resource = Resource{
+                .buffer = .{
+                    .buffer = self.compute_uniform_buffers[target_frame].buffer,
+                    .offset = 0,
+                    .range = vk.WHOLE_SIZE,
+                },
+            };
+
+            const ssbo_in_resource = Resource{
+                .buffer = .{
+                    .buffer = self.particle_buffers[target_frame].particle_buffer_in.buffer,
+                    .offset = 0,
+                    .range = vk.WHOLE_SIZE,
+                },
+            };
+
+            const ssbo_out_resource = Resource{
+                .buffer = .{
+                    .buffer = self.particle_buffers[target_frame].particle_buffer_out.buffer,
+                    .offset = 0,
+                    .range = vk.WHOLE_SIZE,
+                },
+            };
+            try self.pipeline_system.bindResource(self.compute_pipeline, 0, 0, compute_ubo_resource, target_frame);
+            try self.pipeline_system.bindResource(self.compute_pipeline, 0, 1, ssbo_in_resource, target_frame);
+            try self.pipeline_system.bindResource(self.compute_pipeline, 0, 2, ssbo_out_resource, target_frame);
+            self.compute_descriptor_dirty_flags[target_frame] = false;
+        }
     }
 
     /// Debug method to read back the first particle's position
@@ -416,46 +507,6 @@ pub const ParticleRenderer = struct {
         if (staging_buffer.mapped) |mapped_ptr| {
             const particle_ptr: *Particle = @ptrCast(@alignCast(mapped_ptr));
             _ = particle_ptr;
-        }
-    }
-
-    // Private implementation
-
-    fn setupResources(self: *ParticleRenderer) !void {
-        // Bind resources for all frames following old system approach
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
-            const frame_idx = @as(u32, @intCast(frame_index));
-
-            // Set 0: All descriptors following old system approach
-            // Binding 0: ComputeUniformBuffer
-            try self.resource_binder.bindFullUniformBuffer(
-                self.compute_pipeline,
-                0,
-                0, // set 0, binding 0 - ComputeUniformBuffer
-                &self.compute_uniform_buffers[frame_index],
-                frame_idx,
-            );
-
-            // Binding 1: Particle input buffer (ParticleSSBOIn)
-            try self.resource_binder.bindFullStorageBuffer(
-                self.compute_pipeline,
-                0,
-                1, // set 0, binding 1 - Particle input buffer
-                &self.particle_buffers[frame_index].particle_buffer_in,
-                frame_idx,
-            );
-
-            // Binding 2: Particle output buffer (ParticleSSBOOut)
-            try self.resource_binder.bindFullStorageBuffer(
-                self.compute_pipeline,
-                0,
-                2, // set 0, binding 2 - Particle output buffer
-                &self.particle_buffers[frame_index].particle_buffer_out,
-                frame_idx,
-            );
-
-            // Note: Render pipeline doesn't need descriptor sets - it uses vertex attributes only
-            // The particle vertex data is bound as vertex buffers during rendering
         }
     }
 };

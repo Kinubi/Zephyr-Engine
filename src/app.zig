@@ -530,12 +530,12 @@ pub const App = struct {
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Execute rasterization renderers through the forward renderer
-        //try forward_renderer.render(frame_info);
+        try forward_renderer.render(frame_info);
 
         render_system.endRender(frame_info);
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
-        try rt_render_pass.render(frame_info);
+        //try rt_render_pass.render(frame_info);
 
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
