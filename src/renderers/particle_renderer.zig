@@ -201,7 +201,7 @@ pub const ParticleRenderer = struct {
         try self.resource_binder.updateFrame(self.compute_pipeline, frame_index);
 
         // Dispatch compute shader
-    try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
+        try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
 
         // Update descriptor sets first (compute pipeline only)
         try self.pipeline_system.updateDescriptorSetsForPipeline(self.compute_pipeline, frame_index);
@@ -228,7 +228,7 @@ pub const ParticleRenderer = struct {
         // Dispatch compute workgroups
         const workgroup_size = 256; // Match shader local_size_x
         const workgroups = (self.max_particles + workgroup_size - 1) / workgroup_size;
-    self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
+        self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
 
         // Memory barrier to ensure compute writes are complete before copy
         const memory_barrier_after_compute = vk.MemoryBarrier{

@@ -55,6 +55,11 @@ const InstanceWrapper = vk.InstanceWrapper;
 const DeviceWrapper = vk.DeviceWrapper;
 
 pub const GraphicsContext = struct {
+    const WorkerCommandPool = struct {
+        id: std.Thread.Id,
+        pool: vk.CommandPool,
+    };
+
     vkb: BaseWrapper,
     vki: InstanceWrapper,
     vkd: DeviceWrapper,
@@ -72,6 +77,8 @@ pub const GraphicsContext = struct {
     command_pool: vk.CommandPool,
     main_thread_id: std.Thread.Id,
     allocator: Allocator,
+    worker_command_pools: std.ArrayList(WorkerCommandPool),
+    command_pool_mutex: std.Thread.Mutex,
 
     // Queue submission synchronization
     // Vulkan spec requires external synchronization for queue access from multiple threads
@@ -82,6 +89,8 @@ pub const GraphicsContext = struct {
         self.vkb = BaseWrapper.load(@as(vk.PfnGetInstanceProcAddr, @ptrCast(&c.glfwGetInstanceProcAddress)));
         self.main_thread_id = std.Thread.getCurrentId();
         self.allocator = allocator;
+        self.worker_command_pools = .{};
+        self.command_pool_mutex = std.Thread.Mutex{};
 
         // Initialize secondary command buffer collection
         if (!secondary_buffers_initialized) {
@@ -193,7 +202,14 @@ pub const GraphicsContext = struct {
         return self;
     }
 
-    pub fn deinit(self: GraphicsContext) void {
+    pub fn deinit(self: *GraphicsContext) void {
+        self.command_pool_mutex.lock();
+        for (self.worker_command_pools.items) |worker_pool| {
+            self.vkd.destroyCommandPool(self.dev, worker_pool.pool, null);
+        }
+        self.worker_command_pools.deinit(self.allocator);
+        self.command_pool_mutex.unlock();
+
         self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
         self.vkd.destroyDevice(self.dev, null);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
@@ -234,38 +250,51 @@ pub const GraphicsContext = struct {
     }
 
     /// Returns a command pool appropriate for the current thread.
-    /// Thread-local command pool storage
-    threadlocal var worker_command_pool: ?vk.CommandPool = null;
-    threadlocal var worker_command_pool_gc: ?*GraphicsContext = null;
-
-    /// Main thread uses self.command_pool, worker threads use a thread-local pool created on first use.
+    /// Main thread uses self.command_pool, worker threads use per-thread pools stored in a hash map.
     pub fn getThreadCommandPool(self: *GraphicsContext) !vk.CommandPool {
         if (std.Thread.getCurrentId() == self.main_thread_id) {
             return self.command_pool;
         } else {
-            // Use thread-local storage for worker command pools
-            if (worker_command_pool == null or worker_command_pool_gc != self) {
-                // Create a new command pool for this worker thread
-                worker_command_pool = try self.vkd.createCommandPool(self.dev, &.{
-                    .flags = .{ .reset_command_buffer_bit = true },
-                    .queue_family_index = self.graphics_queue.family,
-                }, null);
-                worker_command_pool_gc = self;
+            const thread_id = std.Thread.getCurrentId();
 
-                log(.INFO, "graphics_context", "Created thread-local command pool for worker thread", .{});
+            self.command_pool_mutex.lock();
+            defer self.command_pool_mutex.unlock();
+
+            for (self.worker_command_pools.items) |worker_pool| {
+                if (worker_pool.id == thread_id) {
+                    return worker_pool.pool;
+                }
             }
 
-            return worker_command_pool.?;
+            const new_pool = try self.vkd.createCommandPool(self.dev, &.{
+                .flags = .{ .reset_command_buffer_bit = true },
+                .queue_family_index = self.graphics_queue.family,
+            }, null);
+            try self.worker_command_pools.append(self.allocator, .{ .id = thread_id, .pool = new_pool });
+            log(.INFO, "graphics_context", "Created thread-local command pool for worker thread", .{});
+
+            return new_pool;
         }
     }
 
     /// Clean up thread-local command pool (should be called when worker thread exits)
     pub fn cleanupThreadCommandPool(self: *GraphicsContext) void {
-        if (std.Thread.getCurrentId() == self.main_thread_id and worker_command_pool != null) {
-            self.vkd.destroyCommandPool(self.dev, worker_command_pool.?, null);
-            worker_command_pool = null;
-            worker_command_pool_gc = null;
-            log(.INFO, "graphics_context", "Cleaned up thread-local command pool for worker thread", .{});
+        if (std.Thread.getCurrentId() == self.main_thread_id) {
+            return;
+        }
+
+        const thread_id = std.Thread.getCurrentId();
+        self.command_pool_mutex.lock();
+        defer self.command_pool_mutex.unlock();
+
+        var index: usize = 0;
+        while (index < self.worker_command_pools.items.len) : (index += 1) {
+            if (self.worker_command_pools.items[index].id == thread_id) {
+                const removed = self.worker_command_pools.swapRemove(index);
+                self.vkd.destroyCommandPool(self.dev, removed.pool, null);
+                log(.INFO, "graphics_context", "Cleaned up thread-local command pool for worker thread", .{});
+                break;
+            }
         }
     }
 
@@ -475,9 +504,9 @@ pub const GraphicsContext = struct {
         buffer: vk.Buffer,
         memory: vk.DeviceMemory,
 
-        pub fn cleanup(self: PendingResource, vkd: *const DeviceWrapper, dev: vk.Device) void {
-            vkd.destroyBuffer(dev, self.buffer, null);
-            vkd.freeMemory(dev, self.memory, null);
+        pub fn cleanup(self: PendingResource, gc: *GraphicsContext) void {
+            gc.vkd.destroyBuffer(gc.dev, self.buffer, null);
+            gc.vkd.freeMemory(gc.dev, self.memory, null);
         }
     };
 
@@ -502,13 +531,17 @@ pub const GraphicsContext = struct {
             try self.pending_resources.append(self.allocator, PendingResource{ .buffer = buffer, .memory = memory });
         }
 
-        pub fn deinit(self: *SecondaryCommandBuffer, vkd: *const DeviceWrapper, dev: vk.Device) void {
+        pub fn deinit(self: *SecondaryCommandBuffer, gc: *GraphicsContext) void {
             // Clean up all pending resources
             for (self.pending_resources.items) |resource| {
-                resource.cleanup(vkd, dev);
+                resource.cleanup(gc);
             }
             self.pending_resources.deinit(self.allocator);
-            vkd.freeCommandBuffers(dev, self.pool, 1, @ptrCast(&self.command_buffer));
+            {
+                gc.command_pool_mutex.lock();
+                defer gc.command_pool_mutex.unlock();
+                gc.vkd.freeCommandBuffers(gc.dev, self.pool, 1, @ptrCast(&self.command_buffer));
+            }
         }
     }; // Collection of secondary command buffers to execute at frame end
     var pending_secondary_buffers: std.ArrayList(SecondaryCommandBuffer) = undefined;
@@ -531,7 +564,11 @@ pub const GraphicsContext = struct {
         };
 
         var command_buffer: vk.CommandBuffer = undefined;
-        try self.vkd.allocateCommandBuffers(self.dev, &alloc_info, @ptrCast(&command_buffer));
+        {
+            self.command_pool_mutex.lock();
+            defer self.command_pool_mutex.unlock();
+            try self.vkd.allocateCommandBuffers(self.dev, &alloc_info, @ptrCast(&command_buffer));
+        }
 
         // Secondary command buffers need inheritance info
         const inheritance_info = vk.CommandBufferInheritanceInfo{
@@ -555,7 +592,11 @@ pub const GraphicsContext = struct {
             .p_inheritance_info = &inheritance_info,
         };
 
-        try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+        {
+            self.command_pool_mutex.lock();
+            defer self.command_pool_mutex.unlock();
+            try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+        }
 
         return SecondaryCommandBuffer.init(self.allocator, pool, command_buffer);
     }
@@ -564,7 +605,11 @@ pub const GraphicsContext = struct {
     pub fn endWorkerCommandBuffer(self: *GraphicsContext, secondary_cmd: *SecondaryCommandBuffer) !void {
         if (!secondary_cmd.is_recording) return;
 
-        try self.vkd.endCommandBuffer(secondary_cmd.command_buffer);
+        {
+            self.command_pool_mutex.lock();
+            defer self.command_pool_mutex.unlock();
+            try self.vkd.endCommandBuffer(secondary_cmd.command_buffer);
+        }
         secondary_cmd.is_recording = false;
 
         // Thread-safely add to pending collection
@@ -613,7 +658,6 @@ pub const GraphicsContext = struct {
 
         // Clear the pending collection
         pending_secondary_buffers.clearRetainingCapacity();
-        self.cleanupThreadCommandPool();
     }
 
     /// Clean up submitted secondary command buffers after frame submission completes
@@ -625,7 +669,7 @@ pub const GraphicsContext = struct {
 
         // Clean up all submitted secondary command buffers
         for (submitted_secondary_buffers.items) |*secondary| {
-            secondary.deinit(&self.vkd, self.dev);
+            secondary.deinit(self);
         }
 
         // Clear the submitted collection
@@ -1220,4 +1264,10 @@ fn checkExtensionSupport(
     }
 
     return true;
+}
+
+pub fn workerThreadExitHook(context_ptr: *anyopaque) void {
+    const aligned_ctx: *align(@alignOf(GraphicsContext)) anyopaque = @alignCast(context_ptr);
+    const gc_ptr: *GraphicsContext = @ptrCast(aligned_ctx);
+    gc_ptr.cleanupThreadCommandPool();
 }

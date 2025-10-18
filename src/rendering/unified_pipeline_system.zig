@@ -8,6 +8,8 @@ const AssetId = @import("../assets/asset_types.zig").AssetId;
 const PipelineBuilder = @import("pipeline_builder.zig").PipelineBuilder;
 const RasterizationState = @import("pipeline_builder.zig").RasterizationState;
 const MultisampleState = @import("pipeline_builder.zig").MultisampleState;
+const DepthStencilState = @import("pipeline_builder.zig").DepthStencilState;
+const ColorBlendAttachment = @import("pipeline_builder.zig").ColorBlendAttachment;
 const Shader = @import("../core/shader.zig").Shader;
 const entry_point_definition = @import("../core/shader.zig").entry_point_definition;
 const ShaderCompiler = @import("../assets/shader_compiler.zig");
@@ -416,7 +418,11 @@ pub const UnifiedPipelineSystem = struct {
             _ = builder.setPipelineCache(self.vulkan_pipeline_cache);
 
             _ = try builder.dynamicViewportScissor();
-            _ = try builder.addColorBlendAttachment(@import("pipeline_builder.zig").ColorBlendAttachment.disabled());
+            if (config.color_blend_attachment) |attachment| {
+                _ = try builder.addColorBlendAttachment(attachment);
+            } else {
+                _ = try builder.addColorBlendAttachment(ColorBlendAttachment.disabled());
+            }
 
             if (config.vertex_input_bindings) |bindings| {
                 for (bindings) |binding| {
@@ -442,6 +448,10 @@ pub const UnifiedPipelineSystem = struct {
             raster_state.cull_mode = config.cull_mode;
             raster_state.front_face = config.front_face;
             _ = builder.withRasterizationState(raster_state);
+
+            if (config.depth_stencil_state) |depth_state| {
+                _ = builder.withDepthStencilState(depth_state);
+            }
 
             if (config.multisample_state) |ms_state| {
                 _ = builder.withMultisampleState(MultisampleState{ .rasterization_samples = ms_state.rasterization_samples });
@@ -1577,6 +1587,8 @@ pub const PipelineConfig = struct {
     cull_mode: vk.CullModeFlags = .{ .back_bit = true },
     front_face: vk.FrontFace = .counter_clockwise,
     multisample_state: ?vk.PipelineMultisampleStateCreateInfo = null,
+    depth_stencil_state: ?DepthStencilState = null,
+    color_blend_attachment: ?ColorBlendAttachment = null,
 
     // Push constants
     push_constant_ranges: ?[]const vk.PushConstantRange = null,

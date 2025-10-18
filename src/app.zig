@@ -4,11 +4,10 @@ const std = @import("std");
 const Window = @import("window.zig").Window;
 const Pipeline = @import("core/pipeline.zig").Pipeline;
 
-const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext;
+const graphics_context = @import("core/graphics_context.zig");
+const GraphicsContext = graphics_context.GraphicsContext;
 const Swapchain = @import("core/swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
-const ShaderLibrary = @import("core/shader.zig").ShaderLibrary;
-const entry_point_definition = @import("core/shader.zig").entry_point_definition;
 const Texture = @import("core/texture.zig").Texture;
 const DescriptorSetLayout = @import("core/descriptors.zig").DescriptorSetLayout;
 const DescriptorPool = @import("core/descriptors.zig").DescriptorPool;
@@ -85,14 +84,6 @@ const vk = @import("vulkan");
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
-
-// Embedded shaders
-const simple_vert align(@alignOf(u32)) = @embedFile("simple_vert").*;
-const simple_frag align(@alignOf(u32)) = @embedFile("simple_frag").*;
-const textured_vert align(@alignOf(u32)) = @embedFile("textured_vert").*;
-const textured_frag align(@alignOf(u32)) = @embedFile("textured_frag").*;
-const point_light_vert align(@alignOf(u32)) = @embedFile("point_light_vert").*;
-const point_light_frag align(@alignOf(u32)) = @embedFile("point_light_frag").*;
 
 // Callback function for ThreadPool running status changes
 fn onThreadPoolRunningChanged(running: bool) void {
@@ -203,6 +194,7 @@ pub const App = struct {
         // Initialize Thread Pool with dynamic scaling
         thread_pool = try self.allocator.create(ThreadPool);
         thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
+    thread_pool.setThreadExitHook(graphics_context.workerThreadExitHook, @ptrCast(&self.gc));
 
         // Register subsystems with thread pool
 
@@ -256,10 +248,6 @@ pub const App = struct {
         shader_manager.setPipelineSystem(&unified_pipeline_system);
 
         log(.INFO, "app", "Unified pipeline system initialized", .{});
-
-        // Initialize Dynamic Pipeline Manager
-        dynamic_pipeline_manager = try DynamicPipelineManager.init(self.allocator, &self.gc, asset_manager, &shader_manager);
-        log(.INFO, "app", "Dynamic pipeline manager initialized", .{});
 
         // Shader-pipeline integration intentionally removed. Unified pipeline system is active.
 
@@ -333,8 +321,6 @@ pub const App = struct {
         global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
-        // Register pipeline templates for dynamic pipeline system
-        try self.registerPipelineTemplates();
         log(.INFO, "app", "Pipeline templates registered", .{});
 
         _ = try scene.updateSyncResources(self.allocator);
@@ -351,19 +337,13 @@ pub const App = struct {
         // Material data is now managed by the asset_manager and bound via UnifiedPipelineSystem
         // No need for separate updateMaterialData calls
 
-        var shader_library_point_light = ShaderLibrary.init(self.gc, self.allocator);
-
-        try shader_library_point_light.add(&.{
-            &point_light_frag,
-            &point_light_vert,
-        }, &.{
-            vk.ShaderStageFlags{ .fragment_bit = true },
-            vk.ShaderStageFlags{ .vertex_bit = true },
-        }, &.{
-            entry_point_definition{},
-            entry_point_definition{},
-        });
-        point_light_renderer = try PointLightRenderer.init(@constCast(&self.gc), swapchain.render_pass, scene.asScene(), shader_library_point_light, self.allocator, @constCast(&camera), global_ubo_set.layout.descriptor_set_layout, &dynamic_pipeline_manager);
+        point_light_renderer = try PointLightRenderer.init(
+            @constCast(&self.gc),
+            &unified_pipeline_system,
+            swapchain.render_pass,
+            scene.asScene(),
+            global_ubo_set,
+        );
 
         // Initialize unified raytracing renderer through the shared pipeline system
         raytracing_renderer = try RaytracingRenderer.init(
@@ -444,9 +424,9 @@ pub const App = struct {
             log(.WARN, "app", "Initial async resource update failed: {}", .{err});
         };
         var init_frame_info = frame_info;
-    init_frame_info.current_frame = current_frame;
-    init_frame_info.command_buffer = cmdbufs[current_frame];
-    init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
+        init_frame_info.current_frame = current_frame;
+        init_frame_info.command_buffer = cmdbufs[current_frame];
+        init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
         init_frame_info.camera = &camera;
         try forward_renderer.update(&init_frame_info);
         try rt_render_pass.update(&init_frame_info);
@@ -478,9 +458,6 @@ pub const App = struct {
                 scheduled_asset.loaded = true;
             }
         }
-
-        // Process any pending hot reloads first
-        dynamic_pipeline_manager.processRebuildQueue(swapchain.render_pass);
 
         _ = try scene_bridge.updateAsyncResources();
 
@@ -527,7 +504,7 @@ pub const App = struct {
 
         compute_shader_system.beginCompute(frame_info);
 
-    try forward_renderer.update(&frame_info);
+        try forward_renderer.update(&frame_info);
 
         try rt_render_pass.update(&frame_info);
 
@@ -566,135 +543,6 @@ pub const App = struct {
         //log(.TRACE, "app", "Frame end", .{});
 
         return self.window.isRunning();
-    }
-
-    /// Register pipeline templates for the dynamic pipeline system
-    fn registerPipelineTemplates(self: *App) !void {
-        _ = self; // Method for future expansion, currently uses global dynamic_pipeline_manager
-
-        // NOTE: Textured renderer now uses UnifiedPipelineSystem and creates its own pipeline
-        // No need to register textured_template with DynamicPipelineManager anymore
-
-        // Static arrays for point light renderer
-        const point_light_vertex_bindings = [_]VertexInputBinding{
-            // Point light renderer uses no vertex input (draws fullscreen quad procedurally)
-        };
-
-        const point_light_vertex_attributes = [_]VertexInputAttribute{
-            // No vertex attributes needed
-        };
-
-        const point_light_descriptor_bindings = [_]DescriptorBinding{
-            DescriptorBinding{
-                .binding = 0,
-                .descriptor_type = .uniform_buffer,
-                .descriptor_count = 1,
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-            },
-        };
-
-        const point_light_push_constants = [_]PushConstantRange{
-            PushConstantRange{
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-                .offset = 0,
-                .size = @sizeOf(@import("renderers/point_light_renderer.zig").PointLightPushConstant),
-            },
-        };
-
-        // Point light renderer pipeline template
-        const point_light_template = PipelineTemplate{
-            .name = "point_light_renderer",
-            .vertex_shader = "shaders/point_light.vert",
-            .fragment_shader = "shaders/point_light.frag",
-
-            .vertex_bindings = &point_light_vertex_bindings,
-            .vertex_attributes = &point_light_vertex_attributes,
-            .descriptor_bindings = &point_light_descriptor_bindings,
-            .push_constant_ranges = &point_light_push_constants,
-
-            .primitive_topology = .triangle_list,
-            .depth_test_enable = false, // Point lights are additive
-            .depth_write_enable = false,
-            .blend_enable = true, // Enable blending for light accumulation
-            .cull_mode = .{ .back_bit = true },
-        };
-
-        try dynamic_pipeline_manager.registerPipeline(point_light_template);
-
-        // Particle renderer pipeline templates (for unified system reference)
-        // Note: The unified particle renderer creates its own pipelines automatically
-        // These templates are here for documentation and potential fallback use
-
-        const particle_vertex_bindings = [_]VertexInputBinding{
-            VertexInputBinding{
-                .binding = 0,
-                .stride = @sizeOf(@import("renderers/particle_renderer.zig").Particle),
-                .input_rate = .instance,
-            },
-        };
-
-        const particle_vertex_attributes = [_]VertexInputAttribute{
-            VertexInputAttribute{
-                .location = 0,
-                .binding = 0,
-                .format = .r32g32b32_sfloat,
-                .offset = 0, // position
-            },
-            VertexInputAttribute{
-                .location = 1,
-                .binding = 0,
-                .format = .r32g32b32_sfloat,
-                .offset = 12, // velocity
-            },
-            VertexInputAttribute{
-                .location = 2,
-                .binding = 0,
-                .format = .r32g32b32a32_sfloat,
-                .offset = 24, // color
-            },
-            VertexInputAttribute{
-                .location = 3,
-                .binding = 0,
-                .format = .r32_sfloat,
-                .offset = 40, // life
-            },
-        };
-
-        const particle_descriptor_set_0 = [_]DescriptorBinding{
-            DescriptorBinding{
-                .binding = 0,
-                .descriptor_type = .uniform_buffer,
-                .descriptor_count = 1,
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-            },
-        };
-
-        const particle_descriptor_sets = [_][]const DescriptorBinding{
-            &particle_descriptor_set_0,
-        };
-
-        // Particle render pipeline template
-        const particle_render_template = PipelineTemplate{
-            .name = "particle_renderer",
-            .vertex_shader = "shaders/particles.vert",
-            .fragment_shader = "shaders/particles.frag",
-
-            .vertex_bindings = &particle_vertex_bindings,
-            .vertex_attributes = &particle_vertex_attributes,
-            .descriptor_sets = &particle_descriptor_sets,
-            .push_constant_ranges = &[_]PushConstantRange{},
-
-            .primitive_topology = .point_list,
-            .depth_test_enable = true,
-            .depth_write_enable = false, // Particles don't write to depth
-            .blend_enable = true, // Enable blending for particle effects
-            .cull_mode = .{}, // No culling for point sprites
-        };
-
-        try dynamic_pipeline_manager.registerPipeline(particle_render_template);
-
-        log(.INFO, "app", "Registered pipeline templates with DynamicPipelineManager: point_light_renderer, particle_renderer", .{});
-        log(.INFO, "app", "NOTE: textured_renderer now uses UnifiedPipelineSystem and manages its own pipeline", .{});
     }
 
     pub fn deinit(self: *App) void {

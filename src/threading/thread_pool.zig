@@ -277,6 +277,7 @@ pub const ThreadPool = struct {
 
     // Callbacks
     on_worker_count_changed: ?*const fn (u32, u32) void = null, // (old_count, new_count)
+    thread_exit_hook: ?ThreadExitHook = null,
 
     pub const PoolStatistics = struct {
         total_work_items_processed: std.atomic.Value(u64),
@@ -294,6 +295,11 @@ pub const ThreadPool = struct {
                 .average_work_time_us = std.atomic.Value(u64).init(0),
             };
         }
+    };
+
+    const ThreadExitHook = struct {
+        callback: *const fn (*anyopaque) void,
+        context: *anyopaque,
     };
 
     pub fn init(allocator: std.mem.Allocator, max_workers: u32) !ThreadPool {
@@ -507,6 +513,9 @@ pub const ThreadPool = struct {
 
         // log(.DEBUG, "enhanced_thread_pool", "Worker {} exited main loop (running={})", .{ worker_info.worker_id, pool.running.load(.acquire) });
         worker_info.state.store(.shutting_down, .release);
+        if (pool.thread_exit_hook) |hook| {
+            hook.callback(hook.context);
+        }
         // log(.DEBUG, "enhanced_thread_pool", "Worker {} shutting down", .{worker_info.worker_id});
     }
 
@@ -663,6 +672,14 @@ pub const ThreadPool = struct {
     /// Set callback for worker count changes
     pub fn setWorkerCountChangedCallback(self: *ThreadPool, callback: *const fn (u32, u32) void) void {
         self.on_worker_count_changed = callback;
+    }
+
+    /// Set hook to run when a worker thread exits
+    pub fn setThreadExitHook(self: *ThreadPool, callback: *const fn (*anyopaque) void, context: *anyopaque) void {
+        self.thread_exit_hook = ThreadExitHook{
+            .callback = callback,
+            .context = context,
+        };
     }
 };
 
