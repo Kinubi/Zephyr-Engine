@@ -16,16 +16,16 @@ pub fn DenseSet(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .allocator = allocator,
-                .dense = std.ArrayList(T).init(allocator),
-                .entities = std.ArrayList(EntityId).init(allocator),
-                .sparse = std.ArrayList(u32).init(allocator),
+                .dense = std.ArrayList(T){},
+                .entities = std.ArrayList(EntityId){},
+                .sparse = std.ArrayList(u32){},
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.dense.deinit();
-            self.entities.deinit();
-            self.sparse.deinit();
+            self.dense.deinit(self.allocator);
+            self.entities.deinit(self.allocator);
+            self.sparse.deinit(self.allocator);
         }
 
         pub fn len(self: *const Self) usize {
@@ -35,7 +35,7 @@ pub fn DenseSet(comptime T: type) type {
         fn ensureSparseCapacity(self: *Self, desired_len: usize) !void {
             if (desired_len <= self.sparse.items.len) return;
             const old_len = self.sparse.items.len;
-            try self.sparse.resize(desired_len);
+            try self.sparse.resize(self.allocator, desired_len);
             simd.fillU32(self.sparse.items[old_len..desired_len], invalid_index);
         }
 
@@ -57,8 +57,8 @@ pub fn DenseSet(comptime T: type) type {
             }
 
             const dense_index = @as(u32, @intCast(self.dense.items.len));
-            try self.dense.append(value);
-            try self.entities.append(entity);
+            try self.dense.append(self.allocator, value);
+            try self.entities.append(self.allocator, entity);
             self.sparse.items[idx] = dense_index;
             return true;
         }
@@ -102,20 +102,20 @@ pub fn DenseSet(comptime T: type) type {
         }
 
         pub fn acquireWrite(self: *Self) WriteGuard {
-            self.rwlock.lockExclusive();
+            self.rwlock.lock();
             return .{ .storage = self, .active = true };
         }
 
         pub fn destroyAny(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const storage: *Self = @ptrCast(ptr);
+            const storage = castOpaque(ptr);
             storage.deinit();
             allocator.destroy(storage);
         }
 
         pub fn removeAny(ptr: *anyopaque, entity: EntityId) bool {
-            const storage: *Self = @ptrCast(ptr);
-            storage.rwlock.lockExclusive();
-            defer storage.rwlock.unlockExclusive();
+            const storage = castOpaque(ptr);
+            storage.rwlock.lock();
+            defer storage.rwlock.unlock();
             return storage.removeAssumeLocked(entity);
         }
 
@@ -164,7 +164,7 @@ pub fn DenseSet(comptime T: type) type {
             pub fn release(self: *WriteGuard) void {
                 if (!self.active) return;
                 self.active = false;
-                self.storage.rwlock.unlockExclusive();
+                self.storage.rwlock.unlock();
             }
 
             pub fn put(self: *WriteGuard, entity: EntityId, value: T) !bool {
@@ -186,5 +186,9 @@ pub fn DenseSet(comptime T: type) type {
                 return self.storage.dense.items;
             }
         };
+
+        fn castOpaque(ptr: *anyopaque) *Self {
+            return @ptrFromInt(@intFromPtr(ptr));
+        }
     };
 }

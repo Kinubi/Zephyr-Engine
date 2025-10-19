@@ -38,20 +38,22 @@ pub const EntityRegistry = struct {
         return .{
             .allocator = allocator,
             .generations = try std.ArrayList(u32).initCapacity(allocator, 1024),
-            .free_list = std.ArrayList(u32).init(allocator),
+            .free_list = std.ArrayList(u32){},
         };
     }
 
     pub fn deinit(self: *EntityRegistry) void {
-        self.generations.deinit();
-        self.free_list.deinit();
+        self.generations.deinit(self.allocator);
+        self.free_list.deinit(self.allocator);
     }
 
     pub fn create(self: *EntityRegistry, tag: u8) EntityId {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.free_list.popOrNull()) |idx| {
+        if (self.free_list.items.len > 0) {
+            const idx = self.free_list.items[self.free_list.items.len - 1];
+            self.free_list.items.len -= 1;
             const old_generation = self.generations.items[idx];
             const new_generation = (old_generation + 1) & 0x00FF_FFFF;
             self.generations.items[idx] = new_generation;
@@ -73,7 +75,7 @@ pub const EntityRegistry = struct {
         if (idx >= self.generations.items.len) return;
 
         if (self.free_list.contains(idx)) return;
-        self.free_list.append(idx) catch return;
+        self.free_list.append(self.allocator, idx) catch return;
     }
 
     pub fn isAlive(self: *EntityRegistry, id: EntityId) bool {

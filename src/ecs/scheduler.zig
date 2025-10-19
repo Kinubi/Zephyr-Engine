@@ -49,7 +49,7 @@ pub const Scheduler = struct {
         return .{
             .allocator = allocator,
             .thread_pool = pool,
-            .stages = std.ArrayList(Stage).init(allocator),
+            .stages = std.ArrayList(Stage){},
             .config = config,
             .next_work_id = std.atomic.Value(u64).init(1),
         };
@@ -59,22 +59,24 @@ pub const Scheduler = struct {
         for (self.stages.items) |*stage| {
             stage.deinit();
         }
-        self.stages.deinit();
+        self.stages.deinit(self.allocator);
     }
 
     pub fn addStage(self: *Scheduler, name: []const u8) !usize {
         const stage = Stage{
             .name = name,
-            .systems = std.ArrayList(System).init(self.allocator),
+            .systems = std.ArrayList(System){},
+            .allocator = self.allocator,
         };
-        try self.stages.append(stage);
+        try self.stages.append(self.allocator, stage);
         return self.stages.items.len - 1;
     }
 
     pub fn addSystem(self: *Scheduler, stage_index: usize, descriptor: SystemDescriptor) !void {
         if (stage_index >= self.stages.items.len) return error.UnknownStage;
         const system = System{ .descriptor = descriptor };
-        try self.stages.items[stage_index].systems.append(system);
+        const stage = &self.stages.items[stage_index];
+        try stage.systems.append(stage.allocator, system);
     }
 
     pub fn run(self: *Scheduler, world: *anyopaque) !void {
@@ -86,6 +88,9 @@ pub const Scheduler = struct {
 
     pub fn runStage(self: *Scheduler, world: *anyopaque, stage_index: usize) !void {
         if (stage_index >= self.stages.items.len) return error.UnknownStage;
+
+        var stage = &self.stages.items[stage_index];
+        const start_time = std.time.nanoTimestamp();
 
         var stage_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer stage_arena.deinit();
@@ -101,7 +106,6 @@ pub const Scheduler = struct {
             .allocator = stage_arena.allocator(),
         };
 
-        const stage = &self.stages.items[stage_index];
         for (stage.systems.items) |system| {
             try system.descriptor.prepare(system.descriptor.context, world, &builder);
         }
@@ -111,6 +115,11 @@ pub const Scheduler = struct {
         }
 
         wait_group.wait();
+
+        stage.last_job_count = job_counter;
+        const end_time = std.time.nanoTimestamp();
+        const diff = if (end_time > start_time) end_time - start_time else 0;
+        stage.last_duration_ns = @intCast(diff);
     }
 
     fn enqueueJob(self: *Scheduler, desc: JobDesc, world: *anyopaque, wait_group: *WaitGroup, stage_index: usize, job_index: u32, allocator: std.mem.Allocator) !void {
@@ -147,15 +156,38 @@ pub const Scheduler = struct {
     const Stage = struct {
         name: []const u8,
         systems: std.ArrayList(System),
+        allocator: std.mem.Allocator,
+        last_duration_ns: u64 = 0,
+        last_job_count: u32 = 0,
 
         fn deinit(self: *Stage) void {
-            self.systems.deinit();
+            self.systems.deinit(self.allocator);
         }
     };
 
     const System = struct {
         descriptor: SystemDescriptor,
     };
+
+    pub const StageMetrics = struct {
+        name: []const u8,
+        last_duration_ns: u64,
+        last_job_count: u32,
+    };
+
+    pub fn stageMetrics(self: *const Scheduler, stage_index: usize) ?StageMetrics {
+        if (stage_index >= self.stages.items.len) return null;
+        const stage = &self.stages.items[stage_index];
+        return .{
+            .name = stage.name,
+            .last_duration_ns = stage.last_duration_ns,
+            .last_job_count = stage.last_job_count,
+        };
+    }
+
+    pub fn stageCount(self: *const Scheduler) usize {
+        return self.stages.items.len;
+    }
 
     pub const JobBuilder = struct {
         scheduler: *Scheduler,
@@ -181,7 +213,7 @@ pub const Scheduler = struct {
     };
 
     fn runJob(context: *anyopaque, work_item: thread_pool.WorkItem) void {
-        const payload: *JobPayload = @ptrCast(context);
+        const payload: *JobPayload = @ptrFromInt(@intFromPtr(context));
         const job_ctx = JobContext{
             .stage_index = payload.stage_index,
             .job_index = payload.job_index,

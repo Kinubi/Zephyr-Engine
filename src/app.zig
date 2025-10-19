@@ -67,6 +67,7 @@ const Math = @import("utils/math.zig");
 const log = @import("utils/log.zig").log;
 const LogLevel = @import("utils/log.zig").LogLevel;
 const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
+const ecs = @import("ecs/mod.zig");
 
 // Input controller
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
@@ -162,6 +163,10 @@ pub const App = struct {
     var scene_bridge: SceneBridge = undefined;
     // Generic renderer system is now the default rendering path
 
+    var ecs_world: ecs.world.World = undefined;
+    var ecs_stages: ecs.stage_handles.StageHandles = undefined;
+    var ecs_enabled: bool = false;
+
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
@@ -212,6 +217,11 @@ pub const App = struct {
 
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 4 workers
+
+        ecs_world = try ecs.world.World.init(self.allocator, .{ .thread_pool = thread_pool });
+        errdefer ecs_world.deinit();
+        ecs_stages = try ecs.bootstrap.configureWorld(&ecs_world);
+        ecs_enabled = true;
 
         // Initialize Asset Manager on heap for stable pointer address
         asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
@@ -476,6 +486,11 @@ pub const App = struct {
             self.fps_last_time = current_time;
         }
         const dt = current_time - last_frame_time;
+
+        if (ecs_enabled) {
+            try ecs_world.beginFrame(frame_counter, @as(f32, @floatCast(dt)));
+            try ecs.bootstrap.tick(&ecs_world, ecs_stages);
+        }
         const cmdbuf = cmdbufs[current_frame];
         const computebuf = compute_shader_system.compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
@@ -555,6 +570,11 @@ pub const App = struct {
 
         //particle_renderer.deinit();
         scene.deinit();
+
+        if (ecs_enabled) {
+            ecs_world.deinit();
+            ecs_enabled = false;
+        }
 
         shader_manager.deinit();
         asset_manager.deinit();

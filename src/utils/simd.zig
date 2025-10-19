@@ -34,7 +34,7 @@ pub inline fn loadU32(slice: []const u32) U32x8 {
 pub inline fn storeU32(slice: []u32, vec: U32x8) void {
     std.debug.assert(slice.len >= lanes_u32);
     const tmp: [lanes_u32]u32 = @bitCast(vec);
-    std.mem.copy(u32, slice[0..lanes_u32], tmp[0..]);
+    std.mem.copyForwards(u32, slice[0..lanes_u32], tmp[0..]);
 }
 
 pub inline fn fillU32(slice: []u32, value: u32) void {

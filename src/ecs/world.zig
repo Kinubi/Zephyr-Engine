@@ -4,6 +4,7 @@ const EntityId = @import("entity_registry.zig").EntityId;
 const EntityRegistry = @import("entity_registry.zig").EntityRegistry;
 const DenseSet = @import("component_dense_set.zig").DenseSet;
 const Scheduler = @import("scheduler.zig").Scheduler;
+const Math = @import("../utils/math.zig");
 
 pub const ComponentTypeId = u64;
 
@@ -43,6 +44,9 @@ pub const World = struct {
     registry: EntityRegistry,
     storages: std.AutoHashMap(ComponentTypeId, ComponentEntry),
     scheduler: Scheduler,
+    frame_index: u64 = 0,
+    frame_dt: f32 = 0,
+    extraction_positions: std.ArrayList(Math.Vec3) = std.ArrayList(Math.Vec3){},
 
     pub const Config = struct {
         thread_pool: *thread_pool.ThreadPool,
@@ -71,6 +75,9 @@ pub const World = struct {
             .registry = registry,
             .storages = storages,
             .scheduler = scheduler,
+            .frame_index = 0,
+            .frame_dt = 0,
+            .extraction_positions = std.ArrayList(Math.Vec3){},
         };
     }
 
@@ -82,6 +89,7 @@ pub const World = struct {
         self.storages.deinit();
         self.scheduler.deinit();
         self.registry.deinit();
+        self.extraction_positions.deinit(self.allocator);
     }
 
     pub fn registryPtr(self: *World) *EntityRegistry {
@@ -105,6 +113,37 @@ pub const World = struct {
         }
 
         self.registry.destroy(entity);
+    }
+
+    pub fn beginFrame(self: *World, frame_index: u64, dt: f32) !void {
+        self.frame_index = frame_index;
+        self.frame_dt = dt;
+        try self.ensureExtractionCapacity(0);
+    }
+
+    pub fn frameIndex(self: *const World) u64 {
+        return self.frame_index;
+    }
+
+    pub fn frameDt(self: *const World) f32 {
+        return self.frame_dt;
+    }
+
+    pub fn ensureExtractionCapacity(self: *World, count: usize) !void {
+        if (count == 0) {
+            self.extraction_positions.clearRetainingCapacity();
+            return;
+        }
+
+        try self.extraction_positions.resize(self.allocator, count);
+    }
+
+    pub fn extractionPositions(self: *const World) []const Math.Vec3 {
+        return self.extraction_positions.items;
+    }
+
+    pub fn extractionPositionsMut(self: *World) []Math.Vec3 {
+        return self.extraction_positions.items;
     }
 
     pub fn addComponent(self: *World, entity: EntityId, component: anytype) !bool {
@@ -226,7 +265,7 @@ pub const World = struct {
     fn ensureStorage(self: *World, comptime T: type) !*DenseSet(T) {
         const type_id = componentTypeId(T);
         if (self.storages.getPtr(type_id)) |entry| {
-            return @ptrCast(entry.storage_ptr);
+            return castStoragePtr(T, entry.storage_ptr);
         }
 
         const storage = try self.allocator.create(DenseSet(T));
@@ -241,10 +280,10 @@ pub const World = struct {
         return storage;
     }
 
-    fn getStorage(self: *World, comptime T: type) !*DenseSet(T) {
+    pub fn getStorage(self: *World, comptime T: type) !*DenseSet(T) {
         const type_id = componentTypeId(T);
         if (self.storages.getPtr(type_id)) |entry| {
-            return @ptrCast(entry.storage_ptr);
+            return castStoragePtr(T, entry.storage_ptr);
         }
         return error.ComponentNotRegistered;
     }
@@ -278,4 +317,8 @@ pub fn ComponentWriteHandle(comptime T: type) type {
             return self.ptr;
         }
     };
+}
+
+fn castStoragePtr(comptime T: type, ptr: *anyopaque) *DenseSet(T) {
+    return @ptrFromInt(@intFromPtr(ptr));
 }

@@ -54,6 +54,13 @@ This directory contains technical documentation for the ZulkanZengine rendering 
   - Thread pool integration
   - GPU resource management
 
+## Gameplay & ECS
+
+- **[ECS System](ECS_SYSTEM.md)** ✅ *Updated: Oct 2025*
+  - Entity lifecycle, component storage, and scheduler overview
+  - Job-based system execution and multithreaded guard sharing
+  - Stage metrics, renderer extraction flow, and extension points
+
 ## System Status
 
 | System | Status | Last Updated |
@@ -65,6 +72,7 @@ This directory contains technical documentation for the ZulkanZengine rendering 
 | Enhanced Asset Management | ✅ Complete | - |
 | Particle Renderer | ✅ Complete | - |
 | Render Pass Integration Notes | ✅ Complete | Oct 19, 2025 |
+| ECS System | ✅ Complete | Oct 19, 2025 |
 
 ## Quick Start
 
