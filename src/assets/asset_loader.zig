@@ -7,12 +7,10 @@ const AssetRegistry = @import("asset_registry.zig").AssetRegistry;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Texture = @import("../core/texture.zig").Texture;
 const Model = @import("../rendering/mesh.zig").Model;
-const Mesh = @import("../rendering/mesh.zig").Mesh;
 
 // Thread pool
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
-const WorkItemType = @import("../threading/thread_pool.zig").WorkItemType;
 const WorkPriority = @import("../threading/thread_pool.zig").WorkPriority;
 const SubsystemConfig = @import("../threading/thread_pool.zig").SubsystemConfig;
 const createAssetLoadingWork = @import("../threading/thread_pool.zig").createAssetLoadingWork;
@@ -20,7 +18,6 @@ const createGPUWork = @import("../threading/thread_pool.zig").createGPUWork;
 
 // Logging
 const log = @import("../utils/log.zig").log;
-const LogLevel = @import("../utils/log.zig").LogLevel;
 
 /// Forward declaration for AssetManager integration
 const AssetManager = @import("asset_manager.zig").AssetManager;
@@ -36,19 +33,8 @@ pub const AssetLoader = struct {
     thread_pool: *ThreadPool,
     work_id_counter: std.atomic.Value(u64),
 
-    // Asset staging queues (thread-safe)
-    texture_staging_queue: TextureStagingQueue,
-    mesh_staging_queue: MeshStagingQueue,
-
     // Statistics and monitoring
     stats: LoaderStatistics,
-
-    // GPU worker thread for processing staged assets
-    gpu_worker_thread: ?std.Thread = null,
-    gpu_worker_running: std.atomic.Value(bool),
-
-    // GPU work serialization (prevent concurrent VkQueue access)
-    gpu_queue_mutex: std.Thread.Mutex = .{},
 
     // Integration with asset manager
     asset_manager: *AssetManager,
@@ -71,104 +57,6 @@ pub const AssetLoader = struct {
                 .active_workers = std.atomic.Value(u32).init(0),
                 .queue_size = std.atomic.Value(u32).init(0),
             };
-        }
-    };
-
-    /// Thread-safe staging queue for textures
-    const TextureStagingQueue = struct {
-        items: std.ArrayList(TextureStaging),
-        mutex: std.Thread.Mutex = .{},
-        allocator: std.mem.Allocator,
-
-        pub fn init(allocator: std.mem.Allocator) TextureStagingQueue {
-            return .{
-                .items = std.ArrayList(TextureStaging){},
-                .allocator = allocator,
-            };
-        }
-
-        pub fn deinit(self: *TextureStagingQueue) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Free image data for any remaining items
-            for (self.items.items) |item| {
-                self.allocator.free(item.image_data);
-                self.allocator.free(item.path);
-            }
-            self.items.deinit(self.allocator);
-        }
-
-        pub fn push(self: *TextureStagingQueue, item: TextureStaging) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            try self.items.append(self.allocator, item);
-        }
-
-        pub fn pop(self: *TextureStagingQueue) ?TextureStaging {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            if (self.items.items.len > 0) {
-                return self.items.orderedRemove(0);
-            }
-            return null;
-        }
-
-        pub fn size(self: *TextureStagingQueue) u32 {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            const len = self.items.items.len;
-            return if (len > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(len);
-        }
-    };
-
-    /// Thread-safe staging queue for meshes
-    const MeshStagingQueue = struct {
-        items: std.ArrayList(MeshStaging),
-        mutex: std.Thread.Mutex = .{},
-        allocator: std.mem.Allocator,
-
-        pub fn init(allocator: std.mem.Allocator) MeshStagingQueue {
-            return .{
-                .items = std.ArrayList(MeshStaging){},
-                .allocator = allocator,
-            };
-        }
-
-        pub fn deinit(self: *MeshStagingQueue) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Free mesh data for any remaining items
-            for (self.items.items) |item| {
-                self.allocator.free(item.obj_data);
-                self.allocator.free(item.path);
-            }
-            self.items.deinit(self.allocator);
-        }
-
-        pub fn push(self: *MeshStagingQueue, item: MeshStaging) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            try self.items.append(self.allocator, item);
-        }
-
-        pub fn pop(self: *MeshStagingQueue) ?MeshStaging {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            if (self.items.items.len > 0) {
-                return self.items.orderedRemove(0);
-            }
-            return null;
-        }
-
-        pub fn size(self: *MeshStagingQueue) u32 {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            const len = self.items.items.len;
-            return if (len > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(len);
         }
     };
 
@@ -222,10 +110,7 @@ pub const AssetLoader = struct {
             .graphics_context = graphics_context,
             .thread_pool = thread_pool,
             .work_id_counter = std.atomic.Value(u64).init(0),
-            .texture_staging_queue = TextureStagingQueue.init(allocator),
-            .mesh_staging_queue = MeshStagingQueue.init(allocator),
             .stats = LoaderStatistics.init(),
-            .gpu_worker_running = std.atomic.Value(bool).init(false),
             .asset_manager = asset_manager,
         };
 
@@ -236,17 +121,9 @@ pub const AssetLoader = struct {
     /// Deinitialize the loader
     pub fn deinit(self: *AssetLoader) void {
         log(.INFO, "enhanced_asset_loader", "Shutting down AssetLoader", .{});
-
-        // Clean up staging queues
-        self.texture_staging_queue.deinit();
-        self.mesh_staging_queue.deinit();
+        _ = self;
 
         log(.INFO, "enhanced_asset_loader", "AssetLoader shutdown complete", .{});
-    }
-
-    /// Set the asset manager for integration
-    pub fn setAssetManager(self: *AssetLoader, asset_manager: *AssetManager) void {
-        self.asset_manager = asset_manager;
     }
 
     /// Request async loading of an asset with specified priority
@@ -295,28 +172,6 @@ pub const AssetLoader = struct {
         self.stats.queue_size.store(self.thread_pool.work_queue.size(), .release);
 
         log(.INFO, "enhanced_asset_loader", "Submitted {s} priority load request for asset {} (work_id: {})", .{ @tagName(priority), asset_id.toU64(), work_id });
-    }
-
-    /// Request high-priority loading (for critical assets)
-    pub fn requestHighPriorityLoad(self: *AssetLoader, asset_id: AssetId) !void {
-        try self.requestLoad(asset_id, .high);
-    }
-
-    /// Request critical loading (for frame-critical assets)
-    pub fn requestCriticalLoad(self: *AssetLoader, asset_id: AssetId) !void {
-        try self.requestLoad(asset_id, .critical);
-    }
-
-    /// Get current loader statistics
-    pub fn getStatistics(self: *AssetLoader) LoaderStatistics {
-        // Update queue size
-        self.stats.queue_size.store(self.thread_pool.work_queue.size(), .release);
-
-        // Update active workers (simplified - could query thread pool for actual count)
-        _ = self.thread_pool.getStatistics();
-        self.stats.active_workers.store(self.thread_pool.current_worker_count.load(.acquire), .release);
-
-        return self.stats;
     }
 
     /// Process texture staging on GPU thread

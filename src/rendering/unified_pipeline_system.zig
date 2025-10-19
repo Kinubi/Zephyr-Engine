@@ -374,12 +374,12 @@ pub const UnifiedPipelineSystem = struct {
             var pipeline_ci = vk.RayTracingPipelineCreateInfoKHR{
                 .s_type = vk.StructureType.ray_tracing_pipeline_create_info_khr,
                 .p_next = null,
-                .flags = .{},
+                .flags = config.raytracing_flags,
                 .stage_count = @intCast(stage_infos.items.len),
                 .p_stages = stage_infos.items.ptr,
                 .group_count = @intCast(group_infos.items.len),
                 .p_groups = group_infos.items.ptr,
-                .max_pipeline_ray_recursion_depth = 1,
+                .max_pipeline_ray_recursion_depth = @max(1, config.raytracing_max_recursion_depth),
                 .layout = pipeline_layout,
                 .base_pipeline_handle = vk.Pipeline.null_handle,
                 .base_pipeline_index = -1,
@@ -1457,12 +1457,22 @@ pub const UnifiedPipelineSystem = struct {
         if (config.fragment_shader) |fs| hasher.update(fs);
         if (config.geometry_shader) |gs| hasher.update(gs);
         if (config.compute_shader) |cs| hasher.update(cs);
+        if (config.raygen_shader) |rs| hasher.update(rs);
+        if (config.miss_shader) |ms| hasher.update(ms);
+        if (config.closest_hit_shader) |chs| hasher.update(chs);
+        if (config.any_hit_shader) |ahs| hasher.update(ahs);
+        if (config.intersection_shader) |is| hasher.update(is);
 
         // Hash entry points
         if (config.vertex_entry_point) |ep| hasher.update(ep);
         if (config.fragment_entry_point) |ep| hasher.update(ep);
         if (config.geometry_entry_point) |ep| hasher.update(ep);
         if (config.compute_entry_point) |ep| hasher.update(ep);
+        if (config.raygen_entry_point) |ep| hasher.update(ep);
+        if (config.miss_entry_point) |ep| hasher.update(ep);
+        if (config.closest_hit_entry_point) |ep| hasher.update(ep);
+        if (config.any_hit_entry_point) |ep| hasher.update(ep);
+        if (config.intersection_entry_point) |ep| hasher.update(ep);
 
         // Hash vertex input configuration
         if (config.vertex_input_bindings) |bindings| {
@@ -1505,6 +1515,8 @@ pub const UnifiedPipelineSystem = struct {
         hasher.update(std.mem.asBytes(&config.shader_options.optimization_level));
         hasher.update(std.mem.asBytes(&config.shader_options.debug_info));
         hasher.update(std.mem.asBytes(&config.shader_options.vulkan_semantics));
+        hasher.update(std.mem.asBytes(&config.raytracing_flags));
+        hasher.update(std.mem.asBytes(&config.raytracing_max_recursion_depth));
 
         return hasher.final();
     }
@@ -1566,6 +1578,8 @@ pub const PipelineConfig = struct {
     closest_hit_shader: ?[]const u8 = null,
     any_hit_shader: ?[]const u8 = null,
     intersection_shader: ?[]const u8 = null,
+    raytracing_flags: vk.PipelineCreateFlags = .{},
+    raytracing_max_recursion_depth: u32 = 1,
 
     vertex_entry_point: ?[]const u8 = null,
     fragment_entry_point: ?[]const u8 = null,

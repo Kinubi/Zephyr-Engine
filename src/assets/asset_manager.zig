@@ -435,26 +435,6 @@ pub const AssetManager = struct {
         return asset_id;
     }
 
-    /// Add a pre-created fallback model
-    pub fn addFallbackModel(self: *AssetManager, model: *Model) !AssetId {
-        // Create a synthetic asset ID for fallback
-        const asset_id = @as(AssetId, @enumFromInt(self.loaded_models.items.len + 1000)); // Offset to avoid conflicts
-
-        // Add to storage
-        self.models_mutex.lock();
-        defer self.models_mutex.unlock();
-
-        try self.loaded_models.append(self.allocator, model);
-        const index = self.loaded_models.items.len - 1;
-        try self.asset_to_model.put(asset_id, index);
-
-        // Register as loaded in registry
-        _ = try self.registry.registerAsset("fallback_model", .mesh);
-        self.registry.markAsLoaded(asset_id, 0); // 0 file size for fallback
-
-        return asset_id;
-    }
-
     /// Add loaded texture to the manager (called by GPU worker)
     pub fn addLoadedTexture(self: *AssetManager, asset_id: AssetId, texture: *Texture) !void {
         self.textures_mutex.lock();
@@ -763,24 +743,6 @@ pub const AssetManager = struct {
     /// Get fallback asset for given type
     pub fn getFallbackAsset(self: *AssetManager, fallback_type: FallbackType, asset_type: AssetType) ?AssetId {
         return self.fallbacks.getFallback(fallback_type, asset_type);
-    }
-
-    /// Create fallback materials for basic rendering
-    fn createFallbackMaterials(self: *AssetManager) !void {
-        // Create a default material using fallback textures
-        const default_material = try self.allocator.create(Material);
-        default_material.* = Material{
-            .albedo_texture_id = 0, // Will be resolved to texture index later
-            .roughness = 0.5,
-            .metallic = 0.0,
-            .emissive = 0.0,
-            .emissive_color = [4]f32{ 0.0, 0.0, 0.0, 1.0 },
-        };
-
-        try self.loaded_materials.append(self.allocator, default_material);
-        const material_index = self.loaded_materials.items.len - 1;
-        const material_asset_id = asset_types.AssetId.fromU64(5); // ID 5 for default material
-        try self.asset_to_material.put(material_asset_id, material_index);
     }
 
     /// Create material buffer from loaded materials
