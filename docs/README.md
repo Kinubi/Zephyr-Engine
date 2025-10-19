@@ -28,9 +28,9 @@ This directory contains technical documentation for the ZulkanZengine rendering 
 ### Specialized Systems
 
 - **[Render Pass Vulkan Integration](RENDER_PASS_VULKAN_INTEGRATION.md)**
-  - Render pass management and lifecycle
-  - Vulkan render pass creation and configuration
-  - Integration patterns with rendering systems
+  - Current swapchain-driven render pass flow
+  - How renderers coordinate begin/end with the swapchain
+  - Guidance for adding bespoke off-screen passes
 
 - **[Particle Renderer Migration](PARTICLE_RENDERER_MIGRATION.md)**
   - Unified particle system using compute and render pipelines
@@ -64,7 +64,7 @@ This directory contains technical documentation for the ZulkanZengine rendering 
 | Enhanced Thread Pool | ✅ Complete | - |
 | Enhanced Asset Management | ✅ Complete | - |
 | Particle Renderer | ✅ Complete | - |
-| Render Pass System | ✅ Complete | - |
+| Render Pass Integration Notes | ✅ Complete | Oct 19, 2025 |
 
 ## Quick Start
 
@@ -133,7 +133,7 @@ docs/
 ├── PIPELINE_CACHING_QUICK_REF.md          ← New: Quick reference card
 ├── UNIFIED_PIPELINE_MIGRATION.md          ← Pipeline system guide
 ├── DYNAMIC_PIPELINE_SYSTEM.md             ← Dynamic pipelines
-├── RENDER_PASS_VULKAN_INTEGRATION.md      ← Render pass system
+├── RENDER_PASS_VULKAN_INTEGRATION.md      ← Swapchain render-pass guidance
 ├── PARTICLE_RENDERER_MIGRATION.md         ← Particle system
 ├── ENHANCED_THREAD_POOL.md                ← Threading details
 ├── ENHANCED_THREAD_POOL_SUMMARY.md        ← Threading quick ref

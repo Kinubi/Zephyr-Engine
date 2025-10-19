@@ -2,8 +2,6 @@ const std = @import("std");
 
 // Core graphics imports
 const Window = @import("window.zig").Window;
-const Pipeline = @import("core/pipeline.zig").Pipeline;
-
 const graphics_context = @import("core/graphics_context.zig");
 const GraphicsContext = graphics_context.GraphicsContext;
 const Swapchain = @import("core/swapchain.zig").Swapchain;
@@ -421,7 +419,7 @@ pub const App = struct {
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
-    // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
+        // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
     }
 
     pub fn onUpdate(self: *App) !bool {
@@ -503,8 +501,8 @@ pub const App = struct {
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
 
-    // NOW begin the rasterization render pass
-    swapchain.beginSwapChainRenderPass(frame_info);
+        // NOW begin the rasterization render pass
+        swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         frame_info.camera.updateProjectionMatrix();
@@ -519,7 +517,7 @@ pub const App = struct {
         // Execute rasterization renderers through the forward renderer
         try forward_renderer.render(frame_info);
 
-    swapchain.endSwapChainRenderPass(frame_info);
+        swapchain.endSwapChainRenderPass(frame_info);
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
         //try rt_render_pass.render(frame_info);

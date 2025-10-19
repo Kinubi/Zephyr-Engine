@@ -9,7 +9,7 @@ const Resource = @import("../rendering/unified_pipeline_system.zig").Resource;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
-const Vertex = @import("../rendering/mesh.zig").Vertex;
+const vertex_formats = @import("../rendering/vertex_formats.zig");
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -48,15 +48,8 @@ pub const TexturedRenderer = struct {
             .vertex_shader = "shaders/textured.vert",
             .fragment_shader = "shaders/textured.frag",
             .render_pass = render_pass,
-            .vertex_input_bindings = &[_]@import("../rendering/pipeline_builder.zig").VertexInputBinding{
-                .{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = .vertex },
-            },
-            .vertex_input_attributes = &[_]@import("../rendering/pipeline_builder.zig").VertexInputAttribute{
-                .{ .location = 0, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "pos") },
-                .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "color") },
-                .{ .location = 2, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "normal") },
-                .{ .location = 3, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Vertex, "uv") },
-            },
+            .vertex_input_bindings = vertex_formats.mesh_bindings[0..],
+            .vertex_input_attributes = vertex_formats.mesh_attributes[0..],
             .push_constant_ranges = &[_]vk.PushConstantRange{
                 .{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(TexturedPushConstantData) },
             },

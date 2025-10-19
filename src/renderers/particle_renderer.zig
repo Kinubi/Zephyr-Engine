@@ -15,6 +15,8 @@ const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const log = @import("../utils/log.zig").log;
 const math = @import("../utils/math.zig");
+const vertex_formats = @import("../rendering/vertex_formats.zig");
+const Particle = vertex_formats.Particle;
 
 /// Particle renderer using the unified pipeline system
 ///
@@ -109,14 +111,8 @@ pub const ParticleRenderer = struct {
             .vertex_shader = "shaders/particles.vert",
             .fragment_shader = "shaders/particles.frag",
             .render_pass = render_pass,
-            .vertex_input_bindings = &[_]@import("../rendering/pipeline_builder.zig").VertexInputBinding{
-                .{ .binding = 0, .stride = @sizeOf(Particle), .input_rate = .vertex },
-            },
-            .vertex_input_attributes = &[_]@import("../rendering/pipeline_builder.zig").VertexInputAttribute{
-                .{ .location = 0, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "position") },
-                .{ .location = 1, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "velocity") },
-                .{ .location = 2, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(Particle, "color") },
-            },
+            .vertex_input_bindings = vertex_formats.particle_bindings[0..],
+            .vertex_input_attributes = vertex_formats.particle_attributes[0..],
             .topology = .point_list,
             .cull_mode = .{}, // No culling for particles
         };
@@ -551,25 +547,6 @@ const ParticleBuffers = struct {
         self.particle_buffer_in.deinit();
         self.particle_buffer_out.deinit();
     }
-};
-
-/// Particle vertex data (for rendering) - matches old renderer exactly
-pub const Particle = extern struct {
-    position: [2]f32,
-    velocity: [2]f32,
-    color: [4]f32,
-
-    pub const binding_description = vk.VertexInputBindingDescription{
-        .binding = 0,
-        .stride = @sizeOf(Particle),
-        .input_rate = .vertex,
-    };
-
-    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
-        .{ .binding = 0, .location = 0, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "position") },
-        .{ .binding = 0, .location = 1, .format = .r32g32_sfloat, .offset = @offsetOf(Particle, "velocity") },
-        .{ .binding = 0, .location = 2, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(Particle, "color") },
-    };
 };
 
 /// Render shader uniform buffer
