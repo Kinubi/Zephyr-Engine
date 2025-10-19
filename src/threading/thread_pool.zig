@@ -13,6 +13,7 @@ pub const WorkItemType = enum {
     hot_reload,
     bvh_building,
     compute_task,
+    ecs_update,
     gpu_work,
     custom,
 };
@@ -57,6 +58,7 @@ pub const WorkItem = struct {
         hot_reload: HotReloadData,
         bvh_building: BvhBuildingData,
         compute_task: ComputeTaskData,
+        ecs_update: EcsUpdateData,
         gpu_work: GpuWorkData,
         custom: CustomData,
     };
@@ -86,6 +88,11 @@ pub const WorkItem = struct {
         staging_type: GPUWork,
         asset_id: AssetId,
         data: *anyopaque, // Points to TextureStaging or MeshStaging
+    };
+
+    const EcsUpdateData = struct {
+        stage_index: u32,
+        job_index: u32,
     };
 
     const CustomData = struct {
