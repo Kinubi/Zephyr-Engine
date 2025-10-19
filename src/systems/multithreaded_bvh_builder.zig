@@ -235,7 +235,7 @@ pub const MultithreadedBvhBuilder = struct {
     /// Build BVH structures asynchronously using pre-computed raytracing data
     pub fn buildRtDataBvhAsync(
         self: *MultithreadedBvhBuilder,
-        rt_data: @import("../rendering/scene_view.zig").RaytracingData,
+        rt_data: @import("../rendering/scene_bridge.zig").RaytracingData,
         completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
         callback_context: ?*anyopaque,
     ) !void {

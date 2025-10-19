@@ -2,6 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const SceneBridge = @import("scene_bridge.zig").SceneBridge;
 
 /// Render pass types for categorization and optimization
 pub const PassType = enum {
@@ -201,7 +202,7 @@ pub const RenderContext = struct {
     frame_info: *const FrameInfo,
     command_buffer: vk.CommandBuffer,
     frame_index: u32,
-    scene_view: *SceneView,
+    scene_bridge: *SceneBridge,
 
     /// Get current render area
     pub fn getRenderArea(self: *const RenderContext) vk.Rect2D {
@@ -249,38 +250,6 @@ pub const RenderContext = struct {
     /// End the current Vulkan render pass
     pub fn endVulkanRenderPass(self: *const RenderContext) void {
         self.graphics_context.vkd.cmdEndRenderPass(self.command_buffer);
-    }
-};
-
-/// Scene view abstraction for pass-specific data extraction
-pub const SceneView = struct {
-    // Forward declarations - will be implemented in separate file
-    const RasterizationData = @import("scene_view.zig").RasterizationData;
-    const RaytracingData = @import("scene_view.zig").RaytracingData;
-    const ComputeData = @import("scene_view.zig").ComputeData;
-
-    scene_ptr: *anyopaque,
-    vtable: *const SceneViewVTable,
-
-    pub const SceneViewVTable = struct {
-        getRasterizationData: *const fn (scene_ptr: *anyopaque) RasterizationData,
-        getRaytracingData: *const fn (scene_ptr: *anyopaque) RaytracingData,
-        getComputeData: *const fn (scene_ptr: *anyopaque) ComputeData,
-    };
-
-    /// Get rasterization-specific scene data (meshes, materials, textures)
-    pub fn getRasterizationData(self: *SceneView) RasterizationData {
-        return self.vtable.getRasterizationData(self.scene_ptr);
-    }
-
-    /// Get raytracing-specific scene data (geometries, instances, BLAS/TLAS)
-    pub fn getRaytracingData(self: *SceneView) RaytracingData {
-        return self.vtable.getRaytracingData(self.scene_ptr);
-    }
-
-    /// Get compute-specific scene data (particle systems, compute buffers)
-    pub fn getComputeData(self: *SceneView) ComputeData {
-        return self.vtable.getComputeData(self.scene_ptr);
     }
 };
 

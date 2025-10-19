@@ -844,12 +844,6 @@ pub const AssetManager = struct {
         return LoadPriority.fromDistance(distance);
     }
 
-    /// Process pending hot reloads
-    pub fn processPendingReloads(self: *AssetManager) void {
-        // Hot reload processing is handled by background worker thread
-        _ = self; // Hot reload manager runs continuously in background
-    }
-
     /// Print performance report
     pub fn printPerformanceReport(self: *AssetManager) void {
         const stats = self.getStatistics();

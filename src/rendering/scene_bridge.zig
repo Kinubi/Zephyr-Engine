@@ -1,17 +1,137 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const Scene = @import("../scene/scene.zig").Scene;
-const GameObject = @import("../scene/game_object.zig").GameObject;
-const SceneView = @import("render_pass.zig").SceneView;
-const RasterizationData = @import("scene_view.zig").RasterizationData;
-const RaytracingData = @import("scene_view.zig").RaytracingData;
-const ComputeData = @import("scene_view.zig").ComputeData;
 const Mesh = @import("mesh.zig").Mesh;
+const Model = @import("mesh.zig").Model;
 const Math = @import("../utils/math.zig");
 const log = @import("../utils/log.zig").log;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
-/// Bridge between existing Scene and new SceneView system
+/// Rasterization-specific scene data
+pub const RasterizationData = struct {
+    pub const RenderableObject = struct {
+        pub const MeshHandle = struct {
+            mesh_ptr: *const Mesh,
+
+            pub fn getMesh(self: MeshHandle) *const Mesh {
+                return self.mesh_ptr;
+            }
+        };
+
+        transform: [16]f32,
+        mesh_handle: MeshHandle,
+        material_index: u32,
+        visible: bool = true,
+    };
+
+    pub const MaterialData = struct {
+        base_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
+        metallic: f32 = 0.0,
+        roughness: f32 = 1.0,
+        emissive: f32 = 0.0,
+        texture_index: u32 = 0,
+    };
+
+    objects: []const RenderableObject,
+
+    pub fn getVisibleObjects(self: *const RasterizationData) []const RenderableObject {
+        return self.objects;
+    }
+};
+
+/// Raytracing-specific scene data
+pub const RaytracingData = struct {
+    pub const RTInstance = struct {
+        transform: [3][4]f32,
+        instance_id: u32,
+        mask: u8 = 0xFF,
+        geometry_index: u32,
+        material_index: u32,
+    };
+
+    pub const RTGeometry = struct {
+        mesh_ptr: *Mesh,
+        blas: ?vk.AccelerationStructureKHR = null,
+    };
+
+    pub const BvhChangeTracker = struct {
+        last_object_count: usize = 0,
+        last_geometry_count: usize = 0,
+        last_instance_count: usize = 0,
+        resources_updated: bool = false,
+        force_rebuild: bool = false,
+
+        pub fn needsRebuild(
+            self: *BvhChangeTracker,
+            current_objects: usize,
+            current_geometries: usize,
+            current_instances: usize,
+            resources_changed: bool,
+        ) bool {
+            const needs_rebuild = self.force_rebuild or
+                (current_objects != self.last_object_count) or
+                (current_geometries != self.last_geometry_count) or
+                (current_instances != self.last_instance_count) or
+                resources_changed;
+
+            if (needs_rebuild) {
+                self.last_object_count = current_objects;
+                self.last_geometry_count = current_geometries;
+                self.last_instance_count = current_instances;
+                self.resources_updated = resources_changed;
+                self.force_rebuild = false;
+            }
+
+            return needs_rebuild;
+        }
+
+        pub fn forceRebuild(self: *BvhChangeTracker) void {
+            self.force_rebuild = true;
+        }
+    };
+
+    instances: []const RTInstance,
+    geometries: []const RTGeometry,
+    materials: []const RasterizationData.MaterialData,
+    change_tracker: BvhChangeTracker = .{},
+
+    pub fn needsTLASRebuild(self: *RaytracingData, resources_updated: bool) bool {
+        return self.change_tracker.needsRebuild(self.instances.len, self.geometries.len, self.instances.len, resources_updated);
+    }
+
+    pub fn forceRebuild(self: *RaytracingData) void {
+        self.change_tracker.forceRebuild();
+    }
+};
+
+/// Compute-specific scene data
+pub const ComputeData = struct {
+    pub const ParticleSystem = struct {
+        position_buffer: vk.Buffer,
+        velocity_buffer: vk.Buffer,
+        particle_count: u32,
+        max_particles: u32,
+        emit_rate: f32,
+        lifetime: f32,
+    };
+
+    pub const ComputeTask = struct {
+        dispatch_x: u32,
+        dispatch_y: u32 = 1,
+        dispatch_z: u32 = 1,
+        pipeline: vk.Pipeline,
+        descriptor_set: vk.DescriptorSet,
+    };
+
+    particle_systems: []const ParticleSystem,
+    compute_tasks: []const ComputeTask,
+
+    pub fn getActiveParticleSystems(self: *const ComputeData) []const ParticleSystem {
+        return self.particle_systems;
+    }
+};
+
+/// Bridge between the Scene and renderer-facing data caches
 pub const SceneBridge = struct {
     scene: *Scene,
     rasterization_cache: ?RasterizationData = null,
@@ -67,20 +187,6 @@ pub const SceneBridge = struct {
         return bridge;
     }
 
-    /// Create SceneView that bridges to existing Scene
-    pub fn createSceneView(self: *SceneBridge) SceneView {
-        const vtable = &SceneViewVTable{
-            .getRasterizationData = getRasterizationDataImpl,
-            .getRaytracingData = getRaytracingDataImpl,
-            .getComputeData = getComputeDataImpl,
-        };
-
-        return SceneView{
-            .scene_ptr = self,
-            .vtable = vtable,
-        };
-    }
-
     /// Kick the scene's async resource updates and propagate completion to renderers
     pub fn updateAsyncResources(self: *SceneBridge) !bool {
         const asset_manager = self.scene.asset_manager;
@@ -125,9 +231,6 @@ pub const SceneBridge = struct {
         if (texture_completed) {
             SceneBridge.setAllTrue(&self.texture_update_needed);
             SceneBridge.setAllTrue(&self.raytracing_update_needed);
-            if (self.scene.raytracing_system) |rt_system| {
-                rt_system.requestTextureDescriptorUpdate();
-            }
         }
 
         if (material_completed) {
@@ -547,24 +650,6 @@ pub const SceneBridge = struct {
         }
         // compute_cache uses static slices, no cleanup needed
         self.last_model_asset_ids.deinit(self.allocator);
-    }
-
-    // VTable implementations
-    const SceneViewVTable = SceneView.SceneViewVTable;
-
-    fn getRasterizationDataImpl(scene_ptr: *anyopaque) RasterizationData {
-        const self: *SceneBridge = @ptrCast(@alignCast(scene_ptr));
-        return self.getRasterizationData();
-    }
-
-    fn getRaytracingDataImpl(scene_ptr: *anyopaque) RaytracingData {
-        const self: *SceneBridge = @ptrCast(@alignCast(scene_ptr));
-        return self.getRaytracingData();
-    }
-
-    fn getComputeDataImpl(scene_ptr: *anyopaque) ComputeData {
-        const self: *SceneBridge = @ptrCast(@alignCast(scene_ptr));
-        return self.getComputeData();
     }
 
     fn setAllTrue(flags: *[MAX_FRAMES_IN_FLIGHT]bool) void {

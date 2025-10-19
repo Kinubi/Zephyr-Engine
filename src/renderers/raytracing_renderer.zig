@@ -1,108 +1,126 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Pipeline = @import("../core/pipeline.zig").Pipeline;
-const ShaderLibrary = @import("../core/shader.zig").ShaderLibrary;
+const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const PipelineConfig = @import("../rendering/unified_pipeline_system.zig").PipelineConfig;
+const PipelineId = @import("../rendering/unified_pipeline_system.zig").PipelineId;
+const Resource = @import("../rendering/unified_pipeline_system.zig").Resource;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
-const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const Swapchain = @import("../core/swapchain.zig").Swapchain;
-const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
-const RayTracingRenderPassDescriptors = @import("../rendering/render_pass_descriptors.zig").RayTracingRenderPassDescriptors;
 const RaytracingSystem = @import("../systems/raytracing_system.zig").RaytracingSystem;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const Mesh = @import("../rendering/mesh.zig").Mesh;
+const SceneBridge = @import("../rendering/scene_bridge.zig").SceneBridge;
+const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const log = @import("../utils/log.zig").log;
-const DescriptorSetConfig = @import("../rendering/render_pass_descriptors.zig").DescriptorSetConfig;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
 }
 
-/// Raytracing renderer that follows the render pass pattern
+const PerFrameDescriptorData = struct {
+    vertex_infos: std.ArrayList(vk.DescriptorBufferInfo),
+    index_infos: std.ArrayList(vk.DescriptorBufferInfo),
+
+    fn init() PerFrameDescriptorData {
+        return .{
+            .vertex_infos = std.ArrayList(vk.DescriptorBufferInfo){},
+            .index_infos = std.ArrayList(vk.DescriptorBufferInfo){},
+        };
+    }
+
+    fn deinit(self: *PerFrameDescriptorData, allocator: std.mem.Allocator) void {
+        self.vertex_infos.deinit(allocator);
+        self.index_infos.deinit(allocator);
+    }
+
+    fn updateFromGeometries(self: *PerFrameDescriptorData, allocator: std.mem.Allocator, rt_data: anytype) !void {
+        self.vertex_infos.clearRetainingCapacity();
+        self.index_infos.clearRetainingCapacity();
+
+        try self.vertex_infos.ensureTotalCapacity(allocator, rt_data.geometries.len);
+        try self.index_infos.ensureTotalCapacity(allocator, rt_data.geometries.len);
+
+        for (rt_data.geometries) |geometry| {
+            const mesh: *Mesh = geometry.mesh_ptr;
+
+            const vertex_info = if (mesh.vertex_buffer) |vertex_buf|
+                vk.DescriptorBufferInfo{
+                    .buffer = vertex_buf.buffer,
+                    .offset = 0,
+                    .range = vertex_buf.instance_size * vertex_buf.instance_count,
+                }
+            else
+                vk.DescriptorBufferInfo{ .buffer = vk.Buffer.null_handle, .offset = 0, .range = 0 };
+
+            const index_info = if (mesh.index_buffer) |index_buf|
+                vk.DescriptorBufferInfo{
+                    .buffer = index_buf.buffer,
+                    .offset = 0,
+                    .range = index_buf.instance_size * index_buf.instance_count,
+                }
+            else
+                vk.DescriptorBufferInfo{ .buffer = vk.Buffer.null_handle, .offset = 0, .range = 0 };
+
+            self.vertex_infos.appendAssumeCapacity(vertex_info);
+            self.index_infos.appendAssumeCapacity(index_info);
+        }
+    }
+};
+
+/// Raytracing renderer built on the unified pipeline system.
 pub const RaytracingRenderer = struct {
-    gc: *GraphicsContext,
     allocator: std.mem.Allocator,
+    graphics_context: *GraphicsContext,
+    pipeline_system: *UnifiedPipelineSystem,
+    swapchain: *Swapchain,
 
-    // Pipeline and layout
-    pipeline: Pipeline = undefined,
-    pipeline_layout: vk.PipelineLayout = vk.PipelineLayout.null_handle,
+    rt_system: *RaytracingSystem,
+    global_ubo_set: *GlobalUboSet,
 
-    // Pipeline recreation dependencies
-    render_pass: vk.RenderPass = undefined,
-    shader_library: ShaderLibrary = undefined,
+    raytracing_pipeline: PipelineId,
+    pipeline_handle: vk.Pipeline,
 
-    // Output texture
-    output_texture: Texture = undefined,
-    width: u32 = 1280,
-    height: u32 = 720,
+    output_texture: Texture,
+    width: u32,
+    height: u32,
 
-    // Descriptor management
-    descriptors: *RayTracingRenderPassDescriptors = undefined,
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
+    per_frame: [MAX_FRAMES_IN_FLIGHT]PerFrameDescriptorData,
 
-    // Raytracing system instance
-    rt_system: *RaytracingSystem = undefined,
-
-    // Swapchain reference for copying output
-    swapchain: *Swapchain = undefined,
-
-    // Raytracing state
-    tlas: vk.AccelerationStructureKHR = undefined,
+    tlas: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
     tlas_valid: bool = false,
-    descriptors_initialized: bool = false,
-    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
 
     pub fn init(
-        gc: *GraphicsContext,
         allocator: std.mem.Allocator,
-        render_pass: vk.RenderPass,
-        shader_library: ShaderLibrary,
+        graphics_context: *GraphicsContext,
+        pipeline_system: *UnifiedPipelineSystem,
         swapchain: *Swapchain,
         thread_pool: *ThreadPool,
+        global_ubo_set: *GlobalUboSet,
     ) !RaytracingRenderer {
-        // Initialize descriptor manager with minimal counts (will resize dynamically)
-        const initial_vertex_buffer_count: u32 = 1;
-        const initial_index_buffer_count: u32 = 1;
-        var descriptors = try allocator.create(RayTracingRenderPassDescriptors);
-        descriptors.* = try RayTracingRenderPassDescriptors.init(
-            gc,
-            allocator,
-            initial_vertex_buffer_count,
-            initial_index_buffer_count,
-        );
+        log(.INFO, "raytracing_renderer", "Initializing raytracing renderer", .{});
 
-        // Create pipeline layout using the descriptor set layout
-        const rt_layout = descriptors.getDescSetLayout() orelse return error.FailedToGetDescriptorSetLayout;
-        const dsl = [_]vk.DescriptorSetLayout{rt_layout};
-        const pipeline_layout = try gc.vkd.createPipelineLayout(
-            gc.dev,
-            &vk.PipelineLayoutCreateInfo{
-                .flags = .{},
-                .set_layout_count = dsl.len,
-                .p_set_layouts = &dsl,
-                .push_constant_range_count = 0,
-                .p_push_constant_ranges = null,
-            },
-            null,
-        );
+        const pipeline_config = PipelineConfig{
+            .name = "raytracing_renderer",
+            .raygen_shader = "shaders/RayTracingTriangle.rgen.hlsl",
+            .miss_shader = "shaders/RayTracingTriangle.rmiss.hlsl",
+            .closest_hit_shader = "shaders/RayTracingTriangle.rchit.hlsl",
+            .render_pass = vk.RenderPass.null_handle,
+        };
 
-        // Create raytracing pipeline
-        const pipeline = try Pipeline.initRaytracing(
-            gc.*,
-            render_pass,
-            shader_library,
-            pipeline_layout,
-            Pipeline.defaultRaytracingLayout(pipeline_layout),
-            allocator,
-        );
+        const pipeline_id = try pipeline_system.createPipeline(pipeline_config);
+        const pipeline_entry = pipeline_system.pipelines.get(pipeline_id) orelse return error.PipelineNotFound;
 
-        // Create output texture
         var output_format = swapchain.surface_format.format;
         if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
             output_format = vk.Format.a2b10g10r10_unorm_pack32;
         }
+
         const output_texture = try Texture.init(
-            gc,
+            graphics_context,
             output_format,
             .{ .width = swapchain.extent.width, .height = swapchain.extent.height, .depth = 1 },
             vk.ImageUsageFlags{
@@ -114,420 +132,236 @@ pub const RaytracingRenderer = struct {
             vk.SampleCountFlags{ .@"1_bit" = true },
         );
 
-        // Initialize raytracing system (heap allocated for proper lifetime management)
         const rt_system = try allocator.create(RaytracingSystem);
-        rt_system.* = try RaytracingSystem.init(
-            gc,
-            allocator,
-            swapchain.extent.width,
-            swapchain.extent.height,
-            thread_pool,
-        );
+        rt_system.* = try RaytracingSystem.init(graphics_context, allocator, thread_pool);
+        try rt_system.updateShaderBindingTable(pipeline_entry.vulkan_pipeline);
 
-        // Initialize shader binding table after pipeline creation
-        try rt_system.updateShaderBindingTable(pipeline.pipeline);
+        var per_frame: [MAX_FRAMES_IN_FLIGHT]PerFrameDescriptorData = undefined;
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            per_frame[i] = PerFrameDescriptorData.init();
+        }
+
+        log(.INFO, "raytracing_renderer", "Raytracing renderer initialized", .{});
 
         return RaytracingRenderer{
-            .gc = gc,
             .allocator = allocator,
-            .pipeline = pipeline,
-            .pipeline_layout = pipeline_layout,
-            .render_pass = render_pass,
-            .shader_library = shader_library,
-            .rt_system = rt_system,
+            .graphics_context = graphics_context,
+            .pipeline_system = pipeline_system,
             .swapchain = swapchain,
+            .rt_system = rt_system,
+            .global_ubo_set = global_ubo_set,
+            .raytracing_pipeline = pipeline_id,
+            .pipeline_handle = pipeline_entry.vulkan_pipeline,
             .output_texture = output_texture,
             .width = swapchain.extent.width,
             .height = swapchain.extent.height,
-            .descriptors = descriptors,
-            .tlas = vk.AccelerationStructureKHR.null_handle,
-            .tlas_valid = false,
+            .per_frame = per_frame,
         };
     }
 
     pub fn deinit(self: *RaytracingRenderer) void {
-        // Wait for device idle
-        self.gc.vkd.deviceWaitIdle(self.gc.dev) catch |err| {
+        log(.INFO, "raytracing_renderer", "Cleaning up raytracing renderer", .{});
+
+        self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev) catch |err| {
             log(.WARN, "raytracing_renderer", "Failed to wait for device idle during deinit: {}", .{err});
         };
 
-        // Clean up output texture
         self.output_texture.deinit();
 
-        // Clean up descriptors
-        self.descriptors.deinit();
+        for (&self.per_frame) |*frame| {
+            frame.deinit(self.allocator);
+        }
 
-        // Clean up raytracing system (heap allocated)
         self.rt_system.deinit();
         self.allocator.destroy(self.rt_system);
-
-        // Clean up pipeline
-        self.pipeline.deinit();
-
-        // Clean up pipeline layout (check if valid first)
-        if (self.pipeline_layout != vk.PipelineLayout.null_handle) {
-            self.gc.vkd.destroyPipelineLayout(self.gc.dev, self.pipeline_layout, null);
-            self.pipeline_layout = vk.PipelineLayout.null_handle;
-        }
     }
 
-    /// Update TLAS reference for raytracing
-    pub fn updateTLAS(self: *RaytracingRenderer, tlas: vk.AccelerationStructureKHR) void {
-        self.tlas = tlas;
-        self.tlas_valid = (tlas != vk.AccelerationStructureKHR.null_handle);
-        // Reset descriptor initialization flag since TLAS changed
-        self.descriptors_initialized = false;
-        // Mark all frames as needing descriptor updates
-        self.markAllFramesDirty();
-    }
-
-    /// Mark all frames in flight as needing descriptor updates
-    pub fn markAllFramesDirty(self: *RaytracingRenderer) void {
+    fn markAllFramesDirty(self: *RaytracingRenderer) void {
         for (&self.descriptor_dirty_flags) |*flag| {
             flag.* = true;
         }
     }
 
-    /// Mark descriptors as needing updates due to material changes
-    pub fn markMaterialsDirty(self: *RaytracingRenderer) void {
+    pub fn updateTLAS(self: *RaytracingRenderer, tlas: vk.AccelerationStructureKHR) void {
+        self.tlas = tlas;
+        self.tlas_valid = (tlas != vk.AccelerationStructureKHR.null_handle);
         self.markAllFramesDirty();
     }
 
-    /// Update descriptors with current frame data
-    pub fn updateDescriptors(
-        self: *RaytracingRenderer,
-        frame_index: u32,
-        global_ubo_buffer_info: vk.DescriptorBufferInfo,
-        vertex_buffer_infos: []const vk.DescriptorBufferInfo,
-        index_buffer_infos: []const vk.DescriptorBufferInfo,
-        material_buffer_info: vk.DescriptorBufferInfo,
-        texture_image_infos: []const vk.DescriptorImageInfo,
-    ) !void {
-        if (!self.tlas_valid) {
-            log(.WARN, "raytracing_renderer", "Cannot update descriptors: TLAS not valid", .{});
-            return;
+    pub fn update(self: *RaytracingRenderer, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+        const frame_index = frame_info.current_frame;
+        if (frame_index >= MAX_FRAMES_IN_FLIGHT) return error.InvalidFrameIndex;
+
+        _ = try self.rt_system.update(scene_bridge, frame_info);
+
+        if (self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
+            (!self.tlas_valid or self.rt_system.tlas_dirty))
+        {
+            self.updateTLAS(self.rt_system.tlas);
+            self.rt_system.tlas_dirty = false;
         }
 
-        // Get acceleration structure descriptor info
-        const as_info = vk.WriteDescriptorSetAccelerationStructureKHR{
-            .s_type = vk.StructureType.write_descriptor_set_acceleration_structure_khr,
-            .p_next = null,
-            .acceleration_structure_count = 1,
-            .p_acceleration_structures = @ptrCast(&self.tlas),
-        };
+        const raytracing_dirty = scene_bridge.raytracingUpdated(frame_index);
+        const materials_dirty = scene_bridge.materialsUpdated(frame_index);
+        const textures_dirty = scene_bridge.texturesUpdated(frame_index);
 
-        // Get output image info
-        const output_image_info = self.output_texture.getDescriptorInfo();
+        const rt_geometries = scene_bridge.getRaytracingGeometries();
+        const per_frame = &self.per_frame[frame_index];
+        const geometry_count = rt_geometries.len;
 
-        // Update all raytracing descriptors
-        try self.descriptors.updateRaytracingData(
-            frame_index,
-            @constCast(&as_info),
-            output_image_info,
-            global_ubo_buffer_info,
-            vertex_buffer_infos,
-            index_buffer_infos,
-            material_buffer_info,
-            texture_image_infos,
-        );
-    }
+        const needs_update = raytracing_dirty or
+            materials_dirty or
+            textures_dirty or
+            self.descriptor_dirty_flags[frame_index] or
+            per_frame.vertex_infos.items.len != geometry_count or
+            per_frame.index_infos.items.len != geometry_count;
 
-    /// Update material data only
-    pub fn updateMaterialData(
-        self: *RaytracingRenderer,
-        frame_index: u32,
-        material_buffer_info: vk.DescriptorBufferInfo,
-        texture_image_infos: []const vk.DescriptorImageInfo,
-    ) !void {
-        try self.descriptors.updateMatData(frame_index, material_buffer_info, texture_image_infos);
-    }
-
-    /// Update acceleration structure data only
-    pub fn updateASData(
-        self: *RaytracingRenderer,
-        frame_index: u32,
-        vertex_buffer_infos: []const vk.DescriptorBufferInfo,
-        index_buffer_infos: []const vk.DescriptorBufferInfo,
-    ) !void {
-        if (!self.tlas_valid) return;
-
-        const as_info = vk.WriteDescriptorSetAccelerationStructureKHR{
-            .s_type = vk.StructureType.write_descriptor_set_acceleration_structure_khr,
-            .p_next = null,
-            .acceleration_structure_count = 1,
-            .p_acceleration_structures = @ptrCast(&self.tlas),
-        };
-
-        try self.descriptors.updateASData(frame_index, @constCast(&as_info), vertex_buffer_infos, index_buffer_infos);
-    }
-
-    /// Update from scene view raytracing data (handles dynamic buffer counts)
-    pub fn updateFromSceneView(
-        self: *RaytracingRenderer,
-        frame_index: u32,
-        global_ubo_buffer_info: vk.DescriptorBufferInfo,
-        material_buffer_info: vk.DescriptorBufferInfo,
-        texture_image_infos: []const vk.DescriptorImageInfo,
-        rt_data: anytype, // SceneView.RaytracingData
-        rt_system: *RaytracingSystem, // Reference to reset descriptor update flag
-    ) !void {
-        if (!self.tlas_valid) {
-            log(.WARN, "raytracing_renderer", "Cannot update from scene view: TLAS not valid", .{});
-            return;
+        if (!needs_update) {
+            return false;
         }
 
-        // Check if we need to resize descriptors based on new buffer counts
-        const new_vertex_count = @as(u32, @intCast(rt_data.geometries.len));
-        const new_index_count = @as(u32, @intCast(rt_data.geometries.len));
-        const new_texture_count = @as(u32, @intCast(texture_image_infos.len));
+        const material_info = scene_bridge.getMaterialBufferInfo() orelse {
+            return false;
+        };
 
-        // Check if we need to resize descriptors based on new buffer counts
-        const needs_resize = self.descriptors.needsResize(new_vertex_count, new_index_count, new_texture_count);
+        const texture_image_infos = scene_bridge.getTextures();
+        const textures_ready = blk: {
+            if (texture_image_infos.len == 0) break :blk false;
+            for (texture_image_infos) |info| {
+                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) {
+                    break :blk false;
+                }
+            }
+            break :blk true;
+        };
+        const material_resource = Resource{
+            .buffer = .{
+                .buffer = material_info.buffer,
+                .offset = material_info.offset,
+                .range = material_info.range,
+            },
+        };
 
-        // Update descriptors if: 1) Never initialized, 2) Per-frame dirty flag set, 3) Resize needed
-        const frame_needs_update = self.descriptor_dirty_flags[frame_index];
-        const needs_update = !self.descriptors_initialized or frame_needs_update or needs_resize;
+        const textures_resource = if (textures_ready)
+            Resource{ .image_array = texture_image_infos }
+        else
+            null;
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const target_frame: u32 = @intCast(frame_idx);
+            const frame_data = &self.per_frame[frame_idx];
+            try frame_data.updateFromGeometries(self.allocator, .{ .geometries = rt_geometries });
 
-        if (needs_update) {
-            if (needs_resize) {
-                try self.resizeDescriptors(new_vertex_count, new_index_count, new_texture_count);
+            if (frame_data.vertex_infos.items.len > 0) {
+                const vertices_resource = Resource{ .buffer_array = frame_data.vertex_infos.items };
+                try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 3, vertices_resource, target_frame);
+            }
+            if (frame_data.index_infos.items.len > 0) {
+                const indices_resource = Resource{ .buffer_array = frame_data.index_infos.items };
+                try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 4, indices_resource, target_frame);
             }
 
-            // Update all descriptors
-            const as_info = vk.WriteDescriptorSetAccelerationStructureKHR{
-                .s_type = vk.StructureType.write_descriptor_set_acceleration_structure_khr,
-                .p_next = null,
-                .acceleration_structure_count = 1,
-                .p_acceleration_structures = @ptrCast(&self.tlas),
-            };
+            try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 5, material_resource, target_frame);
 
-            const output_image_info = self.output_texture.getDescriptorInfo();
-
-            try self.descriptors.updateFromSceneViewData(
-                frame_index,
-                @constCast(&as_info),
-                output_image_info,
-                global_ubo_buffer_info,
-                material_buffer_info,
-                texture_image_infos,
-                rt_data,
-            );
-
-            // Mark descriptors as initialized
-            self.descriptors_initialized = true;
-
-            // Clear the per-frame dirty flag
-            self.descriptor_dirty_flags[frame_index] = false;
-
-            // Reset the descriptor update flag in the raytracing system
-            rt_system.descriptors_need_update = false;
+            if (textures_resource) |res| {
+                try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 6, res, target_frame);
+            }
         }
-    }
 
-    /// Resize descriptor sets when buffer counts change
-    fn resizeDescriptors(
-        self: *RaytracingRenderer,
-        new_vertex_buffer_count: u32,
-        new_index_buffer_count: u32,
-        new_texture_count: u32,
-    ) !void {
-        // Create new bindings array on heap (updated counts)
-        const new_bindings = try self.allocator.dupe(DescriptorSetConfig.BindingConfig, &[_]DescriptorSetConfig.BindingConfig{
-            // Binding 0: Top-level acceleration structure
-            .{
-                .binding = 0,
-                .descriptor_type = .acceleration_structure_khr,
-                .stage_flags = .{ .raygen_bit_khr = true },
-                .descriptor_count = 1,
-            },
-            // Binding 1: Storage image (output)
-            .{
-                .binding = 1,
-                .descriptor_type = .storage_image,
-                .stage_flags = .{ .raygen_bit_khr = true },
-                .descriptor_count = 1,
-            },
-            // Binding 2: Uniform buffer (camera data)
-            .{
-                .binding = 2,
-                .descriptor_type = .uniform_buffer,
-                .stage_flags = .{ .raygen_bit_khr = true },
-                .descriptor_count = 1,
-            },
-            // Binding 3: Vertex buffers array (updated count)
-            .{
-                .binding = 3,
-                .descriptor_type = .storage_buffer,
-                .stage_flags = .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true },
-                .descriptor_count = @max(new_vertex_buffer_count, 1),
-            },
-            // Binding 4: Index buffers array (updated count)
-            .{
-                .binding = 4,
-                .descriptor_type = .storage_buffer,
-                .stage_flags = .{ .raygen_bit_khr = true, .closest_hit_bit_khr = true },
-                .descriptor_count = @max(new_index_buffer_count, 1),
-            },
-            // Binding 5: Material buffer
-            .{
-                .binding = 5,
-                .descriptor_type = .storage_buffer,
-                .stage_flags = .{ .closest_hit_bit_khr = true },
-                .descriptor_count = 1,
-            },
-            // Binding 6: Texture array (dynamically sized)
-            .{
-                .binding = 6,
-                .descriptor_type = .combined_image_sampler,
-                .stage_flags = .{ .closest_hit_bit_khr = true },
-                .descriptor_count = @max(new_texture_count, 1),
-            },
-        });
+        if (!self.tlas_valid) {
+            return false;
+        }
 
-        // Create new configuration with updated buffer counts
-        const new_set_config = DescriptorSetConfig{
-            .set_index = 0,
-            .bindings = new_bindings,
+        const accel_resource = Resource{ .acceleration_structure = self.tlas };
+        const output_descriptor = self.output_texture.getDescriptorInfo();
+        const output_resource = Resource{
+            .image = .{
+                .image_view = output_descriptor.image_view,
+                .sampler = output_descriptor.sampler,
+                .layout = output_descriptor.image_layout,
+            },
         };
 
-        // Recreate the descriptor set with new configuration
-        try self.descriptors.manager.recreateDescriptorSet(0, new_set_config);
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const target_frame: u32 = @intCast(frame_idx);
+            const global_ubo_buffer_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+            const global_resource = Resource{
+                .buffer = .{
+                    .buffer = global_ubo_buffer_info.buffer,
+                    .offset = global_ubo_buffer_info.offset,
+                    .range = global_ubo_buffer_info.range,
+                },
+            };
 
-        // CRITICAL: Update stored config in self.descriptors.configs to prevent infinite loop
-        self.descriptors.configs[0] = new_set_config;
+            try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 0, accel_resource, target_frame);
+            try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 1, output_resource, target_frame);
+            try self.pipeline_system.bindResource(self.raytracing_pipeline, 0, 2, global_resource, target_frame);
 
-        // CRITICAL: When descriptor set layout changes, we must recreate pipeline layout and pipeline
-        try self.recreatePipelineLayoutAndPipeline();
+            self.descriptor_dirty_flags[frame_idx] = false;
+        }
 
-        // Reset descriptor initialization flag since we've recreated them
-        self.descriptors_initialized = false;
+        if (raytracing_dirty) {
+            scene_bridge.markRaytracingSynced(frame_index);
+        }
+
+        return true;
     }
 
-    /// Recreate pipeline layout and pipeline after descriptor layout changes
-    fn recreatePipelineLayoutAndPipeline(self: *RaytracingRenderer) !void {
-        // Wait for device idle before destroying pipeline resources
-        try self.gc.vkd.deviceWaitIdle(self.gc.dev);
+    pub fn render(self: *RaytracingRenderer, frame_info: FrameInfo, scene_bridge: *SceneBridge) !void {
+        _ = scene_bridge;
 
-        // Destroy old pipeline and layout (check if valid first)
-        self.pipeline.deinit();
+        if (self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
+            (!self.tlas_valid or self.rt_system.tlas_dirty))
+        {
+            self.updateTLAS(self.rt_system.tlas);
+            self.rt_system.tlas_dirty = false;
+        }
 
-        // Get updated descriptor set layout
-        const rt_layout = self.descriptors.manager.getDescriptorSetLayout(0) orelse return error.FailedToGetDescriptorSetLayout;
-        const dsl = [_]vk.DescriptorSetLayout{rt_layout};
+        if (!self.tlas_valid) {
+            return;
+        }
 
-        // Recreate pipeline layout with new descriptor set layout
-        self.pipeline_layout = try self.gc.vkd.createPipelineLayout(
-            self.gc.dev,
-            &vk.PipelineLayoutCreateInfo{
-                .flags = .{},
-                .set_layout_count = dsl.len,
-                .p_set_layouts = &dsl,
-                .push_constant_range_count = 0,
-                .p_push_constant_ranges = null,
-            },
+        if (self.descriptor_dirty_flags[frame_info.current_frame]) {
+            return;
+        }
+
+        const gc = self.graphics_context;
+
+        try self.resizeOutput(self.swapchain);
+
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.raytracing_pipeline) orelse return error.PipelineNotFound;
+        if (pipeline_entry.vulkan_pipeline != self.pipeline_handle) {
+            try self.rt_system.updateShaderBindingTable(pipeline_entry.vulkan_pipeline);
+            self.pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.pipeline_system.markPipelineResourcesDirty(self.raytracing_pipeline);
+            self.markAllFramesDirty();
+        }
+
+        try self.pipeline_system.updateDescriptorSetsForPipeline(self.raytracing_pipeline, frame_info.current_frame);
+
+        gc.vkd.cmdBindPipeline(frame_info.command_buffer, vk.PipelineBindPoint.ray_tracing_khr, pipeline_entry.vulkan_pipeline);
+
+        if (pipeline_entry.descriptor_sets.items.len == 0) {
+            log(.WARN, "raytracing_renderer", "No descriptor sets available for raytracing pipeline", .{});
+            return;
+        }
+
+        const frame_sets = pipeline_entry.descriptor_sets.items[0];
+        const descriptor_set = frame_sets[frame_info.current_frame];
+        const descriptor_sets = [_]vk.DescriptorSet{descriptor_set};
+        const descriptor_sets_slice = descriptor_sets[0..];
+        const descriptor_count: u32 = @intCast(descriptor_sets.len);
+
+        gc.vkd.cmdBindDescriptorSets(
+            frame_info.command_buffer,
+            vk.PipelineBindPoint.ray_tracing_khr,
+            pipeline_entry.pipeline_layout,
+            0,
+            descriptor_count,
+            descriptor_sets_slice.ptr,
+            0,
             null,
         );
 
-        // Validate shader library state before using it
-        if (self.shader_library.shaders.items.len == 0) {
-            log(.ERROR, "raytracing_renderer", "Shader library has no shaders loaded", .{});
-            return error.EmptyShaderLibrary;
-        }
-
-        // Add safety check for shader library validity
-        if (self.shader_library.shaders.items.len == 0) {
-            log(.ERROR, "raytracing_renderer", "Shader library corrupted: len={}", .{self.shader_library.shaders.items.len});
-            return error.ShaderLibraryCorrupted;
-        }
-
-        // Recreate pipeline with new layout
-        self.pipeline = try Pipeline.initRaytracing(
-            self.gc.*,
-            self.render_pass,
-            self.shader_library,
-            self.pipeline_layout,
-            Pipeline.defaultRaytracingLayout(self.pipeline_layout),
-            self.allocator,
-        );
-
-        // Update SBT after pipeline recreation with error handling
-        self.rt_system.updateShaderBindingTable(self.pipeline.pipeline) catch |err| {
-            log(.ERROR, "raytracing_renderer", "Failed to update SBT after pipeline recreation: {}", .{err});
-            return err;
-        };
-    }
-
-    /// Resize output texture for new swapchain dimensions
-    pub fn resizeOutput(self: *RaytracingRenderer, swapchain: *Swapchain) !void {
-        if (swapchain.extent.width == self.width and swapchain.extent.height == self.height) {
-            return; // No resize needed
-        }
-
-        // Wait for device idle before destroying texture
-        try self.gc.vkd.deviceWaitIdle(self.gc.dev);
-
-        // Destroy old texture
-        self.output_texture.deinit();
-
-        // Create new texture with new dimensions
-        var output_format = swapchain.surface_format.format;
-        if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
-            output_format = vk.Format.a2b10g10r10_unorm_pack32;
-        }
-
-        self.output_texture = try Texture.init(
-            self.gc,
-            output_format,
-            .{ .width = swapchain.extent.width, .height = swapchain.extent.height, .depth = 1 },
-            vk.ImageUsageFlags{
-                .storage_bit = true,
-                .transfer_src_bit = true,
-                .transfer_dst_bit = true,
-                .sampled_bit = true,
-            },
-            vk.SampleCountFlags{ .@"1_bit" = true },
-        );
-
-        self.width = swapchain.extent.width;
-        self.height = swapchain.extent.height;
-    }
-
-    /// Record raytracing commands for a frame
-    pub fn render(
-        self: *RaytracingRenderer,
-        frame_info: FrameInfo,
-    ) !void {
-        if (!self.tlas_valid) {
-            log(.WARN, "raytracing_renderer", "Cannot render: TLAS not valid", .{});
-            return;
-        }
-
-        const gc = self.gc;
-
-        // Check if we need to resize
-        try self.resizeOutput(self.swapchain);
-
-        // Bind pipeline
-        gc.vkd.cmdBindPipeline(frame_info.command_buffer, vk.PipelineBindPoint.ray_tracing_khr, self.pipeline.pipeline);
-
-        // Bind descriptor set
-        if (self.descriptors.getDescSet(frame_info.current_frame)) |descriptor_set| {
-            gc.vkd.cmdBindDescriptorSets(
-                frame_info.command_buffer,
-                vk.PipelineBindPoint.ray_tracing_khr,
-                self.pipeline_layout,
-                0,
-                1,
-                @ptrCast(&descriptor_set),
-                0,
-                null,
-            );
-        } else {
-            log(.WARN, "raytracing_renderer", "No descriptor set available for frame {}", .{frame_info.current_frame});
-            return;
-        }
-
-        // Setup SBT regions
         var rt_props = vk.PhysicalDeviceRayTracingPipelinePropertiesKHR{
             .s_type = vk.StructureType.physical_device_ray_tracing_pipeline_properties_khr,
             .p_next = null,
@@ -578,7 +412,6 @@ pub const RaytracingRenderer = struct {
             .size = 0,
         };
 
-        // Dispatch rays
         gc.vkd.cmdTraceRaysKHR(
             frame_info.command_buffer,
             &raygen_region,
@@ -590,16 +423,46 @@ pub const RaytracingRenderer = struct {
             1,
         );
 
-        // Image layout transitions and copy to swapchain
         try self.copyOutputToSwapchain(frame_info.command_buffer, self.swapchain);
     }
 
-    /// Copy raytracing output to swapchain image
-    fn copyOutputToSwapchain(self: *RaytracingRenderer, command_buffer: vk.CommandBuffer, swapchain: *Swapchain) !void {
-        const gc = self.gc;
+    fn resizeOutput(self: *RaytracingRenderer, swapchain: *Swapchain) !void {
+        if (swapchain.extent.width == self.width and swapchain.extent.height == self.height) {
+            return;
+        }
 
-        // Transition output image to TRANSFER_SRC
-        self.output_texture.transitionImageLayout(
+        try self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev);
+
+        self.output_texture.deinit();
+
+        var output_format = swapchain.surface_format.format;
+        if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
+            output_format = vk.Format.a2b10g10r10_unorm_pack32;
+        }
+
+        self.output_texture = try Texture.init(
+            self.graphics_context,
+            output_format,
+            .{ .width = swapchain.extent.width, .height = swapchain.extent.height, .depth = 1 },
+            vk.ImageUsageFlags{
+                .storage_bit = true,
+                .transfer_src_bit = true,
+                .transfer_dst_bit = true,
+                .sampled_bit = true,
+            },
+            vk.SampleCountFlags{ .@"1_bit" = true },
+        );
+
+        self.width = swapchain.extent.width;
+        self.height = swapchain.extent.height;
+
+        self.markAllFramesDirty();
+    }
+
+    fn copyOutputToSwapchain(self: *RaytracingRenderer, command_buffer: vk.CommandBuffer, swapchain: *Swapchain) !void {
+        const gc = self.graphics_context;
+
+        try self.output_texture.transitionImageLayout(
             command_buffer,
             vk.ImageLayout.general,
             vk.ImageLayout.transfer_src_optimal,
@@ -610,9 +473,8 @@ pub const RaytracingRenderer = struct {
                 .base_array_layer = 0,
                 .layer_count = 1,
             },
-        ) catch |err| return err;
+        );
 
-        // Transition swapchain image to TRANSFER_DST
         gc.transitionImageLayout(
             command_buffer,
             swapchain.swap_images[swapchain.image_index].image,
@@ -627,7 +489,6 @@ pub const RaytracingRenderer = struct {
             },
         );
 
-        // Copy image
         const copy_info = vk.ImageCopy{
             .src_subresource = .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
@@ -660,8 +521,7 @@ pub const RaytracingRenderer = struct {
             @ptrCast(&copy_info),
         );
 
-        // Transition output image back to GENERAL
-        self.output_texture.transitionImageLayout(
+        try self.output_texture.transitionImageLayout(
             command_buffer,
             vk.ImageLayout.transfer_src_optimal,
             vk.ImageLayout.general,
@@ -672,9 +532,8 @@ pub const RaytracingRenderer = struct {
                 .base_array_layer = 0,
                 .layer_count = 1,
             },
-        ) catch |err| return err;
+        );
 
-        // Transition swapchain image to PRESENT_SRC
         gc.transitionImageLayout(
             command_buffer,
             swapchain.swap_images[swapchain.image_index].image,

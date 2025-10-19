@@ -23,7 +23,6 @@ const Camera = @import("rendering/camera.zig").Camera;
 const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("rendering/frameinfo.zig").GlobalUbo;
 const GlobalUboSet = @import("rendering/ubo_set.zig").GlobalUboSet;
-const RaytracingDescriptorSet = @import("rendering/raytracing_descriptor_set.zig").RaytracingDescriptorSet;
 
 // Scene imports
 const Scene = @import("scene/scene.zig").Scene;
@@ -37,8 +36,6 @@ const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
 const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
 
 // Dynamic pipeline system imports
-const DynamicPipelineManager = @import("rendering/dynamic_pipeline_manager.zig").DynamicPipelineManager;
-const PipelineTemplate = @import("rendering/dynamic_pipeline_manager.zig").PipelineTemplate;
 const PipelineBuilder = @import("rendering/pipeline_builder.zig").PipelineBuilder;
 const VertexInputBinding = @import("rendering/pipeline_builder.zig").VertexInputBinding;
 const VertexInputAttribute = @import("rendering/pipeline_builder.zig").VertexInputAttribute;
@@ -51,20 +48,16 @@ const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").U
 const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
 // Renderer imports
-const TexturedRenderer = @import("renderers/unified_textured_renderer.zig").UnifiedTexturedRenderer;
+const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
-const RaytracingRenderer = @import("renderers/unified_raytracing_renderer.zig").RaytracingRenderer;
+const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
 
 // System imports
 // RaytracingSystem is now integrated into RaytracingRenderer
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
-const RenderSystem = @import("systems/render_system.zig").RenderSystem;
 
 // Render Pass System imports
-const RenderPass = @import("rendering/render_pass.zig").RenderPass;
-const RenderContext = @import("rendering/render_pass.zig").RenderContext;
-const SceneView = @import("rendering/render_pass.zig").SceneView;
 const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
 const RendererType = @import("rendering/generic_renderer.zig").RendererType;
 const RendererEntry = @import("rendering/generic_renderer.zig").RendererEntry;
@@ -127,9 +120,7 @@ pub const App = struct {
     var rt_render_pass: GenericRenderer = undefined;
 
     var compute_shader_system: ComputeShaderSystem = undefined;
-    var render_system: RenderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
-    var dynamic_pipeline_manager: DynamicPipelineManager = undefined;
     // NOTE: Shader-pipeline integration removed - unified pipeline system handles hot reload now
 
     // Unified pipeline system
@@ -170,7 +161,6 @@ pub const App = struct {
 
     // Scene bridge and view for rendering
     var scene_bridge: SceneBridge = undefined;
-    var scene_view: SceneView = undefined;
     // Generic renderer system is now the default rendering path
 
     pub fn init(self: *App) !void {
@@ -189,7 +179,6 @@ pub const App = struct {
 
         try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
-        render_system = RenderSystem.init(&self.gc, &swapchain);
 
         // Initialize Thread Pool with dynamic scaling
         thread_pool = try self.allocator.create(ThreadPool);
@@ -415,8 +404,6 @@ pub const App = struct {
         // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
         // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
 
-        // Initialize scene view using the existing SceneBridge
-        scene_view = scene_bridge.createSceneView();
         log(.INFO, "app", "Render pass manager system initialized", .{});
 
         // Prime scene bridge state before entering the main loop so first-frame descriptors are valid
@@ -434,7 +421,7 @@ pub const App = struct {
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
-        // // Legacy initialization removed - descriptors updated via updateFromSceneView during rendering
+    // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
     }
 
     pub fn onUpdate(self: *App) !bool {
@@ -516,8 +503,8 @@ pub const App = struct {
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
 
-        // NOW begin the rasterization render pass
-        render_system.beginRender(frame_info);
+    // NOW begin the rasterization render pass
+    swapchain.beginSwapChainRenderPass(frame_info);
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         frame_info.camera.updateProjectionMatrix();
@@ -532,7 +519,7 @@ pub const App = struct {
         // Execute rasterization renderers through the forward renderer
         try forward_renderer.render(frame_info);
 
-        render_system.endRender(frame_info);
+    swapchain.endSwapChainRenderPass(frame_info);
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
         //try rt_render_pass.render(frame_info);
