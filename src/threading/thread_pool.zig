@@ -277,6 +277,7 @@ pub const ThreadPool = struct {
 
     // Callbacks
     on_worker_count_changed: ?*const fn (u32, u32) void = null, // (old_count, new_count)
+    thread_exit_hook: ?ThreadExitHook = null,
 
     pub const PoolStatistics = struct {
         total_work_items_processed: std.atomic.Value(u64),
@@ -294,6 +295,11 @@ pub const ThreadPool = struct {
                 .average_work_time_us = std.atomic.Value(u64).init(0),
             };
         }
+    };
+
+    const ThreadExitHook = struct {
+        callback: *const fn (*anyopaque) void,
+        context: *anyopaque,
     };
 
     pub fn init(allocator: std.mem.Allocator, max_workers: u32) !ThreadPool {
@@ -447,8 +453,6 @@ pub const ThreadPool = struct {
         const pool = worker_info.pool;
         worker_info.state.store(.idle, .release);
 
-        log(.INFO, "enhanced_thread_pool", "Worker {} started", .{worker_info.worker_id});
-
         while (pool.running) {
             // Try to get work
             if (pool.getWork()) |work_item| {
@@ -500,8 +504,6 @@ pub const ThreadPool = struct {
 
                 // Check if we should shut down due to being idle too long (only when no work available)
                 if (pool.shouldShutdownWorker(worker_info)) {
-                    log(.INFO, "enhanced_thread_pool", "Worker {} shutting down due to idle timeout", .{worker_info.worker_id});
-
                     // Decrement the worker count since this worker is shutting down
                     _ = pool.current_worker_count.fetchSub(1, .acq_rel);
                     break;
@@ -511,6 +513,9 @@ pub const ThreadPool = struct {
 
         // log(.DEBUG, "enhanced_thread_pool", "Worker {} exited main loop (running={})", .{ worker_info.worker_id, pool.running.load(.acquire) });
         worker_info.state.store(.shutting_down, .release);
+        if (pool.thread_exit_hook) |hook| {
+            hook.callback(hook.context);
+        }
         // log(.DEBUG, "enhanced_thread_pool", "Worker {} shutting down", .{worker_info.worker_id});
     }
 
@@ -530,10 +535,8 @@ pub const ThreadPool = struct {
                 worker.pool = self;
                 worker.thread = try std.Thread.spawn(.{}, workerThreadMain, .{worker});
             }
-            log(.INFO, "enhanced_thread_pool", "Scaled up from {} to {} workers", .{ current_count, actual_target });
         } else {
             // Scale down - workers will shut themselves down when idle
-            log(.INFO, "enhanced_thread_pool", "Scaling down from {} to {} workers (gradual)", .{ current_count, actual_target });
             self.current_worker_count.store(actual_target, .release);
         }
 
@@ -670,6 +673,14 @@ pub const ThreadPool = struct {
     pub fn setWorkerCountChangedCallback(self: *ThreadPool, callback: *const fn (u32, u32) void) void {
         self.on_worker_count_changed = callback;
     }
+
+    /// Set hook to run when a worker thread exits
+    pub fn setThreadExitHook(self: *ThreadPool, callback: *const fn (*anyopaque) void, context: *anyopaque) void {
+        self.thread_exit_hook = ThreadExitHook{
+            .callback = callback,
+            .context = context,
+        };
+    }
 };
 
 /// Helper functions for creating work items
@@ -737,7 +748,7 @@ pub fn createComputeWork(
     };
 }
 
-pub const GPUWork = enum { texture, mesh };
+pub const GPUWork = enum { texture, mesh, shader_rebuild };
 
 /// Create a GPU work item for processing staged assets
 pub fn createGPUWork(
@@ -757,6 +768,28 @@ pub fn createGPUWork(
             .staging_type = staging_type,
             .asset_id = asset_id,
             .data = staging_data,
+        } },
+        .worker_fn = worker_fn,
+        .context = context,
+    };
+}
+
+/// Create a custom work item (for specialized tasks like file watching)
+pub fn createCustomWork(
+    id: u64,
+    user_data: *anyopaque,
+    data_size: usize,
+    priority: WorkPriority,
+    worker_fn: *const fn (*anyopaque, WorkItem) void,
+    context: *anyopaque,
+) WorkItem {
+    return WorkItem{
+        .id = id,
+        .item_type = .custom,
+        .priority = priority,
+        .data = .{ .custom = .{
+            .user_data = user_data,
+            .size = data_size,
         } },
         .worker_fn = worker_fn,
         .context = context,

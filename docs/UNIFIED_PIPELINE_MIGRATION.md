@@ -11,6 +11,7 @@ The new unified pipeline system replaces the fragmented approach of having separ
 3. **Hot-Reload Integration**: Automatic pipeline recreation when shaders change
 4. **Frame-based Resource Management**: Proper handling of per-frame resources
 5. **Type-Safe Resource Binding**: Compile-time safety for resource types
+6. **Pipeline Caching**: Persistent disk cache for faster startup times (see `PIPELINE_CACHING.md`)
 
 ## Architecture Overview
 
@@ -300,3 +301,14 @@ const pipeline_config = UnifiedPipelineSystem.PipelineConfig{
 ### Issue: Performance Degradation
 **Problem**: Too many individual resource updates.
 **Solution**: Batch resource binding calls and use single updateFrame() call.
+
+### Issue: Slow Initial Startup
+**Problem**: Pipeline compilation takes too long on first launch.
+**Solution**: The pipeline caching system automatically speeds up subsequent launches. See `docs/PIPELINE_CACHING.md` for details.
+
+## See Also
+
+- `docs/PIPELINE_CACHING.md` - Pipeline cache system for faster startups
+- `docs/DYNAMIC_PIPELINE_SYSTEM.md` - Dynamic pipeline management
+- `src/rendering/unified_pipeline_system.zig` - Main implementation
+- `src/rendering/pipeline_builder.zig` - Pipeline creation utilities

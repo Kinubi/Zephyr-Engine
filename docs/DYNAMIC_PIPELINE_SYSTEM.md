@@ -6,7 +6,7 @@ The Dynamic Pipeline Management System provides real-time pipeline creation and 
 
 - **Dynamic Pipeline Creation**: Create pipelines from templates at runtime
 - **Shader Hot Reload Integration**: Automatically rebuild pipelines when shaders are modified
-- **Pipeline Caching**: Efficient reuse of existing pipelines
+- **Pipeline Caching**: Efficient reuse of existing pipelines (persistent cache via UnifiedPipelineSystem)
 - **Thread Safety**: Safe concurrent access to pipeline resources
 - **Usage Statistics**: Monitor pipeline performance and usage patterns
 
@@ -232,6 +232,8 @@ pub fn update(self: *Renderer, render_pass: vk.RenderPass) void {
 ## Performance Considerations
 
 - **Pipeline Caching**: Pipelines are cached and reused until shaders change
+  - **Disk Persistence**: UnifiedPipelineSystem provides persistent Vulkan pipeline cache for faster subsequent launches
+  - **See**: `docs/PIPELINE_CACHING.md` for details on cache management
 - **Lazy Building**: Pipelines are only built when first requested
 - **Batch Rebuilding**: Multiple shader changes are batched into a single rebuild pass
 - **Thread Safety**: All operations are thread-safe with minimal locking
@@ -279,3 +281,10 @@ See `dynamic_renderer_example.zig` for a complete example renderer that demonstr
 - Statistics monitoring
 
 This system provides the foundation for flexible, maintainable rendering pipelines with excellent developer experience through hot reloading capabilities.
+
+## See Also
+
+- `docs/PIPELINE_CACHING.md` - Persistent pipeline cache for faster startups
+- `docs/UNIFIED_PIPELINE_MIGRATION.md` - UnifiedPipelineSystem migration guide
+- `src/rendering/unified_pipeline_system.zig` - Core pipeline management
+- `src/rendering/pipeline_builder.zig` - Pipeline creation utilities

@@ -1,4 +1,5 @@
 const std = @import("std");
+const ShaderCompiler = @import("shader_compiler.zig");
 
 // Direct C import for shaderc library
 pub const c = @cImport({
@@ -51,7 +52,7 @@ pub const TargetEnv = enum(c_uint) {
 };
 
 pub const CompileOptions = struct {
-    optimization_level: OptimizationLevel = .zero,
+    optimization_level: OptimizationLevel = .performance,
     target_env: TargetEnv = .vulkan,
     target_env_version: u32 = 0,
     source_language: c_uint = c.shaderc_source_language_glsl,
@@ -229,7 +230,7 @@ pub const Compiler = struct {
 
 /// Configuration and helper functions
 /// Convert shader stage from engine types to shaderc types
-pub fn shaderStageToShaderKind(stage: @import("shader_compiler.zig").ShaderStage) ShaderKind {
+pub fn shaderStageToShaderKind(stage: ShaderCompiler.ShaderStage) ShaderKind {
     return switch (stage) {
         .vertex => .vertex_shader,
         .fragment => .fragment_shader,
@@ -250,7 +251,7 @@ pub fn shaderStageToShaderKind(stage: @import("shader_compiler.zig").ShaderStage
 pub fn compileGlslFile(
     allocator: std.mem.Allocator,
     file_path: []const u8,
-    stage: @import("shader_compiler.zig").ShaderStage,
+    stage: ShaderCompiler.ShaderStage,
     entry_point: []const u8,
     options: ?*const CompileOptions,
 ) !CompilationResult {

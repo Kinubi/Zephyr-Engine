@@ -4,6 +4,7 @@ const asset_types = @import("asset_types.zig");
 const asset_registry = @import("asset_registry.zig");
 const asset_loader = @import("asset_loader.zig");
 const hot_reload_manager = @import("hot_reload_manager.zig");
+const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Model = @import("../rendering/mesh.zig").Model;
 const Texture = @import("../core/texture.zig").Texture;
@@ -80,8 +81,6 @@ pub const FallbackAssets = struct {
     failed_model: ?AssetId = null,
     default_model: ?AssetId = null,
 
-    const Self = @This();
-
     /// Initialize fallback assets by loading them synchronously
     pub fn init(asset_manager: *AssetManager) !FallbackAssets {
         var fallbacks = FallbackAssets{};
@@ -139,7 +138,6 @@ pub const FallbackAssets = struct {
             // Mark as loaded in registry
             asset_manager.registry.markAsLoaded(asset_id, 1024); // Fake size
 
-            log(.INFO, "asset_manager", "Created fallback cube model with asset ID {}", .{asset_id.toU64()});
             break :blk asset_id;
         };
 
@@ -147,14 +145,13 @@ pub const FallbackAssets = struct {
         fallbacks.failed_model = fallbacks.missing_model;
         fallbacks.default_model = fallbacks.missing_model;
 
-        log(.INFO, "enhanced_asset_manager", "Fallback assets initialized: missing_texture={?}, missing_model={?}", .{ fallbacks.missing_texture, fallbacks.missing_model });
         try asset_manager.buildTextureDescriptorArray();
         try asset_manager.createMaterialBuffer(asset_manager.loader.graphics_context);
         return fallbacks;
     }
 
     /// Get fallback asset for given type and asset type
-    pub fn getFallback(self: *const Self, fallback_type: FallbackType, asset_type: AssetType) ?AssetId {
+    pub fn getFallback(self: *const FallbackAssets, fallback_type: FallbackType, asset_type: AssetType) ?AssetId {
         return switch (asset_type) {
             .texture => switch (fallback_type) {
                 .missing => self.missing_texture,
@@ -230,17 +227,15 @@ pub const AssetManager = struct {
         average_load_time_ms: std.atomic.Value(f32) = std.atomic.Value(f32).init(0.0),
     } = .{},
 
-    const Self = @This();
-
     /// Initialize enhanced asset manager
-    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, thread_pool: *ThreadPool) !*Self {
+    pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, thread_pool: *ThreadPool) !*AssetManager {
         // Allocate registry on heap to avoid HashMap corruption
         const registry = try allocator.create(AssetRegistry);
         registry.* = AssetRegistry.init(allocator);
 
         // Allocate enhanced loader on heap
-        var self = try allocator.create(Self);
-        self.* = Self{
+        var self = try allocator.create(AssetManager);
+        self.* = AssetManager{
             .registry = registry,
             .allocator = allocator,
             .fallbacks = FallbackAssets{}, // Initialize empty first
@@ -265,7 +260,7 @@ pub const AssetManager = struct {
 
     /// Create a material synchronously
     /// Creates a material with the given texture asset ID
-    pub fn createMaterialSync(self: *Self, albedo_texture_id: AssetId) !AssetId {
+    pub fn createMaterialSync(self: *AssetManager, albedo_texture_id: AssetId) !AssetId {
         // Create a unique material asset ID by registering it with the asset manager
         const material_path = try std.fmt.allocPrint(self.allocator, "material://{d}", .{albedo_texture_id.toU64()});
         defer self.allocator.free(material_path);
@@ -291,7 +286,7 @@ pub const AssetManager = struct {
     }
 
     /// Add a loaded material to the asset manager
-    pub fn addLoadedMaterial(self: *Self, asset_id: AssetId, material: *Material) !void {
+    pub fn addLoadedMaterial(self: *AssetManager, asset_id: AssetId, material: *Material) !void {
         const index = self.loaded_materials.items.len;
         try self.loaded_materials.append(self.allocator, material);
         try self.asset_to_material.put(asset_id, index);
@@ -300,12 +295,12 @@ pub const AssetManager = struct {
     }
 
     /// Create a material asset asynchronously
-    pub fn createMaterial(self: *Self, albedo_texture_id: AssetId) !AssetId {
+    pub fn createMaterial(self: *AssetManager, albedo_texture_id: AssetId) !AssetId {
         return try self.createMaterialSync(albedo_texture_id);
     }
 
     /// Load a texture synchronously (like original asset manager)
-    pub fn loadTextureSync(self: *Self, path: []const u8) !AssetId {
+    pub fn loadTextureSync(self: *AssetManager, path: []const u8) !AssetId {
         // Register the asset first
         const asset_id = try self.registry.registerAsset(path, .texture);
 
@@ -329,7 +324,7 @@ pub const AssetManager = struct {
     }
 
     /// Clean up resources
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *AssetManager) void {
         // Clean up hot reload manager first
         if (self.hot_reload_manager) |hrm| {
             hrm.deinit();
@@ -381,7 +376,7 @@ pub const AssetManager = struct {
     }
 
     /// Load asset asynchronously with priority
-    pub fn loadAssetAsync(self: *Self, file_path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
+    pub fn loadAssetAsync(self: *AssetManager, file_path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
         // Register or get existing asset ID
         const asset_id = try self.registry.registerAsset(file_path, asset_type);
 
@@ -428,7 +423,7 @@ pub const AssetManager = struct {
     }
 
     /// Load asset synchronously (blocks until complete)
-    pub fn loadAssetSync(self: *Self, file_path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
+    pub fn loadAssetSync(self: *AssetManager, file_path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
         const asset_id = try self.loadAssetAsync(file_path, asset_type, priority);
 
         if (self.registry.getAsset(asset_id)) |metadata| {
@@ -440,28 +435,8 @@ pub const AssetManager = struct {
         return asset_id;
     }
 
-    /// Add a pre-created fallback model
-    pub fn addFallbackModel(self: *Self, model: *Model) !AssetId {
-        // Create a synthetic asset ID for fallback
-        const asset_id = @as(AssetId, @enumFromInt(self.loaded_models.items.len + 1000)); // Offset to avoid conflicts
-
-        // Add to storage
-        self.models_mutex.lock();
-        defer self.models_mutex.unlock();
-
-        try self.loaded_models.append(self.allocator, model);
-        const index = self.loaded_models.items.len - 1;
-        try self.asset_to_model.put(asset_id, index);
-
-        // Register as loaded in registry
-        _ = try self.registry.registerAsset("fallback_model", .mesh);
-        self.registry.markAsLoaded(asset_id, 0); // 0 file size for fallback
-
-        return asset_id;
-    }
-
     /// Add loaded texture to the manager (called by GPU worker)
-    pub fn addLoadedTexture(self: *Self, asset_id: AssetId, texture: *Texture) !void {
+    pub fn addLoadedTexture(self: *AssetManager, asset_id: AssetId, texture: *Texture) !void {
         self.textures_mutex.lock();
         defer self.textures_mutex.unlock();
 
@@ -472,13 +447,14 @@ pub const AssetManager = struct {
 
         // Mark texture descriptors as dirty for lazy rebuild
         self.texture_descriptors_dirty = true;
+        self.materials_dirty = true; // Recompute material buffer once real texture is available
 
         // Complete the request
         self.completeRequest(asset_id, true);
     }
 
     /// Add loaded model to the manager
-    pub fn addLoadedModel(self: *Self, asset_id: AssetId, model: *Model) !void {
+    pub fn addLoadedModel(self: *AssetManager, asset_id: AssetId, model: *Model) !void {
         self.models_mutex.lock();
         defer self.models_mutex.unlock();
 
@@ -505,7 +481,7 @@ pub const AssetManager = struct {
     }
 
     /// Complete a load request (internal)
-    fn completeRequest(self: *Self, asset_id: AssetId, success: bool) void {
+    fn completeRequest(self: *AssetManager, asset_id: AssetId, success: bool) void {
         self.request_mutex.lock();
         defer self.request_mutex.unlock();
 
@@ -531,7 +507,7 @@ pub const AssetManager = struct {
     }
 
     /// Get texture by asset ID, with fallback
-    pub fn getTexture(self: *Self, asset_id: AssetId) ?*Texture {
+    pub fn getTexture(self: *AssetManager, asset_id: AssetId) ?*Texture {
         self.textures_mutex.lock();
         defer self.textures_mutex.unlock();
 
@@ -550,7 +526,7 @@ pub const AssetManager = struct {
     }
 
     /// Get model by asset ID, with fallback
-    pub fn getModel(self: *Self, asset_id: AssetId) ?*Model {
+    pub fn getModel(self: *AssetManager, asset_id: AssetId) ?*Model {
         self.models_mutex.lock();
         defer self.models_mutex.unlock();
 
@@ -569,12 +545,12 @@ pub const AssetManager = struct {
     }
 
     /// Get material index for a given asset ID
-    pub fn getMaterialIndex(self: *Self, asset_id: AssetId) ?usize {
+    pub fn getMaterialIndex(self: *AssetManager, asset_id: AssetId) ?usize {
         return self.asset_to_material.get(asset_id);
     }
 
     /// This is the SAFE way to access assets that might still be loading
-    pub fn getAssetIdForRendering(self: *Self, asset_id: AssetId) AssetId {
+    pub fn getAssetIdForRendering(self: *AssetManager, asset_id: AssetId) AssetId {
         const asset = self.registry.getAsset(asset_id);
         switch (asset.?.state) {
             .loaded => {
@@ -623,7 +599,7 @@ pub const AssetManager = struct {
 
     /// Get loaded model as const pointer for safe rendering access
     /// This mirrors the pattern from the old AssetManager
-    pub fn getLoadedModelConst(self: *Self, asset_id: AssetId) ?*const Model {
+    pub fn getLoadedModelConst(self: *AssetManager, asset_id: AssetId) ?*const Model {
         self.models_mutex.lock();
         defer self.models_mutex.unlock();
 
@@ -635,26 +611,16 @@ pub const AssetManager = struct {
         return null;
     }
 
-    /// Initialize hot reloading
-    pub fn initHotReload(self: *Self) !void {
+    pub fn initHotReload(self: *AssetManager, watcher: *FileWatcher) !void {
         const manager = try self.allocator.create(hot_reload_manager.HotReloadManager);
-        manager.* = try hot_reload_manager.HotReloadManager.init(self.allocator, self);
+        manager.* = try hot_reload_manager.HotReloadManager.init(self.allocator, self, watcher);
         self.hot_reload_manager = manager;
-        log(.INFO, "enhanced_asset_manager", "Hot reload manager initialized", .{});
-    }
-
-    /// Enable hot reloading (starts the directory watching)
-    pub fn enableHotReload(self: *Self) !void {
-        if (self.hot_reload_manager) |manager| {
-            try manager.start();
-            log(.INFO, "enhanced_asset_manager", "Hot reload system enabled and started", .{});
-        } else {
-            log(.WARN, "enhanced_asset_manager", "Cannot enable hot reload - manager not initialized", .{});
-        }
+        log(.INFO, "enhanced_asset_manager", "Hot reload manager initialized (external watcher)", .{});
+        try self.hot_reload_manager.?.start();
     }
 
     /// Update texture descriptor array (call when textures are loaded)
-    pub fn buildTextureDescriptorArray(self: *Self) !void {
+    pub fn buildTextureDescriptorArray(self: *AssetManager) !void {
         self.textures_mutex.lock();
         defer self.textures_mutex.unlock();
 
@@ -676,7 +642,7 @@ pub const AssetManager = struct {
     }
 
     /// Queue async texture descriptor array update
-    pub fn queueTextureDescriptorUpdate(self: *Self) !void {
+    pub fn queueTextureDescriptorUpdate(self: *AssetManager) !void {
         // Check if we're already updating
         if (self.texture_descriptors_updating.load(.acquire)) {
             return; // Already updating, skip
@@ -707,7 +673,7 @@ pub const AssetManager = struct {
     }
 
     /// Queue async material buffer update
-    pub fn queueMaterialBufferUpdate(self: *Self) !void {
+    pub fn queueMaterialBufferUpdate(self: *AssetManager) !void {
         // Check if we're already updating
         if (self.material_buffer_updating.load(.acquire)) {
             return; // Already updating, skip
@@ -738,12 +704,12 @@ pub const AssetManager = struct {
     }
 
     /// Get the current texture descriptor array for rendering
-    pub fn getTextureDescriptorArray(self: *Self) []const vk.DescriptorImageInfo {
+    pub fn getTextureDescriptorArray(self: *AssetManager) []const vk.DescriptorImageInfo {
         return self.texture_image_infos;
     }
 
     /// Get performance statistics
-    pub fn getStatistics(self: *Self) struct {
+    pub fn getStatistics(self: *AssetManager) struct {
         total_requests: u64,
         completed_loads: u64,
         failed_loads: u64,
@@ -775,30 +741,12 @@ pub const AssetManager = struct {
     }
 
     /// Get fallback asset for given type
-    pub fn getFallbackAsset(self: *Self, fallback_type: FallbackType, asset_type: AssetType) ?AssetId {
+    pub fn getFallbackAsset(self: *AssetManager, fallback_type: FallbackType, asset_type: AssetType) ?AssetId {
         return self.fallbacks.getFallback(fallback_type, asset_type);
     }
 
-    /// Create fallback materials for basic rendering
-    fn createFallbackMaterials(self: *Self) !void {
-        // Create a default material using fallback textures
-        const default_material = try self.allocator.create(Material);
-        default_material.* = Material{
-            .albedo_texture_id = 0, // Will be resolved to texture index later
-            .roughness = 0.5,
-            .metallic = 0.0,
-            .emissive = 0.0,
-            .emissive_color = [4]f32{ 0.0, 0.0, 0.0, 1.0 },
-        };
-
-        try self.loaded_materials.append(self.allocator, default_material);
-        const material_index = self.loaded_materials.items.len - 1;
-        const material_asset_id = asset_types.AssetId.fromU64(5); // ID 5 for default material
-        try self.asset_to_material.put(material_asset_id, material_index);
-    }
-
     /// Create material buffer from loaded materials
-    pub fn createMaterialBuffer(self: *Self, graphics_context: *GraphicsContext) !void {
+    pub fn createMaterialBuffer(self: *AssetManager, graphics_context: *GraphicsContext) !void {
         if (self.loaded_materials.items.len == 0) {
             log(.WARN, "asset_manager", "No loaded materials to create material buffer", .{});
             return;
@@ -847,7 +795,7 @@ pub const AssetManager = struct {
     }
 
     /// Check if asset is ready for use
-    pub fn isAssetReady(self: *Self, asset_id: AssetId) bool {
+    pub fn isAssetReady(self: *AssetManager, asset_id: AssetId) bool {
         return self.registry.getAssetState(asset_id) == .loaded;
     }
 
@@ -858,14 +806,8 @@ pub const AssetManager = struct {
         return LoadPriority.fromDistance(distance);
     }
 
-    /// Process pending hot reloads
-    pub fn processPendingReloads(self: *Self) void {
-        // Hot reload processing is handled by background worker thread
-        _ = self; // Hot reload manager runs continuously in background
-    }
-
     /// Print performance report
-    pub fn printPerformanceReport(self: *Self) void {
+    pub fn printPerformanceReport(self: *AssetManager) void {
         const stats = self.getStatistics();
         log(.INFO, "enhanced_asset_manager", "=== Enhanced Asset Manager Performance Report ===", .{});
         log(.INFO, "enhanced_asset_manager", "Active loads: {d}, Completed loads: {d}", .{ stats.active_loads, stats.completed_loads });

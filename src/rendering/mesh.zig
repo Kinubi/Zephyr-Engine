@@ -9,39 +9,6 @@ const Geometry = @import("geometry.zig").Geometry;
 const log = @import("../utils/log.zig").log;
 
 pub const Vertex = struct {
-    pub const binding_description = vk.VertexInputBindingDescription{
-        .binding = 0,
-        .stride = @sizeOf(Vertex),
-        .input_rate = .vertex,
-    };
-
-    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
-        .{
-            .binding = 0,
-            .location = 0,
-            .format = .r32g32b32_sfloat,
-            .offset = @offsetOf(Vertex, "pos"),
-        },
-        .{
-            .binding = 0,
-            .location = 1,
-            .format = .r32g32b32_sfloat,
-            .offset = @offsetOf(Vertex, "color"),
-        },
-        .{
-            .binding = 0,
-            .location = 2,
-            .format = .r32g32b32_sfloat,
-            .offset = @offsetOf(Vertex, "normal"),
-        },
-        .{
-            .binding = 0,
-            .location = 3,
-            .format = .r32g32_sfloat,
-            .offset = @offsetOf(Vertex, "uv"),
-        },
-    };
-
     pos: [3]f32 align(16),
     color: [3]f32 align(16),
     normal: [3]f32 align(16) = .{ 0.0, 0.0, 0.0 },

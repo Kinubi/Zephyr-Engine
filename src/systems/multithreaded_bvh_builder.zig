@@ -4,6 +4,7 @@ const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Scene = @import("../scene/scene.zig").Scene;
 const Vertex = @import("../rendering/mesh.zig").Vertex;
+const Model = @import("../rendering/mesh.zig").Model;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
 const WorkPriority = @import("../threading/thread_pool.zig").WorkPriority;
@@ -11,6 +12,8 @@ const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhB
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
 const Mesh = @import("../rendering/mesh.zig").Mesh;
+const SceneBridge = @import("../rendering/scene_bridge.zig");
+const RaytracingData = SceneBridge.RaytracingData;
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {
@@ -188,8 +191,6 @@ pub const MultithreadedBvhBuilder = struct {
         );
 
         try self.thread_pool.submitWork(work_item);
-
-        log(.INFO, "bvh_builder", "Submitted BLAS build work (ID: {})", .{work_id});
         return work_id;
     }
 
@@ -231,20 +232,16 @@ pub const MultithreadedBvhBuilder = struct {
         );
 
         try self.thread_pool.submitWork(work_item);
-
-        log(.INFO, "bvh_builder", "Submitted TLAS build work (ID: {}) with {} instances", .{ work_id, instances.len });
         return work_id;
     }
 
     /// Build BVH structures asynchronously using pre-computed raytracing data
     pub fn buildRtDataBvhAsync(
         self: *MultithreadedBvhBuilder,
-        rt_data: @import("../rendering/scene_view.zig").RaytracingData,
+        rt_data: RaytracingData,
         completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
         callback_context: ?*anyopaque,
     ) !void {
-        log(.INFO, "bvh_builder", "Starting async BVH build for {} geometries using RT data with mesh pointers", .{rt_data.geometries.len});
-
         // Use the RT geometries directly for worker item creation - extract mesh data on main thread
         for (rt_data.geometries, 0..) |rt_geometry, geom_idx| {
             const mesh = rt_geometry.mesh_ptr;
@@ -321,8 +318,6 @@ pub const MultithreadedBvhBuilder = struct {
         callback_context: ?*anyopaque,
     ) !void {
         _ = completion_callback; // TODO: Implement scene-level completion callback
-        log(.INFO, "bvh_builder", "Starting async BVH build for scene with {} objects", .{scene.objects.items.len});
-
         // Clear and prepare persistent geometry storage
         self.geometry_mutex.lock();
         defer self.geometry_mutex.unlock();
@@ -330,7 +325,7 @@ pub const MultithreadedBvhBuilder = struct {
 
         for (scene.objects.items, 0..) |*object, obj_idx| {
             if (!object.has_model) continue;
-            var model_opt: ?*const @import("../rendering/mesh.zig").Model = null;
+            var model_opt: ?*const Model = null;
 
             // Asset-based approach: prioritize asset IDs (same as rasterization system)
             if (object.model_asset) |model_asset_id| {
@@ -371,8 +366,6 @@ pub const MultithreadedBvhBuilder = struct {
                 }
             }
         }
-
-        log(.INFO, "bvh_builder", "Submitted {} BLAS build jobs", .{self.persistent_geometry.items.len});
     }
 
     /// Check if all pending work is complete
@@ -380,21 +373,27 @@ pub const MultithreadedBvhBuilder = struct {
         return self.pending_work.load(.monotonic) == 0;
     }
 
-    /// Get current BLAS results (thread-safe)
-    pub fn getCompletedBlas(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
+    /// Take current BLAS results (thread-safe) and clear builder ownership
+    pub fn takeCompletedBlas(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
         self.blas_mutex.lock();
         defer self.blas_mutex.unlock();
 
         const results = try allocator.alloc(BlasResult, self.completed_blas.items.len);
         @memcpy(results, self.completed_blas.items);
+        self.completed_blas.clearRetainingCapacity();
         return results;
     }
 
-    /// Get TLAS result if available (thread-safe)
-    pub fn getCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
+    /// Take TLAS result if available (thread-safe) and clear builder ownership
+    pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
         self.tlas_mutex.lock();
         defer self.tlas_mutex.unlock();
-        return self.completed_tlas;
+
+        const result = self.completed_tlas;
+        if (result != null) {
+            self.completed_tlas = null;
+        }
+        return result;
     }
 
     /// Get performance metrics
@@ -465,8 +464,6 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
             _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
             _ = builder.pending_work.fetchSub(1, .monotonic);
 
-            log(.INFO, "bvh_builder", "BLAS build completed (ID: {}) in {d:.2}ms", .{ work_item.id, @as(f64, @floatFromInt(build_time)) / 1_000_000.0 });
-
             // Call completion callback if provided
             if (work_data.completion_callback) |callback| {
                 if (work_data.callback_context) |cb_context| {
@@ -497,9 +494,9 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
 
             // Store result thread-safely
             builder.tlas_mutex.lock();
-            defer builder.tlas_mutex.unlock();
-
             builder.completed_tlas = final_result;
+            builder.tlas_mutex.unlock();
+
             _ = builder.pending_work.fetchSub(1, .monotonic);
 
             // Call completion callback if provided
@@ -811,8 +808,6 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
 fn blasCallbackWrapper(context: *anyopaque, result: BvhBuildResult) void {
     switch (result) {
         .build_blas => |blas_result| {
-            log(.INFO, "bvh_builder", "BLAS wrapper callback: geometry_id={}, build_time={d:.2}ms", .{ blas_result.geometry_id, @as(f64, @floatFromInt(blas_result.build_time_ns)) / 1_000_000.0 });
-
             // Extract the wrapper from the context
             const wrapper = @as(*CallbackWrapper, @ptrCast(@alignCast(context)));
 
@@ -833,7 +828,7 @@ fn sceneBlasBuildCallback(context: *anyopaque, result: BvhBuildResult) void {
     _ = context;
     switch (result) {
         .build_blas => |blas_result| {
-            log(.INFO, "bvh_builder", "Scene BLAS completed: geometry_id={}, build_time={d:.2}ms", .{ blas_result.geometry_id, @as(f64, @floatFromInt(blas_result.build_time_ns)) / 1_000_000.0 });
+            _ = blas_result;
         },
         else => {},
     }

@@ -3,3 +3,6 @@
 /zig-out/*
 
 zig-out/bin/ZulkanZengine
+
+# Pipeline cache directory
+/cache/

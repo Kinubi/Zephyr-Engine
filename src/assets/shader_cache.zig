@@ -10,17 +10,16 @@ pub const ShaderCache = struct {
 
     // Maps shader file path to cached metadata
     cache_metadata: std.HashMap([]const u8, CacheEntry, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    cache_mutex: std.Thread.Mutex = .{},
 
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator, cache_dir: []const u8) !Self {
+    pub fn init(allocator: std.mem.Allocator, cache_dir: []const u8) !ShaderCache {
         // Ensure cache directory exists
         std.fs.cwd().makeDir(cache_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {}, // OK, directory exists
             else => return err,
         };
 
-        var cache = Self{
+        var cache = ShaderCache{
             .allocator = allocator,
             .cache_dir = try allocator.dupe(u8, cache_dir),
             .cache_metadata = std.HashMap([]const u8, CacheEntry, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
@@ -32,41 +31,51 @@ pub const ShaderCache = struct {
         return cache;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *ShaderCache) void {
         // Save cache metadata before cleanup
         self.saveCacheMetadata() catch |err| {
             std.log.warn("Failed to save shader cache metadata: {}", .{err});
         };
 
         // Clean up memory
+        // Guard access with mutex in case other threads still reference cache (defensive)
+        self.cache_mutex.lock();
         var iterator = self.cache_metadata.iterator();
         while (iterator.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.cached_spirv_path);
         }
+        self.cache_mutex.unlock();
         self.cache_metadata.deinit();
         self.allocator.free(self.cache_dir);
     }
 
     /// Get compiled SPIR-V for a shader, compiling if necessary
-    pub fn getCompiledShader(self: *Self, compiler: *ShaderCompiler.ShaderCompiler, source_path: []const u8, options: ShaderCompiler.CompilationOptions) !ShaderCompiler.CompiledShader {
+    pub fn getCompiledShader(self: *ShaderCache, compiler: *ShaderCompiler.ShaderCompiler, source_path: []const u8, options: ShaderCompiler.CompilationOptions) !ShaderCompiler.CompiledShader {
 
         // Calculate file hash to detect changes
         const file_hash = try self.calculateFileHash(source_path);
         const path_key = try self.allocator.dupe(u8, source_path);
 
         // Check if we have a valid cached version
+        self.cache_mutex.lock();
         if (self.cache_metadata.get(source_path)) |entry| {
             if (entry.file_hash == file_hash and entry.options_hash == self.calculateOptionsHash(options)) {
-                // Cache hit - load existing SPIR-V
-                return try self.loadCachedSpirv(entry.cached_spirv_path, entry.file_hash);
+                // Cache hit - load existing SPIR-V (include reflection)
+                const cached_path = entry.cached_spirv_path;
+                const cached_hash = entry.file_hash;
+                self.cache_mutex.unlock();
+                return try self.loadCachedSpirv(compiler, cached_path, cached_hash);
             } else {
                 // Cache invalidated - clean up old entry
 
                 // Clean up old cache entry
-                self.allocator.free(entry.cached_spirv_path);
+                const old_path = entry.cached_spirv_path;
+                self.cache_mutex.unlock();
+                self.allocator.free(old_path);
             }
         } else {
+            self.cache_mutex.unlock();
             // New shader compilation needed
         }
 
@@ -87,7 +96,10 @@ pub const ShaderCache = struct {
             .compile_time = std.time.timestamp(),
         };
 
+        // Insert metadata under lock
+        self.cache_mutex.lock();
         try self.cache_metadata.put(path_key, cache_entry);
+        self.cache_mutex.unlock();
 
         // Save updated metadata to disk
         self.saveCacheMetadata() catch |err| {
@@ -99,7 +111,7 @@ pub const ShaderCache = struct {
 
     /// Get compiled SPIR-V from raw shader source
     pub fn getCompiledShaderFromSource(
-        self: *Self,
+        self: *ShaderCache,
         compiler: *ShaderCompiler.ShaderCompiler,
         source: ShaderCompiler.ShaderSource,
         source_identifier: []const u8, // Unique identifier for this source
@@ -111,12 +123,16 @@ pub const ShaderCache = struct {
         const identifier_key = try self.allocator.dupe(u8, source_identifier);
 
         // Check if we have a valid cached version
+        self.cache_mutex.lock();
         if (self.cache_metadata.get(source_identifier)) |entry| {
             if (entry.file_hash == source_hash and entry.options_hash == self.calculateOptionsHash(options)) {
+                const cached_path = entry.cached_spirv_path;
+                self.cache_mutex.unlock();
                 // Cache hit - load existing SPIR-V
-                return try self.loadCachedSpirv(entry.cached_spirv_path, source_hash);
+                return try self.loadCachedSpirv(compiler, cached_path, source_hash);
             }
         }
+        self.cache_mutex.unlock();
 
         // Cache miss or invalid - compile the shader
         const compiled = try compiler.compile(source, options);
@@ -135,7 +151,9 @@ pub const ShaderCache = struct {
             .compile_time = std.time.timestamp(),
         };
 
+        self.cache_mutex.lock();
         try self.cache_metadata.put(identifier_key, cache_entry);
+        self.cache_mutex.unlock();
 
         // Save updated metadata to disk
         self.saveCacheMetadata() catch |err| {
@@ -146,8 +164,9 @@ pub const ShaderCache = struct {
     }
 
     /// Clear all cached shaders
-    pub fn clearCache(self: *Self) !void {
+    pub fn clearCache(self: *ShaderCache) !void {
         // Remove all cached SPIR-V files
+        self.cache_mutex.lock();
         var iterator = self.cache_metadata.iterator();
         while (iterator.next()) |entry| {
             std.fs.cwd().deleteFile(entry.value_ptr.cached_spirv_path) catch |err| switch (err) {
@@ -158,12 +177,31 @@ pub const ShaderCache = struct {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.cached_spirv_path);
         }
-
         // Clear metadata
         self.cache_metadata.clearAndFree();
+        self.cache_mutex.unlock();
     }
 
-    pub fn getCacheStats(self: *Self) CacheStats {
+    /// Remove a single cache entry (invalidate cached SPIR-V for a given key)
+    pub fn removeCacheEntry(self: *ShaderCache, key: []const u8) !void {
+        self.cache_mutex.lock();
+        if (self.cache_metadata.fetchRemove(key)) |entry| {
+            // Remove entry while holding lock, then unlock before file ops
+            self.cache_mutex.unlock();
+            std.fs.cwd().deleteFile(entry.value.cached_spirv_path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => std.log.warn("Failed to delete cached file {s}: {}", .{ entry.value.cached_spirv_path, err }),
+            };
+
+            // Free memory used by stored strings
+            self.allocator.free(entry.key);
+            self.allocator.free(entry.value.cached_spirv_path);
+            return; // we've unlocked and finished
+        }
+        self.cache_mutex.unlock();
+    }
+
+    pub fn getCacheStats(self: *ShaderCache) CacheStats {
         return CacheStats{
             .total_cached_shaders = @intCast(self.cache_metadata.count()),
             .cache_directory = self.cache_dir,
@@ -172,7 +210,7 @@ pub const ShaderCache = struct {
 
     // Private helper functions
 
-    fn calculateFileHash(self: *Self, file_path: []const u8) !u64 {
+    fn calculateFileHash(self: *ShaderCache, file_path: []const u8) !u64 {
         const file_content = std.fs.cwd().readFileAlloc(self.allocator, file_path, 16 * 1024 * 1024) catch |err| {
             std.log.err("Failed to read file for hashing: {s}", .{file_path});
             return err;
@@ -183,7 +221,7 @@ pub const ShaderCache = struct {
         return std.hash_map.hashString(file_content);
     }
 
-    fn calculateOptionsHash(self: *Self, options: ShaderCompiler.CompilationOptions) u64 {
+    fn calculateOptionsHash(self: *ShaderCache, options: ShaderCompiler.CompilationOptions) u64 {
         _ = self;
 
         // Create a simple hash of compilation options to detect changes
@@ -201,7 +239,7 @@ pub const ShaderCache = struct {
         return hasher.final();
     }
 
-    fn generateCachePath(self: *Self, source_path: []const u8) ![]const u8 {
+    fn generateCachePath(self: *ShaderCache, source_path: []const u8) ![]const u8 {
         // Convert source path to cache filename
         // e.g., "shaders/simple.vert" -> "shaders/cached/simple.vert.spv"
 
@@ -212,7 +250,7 @@ pub const ShaderCache = struct {
         return try std.fs.path.join(self.allocator, &[_][]const u8{ self.cache_dir, cache_filename });
     }
 
-    fn generateSourceCachePath(self: *Self, identifier: []const u8, stage: ShaderCompiler.ShaderStage) ![]const u8 {
+    fn generateSourceCachePath(self: *ShaderCache, identifier: []const u8, stage: ShaderCompiler.ShaderStage) ![]const u8 {
         // Generate cache path for inline shader source
         // e.g., "my_shader" + vertex -> "shaders/cached/my_shader.vert.spv"
 
@@ -237,7 +275,7 @@ pub const ShaderCache = struct {
         return try std.fs.path.join(self.allocator, &[_][]const u8{ self.cache_dir, cache_filename });
     }
 
-    fn saveSpirvToCache(self: *Self, spirv_data: []const u8, cache_path: []const u8) !void {
+    fn saveSpirvToCache(self: *ShaderCache, spirv_data: []const u8, cache_path: []const u8) !void {
         _ = self;
 
         // Ensure the cache directory exists
@@ -251,22 +289,28 @@ pub const ShaderCache = struct {
         try std.fs.cwd().writeFile(.{ .sub_path = cache_path, .data = spirv_data });
     }
 
-    fn loadCachedSpirv(self: *Self, cache_path: []const u8, expected_hash: u64) !ShaderCompiler.CompiledShader {
+    fn loadCachedSpirv(self: *ShaderCache, compiler: *ShaderCompiler.ShaderCompiler, cache_path: []const u8, expected_hash: u64) !ShaderCompiler.CompiledShader {
         const spirv_data = std.fs.cwd().readFileAlloc(self.allocator, cache_path, 16 * 1024 * 1024) catch |err| {
             std.log.warn("Failed to load cached SPIR-V from {s}: {}", .{ cache_path, err });
             return err;
         };
+        // Use the compiler to parse words and generate reflection
+        const spirv_bytes = spirv_data; // already read using self.allocator
 
-        // For now, create a basic CompiledShader structure
-        // TODO: Also cache reflection data
+        // parseSpirv expects a byte slice; it returns allocated u32 words owned by compiler. Use that to generate reflection.
+        const reflection = try compiler.generateReflectionFromSpirv(spirv_bytes);
+
+        // Duplicate the raw SPIR-V bytes into the cache allocator so ownership is consistent
+        const spirv_owned = try self.allocator.dupe(u8, spirv_bytes);
+
         return ShaderCompiler.CompiledShader{
-            .spirv_code = spirv_data,
-            .reflection = ShaderCompiler.ShaderReflection.init(),
+            .spirv_code = spirv_owned,
+            .reflection = reflection,
             .source_hash = expected_hash,
         };
     }
 
-    fn loadCacheMetadata(self: *Self) !void {
+    fn loadCacheMetadata(self: *ShaderCache) !void {
         const metadata_path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.cache_dir, "cache_metadata.json" });
         defer self.allocator.free(metadata_path);
 
@@ -348,7 +392,7 @@ pub const ShaderCache = struct {
         }
     }
 
-    fn saveCacheMetadata(self: *Self) !void {
+    fn saveCacheMetadata(self: *ShaderCache) !void {
         const metadata_path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.cache_dir, "cache_metadata.json" });
         defer self.allocator.free(metadata_path);
 
@@ -370,7 +414,7 @@ pub const ShaderCache = struct {
             if (!first) try buffer.appendSlice(self.allocator, ",\n");
             first = false;
 
-            const entry_json = try std.fmt.allocPrint(self.allocator, "    \"{s}\": {{\n      \"cached_spirv_path\": \"{s}\",\n      \"file_hash\": \"{}\",\n      \"options_hash\": \"{}\",\n      \"compile_time\": {}\n    }}", .{ entry.key_ptr.*, entry.value_ptr.cached_spirv_path, entry.value_ptr.file_hash, entry.value_ptr.options_hash, entry.value_ptr.compile_time });
+            const entry_json = try std.fmt.allocPrint(self.allocator, "    \"{s}\": {{\n      \"cached_spirv_path\": \"{s}\",\n      \"file_hash\": \"{d}\",\n      \"options_hash\": \"{d}\",\n      \"compile_time\": {d}\n    }}", .{ entry.key_ptr.*, entry.value_ptr.cached_spirv_path, entry.value_ptr.file_hash, entry.value_ptr.options_hash, entry.value_ptr.compile_time });
             defer self.allocator.free(entry_json);
             try buffer.appendSlice(self.allocator, entry_json);
         }
@@ -379,8 +423,6 @@ pub const ShaderCache = struct {
 
         // Write to file
         try std.fs.cwd().writeFile(.{ .sub_path = metadata_path, .data = buffer.items });
-
-        std.log.debug("Saved shader cache metadata with {} entries to: {s}", .{ self.cache_metadata.count(), metadata_path });
     }
 };
 
