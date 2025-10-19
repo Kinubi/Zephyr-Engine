@@ -4,6 +4,7 @@ const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Scene = @import("../scene/scene.zig").Scene;
 const Vertex = @import("../rendering/mesh.zig").Vertex;
+const Model = @import("../rendering/mesh.zig").Model;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
 const WorkPriority = @import("../threading/thread_pool.zig").WorkPriority;
@@ -11,6 +12,8 @@ const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhB
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
 const Mesh = @import("../rendering/mesh.zig").Mesh;
+const SceneBridge = @import("../rendering/scene_bridge.zig");
+const RaytracingData = SceneBridge.RaytracingData;
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {
@@ -235,7 +238,7 @@ pub const MultithreadedBvhBuilder = struct {
     /// Build BVH structures asynchronously using pre-computed raytracing data
     pub fn buildRtDataBvhAsync(
         self: *MultithreadedBvhBuilder,
-        rt_data: @import("../rendering/scene_bridge.zig").RaytracingData,
+        rt_data: RaytracingData,
         completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
         callback_context: ?*anyopaque,
     ) !void {
@@ -322,7 +325,7 @@ pub const MultithreadedBvhBuilder = struct {
 
         for (scene.objects.items, 0..) |*object, obj_idx| {
             if (!object.has_model) continue;
-            var model_opt: ?*const @import("../rendering/mesh.zig").Model = null;
+            var model_opt: ?*const Model = null;
 
             // Asset-based approach: prioritize asset IDs (same as rasterization system)
             if (object.model_asset) |model_asset_id| {

@@ -8,6 +8,7 @@ const ThreadPool = TP.ThreadPool;
 const AssetId = @import("asset_types.zig").AssetId;
 const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const log = @import("../utils/log.zig").log;
+const UnifiedPipelineModule = @import("../rendering/unified_pipeline_system.zig");
 
 // Real-time multithreaded shader hot reload system
 // Watches shader files for changes and automatically recompiles them
@@ -211,19 +212,18 @@ pub const ShaderWatcher = struct {
             };
 
             // Submit to pipeline rebuild worker directly
-            const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig");
             if (self.pipeline_system) |pipeline_system_opaque| {
-                const pipeline_system: *UnifiedPipelineSystem.UnifiedPipelineSystem = @ptrCast(@alignCast(pipeline_system_opaque));
+                const pipeline_system: *UnifiedPipelineModule.UnifiedPipelineSystem = @ptrCast(@alignCast(pipeline_system_opaque));
 
                 // Allocate rebuild job to transfer ownership of compiled shader
                 // Job only contains file_path and compiled_shader; everything else accessed via system
-                const job = pipeline_system.allocator.create(UnifiedPipelineSystem.UnifiedPipelineSystem.ShaderRebuildJob) catch |err| {
+                const job = pipeline_system.allocator.create(UnifiedPipelineModule.UnifiedPipelineSystem.ShaderRebuildJob) catch |err| {
                     std.log.err("Failed to allocate shader rebuild job: {}", .{err});
                     compiled.deinit(self.allocator);
                     fi.compilation_in_progress = false;
                     return;
                 };
-                job.* = UnifiedPipelineSystem.UnifiedPipelineSystem.ShaderRebuildJob{
+                job.* = UnifiedPipelineModule.UnifiedPipelineSystem.ShaderRebuildJob{
                     .file_path = file_path,
                     .compiled_shader = compiled,
                 };
@@ -235,7 +235,7 @@ pub const ShaderWatcher = struct {
                     AssetId.fromU64(0), // asset_id (unused for shader rebuilds)
                     @as(*anyopaque, job), // staging_data - the ShaderRebuildJob
                     .high, // priority
-                    UnifiedPipelineSystem.UnifiedPipelineSystem.pipelineRebuildWorker,
+                    UnifiedPipelineModule.UnifiedPipelineSystem.pipelineRebuildWorker,
                     @as(*anyopaque, pipeline_system), // context - the UnifiedPipelineSystem
                 );
 

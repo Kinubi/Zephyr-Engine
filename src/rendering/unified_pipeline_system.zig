@@ -10,6 +10,8 @@ const RasterizationState = @import("pipeline_builder.zig").RasterizationState;
 const MultisampleState = @import("pipeline_builder.zig").MultisampleState;
 const DepthStencilState = @import("pipeline_builder.zig").DepthStencilState;
 const ColorBlendAttachment = @import("pipeline_builder.zig").ColorBlendAttachment;
+const VertexInputBinding = @import("pipeline_builder.zig").VertexInputBinding;
+const VertexInputAttribute = @import("pipeline_builder.zig").VertexInputAttribute;
 const Shader = @import("../core/shader.zig").Shader;
 const entry_point_definition = @import("../core/shader.zig").entry_point_definition;
 const ShaderCompiler = @import("../assets/shader_compiler.zig");
@@ -1575,11 +1577,11 @@ pub const PipelineConfig = struct {
     any_hit_entry_point: ?[]const u8 = null,
     intersection_entry_point: ?[]const u8 = null,
 
-    shader_options: @import("../assets/shader_compiler.zig").CompilationOptions = .{ .target = .vulkan },
+    shader_options: ShaderCompiler.CompilationOptions = .{ .target = .vulkan },
 
     // Vertex input configuration
-    vertex_input_bindings: ?[]const @import("pipeline_builder.zig").VertexInputBinding = null,
-    vertex_input_attributes: ?[]const @import("pipeline_builder.zig").VertexInputAttribute = null,
+    vertex_input_bindings: ?[]const VertexInputBinding = null,
+    vertex_input_attributes: ?[]const VertexInputAttribute = null,
 
     // Pipeline state
     topology: vk.PrimitiveTopology = .triangle_list,

@@ -502,7 +502,7 @@ pub const SceneBridge = struct {
 
         for (self.scene.objects.items, 0..) |*obj, obj_idx| {
             if (!obj.has_model) continue;
-            var model_opt: ?*const @import("mesh.zig").Model = null;
+            var model_opt: ?*const Model = null;
 
             // Asset-based approach: prioritize asset IDs (same as scene system)
             if (obj.model_asset) |model_asset_id| {
@@ -561,7 +561,7 @@ pub const SceneBridge = struct {
 
         for (self.scene.objects.items, 0..) |*obj, obj_idx| {
             if (!obj.has_model) continue;
-            var model_opt: ?*const @import("mesh.zig").Model = null;
+            var model_opt: ?*const Model = null;
 
             // Asset-based approach: prioritize asset IDs (same as rasterization system)
             if (obj.model_asset) |model_asset_id| {

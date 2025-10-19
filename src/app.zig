@@ -6,7 +6,8 @@ const graphics_context = @import("core/graphics_context.zig");
 const GraphicsContext = graphics_context.GraphicsContext;
 const Swapchain = @import("core/swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
-const Texture = @import("core/texture.zig").Texture;
+const core_texture = @import("core/texture.zig");
+const Texture = core_texture.Texture;
 const DescriptorSetLayout = @import("core/descriptors.zig").DescriptorSetLayout;
 const DescriptorPool = @import("core/descriptors.zig").DescriptorPool;
 const DescriptorSetWriter = @import("core/descriptors.zig").DescriptorWriter;
@@ -566,11 +567,8 @@ pub const App = struct {
         self.gc.deinit();
 
         // Clean up zstbi global state
-        @import("core/texture.zig").deinitZstbi();
+        core_texture.deinitZstbi();
 
         self.window.deinit();
     }
 };
-
-// --- User-friendly helpers for model/object creation ---
-// (Moved to mesh.zig and scene.zig)

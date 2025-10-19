@@ -568,7 +568,7 @@ pub const ShaderCompiler = struct {
             },
             .target_env = if (options.vulkan_semantics) .vulkan else .opengl,
             .generate_debug_info = options.debug_info,
-            .source_language = @import("glsl_compiler.zig").c.shaderc_source_language_glsl,
+            .source_language = glsl_compiler.c.shaderc_source_language_glsl,
         };
 
         // Compile to SPIR-V
