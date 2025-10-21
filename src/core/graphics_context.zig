@@ -9,6 +9,7 @@ const log = @import("../utils/log.zig").log;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
+    vk.extensions.khr_dynamic_rendering.name,
     vk.extensions.khr_acceleration_structure.name,
     vk.extensions.khr_ray_tracing_pipeline.name,
     vk.extensions.khr_ray_query.name,
@@ -163,7 +164,7 @@ pub const GraphicsContext = struct {
             .application_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
             .p_engine_name = app_name,
             .engine_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
-            .api_version = @bitCast(vk.API_VERSION_1_2),
+            .api_version = @bitCast(vk.API_VERSION_1_3),
         };
 
         self.instance = try self.vkb.createInstance(&vk.InstanceCreateInfo{
@@ -1133,6 +1134,12 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .buffer_device_address_multi_device = .true,
     };
     accel_create.p_next = &vulkan12_features;
+
+    // Enable dynamic rendering (Vulkan 1.3 core / VK_KHR_dynamic_rendering)
+    var dynamic_rendering_features = vk.PhysicalDeviceDynamicRenderingFeatures{
+        .dynamic_rendering = .true,
+    };
+    vulkan12_features.p_next = &dynamic_rendering_features;
 
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);

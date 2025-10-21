@@ -101,11 +101,11 @@ pub const App = struct {
     //var particle_renderer: ParticleRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
 
-    // Generic forward renderer that orchestrates rasterization renderers
-    var forward_renderer: GenericRenderer = undefined;
+    // OLD: Generic forward renderer (DISABLED FOR RENDER GRAPH)
+    // var forward_renderer: GenericRenderer = undefined;
 
-    // Raytracing render pass (separate from forward renderer)
-    var rt_render_pass: GenericRenderer = undefined;
+    // OLD: Raytracing render pass (DISABLED FOR RENDER GRAPH)
+    // var rt_render_pass: GenericRenderer = undefined;
 
     var compute_shader_system: ComputeShaderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
@@ -174,9 +174,9 @@ pub const App = struct {
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
         log(.INFO, "app", "Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
-        try swapchain.createRenderPass();
+        // try swapchain.createRenderPass();
 
-        try swapchain.createFramebuffers();
+        // try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
 
         // Initialize Thread Pool with dynamic scaling
@@ -393,11 +393,11 @@ pub const App = struct {
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
-        // First vase (left side) - smooth vase
-        const vase1 = try scene_v2.spawnProp("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png");
-        try vase1.setPosition(Math.Vec3.init(-1.2, -half_size + 0.05, 0.5));
-        try vase1.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
-        log(.INFO, "app", "Scene v2: Added vase 1 (smooth)", .{});
+        // // First vase (left side) - smooth vase
+        // const vase1 = try scene_v2.spawnProp("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png");
+        // try vase1.setPosition(Math.Vec3.init(-1.2, -half_size + 0.05, 0.5));
+        // try vase1.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
+        // log(.INFO, "app", "Scene v2: Added vase 1 (smooth)", .{});
 
         // Second vase (right side) - flat vase
         const vase2 = try scene_v2.spawnProp("models/flat_vase.obj", "textures/granitesmooth1-albedo.png");
@@ -406,6 +406,15 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
 
         log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene_v2.entities.items.len});
+
+        // Initialize RenderGraph for scene_v2
+        try scene_v2.initRenderGraph(
+            &self.gc,
+            &unified_pipeline_system,
+            swapchain.surface_format.format,
+            try swapchain.depthFormat(),
+        );
+        log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
 
         // ==================== End Scene v2 Setup ====================
 
@@ -516,42 +525,44 @@ pub const App = struct {
 
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
+        // ==================== OLD GENERIC RENDERER (DISABLED FOR RENDER GRAPH) ====================
         // Initialize Generic Forward Renderer (rasterization only)
-        forward_renderer = GenericRenderer.init(self.allocator);
+        // forward_renderer = GenericRenderer.init(self.allocator);
 
         // Set the scene bridge for renderers that need scene data
-        forward_renderer.setSceneBridge(&scene_bridge);
+        // forward_renderer.setSceneBridge(&scene_bridge);
 
         // Set the swapchain for renderers that need it
-        forward_renderer.setSwapchain(&swapchain);
+        // forward_renderer.setSwapchain(&swapchain);
 
         // Add rasterization renderers to the forward renderer
         // try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
-        try forward_renderer.addRenderer("ecs_renderer", RendererType.raster, &ecs_renderer, EcsRenderer);
-        try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
-        try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
+        // try forward_renderer.addRenderer("ecs_renderer", RendererType.raster, &ecs_renderer, EcsRenderer);
+        // try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
+        // try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
 
         // Prime renderer descriptor bindings once all raster renderers are registered
-        try forward_renderer.onCreate();
+        // try forward_renderer.onCreate();
 
         // Initialize Raytracing Render Pass (separate from forward renderer)
-        rt_render_pass = GenericRenderer.init(self.allocator);
+        // rt_render_pass = GenericRenderer.init(self.allocator);
 
         // Set the scene bridge and swapchain for raytracing
-        rt_render_pass.setSceneBridge(&scene_bridge);
-        rt_render_pass.setSwapchain(&swapchain);
+        // rt_render_pass.setSceneBridge(&scene_bridge);
+        // rt_render_pass.setSwapchain(&swapchain);
 
         // Add raytracing renderer to its own render pass
-        try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+        // try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
 
         // Ensure raytracing renderer receives initial descriptor bindings before the first frame
-        try rt_render_pass.onCreate();
+        // try rt_render_pass.onCreate();
 
         // Future renderers can be added here:
         // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
         // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
+        // ==================== END OLD GENERIC RENDERER ====================
 
-        log(.INFO, "app", "Render pass manager system initialized", .{});
+        log(.INFO, "app", "Render pass manager system initialized (GenericRenderer disabled)", .{});
 
         // Prime scene bridge state before entering the main loop so first-frame descriptors are valid
         _ = scene_bridge.updateAsyncResources() catch |err| {
@@ -562,8 +573,8 @@ pub const App = struct {
         init_frame_info.command_buffer = cmdbufs[current_frame];
         init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
         init_frame_info.camera = &camera;
-        try forward_renderer.update(&init_frame_info);
-        try rt_render_pass.update(&init_frame_info);
+        // try forward_renderer.update(&init_frame_info);  // OLD: Disabled for RenderGraph
+        // try rt_render_pass.update(&init_frame_info);    // OLD: Disabled for RenderGraph
 
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
@@ -572,6 +583,10 @@ pub const App = struct {
     }
 
     pub fn update(self: *App) !bool {
+        // Reset AssetManager dirty flags at frame start
+        // Async completion will set them back to true during the frame
+        asset_manager.beginFrame();
+
         // Process deferred pipeline destroys for hot reload safety
         unified_pipeline_system.processDeferredDestroys();
 
@@ -583,9 +598,10 @@ pub const App = struct {
             if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
                 log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
 
-                const loaded_object = try scene.addModelAssetAsync(scheduled_asset.model_path, scheduled_asset.texture_path, scheduled_asset.position, scheduled_asset.rotation, scheduled_asset.scale);
+                var loaded_object = try scene_v2.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
+                try loaded_object.setPosition(scheduled_asset.position);
 
-                log(.INFO, "app", "Successfully queued scheduled asset for loading with IDs: model={}, material={}, texture={}", .{ loaded_object.model_asset orelse @as(@TypeOf(loaded_object.model_asset.?), @enumFromInt(0)), loaded_object.material_asset orelse @as(@TypeOf(loaded_object.material_asset.?), @enumFromInt(0)), loaded_object.texture_asset orelse @as(@TypeOf(loaded_object.texture_asset.?), @enumFromInt(0)) });
+                try loaded_object.setScale(scheduled_asset.scale);
 
                 log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
 
@@ -593,7 +609,7 @@ pub const App = struct {
             }
         }
 
-        _ = try scene_bridge.updateAsyncResources();
+        // _ = try scene_bridge.updateAsyncResources();
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
@@ -644,17 +660,24 @@ pub const App = struct {
 
         compute_shader_system.beginCompute(frame_info);
 
-        try forward_renderer.update(&frame_info);
+        // try forward_renderer.update(&frame_info);  // OLD: Disabled for RenderGraph
 
-        try rt_render_pass.update(&frame_info);
+        // try rt_render_pass.update(&frame_info);    // OLD: Disabled for RenderGraph
 
         compute_shader_system.endCompute(frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
 
-        // NOW begin the rasterization render pass
-        swapchain.beginSwapChainRenderPass(frame_info);
+        // Populate image views for dynamic rendering
+        const swap_image = swapchain.currentSwapImage();
+        frame_info.color_image = swapchain.currentImage();
+        frame_info.color_image_view = swap_image.view;
+        frame_info.depth_image_view = swap_image.depth_image_view;
+
+        // OLD: Legacy render pass (disabled for dynamic rendering)
+        // swapchain.beginSwapChainRenderPass(frame_info);
+
         camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         frame_info.camera.updateProjectionMatrix();
@@ -667,22 +690,28 @@ pub const App = struct {
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Execute rasterization renderers through the forward renderer
-        try forward_renderer.render(frame_info);
+        // try forward_renderer.render(frame_info);  // OLD: Disabled for RenderGraph
 
-        swapchain.endSwapChainRenderPass(frame_info);
+        // NEW: Execute Scene v2 RenderGraph (uses dynamic rendering)
+        if (scene_v2_enabled) {
+            try scene_v2.render(frame_info);
+        }
+
+        // OLD: Legacy render pass (disabled for dynamic rendering)
+        // swapchain.endSwapChainRenderPass(frame_info);
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
-        //try rt_render_pass.render(frame_info);
+        // try rt_render_pass.render(frame_info);  // OLD: Disabled for RenderGraph
 
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
 
         //log(.TRACE, "app", "Frame end", .{});
 
-        if (frame_counter >= 60_000) {
-            // Stop the app once the frame counter reaches the test threshold.
-            return false;
-        }
+        // if (frame_counter >= 60_000) {
+        //     // Stop the app once the frame counter reaches the test threshold.
+        //     return false;
+        // }
 
         return self.window.isRunning();
     }
@@ -698,8 +727,8 @@ pub const App = struct {
         global_ubo_set.deinit();
 
         // Cleanup generic renderer
-        forward_renderer.deinit();
-        rt_render_pass.deinit();
+        // forward_renderer.deinit();  // OLD: Disabled for RenderGraph
+        // rt_render_pass.deinit();    // OLD: Disabled for RenderGraph
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
 

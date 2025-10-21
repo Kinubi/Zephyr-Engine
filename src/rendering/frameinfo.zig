@@ -28,4 +28,9 @@ pub const FrameInfo = struct {
     extent: vk.Extent2D = .{ .width = 1280, .height = 720 },
     global_descriptor_set: vk.DescriptorSet = undefined,
     ray_tracing_descriptor_set: vk.DescriptorSet = undefined,
+
+    // Dynamic rendering attachments (for RenderGraph)
+    color_image: vk.Image = .null_handle,
+    color_image_view: vk.ImageView = .null_handle,
+    depth_image_view: vk.ImageView = .null_handle,
 };

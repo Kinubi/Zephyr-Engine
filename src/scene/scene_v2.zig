@@ -1,4 +1,5 @@
 const std = @import("std");
+const vk = @import("vulkan");
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
 const Vec3 = Math.Vec3;
@@ -6,6 +7,10 @@ const Mat4x4 = Math.Mat4x4;
 
 const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 
 // ECS imports
 const ecs = @import("../ecs.zig");
@@ -30,6 +35,9 @@ pub const Scene = struct {
 
     // Store GameObjects for stable pointer returns
     game_objects: std.ArrayList(GameObject),
+
+    // Rendering pipeline for this scene
+    render_graph: ?RenderGraph = null,
 
     /// Initialize a new scene
     pub fn init(
@@ -179,7 +187,7 @@ pub const Scene = struct {
     pub fn spawnLight(
         self: *Scene,
         _: Vec3, // color - reserved for future Light component
-        _: f32,  // intensity - reserved for future Light component
+        _: f32, // intensity - reserved for future Light component
     ) !*GameObject {
         log(.INFO, "scene_v2", "Spawning light (Light component not yet implemented)", .{});
 
@@ -239,7 +247,7 @@ pub const Scene = struct {
     /// Destroy a specific GameObject
     pub fn destroyObject(self: *Scene, game_object: *GameObject) void {
         const entity_id = game_object.entity_id;
-        
+
         // Destroy in ECS world
         self.ecs_world.destroyEntity(entity_id);
 
@@ -292,9 +300,54 @@ pub const Scene = struct {
     /// Cleanup scene resources
     pub fn deinit(self: *Scene) void {
         self.unload();
+        if (self.render_graph) |*graph| {
+            graph.deinit();
+        }
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
+    }
+
+    /// Initialize rendering pipeline for this scene
+    /// Must be called after scene creation to enable rendering
+    pub fn initRenderGraph(
+        self: *Scene,
+        graphics_context: *GraphicsContext,
+        pipeline_system: *UnifiedPipelineSystem,
+        swapchain_format: vk.Format,
+        swapchain_depth_format: vk.Format,
+    ) !void {
+        const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
+
+        // Create render graph
+        self.render_graph = RenderGraph.init(self.allocator, graphics_context);
+
+        // Create and add GeometryPass
+        const geometry_pass = try GeometryPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            self.asset_manager,
+            self.ecs_world,
+            swapchain_format,
+            swapchain_depth_format,
+        );
+
+        try self.render_graph.?.addPass(&geometry_pass.base);
+
+        // Compile the graph (setup passes, validate dependencies)
+        try self.render_graph.?.compile();
+
+        log(.INFO, "scene_v2", "RenderGraph initialized for scene: {s}", .{self.name});
+    }
+
+    /// Render the scene using the RenderGraph
+    pub fn render(self: *Scene, frame_info: FrameInfo) !void {
+        if (self.render_graph) |*graph| {
+            try graph.execute(frame_info);
+        } else {
+            log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
+        }
     }
 };
 

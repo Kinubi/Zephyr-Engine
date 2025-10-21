@@ -463,7 +463,15 @@ pub const UnifiedPipelineSystem = struct {
                 _ = builder.withMultisampleState(MultisampleState{ .rasterization_samples = ms_state.rasterization_samples });
             }
 
-            _ = builder.withRenderPass(config.render_pass, config.subpass);
+            // Use dynamic rendering if no render pass specified
+            if (config.render_pass == .null_handle) {
+                // Use provided formats or fall back to defaults
+                const color_formats = config.dynamic_rendering_color_formats orelse &[_]vk.Format{.r16g16b16a16_sfloat};
+                const depth_format = config.dynamic_rendering_depth_format orelse .d32_sfloat_s8_uint;
+                _ = builder.withDynamicRendering(color_formats, depth_format);
+            } else {
+                _ = builder.withRenderPass(config.render_pass, config.subpass);
+            }
 
             for (shaders.items) |shader| {
                 if (shader.shader_type.vertex_bit and !shader.shader_type.compute_bit) {
@@ -486,6 +494,14 @@ pub const UnifiedPipelineSystem = struct {
         const owned_shaders = try shaders.toOwnedSlice(self.allocator);
         shaders_transferred = true; // Mark as transferred so defer won't clean them up
 
+        // Deep copy the config to ensure dynamic rendering formats outlive the original
+        var owned_config = config;
+        if (config.dynamic_rendering_color_formats) |formats| {
+            const formats_copy = try self.allocator.alloc(vk.Format, formats.len);
+            @memcpy(formats_copy, formats);
+            owned_config.dynamic_rendering_color_formats = formats_copy;
+        }
+
         // Create unified pipeline object
         const pipeline = Pipeline{
             .vulkan_pipeline = vulkan_pipeline,
@@ -496,7 +512,7 @@ pub const UnifiedPipelineSystem = struct {
             .descriptor_layouts = descriptor_resources.layouts,
             .descriptor_sets = descriptor_resources.sets,
             .shaders = owned_shaders,
-            .config = config,
+            .config = owned_config,
             .is_compute = is_compute_pipeline,
             .is_raytracing = is_raytracing_pipeline,
         };
@@ -1626,6 +1642,10 @@ pub const PipelineConfig = struct {
     // Render pass
     render_pass: vk.RenderPass,
     subpass: u32 = 0,
+
+    // Dynamic rendering formats (used when render_pass is .null_handle)
+    dynamic_rendering_color_formats: ?[]const vk.Format = null,
+    dynamic_rendering_depth_format: ?vk.Format = null,
 };
 
 /// Unified pipeline representation
@@ -1668,6 +1688,12 @@ const Pipeline = struct {
         for (self.shaders) |shader| {
             shader.deinit(graphics_context.*);
             allocator.destroy(shader);
+        }
+        allocator.free(self.shaders);
+
+        // Free copied dynamic rendering formats
+        if (self.config.dynamic_rendering_color_formats) |formats| {
+            allocator.free(formats);
         }
 
         self.descriptor_layout_info.deinit();
