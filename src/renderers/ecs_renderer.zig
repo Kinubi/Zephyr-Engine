@@ -334,7 +334,7 @@ pub const EcsRenderer = struct {
         var skipped_no_model: usize = 0;
         var skipped_no_material_asset: usize = 0;
         var skipped_no_material_index: usize = 0;
-        
+
         for (render_data.renderables.items) |renderable| {
             // Get model from asset manager
             const model = self.asset_manager.getModel(renderable.model_asset) orelse {
@@ -389,8 +389,7 @@ pub const EcsRenderer = struct {
 
         // Log skip statistics
         if (skipped_no_model > 0 or skipped_no_material_asset > 0 or skipped_no_material_index > 0) {
-            log(.INFO, "ecs_renderer", "Skipped entities: {} no model, {} no material asset, {} no material index", 
-                .{skipped_no_model, skipped_no_material_asset, skipped_no_material_index});
+            log(.INFO, "ecs_renderer", "Skipped entities: {} no model, {} no material asset, {} no material index", .{ skipped_no_model, skipped_no_material_asset, skipped_no_material_index });
         }
 
         if (rendered_count > 0) {

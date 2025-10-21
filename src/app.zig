@@ -359,9 +359,9 @@ pub const App = struct {
         scene_v2_enabled = true;
 
         // Cornell Box dimensions - smaller and pushed back so camera can see it
-        const box_size: f32 = 2.0;  // Smaller box
+        const box_size: f32 = 2.0; // Smaller box
         const half_size = box_size / 2.0;
-        const box_offset_z: f32 = 3.0;  // Push box away from camera
+        const box_offset_z: f32 = 3.0; // Push box away from camera
 
         // Floor (white)
         const floor = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
