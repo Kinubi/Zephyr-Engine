@@ -1,3 +1,8 @@
 {
-    "cmake.ignoreCMakeListsMissing": true
+    "cmake.ignoreCMakeListsMissing": true,
+    "zig.testArgs": [
+        "build",
+        "test",
+        "-Dtest-filter=${filter}"
+    ]
 }
