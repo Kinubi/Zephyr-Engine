@@ -24,6 +24,10 @@ const Scene = @import("scene/scene.zig").Scene;
 const GameObject = @import("scene/game_object.zig").GameObject;
 const Material = @import("assets/asset_manager.zig").Material;
 
+// Scene v2 imports (new ECS-based scene system)
+const SceneV2 = @import("scene/scene_v2.zig").Scene;
+const GameObjectV2 = @import("scene/game_object_v2.zig").GameObject;
+
 // Asset system imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
@@ -153,6 +157,10 @@ pub const App = struct {
 
     // ECS systems
     var transform_system: new_ecs.TransformSystem = undefined;
+
+    // Scene v2 (ECS-based scene)
+    var scene_v2: SceneV2 = undefined;
+    var scene_v2_enabled: bool = false;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -343,6 +351,63 @@ pub const App = struct {
 
         log(.INFO, "app", "Created ECS cube entity at (1.5, 0, 0)", .{});
         log(.INFO, "app", "ECS test scene created with 2 renderable entities", .{});
+
+        // ==================== Scene v2: Cornell Box with Two Vases ====================
+        log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
+
+        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, "cornell_box");
+        scene_v2_enabled = true;
+
+        // Cornell Box dimensions - smaller and pushed back so camera can see it
+        const box_size: f32 = 2.0;  // Smaller box
+        const half_size = box_size / 2.0;
+        const box_offset_z: f32 = 3.0;  // Push box away from camera
+
+        // Floor (white)
+        const floor = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
+        try floor.setPosition(Math.Vec3.init(0, -half_size, box_offset_z));
+        try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
+        log(.INFO, "app", "Scene v2: Added floor", .{});
+
+        // Ceiling (white)
+        const ceiling = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
+        try ceiling.setPosition(Math.Vec3.init(0, half_size, 0));
+        try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
+        log(.INFO, "app", "Scene v2: Added ceiling", .{});
+
+        // Back wall (white)
+        const back_wall = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
+        try back_wall.setPosition(Math.Vec3.init(0, 0, half_size));
+        try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
+        log(.INFO, "app", "Scene v2: Added back wall", .{});
+
+        // Left wall (red) - using error.png for red color
+        const left_wall = try scene_v2.spawnProp("models/cube.obj", "textures/error.png");
+        try left_wall.setPosition(Math.Vec3.init(-half_size, 0, 0));
+        try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
+        log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
+
+        // Right wall (green) - using default.png for green-ish color
+        const right_wall = try scene_v2.spawnProp("models/cube.obj", "textures/default.png");
+        try right_wall.setPosition(Math.Vec3.init(half_size, 0, 0));
+        try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
+        log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
+
+        // First vase (left side) - smooth vase
+        const vase1 = try scene_v2.spawnProp("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png");
+        try vase1.setPosition(Math.Vec3.init(-1.2, -half_size + 0.05, 0.5));
+        try vase1.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
+        log(.INFO, "app", "Scene v2: Added vase 1 (smooth)", .{});
+
+        // Second vase (right side) - flat vase
+        const vase2 = try scene_v2.spawnProp("models/flat_vase.obj", "textures/granitesmooth1-albedo.png");
+        try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
+        try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
+        log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
+
+        log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene_v2.entities.items.len});
+
+        // ==================== End Scene v2 Setup ====================
 
         // log(.DEBUG, "scene", "Adding point light objects", .{});
         // const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
@@ -646,6 +711,12 @@ pub const App = struct {
 
         //particle_renderer.deinit();
         scene.deinit();
+
+        // Clean up Scene v2
+        if (scene_v2_enabled) {
+            scene_v2.deinit();
+            log(.INFO, "app", "Scene v2 cleaned up", .{});
+        }
 
         shader_manager.deinit();
         asset_manager.deinit();

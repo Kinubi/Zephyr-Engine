@@ -111,16 +111,17 @@ pub const EcsRenderer = struct {
         }
     }
 
-    pub fn onCreate(self: *EcsRenderer, scene_bridge: *SceneBridge) !void {
+    pub fn onCreate(self: *EcsRenderer, _: *SceneBridge) !void {
         var any_bindings = false;
 
-        // Bind material buffer from SceneBridge
-        if (scene_bridge.getMaterialBufferInfo()) |material_info| {
+        // Bind material buffer directly from AssetManager (not SceneBridge)
+        // This is the modern ECS path - get GPU resources directly from AssetManager
+        if (self.asset_manager.material_buffer) |buffer| {
             const material_resource = Resource{
                 .buffer = .{
-                    .buffer = material_info.buffer,
-                    .offset = material_info.offset,
-                    .range = material_info.range,
+                    .buffer = buffer.buffer,
+                    .offset = 0,
+                    .range = buffer.buffer_size,
                 },
             };
 
@@ -137,8 +138,8 @@ pub const EcsRenderer = struct {
             any_bindings = true;
         }
 
-        // Bind texture array from SceneBridge
-        const texture_image_infos = scene_bridge.getTextures();
+        // Bind texture array directly from AssetManager
+        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
         var textures_ready = false;
         if (texture_image_infos.len > 0) {
             textures_ready = true;
@@ -173,16 +174,16 @@ pub const EcsRenderer = struct {
             }
         }
 
-        log(.INFO, "ecs_renderer", "ECS renderer onCreate complete (materials: {}, textures: {})", .{ scene_bridge.getMaterialBufferInfo() != null, textures_ready });
+        log(.INFO, "ecs_renderer", "ECS renderer onCreate complete (materials: {}, textures: {})", .{ self.asset_manager.material_buffer != null, textures_ready });
     }
 
     /// Update checks if pipeline needs refresh or descriptors need rebinding
-    pub fn update(self: *EcsRenderer, frame_info: *const FrameInfo, scene_bridge: *SceneBridge) !bool {
+    pub fn update(self: *EcsRenderer, frame_info: *const FrameInfo, _: *SceneBridge) !bool {
         const frame_index = frame_info.current_frame;
 
-        // Check for material/texture updates from SceneBridge
-        const materials_dirty = scene_bridge.materialsUpdated(frame_index);
-        const textures_dirty = scene_bridge.texturesUpdated(frame_index);
+        // Check for material/texture updates directly from AssetManager
+        const materials_dirty = self.asset_manager.materials_dirty;
+        const textures_dirty = self.asset_manager.texture_descriptors_dirty;
 
         const needs_update =
             materials_dirty or
@@ -204,15 +205,15 @@ pub const EcsRenderer = struct {
             self.markAllFramesDirty();
         }
 
-        // Update material buffer binding if available
-        const material_info = scene_bridge.getMaterialBufferInfo() orelse {
+        // Get material buffer directly from AssetManager
+        const material_buffer = self.asset_manager.material_buffer orelse {
             log(.WARN, "ecs_renderer", "Material buffer not ready, deferring descriptor update", .{});
             self.markAllFramesDirty();
             return false;
         };
 
-        // Update texture bindings if available
-        const texture_image_infos = scene_bridge.getTextures();
+        // Get texture array directly from AssetManager
+        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
         const textures_ready = blk: {
             if (texture_image_infos.len == 0) break :blk false;
             for (texture_image_infos) |info| {
@@ -226,9 +227,9 @@ pub const EcsRenderer = struct {
         // Bind resources
         const material_resource = Resource{
             .buffer = .{
-                .buffer = material_info.buffer,
-                .offset = material_info.offset,
-                .range = material_info.range,
+                .buffer = material_buffer.buffer,
+                .offset = 0,
+                .range = material_buffer.buffer_size,
             },
         };
 
@@ -265,6 +266,11 @@ pub const EcsRenderer = struct {
         // Extract rendering data from ECS
         var render_data = try self.render_system.extractRenderData(self.ecs_world);
         defer render_data.deinit();
+
+        // Log entity count for debugging
+        if (render_data.renderables.items.len > 0) {
+            log(.INFO, "ecs_renderer", "Found {} ECS entities to render", .{render_data.renderables.items.len});
+        }
 
         // Skip if no entities to render
         if (render_data.renderables.items.len == 0) {
@@ -325,21 +331,34 @@ pub const EcsRenderer = struct {
 
         // Render each entity
         var rendered_count: usize = 0;
+        var skipped_no_model: usize = 0;
+        var skipped_no_material_asset: usize = 0;
+        var skipped_no_material_index: usize = 0;
+        
         for (render_data.renderables.items) |renderable| {
             // Get model from asset manager
             const model = self.asset_manager.getModel(renderable.model_asset) orelse {
-                log(.WARN, "ecs_renderer", "Model asset {} not found", .{@intFromEnum(renderable.model_asset)});
+                // Suppress warning - assets may still be loading
+                skipped_no_model += 1;
+                log(.DEBUG, "ecs_renderer", "Entity skipped: no model for asset {}", .{@intFromEnum(renderable.model_asset)});
                 continue;
             };
 
-            // Get material index from asset manager (use model's material if entity doesn't specify one)
-            const material_asset_id = renderable.material_asset orelse renderable.model_asset;
-            const material_index = self.asset_manager.getMaterialIndex(material_asset_id) orelse {
-                log(.WARN, "ecs_renderer", "Material asset {} not found", .{@intFromEnum(material_asset_id)});
+            // Look up material index from AssetManager
+            const material_asset = renderable.material_asset orelse {
+                // No material assigned
+                skipped_no_material_asset += 1;
+                log(.DEBUG, "ecs_renderer", "Entity skipped: no material asset assigned", .{});
                 continue;
             };
-
-            // Prepare push constants
+            const material_idx_opt = self.asset_manager.getMaterialIndex(material_asset);
+            if (material_idx_opt == null) {
+                // Suppress warning - assets may still be loading
+                skipped_no_material_index += 1;
+                log(.DEBUG, "ecs_renderer", "Entity skipped: no material index for asset {}", .{@intFromEnum(material_asset)});
+                continue;
+            }
+            const material_index = material_idx_opt.?; // Prepare push constants
             const push_constants = EcsPushConstantData{
                 .transform = renderable.world_matrix.data,
                 .normal_matrix = renderable.world_matrix.data, // TODO: Compute proper normal matrix
@@ -366,6 +385,12 @@ pub const EcsRenderer = struct {
         // Mark scene resources as synced after rendering
         if (meshes_dirty) {
             scene_bridge.markMeshesSynced(frame_index);
+        }
+
+        // Log skip statistics
+        if (skipped_no_model > 0 or skipped_no_material_asset > 0 or skipped_no_material_index > 0) {
+            log(.INFO, "ecs_renderer", "Skipped entities: {} no model, {} no material asset, {} no material index", 
+                .{skipped_no_model, skipped_no_material_asset, skipped_no_material_index});
         }
 
         if (rendered_count > 0) {
