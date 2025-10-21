@@ -133,7 +133,6 @@ pub const GeometryPass = struct {
     // Pipeline
     geometry_pipeline: PipelineId = undefined,
     cached_pipeline_handle: vk.Pipeline = .null_handle,
-    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
     // Render system for extracting entities
     render_system: RenderSystem,
@@ -285,17 +284,26 @@ pub const GeometryPass = struct {
         const cmd = frame_info.command_buffer;
         const frame_index = frame_info.current_frame;
 
-        // If AssetManager signals materials or textures were updated, mark ALL frames dirty
-        if (self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated) {
-            for (&self.descriptor_dirty_flags) |*flag| {
-                flag.* = true;
-            }
+        // Check if pipeline was hot-reloaded
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
+        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+
+        if (pipeline_rebuilt) {
+            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
+            self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
+            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
         }
 
-        // Check if THIS frame needs updating
-        if (self.descriptor_dirty_flags[frame_index]) {
-            try self.updateDescriptors(frame_index);
+        // Check if assets were updated (materials or textures)
+        const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
+
+        // If pipeline was rebuilt OR assets were updated, rebind descriptors for ALL frames
+        if (pipeline_rebuilt or assets_updated) {
+            try self.updateDescriptors();
         }
+
+        // Re-fetch pipeline entry in case updateDescriptors() rebuilt it
+        const current_pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
 
         // Extract renderables from ECS
         var render_data = try self.render_system.extractRenderData(self.ecs_world);
@@ -333,14 +341,13 @@ pub const GeometryPass = struct {
         // Begin rendering (also sets viewport and scissor)
         rendering.begin(self.graphics_context, cmd);
 
-        // Bind pipeline
-        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
-        self.graphics_context.vkd.cmdBindPipeline(cmd, .graphics, pipeline_entry.vulkan_pipeline);
+        // Bind pipeline (use current_pipeline_entry which may have been updated by updateDescriptors)
+        self.graphics_context.vkd.cmdBindPipeline(cmd, .graphics, current_pipeline_entry.vulkan_pipeline);
 
         // Bind descriptor sets
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
-        if (pipeline_entry.descriptor_sets.items.len > 1) {
-            const set_1_frames = pipeline_entry.descriptor_sets.items[1];
+        if (current_pipeline_entry.descriptor_sets.items.len > 1) {
+            const set_1_frames = current_pipeline_entry.descriptor_sets.items[1];
             const material_descriptor_set = set_1_frames[frame_index];
 
             const descriptor_sets = [_]vk.DescriptorSet{
@@ -430,19 +437,8 @@ pub const GeometryPass = struct {
         );
     }
 
-    fn updateDescriptors(self: *GeometryPass, frame_index: u32) !void {
-        // Check for pipeline hot-reload
-        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
-        if (pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle) {
-            log(.INFO, "geometry_pass", "Pipeline hot-reloaded", .{});
-            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
-            self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
-            for (&self.descriptor_dirty_flags) |*flag| {
-                flag.* = true;
-            }
-        }
-
-        // Rebind resources
+    fn updateDescriptors(self: *GeometryPass) !void {
+        // Rebind resources for ALL frames
         if (self.asset_manager.material_buffer) |buffer| {
             const material_resource = Resource{
                 .buffer = .{
@@ -489,18 +485,13 @@ pub const GeometryPass = struct {
             }
         }
 
-        // Update descriptor sets
-        try self.pipeline_system.updateDescriptorSetsForPipeline(
-            self.geometry_pipeline,
-            frame_index,
-        );
-
-        // Clear dirty flags after successful update
-        self.descriptor_dirty_flags[frame_index] = false;
-
-        // Clear AssetManager flags (they are global, not per-frame like SceneBridge)
-        // We clear them here because we've successfully processed the update
-
+        // Update descriptor sets for ALL frames
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            try self.pipeline_system.updateDescriptorSetsForPipeline(
+                self.geometry_pipeline,
+                @intCast(frame_idx),
+            );
+        }
     }
 
     fn teardownImpl(base: *RenderPass) void {

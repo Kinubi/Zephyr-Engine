@@ -380,7 +380,6 @@ pub const Texture = struct {
         // 1. Create staging buffer and upload pixels using Buffer abstraction
         const pixel_count = image.width * image.height * image.num_components;
         const buffer_size = pixel_count * image.bytes_per_component;
-        log(.DEBUG, "texture", "initFromMemory staging buffer size={d} bytes", .{buffer_size});
         const on_main_thread = std.Thread.getCurrentId() == gc.main_thread_id;
         var staging_buffer = try Buffer.init(
             gc,

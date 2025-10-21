@@ -287,11 +287,11 @@ pub const App = struct {
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
         log(.INFO, "app", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
 
-        // Add another vase with a different texture (asset-based)
-        const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
-            Math.Vec3.init(0, 0, 0), // rotation
-            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        log(.INFO, "app", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
+        // // Add another vase with a different texture (asset-based)
+        // const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
+        //     Math.Vec3.init(0, 0, 0), // rotation
+        //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        // log(.INFO, "app", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -307,51 +307,6 @@ pub const App = struct {
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
 
-        // Create test ECS entities with Transform + MeshRenderer
-        // Wait briefly to ensure assets are loaded
-        log(.INFO, "app", "Creating test ECS entities...", .{});
-
-        // Get asset IDs for cube model and textures
-        const cube_model_id = cube_object.model_asset orelse {
-            log(.WARN, "app", "Cube model asset not available, skipping ECS entities", .{});
-            @panic("Cube model required for ECS test");
-        };
-        const cube_material_id = cube_object.material_asset orelse {
-            log(.WARN, "app", "Cube material asset not available", .{});
-            @panic("Cube material required for ECS test");
-        };
-        const cube_texture_id = cube_object.texture_asset orelse {
-            log(.WARN, "app", "Cube texture asset not available", .{});
-            @panic("Cube texture required for ECS test");
-        };
-
-        // Create ECS cube entity at position (-1.5, 0, 0)
-        const ecs_cube1 = try new_ecs_world.createEntity();
-        const cube1_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0, 0));
-        try new_ecs_world.emplace(new_ecs.Transform, ecs_cube1, cube1_transform);
-
-        var cube1_renderer = new_ecs.MeshRenderer.init(cube_model_id, cube_material_id);
-        cube1_renderer.setTexture(cube_texture_id);
-        cube1_renderer.layer = 100; // Render after scene objects
-        try new_ecs_world.emplace(new_ecs.MeshRenderer, ecs_cube1, cube1_renderer);
-
-        log(.INFO, "app", "Created ECS cube entity at (-1.5, 0, 0)", .{});
-
-        // Create second ECS cube entity at position (1.5, 0, 0) with different texture
-        const cube2_texture_id = cube2_object.texture_asset orelse cube_texture_id;
-
-        const ecs_cube2 = try new_ecs_world.createEntity();
-        const cube2_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0, 0));
-        try new_ecs_world.emplace(new_ecs.Transform, ecs_cube2, cube2_transform);
-
-        var cube2_renderer = new_ecs.MeshRenderer.init(cube_model_id, cube_material_id);
-        cube2_renderer.setTexture(cube2_texture_id);
-        cube2_renderer.layer = 100;
-        try new_ecs_world.emplace(new_ecs.MeshRenderer, ecs_cube2, cube2_renderer);
-
-        log(.INFO, "app", "Created ECS cube entity at (1.5, 0, 0)", .{});
-        log(.INFO, "app", "ECS test scene created with 2 renderable entities", .{});
-
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
@@ -365,13 +320,13 @@ pub const App = struct {
 
         // Floor (white)
         const floor = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
-        try floor.setPosition(Math.Vec3.init(0, -half_size, box_offset_z));
+        try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
         const ceiling = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
-        try ceiling.setPosition(Math.Vec3.init(0, half_size, 0));
+        try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
@@ -383,13 +338,13 @@ pub const App = struct {
 
         // Left wall (red) - using error.png for red color
         const left_wall = try scene_v2.spawnProp("models/cube.obj", "textures/error.png");
-        try left_wall.setPosition(Math.Vec3.init(-half_size, 0, 0));
+        try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
         const right_wall = try scene_v2.spawnProp("models/cube.obj", "textures/default.png");
-        try right_wall.setPosition(Math.Vec3.init(half_size, 0, 0));
+        try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
@@ -407,6 +362,7 @@ pub const App = struct {
 
         log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene_v2.entities.items.len});
 
+        asset_manager.beginFrame();
         // Initialize RenderGraph for scene_v2
         try scene_v2.initRenderGraph(
             &self.gc,
@@ -449,49 +405,49 @@ pub const App = struct {
 
         log(.INFO, "app", "Pipeline templates registered", .{});
 
-        _ = try scene.updateSyncResources(self.allocator);
+        //_ = try scene.updateSyncResources(self.allocator);
 
         // Initialize unified textured renderer with shared pipeline system
-        textured_renderer = try TexturedRenderer.init(
-            self.allocator,
-            @constCast(&self.gc),
-            &shader_manager,
-            &unified_pipeline_system,
-            swapchain.render_pass,
-        );
+        // textured_renderer = try TexturedRenderer.init(
+        //     self.allocator,
+        //     @constCast(&self.gc),
+        //     &shader_manager,
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        // );
 
         // Initialize ECS renderer with shared pipeline system
-        ecs_renderer = try EcsRenderer.init(
-            self.allocator,
-            @constCast(&self.gc),
-            &shader_manager,
-            asset_manager, // asset_manager is already a pointer
-            &unified_pipeline_system,
-            swapchain.render_pass,
-            &new_ecs_world,
-        );
+        // ecs_renderer = try EcsRenderer.init(
+        //     self.allocator,
+        //     @constCast(&self.gc),
+        //     &shader_manager,
+        //     asset_manager, // asset_manager is already a pointer
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        //     &new_ecs_world,
+        // );
         log(.INFO, "app", "ECS renderer initialized", .{});
 
         // Material data is now managed by the asset_manager and bound via UnifiedPipelineSystem
         // No need for separate updateMaterialData calls
 
-        point_light_renderer = try PointLightRenderer.init(
-            @constCast(&self.gc),
-            &unified_pipeline_system,
-            swapchain.render_pass,
-            scene.asScene(),
-            global_ubo_set,
-        );
+        // point_light_renderer = try PointLightRenderer.init(
+        //     @constCast(&self.gc),
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        //     scene.asScene(),
+        //     global_ubo_set,
+        // );
 
-        // Initialize unified raytracing renderer through the shared pipeline system
-        raytracing_renderer = try RaytracingRenderer.init(
-            self.allocator,
-            @constCast(&self.gc),
-            &unified_pipeline_system,
-            &swapchain,
-            thread_pool,
-            global_ubo_set,
-        );
+        // // Initialize unified raytracing renderer through the shared pipeline system
+        // raytracing_renderer = try RaytracingRenderer.init(
+        //     self.allocator,
+        //     @constCast(&self.gc),
+        //     &unified_pipeline_system,
+        //     &swapchain,
+        //     thread_pool,
+        //     global_ubo_set,
+        // );
 
         // --- Raytracing pipeline setup ---
         // Use the same global descriptor set and layout as the renderer
@@ -499,24 +455,24 @@ pub const App = struct {
         // Create scene bridge for render pass system and raytracing
         scene_bridge = SceneBridge.init(&scene, self.allocator);
 
-        // Connect new ECS World to SceneBridge for particle extraction
-        if (new_ecs_enabled) {
-            scene_bridge.setEcsWorld(&new_ecs_world);
-            log(.INFO, "app", "Connected ECS World to SceneBridge", .{});
-        }
+        // // Connect new ECS World to SceneBridge for particle extraction
+        // if (new_ecs_enabled) {
+        //     scene_bridge.setEcsWorld(&new_ecs_world);
+        //     log(.INFO, "app", "Connected ECS World to SceneBridge", .{});
+        // }
 
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
         // SBT will be created by raytracing renderer when pipeline is ready
 
         log(.INFO, "app", "Creating unified particle renderer...", .{});
-        particle_renderer = try ParticleRenderer.init(
-            self.allocator,
-            &self.gc,
-            &shader_manager,
-            &unified_pipeline_system,
-            swapchain.render_pass,
-            PARTICLE_MAX,
-        );
+        // particle_renderer = try ParticleRenderer.init(
+        //     self.allocator,
+        //     &self.gc,
+        //     &shader_manager,
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        //     PARTICLE_MAX,
+        // );
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
 
