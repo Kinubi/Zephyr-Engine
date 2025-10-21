@@ -19,6 +19,11 @@ pub const Camera = @import("ecs/components/camera.zig").Camera;
 pub const TransformSystem = @import("ecs/systems/transform_system.zig").TransformSystem;
 pub const RenderSystem = @import("ecs/systems/render_system.zig").RenderSystem;
 
+// Workflow demonstrations
+test {
+    _ = @import("ecs/workflow_demo.zig");
+}
+
 test {
     @import("std").testing.refAllDecls(@This());
 }

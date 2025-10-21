@@ -60,7 +60,7 @@ pub const TransformSystem = struct {
 
 test "TransformSystem: basic update" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -87,7 +87,7 @@ test "TransformSystem: basic update" {
 
 test "TransformSystem: parent-child hierarchy" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -127,7 +127,7 @@ test "TransformSystem: parent-child hierarchy" {
 
 test "TransformSystem: multiple children" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 

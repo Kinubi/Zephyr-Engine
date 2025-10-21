@@ -93,15 +93,15 @@ pub const RenderSystem = struct {
             if (camera.is_primary) {
                 // Try to get the transform for this camera entity
                 const transform = world.get(Transform, entry.entity);
-                
+
                 const position = if (transform) |t| t.position else math.Vec3.init(0, 0, 0);
-                
+
                 // Get view matrix from transform
                 // TODO: Implement proper matrix inverse for view transform
                 // For now, use identity as placeholder
                 const view_matrix = if (transform) |_|
                     math.Mat4x4.identity()
-                else 
+                else
                     math.Mat4x4.identity();
 
                 return CameraData{
@@ -123,7 +123,7 @@ pub const RenderSystem = struct {
         var iter = mesh_view.iterator();
         while (iter.next()) |entry| {
             const renderer = entry.component;
-            
+
             // Skip if not enabled or doesn't have valid assets
             if (!renderer.hasValidAssets()) {
                 continue;
@@ -159,7 +159,7 @@ pub const RenderSystem = struct {
 
 test "RenderSystem: extract empty world" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -180,7 +180,7 @@ test "RenderSystem: extract empty world" {
 test "RenderSystem: extract single renderable" {
     const ecs = @import("../world.zig");
     const AssetId = @import("../../assets/asset_types.zig").AssetId;
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -193,10 +193,10 @@ test "RenderSystem: extract single renderable" {
 
     // Create entity with transform and renderer
     const entity = try world.createEntity();
-    
+
     const transform = Transform.initWithPosition(.{ .x = 1, .y = 2, .z = 3 });
     try world.emplace(Transform, entity, transform);
-    
+
     const renderer = MeshRenderer.init(@enumFromInt(100), @enumFromInt(200));
     try world.emplace(MeshRenderer, entity, renderer);
 
@@ -205,7 +205,7 @@ test "RenderSystem: extract single renderable" {
     defer render_data.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), render_data.renderables.items.len);
-    
+
     const renderable = render_data.renderables.items[0];
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(100)), renderable.model_asset);
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(200)), renderable.material_asset.?);
@@ -213,7 +213,7 @@ test "RenderSystem: extract single renderable" {
 
 test "RenderSystem: disabled renderer not extracted" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -239,7 +239,7 @@ test "RenderSystem: disabled renderer not extracted" {
 
 test "RenderSystem: extract primary camera" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -252,11 +252,11 @@ test "RenderSystem: extract primary camera" {
 
     // Create camera entity
     const entity = try world.createEntity();
-    
+
     var camera = Camera.initPerspective(60.0, 16.0 / 9.0, 0.1, 100.0);
     camera.setPrimary(true);
     try world.emplace(Camera, entity, camera);
-    
+
     const transform = Transform.initWithPosition(.{ .x = 0, .y = 5, .z = 10 });
     try world.emplace(Transform, entity, transform);
 
@@ -265,7 +265,7 @@ test "RenderSystem: extract primary camera" {
     defer render_data.deinit();
 
     try std.testing.expect(render_data.camera != null);
-    
+
     const cam_data = render_data.camera.?;
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), cam_data.position.x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 5.0), cam_data.position.y, 0.001);
@@ -274,7 +274,7 @@ test "RenderSystem: extract primary camera" {
 
 test "RenderSystem: sort by layer" {
     const ecs = @import("../world.zig");
-    
+
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -305,7 +305,7 @@ test "RenderSystem: sort by layer" {
     defer render_data.deinit();
 
     try std.testing.expectEqual(@as(usize, 3), render_data.renderables.items.len);
-    
+
     // Should be sorted: 5, 10, 20
     try std.testing.expectEqual(@as(u8, 5), render_data.renderables.items[0].layer);
     try std.testing.expectEqual(@as(u8, 10), render_data.renderables.items[1].layer);

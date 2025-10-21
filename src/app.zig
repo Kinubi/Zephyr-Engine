@@ -38,6 +38,7 @@ const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
 // Renderer imports
 const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
+const EcsRenderer = @import("renderers/ecs_renderer.zig").EcsRenderer;
 const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
 const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
 const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
@@ -90,6 +91,7 @@ pub const App = struct {
 
     // Individual renderers (still needed for initialization)
     var textured_renderer: TexturedRenderer = undefined;
+    var ecs_renderer: EcsRenderer = undefined;
     var point_light_renderer: PointLightRenderer = undefined;
     var raytracing_renderer: RaytracingRenderer = undefined;
     //var particle_renderer: ParticleRenderer = undefined;
@@ -148,6 +150,9 @@ pub const App = struct {
     // New coherent ECS system
     var new_ecs_world: new_ecs.World = undefined;
     var new_ecs_enabled: bool = false;
+
+    // ECS systems
+    var transform_system: new_ecs.TransformSystem = undefined;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -213,19 +218,16 @@ pub const App = struct {
         new_ecs_world = new_ecs.World.init(self.allocator, thread_pool);
         errdefer new_ecs_world.deinit();
 
-        // Register ParticleComponent
+        // Register all ECS components
         try new_ecs_world.registerComponent(new_ecs.ParticleComponent);
+        try new_ecs_world.registerComponent(new_ecs.Transform);
+        try new_ecs_world.registerComponent(new_ecs.MeshRenderer);
+        try new_ecs_world.registerComponent(new_ecs.Camera);
+        log(.INFO, "app", "Registered ECS components: ParticleComponent, Transform, MeshRenderer, Camera", .{});
 
-        // Spawn initial particles (1024 particles)
-        log(.INFO, "app", "Spawning {} particles in new ECS...", .{PARTICLE_MAX});
-        var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
-        const random = prng.random();
-
-        for (0..PARTICLE_MAX) |_| {
-            const entity = try new_ecs_world.createEntity();
-            const particle = new_ecs.ParticleComponent.init(random);
-            try new_ecs_world.emplace(new_ecs.ParticleComponent, entity, particle);
-        }
+        // Initialize ECS systems
+        transform_system = new_ecs.TransformSystem.init(self.allocator);
+        log(.INFO, "app", "Initialized ECS systems: TransformSystem", .{});
 
         new_ecs_enabled = true;
         log(.INFO, "app", "New ECS system initialized with {} particles", .{PARTICLE_MAX});
@@ -297,6 +299,51 @@ pub const App = struct {
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
 
+        // Create test ECS entities with Transform + MeshRenderer
+        // Wait briefly to ensure assets are loaded
+        log(.INFO, "app", "Creating test ECS entities...", .{});
+
+        // Get asset IDs for cube model and textures
+        const cube_model_id = cube_object.model_asset orelse {
+            log(.WARN, "app", "Cube model asset not available, skipping ECS entities", .{});
+            @panic("Cube model required for ECS test");
+        };
+        const cube_material_id = cube_object.material_asset orelse {
+            log(.WARN, "app", "Cube material asset not available", .{});
+            @panic("Cube material required for ECS test");
+        };
+        const cube_texture_id = cube_object.texture_asset orelse {
+            log(.WARN, "app", "Cube texture asset not available", .{});
+            @panic("Cube texture required for ECS test");
+        };
+
+        // Create ECS cube entity at position (-1.5, 0, 0)
+        const ecs_cube1 = try new_ecs_world.createEntity();
+        const cube1_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0, 0));
+        try new_ecs_world.emplace(new_ecs.Transform, ecs_cube1, cube1_transform);
+
+        var cube1_renderer = new_ecs.MeshRenderer.init(cube_model_id, cube_material_id);
+        cube1_renderer.setTexture(cube_texture_id);
+        cube1_renderer.layer = 100; // Render after scene objects
+        try new_ecs_world.emplace(new_ecs.MeshRenderer, ecs_cube1, cube1_renderer);
+
+        log(.INFO, "app", "Created ECS cube entity at (-1.5, 0, 0)", .{});
+
+        // Create second ECS cube entity at position (1.5, 0, 0) with different texture
+        const cube2_texture_id = cube2_object.texture_asset orelse cube_texture_id;
+
+        const ecs_cube2 = try new_ecs_world.createEntity();
+        const cube2_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0, 0));
+        try new_ecs_world.emplace(new_ecs.Transform, ecs_cube2, cube2_transform);
+
+        var cube2_renderer = new_ecs.MeshRenderer.init(cube_model_id, cube_material_id);
+        cube2_renderer.setTexture(cube2_texture_id);
+        cube2_renderer.layer = 100;
+        try new_ecs_world.emplace(new_ecs.MeshRenderer, ecs_cube2, cube2_renderer);
+
+        log(.INFO, "app", "Created ECS cube entity at (1.5, 0, 0)", .{});
+        log(.INFO, "app", "ECS test scene created with 2 renderable entities", .{});
+
         // log(.DEBUG, "scene", "Adding point light objects", .{});
         // const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
         // object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
@@ -338,6 +385,18 @@ pub const App = struct {
             &unified_pipeline_system,
             swapchain.render_pass,
         );
+
+        // Initialize ECS renderer with shared pipeline system
+        ecs_renderer = try EcsRenderer.init(
+            self.allocator,
+            @constCast(&self.gc),
+            &shader_manager,
+            asset_manager, // asset_manager is already a pointer
+            &unified_pipeline_system,
+            swapchain.render_pass,
+            &new_ecs_world,
+        );
+        log(.INFO, "app", "ECS renderer initialized", .{});
 
         // Material data is now managed by the asset_manager and bound via UnifiedPipelineSystem
         // No need for separate updateMaterialData calls
@@ -402,7 +461,8 @@ pub const App = struct {
         forward_renderer.setSwapchain(&swapchain);
 
         // Add rasterization renderers to the forward renderer
-        try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
+        // try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
+        try forward_renderer.addRenderer("ecs_renderer", RendererType.raster, &ecs_renderer, EcsRenderer);
         try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
         try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
 
@@ -512,11 +572,10 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
-        // ECS particle update disabled - particles are handled entirely by compute shader
-        // Uncomment when implementing proper ECS-compute integration
-        // if (new_ecs_enabled) {
-        //     try new_ecs_world.update(new_ecs.ParticleComponent, @floatCast(dt));
-        // }
+        // Update ECS transform hierarchies
+        if (new_ecs_enabled) {
+            try transform_system.update(&new_ecs_world);
+        }
 
         compute_shader_system.beginCompute(frame_info);
 
