@@ -328,4 +328,12 @@ pub fn getPipelineStats(self: *UnifiedPipelineSystem, pipeline_id: PipelineId) P
 }
 ```
 
+## 2025-10-21 Progress Log: ECS-Driven Particle Uploads
+
+- Introduced `src/ecs/particle_system.zig`, seeding ECS entities with the legacy random distribution and providing a `Stage` helper that copies component data into a scratch buffer before calling `ParticleRenderer.syncFromEcs`.
+- Expanded `src/ecs/bootstrap.zig` with a configurable bootstrap that owns the particle stage, exposes helpers to attach the runtime renderer, mark the stage dirty, tick it each frame, and release resources during shutdown.
+- Extended `src/app.zig` to pass a shared `PARTICLE_MAX` constant into both the renderer and ECS bootstrap, attach the renderer to the ECS stage immediately after creation, invoke the new tick signature every frame (including the initial zero-delta prime), and tear the stage down during `App.deinit`.
+- Updated `src/renderers/particle_renderer.zig` with `syncFromEcs` and `uploadParticleData` so ECS-driven particle snapshots upload through a single staging buffer pass, reusing descriptor dirtying to ensure compute bindings refresh automatically.
+- Verified the migration step with `zig build`, confirming the project compiles after wiring ECS particle data into the renderer.
+
 This migration demonstrates how the unified system simplifies particle rendering while providing better performance, maintainability, and developer experience.

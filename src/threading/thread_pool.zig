@@ -345,6 +345,7 @@ pub const ThreadPool = struct {
         self.shutdown();
 
         self.work_queue.deinit();
+        self.allocator.destroy(self.work_queue); // Free the work_queue pointer
         self.registered_subsystems.deinit();
         self.subsystem_demands.deinit();
         self.active_workers_per_subsystem.deinit();

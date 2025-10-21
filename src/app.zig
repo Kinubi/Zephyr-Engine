@@ -7,17 +7,13 @@ const GraphicsContext = graphics_context.GraphicsContext;
 const Swapchain = @import("core/swapchain.zig").Swapchain;
 const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const core_texture = @import("core/texture.zig");
-const Texture = core_texture.Texture;
-const DescriptorSetLayout = @import("core/descriptors.zig").DescriptorSetLayout;
-const DescriptorPool = @import("core/descriptors.zig").DescriptorPool;
-const DescriptorSetWriter = @import("core/descriptors.zig").DescriptorWriter;
+
 const Buffer = @import("core/buffer.zig").Buffer;
 
 // Rendering imports
 const Vertex = @import("rendering/mesh.zig").Vertex;
 const Mesh = @import("rendering/mesh.zig").Mesh;
 const Model = @import("rendering/mesh.zig").Model;
-const ModelMesh = @import("rendering/mesh.zig").ModelMesh;
 const Camera = @import("rendering/camera.zig").Camera;
 const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("rendering/frameinfo.zig").GlobalUbo;
@@ -34,12 +30,6 @@ const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
 const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
 const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
 
-// Dynamic pipeline system imports
-const PipelineBuilder = @import("rendering/pipeline_builder.zig").PipelineBuilder;
-const VertexInputBinding = @import("rendering/pipeline_builder.zig").VertexInputBinding;
-const VertexInputAttribute = @import("rendering/pipeline_builder.zig").VertexInputAttribute;
-const DescriptorBinding = @import("rendering/pipeline_builder.zig").DescriptorBinding;
-const PushConstantRange = @import("rendering/pipeline_builder.zig").PushConstantRange;
 // Shader-pipeline integration removed in favor of the unified pipeline system
 
 // Unified pipeline system imports
@@ -56,6 +46,8 @@ const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").Raytraci
 // RaytracingSystem is now integrated into RaytracingRenderer
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 
+const PARTICLE_MAX: u32 = 1024;
+
 // Render Pass System imports
 const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
 const RendererType = @import("rendering/generic_renderer.zig").RendererType;
@@ -65,9 +57,8 @@ const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
 // Utility imports
 const Math = @import("utils/math.zig");
 const log = @import("utils/log.zig").log;
-const LogLevel = @import("utils/log.zig").LogLevel;
-const loadFileAlloc = @import("utils/file.zig").loadFileAlloc;
-const ecs = @import("ecs/mod.zig");
+
+const new_ecs = @import("ecs.zig"); // New coherent ECS system
 
 // Input controller
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
@@ -77,15 +68,6 @@ const vk = @import("vulkan");
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
-
-// Callback function for ThreadPool running status changes
-fn onThreadPoolRunningChanged(running: bool) void {
-    if (running) {
-        log(.INFO, "app", "ThreadPool is now running", .{});
-    } else {
-        log(.WARN, "app", "ThreadPool has stopped running - no more async operations possible", .{});
-    }
-}
 
 pub const App = struct {
     window: Window = undefined,
@@ -163,12 +145,9 @@ pub const App = struct {
     var scene_bridge: SceneBridge = undefined;
     // Generic renderer system is now the default rendering path
 
-    var ecs_world: ecs.world.World = undefined;
-    var ecs_stages: ecs.stage_handles.StageHandles = undefined;
-    var ecs_enabled: bool = false;
-    // Small test Health component handle to exercise per-component worker submission
-    var test_health: ?usize = null;
-    var test_health_type: ?usize = null;
+    // New coherent ECS system
+    var new_ecs_world: new_ecs.World = undefined;
+    var new_ecs_enabled: bool = false;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -218,22 +197,38 @@ pub const App = struct {
             .work_item_type = .custom,
         });
 
+        try thread_pool.registerSubsystem(.{
+            .name = "ecs_update",
+            .min_workers = 2,
+            .max_workers = 8,
+            .priority = .normal,
+            .work_item_type = .ecs_update,
+        });
+
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 4 workers
 
-        ecs_world = try ecs.world.World.init(self.allocator, .{ .thread_pool = thread_pool });
-        errdefer ecs_world.deinit();
-        ecs_stages = try ecs.bootstrap.configureWorld(&ecs_world);
-        ecs_enabled = true;
+        // Initialize new coherent ECS system
+        log(.INFO, "app", "Initializing new ECS system with ThreadPool support...", .{});
+        new_ecs_world = new_ecs.World.init(self.allocator, thread_pool);
+        errdefer new_ecs_world.deinit();
 
-        // Initialize a test Health component and attach it to a new entity in the registry.
-        const Health = @import("ecs/health.zig").Health;
-        const entity = ecs_world.registry.create();
-        var h = Health.init(0.0, 100.0);
-        const health_type_id = try ecs_world.registry.registerComponentType();
-        test_health_type = health_type_id;
-        const h_handle = try ecs_world.registry.emplaceComponentFor(comptime Health, health_type_id, entity, &h);
-        test_health = h_handle;
+        // Register ParticleComponent
+        try new_ecs_world.registerComponent(new_ecs.ParticleComponent);
+
+        // Spawn initial particles (1024 particles)
+        log(.INFO, "app", "Spawning {} particles in new ECS...", .{PARTICLE_MAX});
+        var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+        const random = prng.random();
+
+        for (0..PARTICLE_MAX) |_| {
+            const entity = try new_ecs_world.createEntity();
+            const particle = new_ecs.ParticleComponent.init(random);
+            try new_ecs_world.emplace(new_ecs.ParticleComponent, entity, particle);
+        }
+
+        new_ecs_enabled = true;
+        log(.INFO, "app", "New ECS system initialized with {} particles", .{PARTICLE_MAX});
 
         // Initialize Asset Manager on heap for stable pointer address
         asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
@@ -371,6 +366,12 @@ pub const App = struct {
         // Create scene bridge for render pass system and raytracing
         scene_bridge = SceneBridge.init(&scene, self.allocator);
 
+        // Connect new ECS World to SceneBridge for particle extraction
+        if (new_ecs_enabled) {
+            scene_bridge.setEcsWorld(&new_ecs_world);
+            log(.INFO, "app", "Connected ECS World to SceneBridge", .{});
+        }
+
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
         // SBT will be created by raytracing renderer when pipeline is ready
 
@@ -381,7 +382,7 @@ pub const App = struct {
             &shader_manager,
             &unified_pipeline_system,
             swapchain.render_pass,
-            1024, // max particles
+            PARTICLE_MAX,
         );
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
@@ -445,7 +446,7 @@ pub const App = struct {
         // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
     }
 
-    pub fn onUpdate(self: *App) !bool {
+    pub fn update(self: *App) !bool {
         // Process deferred pipeline destroys for hot reload safety
         unified_pipeline_system.processDeferredDestroys();
 
@@ -499,15 +500,6 @@ pub const App = struct {
         }
         const dt = current_time - last_frame_time;
 
-        if (ecs_enabled) {
-            try ecs_world.beginFrame(frame_counter, @as(f32, @floatCast(dt)));
-            try ecs.bootstrap.tick(&ecs_world, ecs_stages);
-            if (test_health) |h| {
-                // submit a per-component work item for the registry-owned Health
-                const tid = test_health_type orelse return error.InvalidComponentType;
-                try ecs_world.registry.submitComponent(tid, h, thread_pool, .normal, @as(f32, @floatCast(dt)), @import("ecs/health.zig").update_trampoline);
-            }
-        }
         const cmdbuf = cmdbufs[current_frame];
         const computebuf = compute_shader_system.compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
@@ -520,14 +512,17 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
+        // ECS particle update disabled - particles are handled entirely by compute shader
+        // Uncomment when implementing proper ECS-compute integration
+        // if (new_ecs_enabled) {
+        //     try new_ecs_world.update(new_ecs.ParticleComponent, @floatCast(dt));
+        // }
+
         compute_shader_system.beginCompute(frame_info);
 
         try forward_renderer.update(&frame_info);
 
         try rt_render_pass.update(&frame_info);
-
-        // Update and render particles using the unified system
-        //_ = try particle_renderer.update(&frame_info, &scene_bridge);
 
         compute_shader_system.endCompute(frame_info);
 
@@ -593,14 +588,16 @@ pub const App = struct {
         //particle_renderer.deinit();
         scene.deinit();
 
-        if (ecs_enabled) {
-            ecs_world.deinit();
-            ecs_enabled = false;
-        }
-
         shader_manager.deinit();
         asset_manager.deinit();
         file_watcher.deinit();
+
+        // Clean up new ECS system
+        if (new_ecs_enabled) {
+            new_ecs_world.deinit();
+            log(.INFO, "app", "New ECS system cleaned up", .{});
+        }
+
         // Shutdown thread pool last to prevent threading conflicts
         thread_pool.deinit();
         self.allocator.destroy(thread_pool);

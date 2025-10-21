@@ -6,6 +6,7 @@ const Model = @import("mesh.zig").Model;
 const Math = @import("../utils/math.zig");
 const log = @import("../utils/log.zig").log;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const EcsWorld = @import("../ecs.zig").World;
 
 /// Rasterization-specific scene data
 pub const RasterizationData = struct {
@@ -139,6 +140,9 @@ pub const SceneBridge = struct {
     compute_cache: ?ComputeData = null,
     allocator: std.mem.Allocator,
     cache_dirty: bool = true,
+
+    // ECS World reference for particle extraction
+    ecs_world: ?*EcsWorld = null,
 
     // BVH change tracking for efficient raytracing updates
     last_object_count: usize = 0,
@@ -669,5 +673,14 @@ pub const SceneBridge = struct {
         const idx = @as(usize, @intCast(frame_index));
         if (idx >= flags.len) return;
         flags[idx] = false;
+    }
+
+    // ECS World access for particle extraction
+    pub fn setEcsWorld(self: *SceneBridge, world: *EcsWorld) void {
+        self.ecs_world = world;
+    }
+
+    pub fn getEcsWorld(self: *const SceneBridge) ?*EcsWorld {
+        return self.ecs_world;
     }
 };
