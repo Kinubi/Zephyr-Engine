@@ -187,6 +187,8 @@ pub const AssetManager = struct {
     loaded_models: std.ArrayList(*Model), // Array of loaded model pointers
     loaded_materials: std.ArrayList(*Material), // Array of loaded material pointers
     material_buffer: ?Buffer = null, // Optional material buffer created on demand
+    material_buffer_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    stale_material_buffers: std.ArrayList(Buffer) = std.ArrayList(Buffer){},
 
     // Asset ID to array index mappings
     asset_to_texture: std.AutoHashMap(AssetId, usize), // AssetId -> texture array index
@@ -246,6 +248,7 @@ pub const AssetManager = struct {
             .asset_to_model = std.AutoHashMap(AssetId, usize).init(allocator),
             .asset_to_material = std.AutoHashMap(AssetId, usize).init(allocator),
             .pending_requests = std.AutoHashMap(AssetId, LoadRequest).init(allocator),
+            .stale_material_buffers = std.ArrayList(Buffer){},
         };
         const loader = try allocator.create(AssetLoader);
         loader.* = try AssetLoader.init(allocator, registry, graphics_context, thread_pool, self);
@@ -361,6 +364,9 @@ pub const AssetManager = struct {
         self.asset_to_model.deinit();
         self.asset_to_material.deinit();
         self.pending_requests.deinit();
+
+        self.flushStaleMaterialBuffers();
+        self.stale_material_buffers.deinit(self.allocator);
 
         // Clean up material buffer
         if (self.material_buffer) |*buffer| {
@@ -752,17 +758,61 @@ pub const AssetManager = struct {
             return;
         }
 
-        self.material_buffer = try Buffer.init(
-            graphics_context,
-            @sizeOf(Material),
-            @as(u32, @intCast(self.loaded_materials.items.len)),
-            .{
-                .storage_buffer_bit = true,
-            },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
+        self.material_buffer_mutex.lock();
+        defer self.material_buffer_mutex.unlock();
 
-        try self.material_buffer.?.map(@sizeOf(Material) * self.loaded_materials.items.len, 0);
+        const required_count: u32 = @intCast(self.loaded_materials.items.len);
+        const required_bytes: vk.DeviceSize = @intCast(@sizeOf(Material) * self.loaded_materials.items.len);
+
+        var buffer_ptr: *Buffer = undefined;
+        var needs_new_buffer = true;
+        var retire_buffer: ?Buffer = null;
+
+        if (self.material_buffer) |*existing| {
+            const reusable = existing.instance_size == @sizeOf(Material) and existing.instance_count >= required_count;
+            if (reusable) {
+                needs_new_buffer = false;
+                buffer_ptr = existing;
+                if (existing.mapped == null) {
+                    try existing.map(existing.buffer_size, 0);
+                }
+                existing.instance_count = required_count;
+            } else {
+                retire_buffer = existing.*;
+            }
+        }
+
+        if (needs_new_buffer) {
+            var new_buffer = try Buffer.init(
+                graphics_context,
+                @sizeOf(Material),
+                required_count,
+                .{
+                    .storage_buffer_bit = true,
+                },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+            );
+
+            try new_buffer.map(new_buffer.buffer_size, 0);
+            new_buffer.instance_count = required_count;
+
+            self.material_buffer = new_buffer;
+            buffer_ptr = &self.material_buffer.?;
+
+            if (retire_buffer) |retired_value| {
+                var retired = retired_value;
+                if (retired.mapped != null) {
+                    retired.unmap();
+                }
+                try self.stale_material_buffers.append(self.allocator, retired);
+            }
+        }
+
+        if (!needs_new_buffer) {
+            // Ensure descriptor reflects current range when reusing
+            buffer_ptr.descriptor_info = .{ .buffer = buffer_ptr.buffer, .offset = 0, .range = vk.WHOLE_SIZE };
+        }
+        buffer_ptr.instance_count = required_count;
 
         // Convert material pointers to material data with resolved texture indices
         var material_data = try self.allocator.alloc(Material, self.loaded_materials.items.len);
@@ -785,13 +835,22 @@ pub const AssetManager = struct {
             material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
         }
 
-        self.material_buffer.?.writeToBuffer(
-            std.mem.sliceAsBytes(material_data),
-            @sizeOf(Material) * self.loaded_materials.items.len,
-            0,
-        );
+        buffer_ptr.writeToBuffer(std.mem.sliceAsBytes(material_data), required_bytes, 0);
 
         log(.INFO, "enhanced asset_manager", "Created material buffer with {d} materials (texture IDs resolved)", .{self.loaded_materials.items.len});
+    }
+
+    pub fn flushStaleMaterialBuffers(self: *AssetManager) void {
+        self.material_buffer_mutex.lock();
+        defer self.material_buffer_mutex.unlock();
+
+        if (self.stale_material_buffers.items.len == 0) return;
+
+        for (self.stale_material_buffers.items) |*buffer| {
+            buffer.deinit();
+        }
+
+        self.stale_material_buffers.clearRetainingCapacity();
     }
 
     /// Check if asset is ready for use

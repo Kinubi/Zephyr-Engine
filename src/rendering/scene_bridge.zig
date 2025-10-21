@@ -305,6 +305,7 @@ pub const SceneBridge = struct {
 
     pub fn markMaterialsSynced(self: *SceneBridge, frame_index: u32) void {
         SceneBridge.markFrameClean(&self.material_update_needed, frame_index);
+        self.scene.asset_manager.flushStaleMaterialBuffers();
     }
 
     /// Texture accessors

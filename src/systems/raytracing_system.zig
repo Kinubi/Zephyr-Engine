@@ -28,6 +28,7 @@ pub const RaytracingSystem = struct {
     tlas_buffer: Buffer = undefined,
     tlas_instance_buffer: Buffer = undefined,
     tlas_instance_buffer_initialized: bool = false,
+    tlas_buffer_initialized: bool = false,
     tlas_dirty: bool = false,
 
     // New multithreaded BVH system
@@ -41,6 +42,11 @@ pub const RaytracingSystem = struct {
     // Legacy BLAS arrays (for compatibility)
     blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
     blas_buffers: std.ArrayList(Buffer) = undefined,
+    destroy_blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
+    destroy_blas_buffers: std.ArrayList(Buffer) = undefined,
+    destroy_tlas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
+    destroy_tlas_buffers: std.ArrayList(Buffer) = undefined,
+    destroy_tlas_instance_buffers: std.ArrayList(Buffer) = undefined,
     allocator: std.mem.Allocator = undefined,
 
     /// Enhanced init with multithreaded BVH support
@@ -63,8 +69,14 @@ pub const RaytracingSystem = struct {
             .bvh_build_in_progress = false,
             .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 8),
             .blas_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 8),
+            .destroy_blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 8),
+            .destroy_blas_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 8),
+            .destroy_tlas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 1),
+            .destroy_tlas_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 1),
+            .destroy_tlas_instance_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 1),
             .allocator = allocator,
             .tlas_instance_buffer_initialized = false,
+            .tlas_buffer_initialized = false,
             .blas = vk.AccelerationStructureKHR.null_handle,
             .tlas = vk.AccelerationStructureKHR.null_handle,
             .tlas_buffer = undefined,
@@ -280,6 +292,53 @@ pub const RaytracingSystem = struct {
             const rebuild_rt_data = scene_bridge.getRaytracingData();
 
             // Debug the condition evaluation
+            if (self.tlas != .null_handle) {
+                self.destroy_tlas_handles.append(self.allocator, self.tlas) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue TLAS handle for destruction: {}", .{err});
+                    self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
+                };
+                self.tlas = vk.AccelerationStructureKHR.null_handle;
+            }
+
+            if (self.tlas_buffer_initialized) {
+                self.destroy_tlas_buffers.append(self.allocator, self.tlas_buffer) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue TLAS buffer for destruction: {}", .{err});
+                    var immediate = self.tlas_buffer;
+                    immediate.deinit();
+                };
+                self.tlas_buffer_initialized = false;
+            }
+
+            if (self.tlas_instance_buffer_initialized) {
+                self.destroy_tlas_instance_buffers.append(self.allocator, self.tlas_instance_buffer) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue TLAS instance buffer for destruction: {}", .{err});
+                    var immediate = self.tlas_instance_buffer;
+                    immediate.deinit();
+                };
+                self.tlas_instance_buffer_initialized = false;
+            }
+
+            for (self.blas_handles.items, self.blas_buffers.items) |handle, buffer| {
+                self.destroy_blas_handles.append(self.allocator, handle) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue BLAS handle for destruction: {}", .{err});
+                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
+                    var immediate = buffer;
+                    immediate.deinit();
+                    continue;
+                };
+
+                self.destroy_blas_buffers.append(self.allocator, buffer) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue BLAS buffer for destruction: {}", .{err});
+                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
+                    var temp = buffer;
+                    temp.deinit();
+                    if (self.destroy_blas_handles.items.len > 0) {
+                        self.destroy_blas_handles.items.len -= 1;
+                    }
+                    continue;
+                };
+            }
+
             self.blas_handles.clearRetainingCapacity();
             self.blas_buffers.clearRetainingCapacity();
 
@@ -338,6 +397,7 @@ pub const RaytracingSystem = struct {
         if (tlas_result) |tlas| {
             self.tlas = tlas.acceleration_structure;
             self.tlas_buffer = tlas.buffer;
+            self.tlas_buffer_initialized = true;
             self.tlas_instance_buffer = tlas.instance_buffer;
             self.tlas_instance_buffer_initialized = true;
             self.completed_tlas = tlas;
@@ -356,6 +416,7 @@ pub const RaytracingSystem = struct {
                 // Update raytracing system state with completed TLAS
                 self.tlas = tlas_result.acceleration_structure;
                 self.tlas_buffer = tlas_result.buffer;
+                self.tlas_buffer_initialized = true;
                 self.tlas_instance_buffer = tlas_result.instance_buffer;
                 self.tlas_instance_buffer_initialized = true;
                 self.completed_tlas = tlas_result;
@@ -363,6 +424,8 @@ pub const RaytracingSystem = struct {
                 self.tlas_dirty = true;
 
                 // Mark descriptors as needing update since we have a new TLAS
+
+                self.flushDeferredAccelerationStructures();
 
                 // Clear builder ownership now that the system tracks this TLAS
                 _ = self.bvh_builder.takeCompletedTlas();
@@ -384,6 +447,8 @@ pub const RaytracingSystem = struct {
         self.allocator.destroy(self.bvh_builder);
 
         if (self.tlas_instance_buffer_initialized) self.tlas_instance_buffer.deinit();
+        if (self.tlas_buffer_initialized) self.tlas_buffer.deinit();
+        self.flushDeferredAccelerationStructures();
         // Deinit all BLAS buffers and destroy BLAS acceleration structures
         for (self.blas_buffers.items, self.blas_handles.items) |*buf, blas| {
             buf.deinit();
@@ -392,13 +457,45 @@ pub const RaytracingSystem = struct {
 
         self.blas_buffers.deinit(self.allocator);
         self.blas_handles.deinit(self.allocator);
+        self.destroy_blas_buffers.deinit(self.allocator);
+        self.destroy_blas_handles.deinit(self.allocator);
+        self.destroy_tlas_buffers.deinit(self.allocator);
+        self.destroy_tlas_handles.deinit(self.allocator);
+        self.destroy_tlas_instance_buffers.deinit(self.allocator);
         // Destroy TLAS acceleration structure and deinit TLAS buffer
         if (self.tlas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
-        self.tlas_buffer.deinit();
         // Destroy shader binding table buffer and free its memory
         if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
         // Destroy output image/texture
 
+    }
+
+    fn flushDeferredAccelerationStructures(self: *RaytracingSystem) void {
+        for (self.destroy_blas_buffers.items, self.destroy_blas_handles.items) |*buf, handle| {
+            buf.deinit();
+            if (handle != .null_handle) {
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
+            }
+        }
+        self.destroy_blas_buffers.clearRetainingCapacity();
+        self.destroy_blas_handles.clearRetainingCapacity();
+
+        for (self.destroy_tlas_buffers.items) |*buf| {
+            buf.deinit();
+        }
+        self.destroy_tlas_buffers.clearRetainingCapacity();
+
+        for (self.destroy_tlas_instance_buffers.items) |*buf| {
+            buf.deinit();
+        }
+        self.destroy_tlas_instance_buffers.clearRetainingCapacity();
+
+        for (self.destroy_tlas_handles.items) |handle| {
+            if (handle != .null_handle) {
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
+            }
+        }
+        self.destroy_tlas_handles.clearRetainingCapacity();
     }
 };

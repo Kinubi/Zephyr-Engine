@@ -153,6 +153,9 @@ pub const ParticleRenderer = struct {
         }
 
         // Clean up uniform buffers
+        for (&self.compute_uniform_buffers) |*buffer| {
+            buffer.deinit();
+        }
         for (&self.render_uniform_buffers) |*buffer| {
             buffer.deinit();
         }
@@ -173,7 +176,6 @@ pub const ParticleRenderer = struct {
         _ = scene_bridge;
 
         if (frame_info.compute_buffer == vk.CommandBuffer.null_handle) {
-            log(.DEBUG, "particle_renderer", "Skipping compute update; compute command buffer unavailable", .{});
             return false;
         }
 
@@ -184,7 +186,6 @@ pub const ParticleRenderer = struct {
 
         const compute_pipeline_entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
         if (compute_pipeline_entry.vulkan_pipeline != self.cached_compute_pipeline_handle) {
-            log(.INFO, "particle_renderer", "Compute pipeline changed, scheduling resource rebind", .{});
             self.cached_compute_pipeline_handle = compute_pipeline_entry.vulkan_pipeline;
             self.resource_binder.clearPipeline(self.compute_pipeline);
             self.markAllFramesDirty();
@@ -300,7 +301,6 @@ pub const ParticleRenderer = struct {
 
         const render_pipeline_entry = self.pipeline_system.pipelines.get(self.render_pipeline) orelse return error.PipelineNotFound;
         if (render_pipeline_entry.vulkan_pipeline != self.cached_render_pipeline_handle) {
-            log(.INFO, "particle_renderer", "Render pipeline changed, updating cached handle", .{});
             self.cached_render_pipeline_handle = render_pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.render_pipeline);
             self.markAllFramesDirty();

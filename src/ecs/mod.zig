@@ -1,10 +1,7 @@
-pub const entity = @import("entity_registry.zig");
-pub const storage = @import("component_dense_set.zig");
-pub const scheduler = @import("scheduler.zig");
+pub const Registry = @import("registry.zig").Registry;
+pub const DenseSet = @import("component_dense_set.zig").DenseSet;
+pub const View = @import("view.zig").View;
+pub const health = @import("health.zig");
 pub const world = @import("world.zig");
 pub const bootstrap = @import("bootstrap.zig");
-pub const components = @import("components.zig");
-pub const stage_handles = @import("stage_handles.zig");
-pub const systems = struct {
-    pub const defaults = @import("systems/default.zig");
-};
+pub const stage_handles = @import("bootstrap.zig");

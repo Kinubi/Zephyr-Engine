@@ -298,7 +298,11 @@ pub const UnifiedPipelineSystem = struct {
 
         // Create descriptor set layouts from extracted information
         const descriptor_set_layouts = try self.createDescriptorSetLayouts(&descriptor_layout_info);
-        defer self.allocator.free(descriptor_set_layouts);
+        var descriptor_layouts_owned = false;
+        defer if (!descriptor_layouts_owned) {
+            self.destroyDescriptorSetLayouts(descriptor_set_layouts);
+            self.allocator.free(descriptor_set_layouts);
+        };
 
         // Create pipeline layout
         const pipeline_layout = try self.createPipelineLayout(descriptor_set_layouts, config.push_constant_ranges);
@@ -486,6 +490,7 @@ pub const UnifiedPipelineSystem = struct {
         const pipeline = Pipeline{
             .vulkan_pipeline = vulkan_pipeline,
             .pipeline_layout = pipeline_layout,
+            .pipeline_set_layout_handles = descriptor_set_layouts,
             .descriptor_layout_info = descriptor_layout_info,
             .descriptor_pools = descriptor_resources.pools,
             .descriptor_layouts = descriptor_resources.layouts,
@@ -497,7 +502,17 @@ pub const UnifiedPipelineSystem = struct {
         };
 
         // Use the provided pipeline ID
+        var pipeline_inserted = false;
+        errdefer if (pipeline_inserted) {
+            if (self.pipelines.fetchRemove(pipeline_id)) |removed| {
+                var removed_pipeline = removed.value;
+                removed_pipeline.deinit(self.graphics_context, self.allocator);
+            }
+        };
+
         try self.pipelines.put(pipeline_id, pipeline);
+        pipeline_inserted = true;
+        descriptor_layouts_owned = true;
 
         // Track shader dependencies for hot-reload
         try self.registerShaderDependency(config.compute_shader, pipeline_id);
@@ -921,13 +936,6 @@ pub const UnifiedPipelineSystem = struct {
             }
         }
 
-        log(
-            .INFO,
-            "unified_pipeline",
-            "Preparing rebuild for {s}: cleared {} stale resource bindings",
-            .{ pipeline_id.name, cleared_count },
-        );
-
         // Get reference to the old pipeline before we replace it
         const old_pipeline_to_destroy = self.pipelines.get(pipeline_id).?;
 
@@ -1193,6 +1201,12 @@ pub const UnifiedPipelineSystem = struct {
         }
 
         return try layouts.toOwnedSlice(self.allocator);
+    }
+
+    fn destroyDescriptorSetLayouts(self: *UnifiedPipelineSystem, layouts: []const vk.DescriptorSetLayout) void {
+        for (layouts) |layout| {
+            self.graphics_context.vkd.destroyDescriptorSetLayout(self.graphics_context.dev, layout, null);
+        }
     }
 
     fn createPipelineLayout(
@@ -1618,6 +1632,7 @@ pub const PipelineConfig = struct {
 const Pipeline = struct {
     vulkan_pipeline: vk.Pipeline,
     pipeline_layout: vk.PipelineLayout,
+    pipeline_set_layout_handles: []vk.DescriptorSetLayout,
     descriptor_layout_info: DescriptorLayoutInfo,
     descriptor_pools: std.ArrayList(*DescriptorPool),
     descriptor_layouts: std.ArrayList(*DescriptorSetLayout),
@@ -1631,6 +1646,11 @@ const Pipeline = struct {
         // Clean up Vulkan objects
         graphics_context.vkd.destroyPipeline(graphics_context.dev, self.vulkan_pipeline, null);
         graphics_context.vkd.destroyPipelineLayout(graphics_context.dev, self.pipeline_layout, null);
+
+        for (self.pipeline_set_layout_handles) |layout_handle| {
+            graphics_context.vkd.destroyDescriptorSetLayout(graphics_context.dev, layout_handle, null);
+        }
+        allocator.free(self.pipeline_set_layout_handles);
 
         // Clean up descriptor resources using proper builders
         for (self.descriptor_pools.items) |pool| {

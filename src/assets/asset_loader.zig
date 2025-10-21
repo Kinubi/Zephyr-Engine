@@ -170,8 +170,6 @@ pub const AssetLoader = struct {
         // Update statistics
         _ = self.stats.total_requests.fetchAdd(1, .monotonic);
         self.stats.queue_size.store(self.thread_pool.work_queue.size(), .release);
-
-        log(.INFO, "enhanced_asset_loader", "Submitted {s} priority load request for asset {} (work_id: {})", .{ @tagName(priority), asset_id.toU64(), work_id });
     }
 
     /// Process texture staging on GPU thread

@@ -166,6 +166,9 @@ pub const App = struct {
     var ecs_world: ecs.world.World = undefined;
     var ecs_stages: ecs.stage_handles.StageHandles = undefined;
     var ecs_enabled: bool = false;
+    // Small test Health component handle to exercise per-component worker submission
+    var test_health: ?usize = null;
+    var test_health_type: ?usize = null;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -222,6 +225,15 @@ pub const App = struct {
         errdefer ecs_world.deinit();
         ecs_stages = try ecs.bootstrap.configureWorld(&ecs_world);
         ecs_enabled = true;
+
+        // Initialize a test Health component and attach it to a new entity in the registry.
+        const Health = @import("ecs/health.zig").Health;
+        const entity = ecs_world.registry.create();
+        var h = Health.init(0.0, 100.0);
+        const health_type_id = try ecs_world.registry.registerComponentType();
+        test_health_type = health_type_id;
+        const h_handle = try ecs_world.registry.emplaceComponentFor(comptime Health, health_type_id, entity, &h);
+        test_health = h_handle;
 
         // Initialize Asset Manager on heap for stable pointer address
         asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
@@ -490,6 +502,11 @@ pub const App = struct {
         if (ecs_enabled) {
             try ecs_world.beginFrame(frame_counter, @as(f32, @floatCast(dt)));
             try ecs.bootstrap.tick(&ecs_world, ecs_stages);
+            if (test_health) |h| {
+                // submit a per-component work item for the registry-owned Health
+                const tid = test_health_type orelse return error.InvalidComponentType;
+                try ecs_world.registry.submitComponent(tid, h, thread_pool, .normal, @as(f32, @floatCast(dt)), @import("ecs/health.zig").update_trampoline);
+            }
         }
         const cmdbuf = cmdbufs[current_frame];
         const computebuf = compute_shader_system.compute_bufs[current_frame];
@@ -542,6 +559,11 @@ pub const App = struct {
         last_frame_time = current_time;
 
         //log(.TRACE, "app", "Frame end", .{});
+
+        if (frame_counter >= 60_000) {
+            // Stop the app once the frame counter reaches the test threshold.
+            return false;
+        }
 
         return self.window.isRunning();
     }

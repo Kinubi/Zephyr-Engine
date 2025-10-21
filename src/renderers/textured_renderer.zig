@@ -227,7 +227,6 @@ pub const TexturedRenderer = struct {
         if (pipeline_changed) {
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.textured_pipeline);
-            log(.INFO, "textured_renderer", "Pipeline changed, marking resources dirty", .{});
             self.markAllFramesDirty();
         }
 

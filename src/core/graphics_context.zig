@@ -280,7 +280,6 @@ pub const GraphicsContext = struct {
                 .queue_family_index = self.graphics_queue.family,
             }, null);
             try self.worker_command_pools.append(self.allocator, .{ .id = thread_id, .pool = new_pool });
-            log(.INFO, "graphics_context", "Created thread-local command pool for worker thread", .{});
 
             return new_pool;
         }
@@ -301,7 +300,6 @@ pub const GraphicsContext = struct {
             if (self.worker_command_pools.items[index].id == thread_id) {
                 const removed = self.worker_command_pools.swapRemove(index);
                 self.vkd.destroyCommandPool(self.dev, removed.pool, null);
-                log(.INFO, "graphics_context", "Cleaned up thread-local command pool for worker thread", .{});
                 break;
             }
         }
@@ -518,7 +516,6 @@ pub const GraphicsContext = struct {
         memory: vk.DeviceMemory,
 
         pub fn cleanup(self: PendingResource, gc: *GraphicsContext) void {
-            log(.DEBUG, "graphics_context", "Cleaning up pending resource buffer {x} and memory {x}", .{ self.buffer, self.memory });
             gc.vkd.destroyBuffer(gc.dev, self.buffer, null);
             gc.vkd.freeMemory(gc.dev, self.memory, null);
         }

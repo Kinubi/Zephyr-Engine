@@ -671,10 +671,12 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
         };
     }
 
+    const instance_buffer_size = @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len;
+
     // Create instance buffer
     var instance_buffer = try Buffer.init(
         builder.gc,
-        @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len,
+        instance_buffer_size,
         1,
         .{
             .shader_device_address_bit = true,
@@ -684,8 +686,8 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
         .{ .host_visible_bit = true, .host_coherent_bit = true },
     );
 
-    try instance_buffer.map(@sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len, 0);
-    instance_buffer.writeToBuffer(std.mem.sliceAsBytes(vk_instances), @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len, 0);
+    try instance_buffer.map(instance_buffer_size, 0);
+    instance_buffer.writeToBuffer(std.mem.sliceAsBytes(vk_instances), instance_buffer_size, 0);
 
     // Get instance buffer device address
     var instance_addr_info = vk.BufferDeviceAddressInfo{

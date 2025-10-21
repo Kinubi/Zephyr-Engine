@@ -31,7 +31,7 @@ void main()
 
     Particle particleIn = particlesIn[index];
 
-    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.delta_time * 5;
+    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.delta_time * 10;
     particlesOut[index].velocity = particleIn.velocity;
     particlesOut[index].color = particleIn.color;
 
