@@ -1,24 +1,25 @@
 const std = @import("std");
 const math = @import("../../utils/math.zig");
+const EntityId = @import("../entity_registry.zig").EntityId;
 
 /// Transform component for ECS entities
 /// Supports local transforms with optional parent-child hierarchies
 pub const Transform = struct {
     /// Local position relative to parent (or world if no parent)
     position: math.Vec3,
-    
+
     /// Local rotation (Euler angles in radians)
     rotation: math.Vec3,
-    
+
     /// Local scale
     scale: math.Vec3,
-    
+
     /// Optional parent entity for hierarchical transforms
-    parent: ?u32 = null,
-    
+    parent: ?EntityId = null,
+
     /// Cached world-space matrix (updated by TransformSystem)
     world_matrix: math.Mat4 = math.Mat4.identity(),
-    
+
     /// Dirty flag - set to true when local transform changes
     dirty: bool = true,
 
@@ -58,21 +59,21 @@ pub const Transform = struct {
         // Build TRS matrix: Translation * Rotation * Scale
         // Start with identity
         var mat = math.Mat4.identity();
-        
+
         // Apply scale
         mat.data[0] *= self.scale.x;
         mat.data[5] *= self.scale.y;
         mat.data[10] *= self.scale.z;
-        
+
         // Apply rotation (would need proper rotation matrix multiplication)
         // For now, just handle translation and scale
         // TODO: Add proper rotation support when needed
-        
+
         // Apply translation
         mat.data[12] = self.position.x;
         mat.data[13] = self.position.y;
         mat.data[14] = self.position.z;
-        
+
         return mat;
     }
 
@@ -128,7 +129,7 @@ pub const Transform = struct {
     }
 
     /// Set parent entity (for hierarchical transforms)
-    pub fn setParent(self: *Transform, parent_entity: ?u32) void {
+    pub fn setParent(self: *Transform, parent_entity: ?EntityId) void {
         self.parent = parent_entity;
         self.dirty = true;
     }
@@ -175,22 +176,22 @@ pub const Transform = struct {
 
 test "Transform: default init creates identity" {
     const t = Transform.init();
-    
+
     try std.testing.expectEqual(@as(f32, 0), t.position.x);
     try std.testing.expectEqual(@as(f32, 0), t.position.y);
     try std.testing.expectEqual(@as(f32, 0), t.position.z);
-    
+
     try std.testing.expectEqual(@as(f32, 1), t.scale.x);
     try std.testing.expectEqual(@as(f32, 1), t.scale.y);
     try std.testing.expectEqual(@as(f32, 1), t.scale.z);
-    
+
     try std.testing.expect(t.dirty);
     try std.testing.expect(t.parent == null);
 }
 
 test "Transform: init with position" {
     const t = Transform.initWithPosition(math.Vec3.init(1, 2, 3));
-    
+
     try std.testing.expectEqual(@as(f32, 1), t.position.x);
     try std.testing.expectEqual(@as(f32, 2), t.position.y);
     try std.testing.expectEqual(@as(f32, 3), t.position.z);
@@ -199,14 +200,14 @@ test "Transform: init with position" {
 test "Transform: setters mark dirty" {
     var t = Transform.init();
     t.dirty = false;
-    
+
     t.setPosition(math.Vec3.init(1, 0, 0));
     try std.testing.expect(t.dirty);
-    
+
     t.dirty = false;
     t.setRotation(math.Vec3.init(0, 1, 0));
     try std.testing.expect(t.dirty);
-    
+
     t.dirty = false;
     t.setScale(math.Vec3.init(2, 2, 2));
     try std.testing.expect(t.dirty);
@@ -215,11 +216,11 @@ test "Transform: setters mark dirty" {
 test "Transform: translate adds to position" {
     var t = Transform.init();
     t.translate(math.Vec3.init(1, 2, 3));
-    
+
     try std.testing.expectEqual(@as(f32, 1), t.position.x);
     try std.testing.expectEqual(@as(f32, 2), t.position.y);
     try std.testing.expectEqual(@as(f32, 3), t.position.z);
-    
+
     t.translate(math.Vec3.init(1, 1, 1));
     try std.testing.expectEqual(@as(f32, 2), t.position.x);
     try std.testing.expectEqual(@as(f32, 3), t.position.y);
@@ -229,7 +230,7 @@ test "Transform: translate adds to position" {
 test "Transform: updateWorldMatrix clears dirty flag" {
     var t = Transform.init();
     try std.testing.expect(t.dirty);
-    
+
     t.updateWorldMatrix();
     try std.testing.expect(!t.dirty);
 }
@@ -237,10 +238,10 @@ test "Transform: updateWorldMatrix clears dirty flag" {
 test "Transform: parent support" {
     var t = Transform.init();
     try std.testing.expect(!t.hasParent());
-    
-    t.setParent(42);
+
+    t.setParent(@enumFromInt(42));
     try std.testing.expect(t.hasParent());
-    try std.testing.expectEqual(@as(u32, 42), t.parent.?);
+    try std.testing.expectEqual(@as(u32, 42), @intFromEnum(t.parent.?));
 }
 
 test "Transform: local matrix calculation" {
@@ -249,9 +250,9 @@ test "Transform: local matrix calculation" {
         math.Vec3.init(0, 0, 0),
         math.Vec3.init(1, 1, 1),
     );
-    
+
     const mat = t.getLocalMatrix();
-    
+
     // Translation should be in the last column
     try std.testing.expectEqual(@as(f32, 1), mat.data[12]);
     try std.testing.expectEqual(@as(f32, 2), mat.data[13]);

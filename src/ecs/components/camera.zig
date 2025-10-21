@@ -224,7 +224,7 @@ pub const Camera = struct {
 
 test "Camera: default init creates perspective" {
     const camera = Camera.init();
-    
+
     try std.testing.expectEqual(Camera.ProjectionType.perspective, camera.projection_type);
     try std.testing.expectEqual(@as(f32, 50.0), camera.fov);
     try std.testing.expectEqual(@as(f32, 0.1), camera.near_plane);
@@ -235,7 +235,7 @@ test "Camera: default init creates perspective" {
 
 test "Camera: perspective init with custom params" {
     const camera = Camera.initPerspective(60.0, 16.0 / 9.0, 0.01, 500.0);
-    
+
     try std.testing.expectEqual(@as(f32, 60.0), camera.fov);
     try std.testing.expectEqual(@as(f32, 0.01), camera.near_plane);
     try std.testing.expectEqual(@as(f32, 500.0), camera.far_plane);
@@ -244,7 +244,7 @@ test "Camera: perspective init with custom params" {
 
 test "Camera: orthographic init" {
     const camera = Camera.initOrthographic(-10, 10, -5, 5, 0.1, 100);
-    
+
     try std.testing.expectEqual(Camera.ProjectionType.orthographic, camera.projection_type);
     try std.testing.expectEqual(@as(f32, -10), camera.ortho_left);
     try std.testing.expectEqual(@as(f32, 10), camera.ortho_right);
@@ -255,9 +255,9 @@ test "Camera: orthographic init" {
 test "Camera: setPerspective marks dirty" {
     var camera = Camera.init();
     camera.projection_dirty = false;
-    
+
     camera.setPerspective(90.0, 1.0, 0.5, 200.0);
-    
+
     try std.testing.expect(camera.projection_dirty);
     try std.testing.expectEqual(@as(f32, 90.0), camera.fov);
     try std.testing.expectEqual(@as(f32, 1.0), camera.aspect_ratio);
@@ -266,9 +266,9 @@ test "Camera: setPerspective marks dirty" {
 test "Camera: setOrthographic marks dirty and changes type" {
     var camera = Camera.initPerspective(60.0, 16.0 / 9.0, 0.1, 100);
     camera.projection_dirty = false;
-    
+
     camera.setOrthographic(-5, 5, -5, 5, 0.1, 50);
-    
+
     try std.testing.expect(camera.projection_dirty);
     try std.testing.expectEqual(Camera.ProjectionType.orthographic, camera.projection_type);
 }
@@ -276,9 +276,9 @@ test "Camera: setOrthographic marks dirty and changes type" {
 test "Camera: setFov marks dirty" {
     var camera = Camera.init();
     camera.projection_dirty = false;
-    
+
     camera.setFov(75.0);
-    
+
     try std.testing.expect(camera.projection_dirty);
     try std.testing.expectEqual(@as(f32, 75.0), camera.fov);
 }
@@ -286,22 +286,22 @@ test "Camera: setFov marks dirty" {
 test "Camera: setAspectRatio marks dirty" {
     var camera = Camera.init();
     camera.projection_dirty = false;
-    
+
     camera.setAspectRatio(21.0 / 9.0);
-    
+
     try std.testing.expect(camera.projection_dirty);
     try std.testing.expectApproxEqAbs(@as(f32, 21.0 / 9.0), camera.aspect_ratio, 0.0001);
 }
 
 test "Camera: getProjectionMatrix updates when dirty" {
     var camera = Camera.initPerspective(90.0, 1.0, 1.0, 10.0);
-    
+
     try std.testing.expect(camera.projection_dirty);
-    
+
     const proj = camera.getProjectionMatrix();
-    
+
     try std.testing.expect(!camera.projection_dirty);
-    
+
     // Verify projection matrix has been calculated (not identity)
     // For a 90 degree FOV with aspect 1.0, [0,0] should be 1.0 / tan(45 deg) = 1.0
     // So check element that should NOT be 1.0 - like [3,2] which should be negative
@@ -311,10 +311,10 @@ test "Camera: getProjectionMatrix updates when dirty" {
 test "Camera: setPrimary flag" {
     var camera = Camera.init();
     try std.testing.expect(!camera.is_primary);
-    
+
     camera.setPrimary(true);
     try std.testing.expect(camera.is_primary);
-    
+
     camera.setPrimary(false);
     try std.testing.expect(!camera.is_primary);
 }
@@ -323,30 +323,30 @@ test "Camera: render extracts primary camera" {
     var camera = Camera.init();
     camera.setPrimary(true);
     _ = camera.getProjectionMatrix(); // Ensure projection is calculated
-    
+
     var context = Camera.RenderContext{};
-    
+
     camera.render(&context);
-    
+
     try std.testing.expect(context.primary_camera != null);
     try std.testing.expectEqual(&camera, context.primary_camera.?);
 }
 
 test "Camera: render ignores non-primary camera" {
     const camera = Camera.init(); // is_primary = false
-    
+
     var context = Camera.RenderContext{};
-    
+
     camera.render(&context);
-    
+
     try std.testing.expect(context.primary_camera == null);
 }
 
 test "Camera: update method clears dirty flag" {
     var camera = Camera.init();
     try std.testing.expect(camera.projection_dirty);
-    
+
     camera.update(0.016);
-    
+
     try std.testing.expect(!camera.projection_dirty);
 }
