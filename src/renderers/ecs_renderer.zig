@@ -267,11 +267,6 @@ pub const EcsRenderer = struct {
         var render_data = try self.render_system.extractRenderData(self.ecs_world);
         defer render_data.deinit();
 
-        // Log entity count for debugging
-        if (render_data.renderables.items.len > 0) {
-            log(.INFO, "ecs_renderer", "Found {} ECS entities to render", .{render_data.renderables.items.len});
-        }
-
         // Skip if no entities to render
         if (render_data.renderables.items.len == 0) {
             if (meshes_dirty) {
@@ -390,10 +385,6 @@ pub const EcsRenderer = struct {
         // Log skip statistics
         if (skipped_no_model > 0 or skipped_no_material_asset > 0 or skipped_no_material_index > 0) {
             log(.INFO, "ecs_renderer", "Skipped entities: {} no model, {} no material asset, {} no material index", .{ skipped_no_model, skipped_no_material_asset, skipped_no_material_index });
-        }
-
-        if (rendered_count > 0) {
-            log(.TRACE, "ecs_renderer", "Rendered {} ECS entities", .{rendered_count});
         }
     }
 };
