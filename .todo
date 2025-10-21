@@ -1,8 +1,0 @@
-- [x] Investigate runtime alignment panic when destroying entity maps during ECS world shutdown (`PageAllocator.free` misalignment)
-- [x] Investigate recent `zig build` failure on feature/ecs branch and capture repro steps
-- [x] Document ECS migration strategy in POC/SIMPLE_ECS_v2.md
-- [x] Implement chunked component dispatch in ECS runtime
-- [x] Resolve lingering Vulkan buffers reported during `vkDestroyDevice` validation
-- [ ] Migrate the particle system to ECS once buffers are cleaned up
-- [ ] Update project to use ECS-based chunked dispatch
-- [ ] Expose chunked dispatch helpers through view/world APIs and migrate a pilot subsystem (e.g. particles)

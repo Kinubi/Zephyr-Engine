@@ -162,7 +162,7 @@ pub const World = struct {
         const v = try self.view(T);
         var iter = v.constIterator();
         while (iter.next()) |item| {
-            item.component.render(@constCast(&context));
+            item.component.render(context);
         }
     }
 };

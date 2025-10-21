@@ -4,34 +4,40 @@
 
 ### ✅ **Phase 1: Asset Manager** - COMPLETE & PRODUCTION READY
 - **AssetManager**: Full async loading, hot reload, fallback assets, material/texture management
-- **ThreadPool**: Dynamic scaling with subsystem management (hot_reload, bvh_building, custom_work)
+- **ThreadPool**: Dynamic scaling with subsystem management (hot_reload, bvh_building, custom_work, ecs_update)
 - **FileWatcher**: Hybrid directory/file watching with metadata-based change detection
 - **FallbackAssets**: Production-safe rendering with missing/loading/error/default textures
 
 ### ✅ **Phase 1.5: GenericRenderer System** - COMPLETE & PRODUCTION READY
 - **GenericRenderer**: VTable-based renderer orchestration with RendererType classification
-- **SceneBridge**: Scene data abstraction feeding rasterization/raytracing/compute renderers
+- **SceneBridge**: Scene data abstraction feeding rasterization/raytracing/compute renderers (now with ECS World support)
 - **Multi-frame Synchronization**: Per-frame descriptor dirty flags eliminate validation errors
-- **Active Renderers**: UnifiedTexturedRenderer, PointLightRenderer, UnifiedRaytracingRenderer
+- **Active Renderers**: UnifiedTexturedRenderer, PointLightRenderer, UnifiedRaytracingRenderer, ParticleRenderer
 
-### 🔄 **Phase 3: UnifiedPipelineSystem** - CORE COMPLETE, ENHANCEMENTS PENDING
+### 🔄 **Phase 2: ECS Foundation** - IN PROGRESS (Core Complete, Components Being Added)
+- ✅ **Core ECS**: EntityRegistry, DenseSet storage, View queries, World management
+- ✅ **Parallel Dispatch**: ThreadPool integration with parallel each_parallel() iteration
+- ✅ **ParticleComponent**: Lifecycle management with update/render methods (27 tests passing)
+- ✅ **Transform Component**: Position, rotation, scale with world matrix calculation (34 tests passing)
+- ✅ **SceneBridge Integration**: ECS World access for renderer data extraction
+- ⏳ **MeshRenderer Component**: Pending (uses AssetId references)
+- ⏳ **Camera Component**: Pending (for automatic camera selection)
+- ⏳ **System Framework**: Pending (TransformSystem for hierarchies, RenderSystem for queries)
+
+### ✅ **Phase 3: UnifiedPipelineSystem** - COMPLETE & PRODUCTION READY
 - **UnifiedPipelineSystem**: ✅ Automatic descriptor extraction, Vulkan pipeline cache (disk persistence)
 - **ShaderManager**: ✅ GLSL→SPIR-V compilation, file watching, shader caching
 - **ResourceBinder**: ✅ High-level descriptor binding API for renderers
-- **Shader Hot Reload**: ⏳ File watching active, pipeline rebuild integration pending
-
-### ⏳ **Phase 2: ECS Foundation** - NOT STARTED (Dependencies Complete)
-- All prerequisites satisfied: AssetId system, GenericRenderer, SceneBridge, ThreadPool
-- Empty `src/ecs/` directory awaiting implementation
-- Ready to begin when prioritized
+- **Shader Hot Reload**: ✅ COMPLETE - File watching, shader recompilation, and cache management working
 
 ### 📊 **Production Metrics**
-- **Validation Errors**: Zero Vulkan validation errors in raytracing/rasterization
+- **Validation Errors**: Zero Vulkan validation errors in raytracing/rasterization/compute
 - **FPS Display**: Real-time performance monitoring in window title
-- **Hot Reload**: Texture/model changes detected and reloaded automatically
+- **Hot Reload**: Texture/model/shader changes detected and reloaded automatically
 - **Pipeline Cache**: 100MB+ Vulkan cache reused across application launches
 - **Asset Loading**: Async background loading with GPU staging
 - **Multi-frame Safety**: 3 frames in flight with proper synchronization
+- **ECS Performance**: 34 tests passing, parallel dispatch with 8 worker threads
 
 ---
 
@@ -41,12 +47,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        ZulkanZengine (October 2025)                          │
-│                         GenericRenderer-Based System                         │
+│                  GenericRenderer + ECS Hybrid System                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────┐      ┌──────────────────────┐      ┌─────────────────┐
 │   Asset Manager      │      │   GenericRenderer    │      │ UnifiedPipeline │
-│  (Phase 1 Complete)  │      │ (Phase 1.5 Complete) │      │ (Phase 3 Core)  │
+│  (Phase 1 Complete)  │      │ (Phase 1.5 Complete) │      │ (Phase 3 Complete)│
 │                      │      │                      │      │                 │
 │ • AssetId system     │─────▶│ • VTable dispatch    │─────▶│ • SPIR-V reflect│
 │ • Hot reload         │      │ • RendererType enum  │      │ • Vulkan cache  │
