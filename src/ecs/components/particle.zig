@@ -4,8 +4,8 @@ const std = @import("std");
 /// The actual physics simulation happens in GPU compute shaders
 /// This component handles lifecycle, spawning, and data extraction for rendering
 pub const ParticleComponent = struct {
-    position: [2]f32,
-    velocity: [2]f32,
+    position: [3]f32, // 3D world position
+    velocity: [3]f32, // 3D velocity
     color: [4]f32,
     lifetime: f32,
     max_lifetime: f32,
@@ -19,10 +19,12 @@ pub const ParticleComponent = struct {
             .position = .{
                 random.float(f32) * 2.0 - 1.0, // -1 to 1
                 random.float(f32) * 2.0 - 1.0,
+                random.float(f32) * 2.0 - 1.0,
             },
             .velocity = .{
                 @cos(angle) * speed,
                 @sin(angle) * speed,
+                0.0,
             },
             .color = .{
                 random.float(f32),
@@ -36,13 +38,13 @@ pub const ParticleComponent = struct {
     }
 
     /// CPU-side update: manage lifetime
-    /// Note: Position and velocity updates happen in GPU compute shader
+    /// Note: Position, velocity, and alpha fading happen in GPU compute shader
+    /// CPU only tracks lifetime for particle removal
     pub fn update(self: *ParticleComponent, dt: f32) void {
         self.lifetime -= dt;
 
-        // Fade out alpha based on lifetime
-        const life_ratio = self.lifetime / self.max_lifetime;
-        self.color[3] = life_ratio;
+        // Alpha fading is now handled by GPU compute shader
+        // We just track lifetime here for removal
     }
 
     /// Check if particle is still alive

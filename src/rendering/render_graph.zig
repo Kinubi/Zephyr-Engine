@@ -163,6 +163,11 @@ pub const RenderPass = struct {
     pub fn teardown(self: *RenderPass) void {
         self.vtable.teardown(self);
     }
+
+    /// Check if this is a compute pass by name convention
+    pub fn isComputePass(self: *const RenderPass) bool {
+        return std.mem.indexOf(u8, self.name, "compute") != null;
+    }
 };
 
 /// RenderGraph manages a DAG of render passes for a scene

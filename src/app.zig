@@ -132,6 +132,7 @@ pub const App = struct {
     // deinitialized after other systems that depend on it have been deinitialized.
 
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
+    var last_particle_debug: f64 = 0.0; // Track when we last printed particle debug info
     // Scheduled asset loading system
     const ScheduledAsset = struct {
         frame: u64,
@@ -228,10 +229,11 @@ pub const App = struct {
 
         // Register all ECS components
         try new_ecs_world.registerComponent(new_ecs.ParticleComponent);
+        try new_ecs_world.registerComponent(new_ecs.ParticleEmitter);
         try new_ecs_world.registerComponent(new_ecs.Transform);
         try new_ecs_world.registerComponent(new_ecs.MeshRenderer);
         try new_ecs_world.registerComponent(new_ecs.Camera);
-        log(.INFO, "app", "Registered ECS components: ParticleComponent, Transform, MeshRenderer, Camera", .{});
+        log(.INFO, "app", "Registered ECS components: ParticleComponent, ParticleEmitter, Transform, MeshRenderer, Camera", .{});
 
         // Initialize ECS systems
         transform_system = new_ecs.TransformSystem.init(self.allocator);
@@ -413,6 +415,14 @@ pub const App = struct {
         );
         log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
 
+        // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
+        try scene_v2.addParticleEmitter(
+            vase2.entity_id,
+            20.0, // emission_rate: 20 particles per second (increased for better visibility)
+            2.5, // particle_lifetime: 2.5 seconds (slightly longer)
+        );
+        log(.INFO, "app", "Scene v2: Added particle emitter to vase 2", .{});
+
         // ==================== End Scene v2 Setup ====================
 
         // log(.DEBUG, "scene", "Adding point light objects", .{});
@@ -444,7 +454,8 @@ pub const App = struct {
         global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
         frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
-        log(.INFO, "app", "Pipeline templates registered", .{});
+        // Register global descriptor sets with the pipeline system for automatic binding
+        unified_pipeline_system.setGlobalDescriptorSets(global_ubo_set.sets);
 
         //_ = try scene.updateSyncResources(self.allocator);
 
@@ -561,10 +572,6 @@ pub const App = struct {
 
         log(.INFO, "app", "Render pass manager system initialized (GenericRenderer disabled)", .{});
 
-        // Prime scene bridge state before entering the main loop so first-frame descriptors are valid
-        _ = scene_bridge.updateAsyncResources() catch |err| {
-            log(.WARN, "app", "Initial async resource update failed: {}", .{err});
-        };
         var init_frame_info = frame_info;
         init_frame_info.current_frame = current_frame;
         init_frame_info.command_buffer = cmdbufs[current_frame];
@@ -603,6 +610,11 @@ pub const App = struct {
                 log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
 
                 scheduled_asset.loaded = true;
+                try scene_v2.addParticleEmitter(
+                    loaded_object.entity_id,
+                    20.0, // emission_rate: 20 particles per second (increased for better visibility)
+                    2.5, // particle_lifetime: 2.5 seconds (slightly longer)
+                );
             }
         }
 
@@ -616,6 +628,16 @@ pub const App = struct {
             if (current_time - last_performance_report >= 10.0) {
                 asset_manager.printPerformanceReport();
                 last_performance_report = current_time;
+            }
+
+            // Print particle debug info every 3 seconds
+            if (current_time - last_particle_debug >= 3.0) {
+                if (scene_v2.particle_compute_pass) |particle_pass| {
+                    particle_pass.debugPrintAliveParticles(current_frame, self.allocator, 10) catch |err| {
+                        log(.WARN, "app", "Failed to read particle debug info: {}", .{err});
+                    };
+                }
+                last_particle_debug = current_time;
             }
         }
 
@@ -650,18 +672,32 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
+        camera_controller.processInput(&self.window, viewer_object, dt);
+        frame_info.camera.viewMatrix = viewer_object.transform.local2world;
+        frame_info.camera.updateProjectionMatrix();
+        var ubo = GlobalUbo{
+            .view = frame_info.camera.viewMatrix,
+            .projection = frame_info.camera.projectionMatrix,
+            .dt = @floatCast(dt),
+        };
+
         // Update ECS transform hierarchies
         if (new_ecs_enabled) {
             try transform_system.update(&new_ecs_world);
         }
 
         compute_shader_system.beginCompute(frame_info);
+        // Update scene (animations, physics, lights, etc.)
+        if (scene_v2_enabled) {
+            try scene_v2.update(frame_info, &ubo);
+        }
 
         // try forward_renderer.update(&frame_info);  // OLD: Disabled for RenderGraph
 
         // try rt_render_pass.update(&frame_info);    // OLD: Disabled for RenderGraph
 
         compute_shader_system.endCompute(frame_info);
+        global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
@@ -674,22 +710,6 @@ pub const App = struct {
 
         // OLD: Legacy render pass (disabled for dynamic rendering)
         // swapchain.beginSwapChainRenderPass(frame_info);
-
-        camera_controller.processInput(&self.window, viewer_object, dt);
-        frame_info.camera.viewMatrix = viewer_object.transform.local2world;
-        frame_info.camera.updateProjectionMatrix();
-        var ubo = GlobalUbo{
-            .view = frame_info.camera.viewMatrix,
-            .projection = frame_info.camera.projectionMatrix,
-            .dt = @floatCast(dt),
-        };
-
-        // Update lights from scene ECS
-        if (scene_v2_enabled) {
-            try scene_v2.updateLights(&ubo, @floatCast(dt));
-        }
-
-        global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Execute rasterization renderers through the forward renderer
         // try forward_renderer.render(frame_info);  // OLD: Disabled for RenderGraph

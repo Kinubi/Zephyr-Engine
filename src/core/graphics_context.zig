@@ -339,6 +339,33 @@ pub const GraphicsContext = struct {
         }
     }
 
+    pub fn copyBufferWithOffset(self: *GraphicsContext, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize, dst_offset: vk.DeviceSize, src_offset: vk.DeviceSize) !void {
+        // Check if we're on a worker thread
+        if (std.Thread.getCurrentId() != self.main_thread_id) {
+            // Use secondary command buffer (no queue submission)
+            var secondary_cmd = try self.beginWorkerCommandBuffer();
+            const region = vk.BufferCopy{
+                .src_offset = src_offset,
+                .dst_offset = dst_offset,
+                .size = size,
+            };
+            self.vkd.cmdCopyBuffer(secondary_cmd.command_buffer, src, dst, 1, @ptrCast(&region));
+            try self.endWorkerCommandBuffer(&secondary_cmd);
+        } else {
+            // Main thread can use legacy approach for now
+            const command_buffer = try self.beginSingleTimeCommands();
+            defer self.endSingleTimeCommands(command_buffer) catch |err| {
+                log(.ERROR, "graphics_context", "endSingleTimeCommands failed: {any}", .{err});
+            };
+            const region = vk.BufferCopy{
+                .src_offset = src_offset,
+                .dst_offset = dst_offset,
+                .size = size,
+            };
+            self.vkd.cmdCopyBuffer(command_buffer, src, dst, 1, @ptrCast(&region));
+        }
+    }
+
     /// Copy from staging buffer with proper lifetime management for worker threads
     pub fn copyFromStagingBuffer(self: *GraphicsContext, dst: vk.Buffer, staging_buffer: *Buffer, size: vk.DeviceSize) !void {
         // Check if we're on a worker thread

@@ -15,6 +15,7 @@ pub const Transform = @import("ecs/components/transform.zig").Transform;
 pub const MeshRenderer = @import("ecs/components/mesh_renderer.zig").MeshRenderer;
 pub const Camera = @import("ecs/components/camera.zig").Camera;
 pub const PointLight = @import("ecs/components/point_light.zig").PointLight;
+pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").ParticleEmitter;
 
 // Systems
 pub const TransformSystem = @import("ecs/systems/transform_system.zig").TransformSystem;

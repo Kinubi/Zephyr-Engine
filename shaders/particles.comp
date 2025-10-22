@@ -1,46 +1,141 @@
 #version 450
 
 struct Particle {
-	vec2 position;
-	vec2 velocity;
-    vec4 color;
+	vec3 position;      // 3D world position
+	vec3 velocity;      // 3D velocity
+    vec4 color;         // RGBA color
+    float lifetime;     // Current lifetime
+    float max_lifetime; // Maximum lifetime for fade calculation
+    uint emitter_id;    // ID of the emitter that spawned this particle
+};
+
+struct Emitter {
+    vec3 position;      // Emitter world position
+    uint is_active;     // 1 if active, 0 if paused
+    
+    vec3 velocity_min;  // Minimum velocity range
+    vec3 velocity_max;  // Maximum velocity range
+    
+    vec4 color_start;   // Starting particle color (RGBA)
+    vec4 color_end;     // Ending particle color for fading (RGBA)
+    
+    float lifetime_min; // Minimum particle lifetime
+    float lifetime_max; // Maximum particle lifetime
+    float spawn_rate;   // Particles per second to spawn
+    float accumulated_spawn_time; // Time accumulator for fractional spawning
+    
+    uint particles_per_spawn; // Batch size per spawn event
+
 };
 
 layout(set = 0, binding = 0) uniform ComputeUniformBuffer {
     float delta_time;
-    vec4 emitter_position;
-    uint particle_count;
-    uint max_particles;
-    vec4 gravity;
-    float spawn_rate;
+    uint particle_count;    // Total allocated particle slots
+    uint emitter_count;     // Number of emitters
+    uint max_particles;     // Maximum particle capacity
+    vec4 gravity;           // Global gravity vector
+    uint frame_index;       // Current frame for random seed
+
 } ubo;
 
-layout(std140, set = 0, binding = 1) readonly buffer ParticleSSBOIn {
-   Particle particlesIn[ ];
+layout(std140, set = 0, binding = 1) readonly buffer ParticleBufferIn {
+   Particle particlesIn[];
 };
 
-layout(std140, set = 0, binding = 2) buffer ParticleSSBOOut {
-   Particle particlesOut[ ];
+layout(std140, set = 0, binding = 2) buffer ParticleBufferOut {
+   Particle particlesOut[];
+};
+
+layout(std140, set = 0, binding = 3) buffer EmitterBuffer {
+   Emitter emitters[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+// Simple pseudo-random number generator
+float random(uint seed, uint index) {
+    uint state = seed + index * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return float((word >> 22u) ^ word) / 4294967295.0;
+}
+
+// Random float in range [min, max]
+float randomRange(uint seed, uint index, float minVal, float maxVal) {
+    return minVal + random(seed, index) * (maxVal - minVal);
+}
+
+// Random vec3 in range [min, max]
+vec3 randomVec3Range(uint seed, uint index, vec3 minVal, vec3 maxVal) {
+    return vec3(
+        randomRange(seed, index * 3u + 0u, minVal.x, maxVal.x),
+        randomRange(seed, index * 3u + 1u, minVal.y, maxVal.y),
+        randomRange(seed, index * 3u + 2u, minVal.z, maxVal.z)
+    );
+}
+
 void main() 
 {
     uint index = gl_GlobalInvocationID.x;  
+    
+    // Skip particles beyond the allocated count
+    if (index >= ubo.max_particles) {
+        return;
+    }
 
     Particle particleIn = particlesIn[index];
+    Particle particleOut;
 
-    particlesOut[index].position = particleIn.position + particleIn.velocity.xy * ubo.delta_time * 10;
-    particlesOut[index].velocity = particleIn.velocity;
-    particlesOut[index].color = particleIn.color;
-
-    // Flip movement at window border
-    if ((particlesOut[index].position.x <= -1.0) || (particlesOut[index].position.x >= 1.0)) {
-        particlesOut[index].velocity.x = -particlesOut[index].velocity.x;
+    // Check if particle is dead (lifetime <= 0)
+    if (particleIn.lifetime <= 0.0) {
+        // Dead particle - check if its emitter wants to respawn it
+        uint emitter_idx = particleIn.emitter_id;
+        
+        // Validate emitter index and check if active
+        if (emitter_idx < ubo.emitter_count && emitters[emitter_idx].is_active == 1u) {
+            Emitter emitter = emitters[emitter_idx];
+            
+            // Simple probability-based spawning: spawn if random < (spawn_rate * delta_time)
+            // This gives each dead particle a chance to respawn based on spawn rate
+            float spawn_probability = emitter.spawn_rate * ubo.delta_time;
+            float rand_val = random(ubo.frame_index, index);
+            
+            if (rand_val < spawn_probability) {
+                // Respawn this particle!
+                uint seed = ubo.frame_index + index;
+                
+                particleOut.position = emitter.position;
+                particleOut.velocity = -randomVec3Range(seed, index,emitter.velocity_min, emitter.velocity_max);
+                particleOut.lifetime = randomRange(seed, index + 1000u, emitter.lifetime_min, emitter.lifetime_max);
+                particleOut.max_lifetime = particleOut.lifetime; // Set max to initial lifetime
+                particleOut.color = emitter.color_start; // Start with full alpha
+                particleOut.emitter_id = emitter_idx;
+                particlesOut[index] = particleOut;
+                return;
+            }
+        }
+        
+        // Particle stays dead - copy input to output
+        particlesOut[index] = particleIn;
+        return;
     }
-    if ((particlesOut[index].position.y <= -1.0) || (particlesOut[index].position.y >= 1.0)) {
-        particlesOut[index].velocity.y = -particlesOut[index].velocity.y;
-    }
 
+    // Living particle - update physics
+    particleOut.position = particleIn.position + particleIn.velocity * ubo.delta_time;
+    
+    // Apply gravity
+    particleOut.velocity = particleIn.velocity + ubo.gravity.xyz * ubo.delta_time;
+    
+    // Update lifetime
+    particleOut.lifetime = particleIn.lifetime - ubo.delta_time;
+    particleOut.max_lifetime = particleIn.max_lifetime;
+    particleOut.emitter_id = particleIn.emitter_id;
+    
+    // Fade out based on lifetime ratio
+    float life_ratio = particleOut.lifetime / particleOut.max_lifetime;
+    life_ratio = clamp(life_ratio, 0.0, 1.0);
+    
+    // Copy color but update alpha for fading
+    particleOut.color = vec4(particleIn.color.rgb, life_ratio);
+    
+    particlesOut[index] = particleOut;
 }

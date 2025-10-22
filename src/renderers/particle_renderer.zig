@@ -201,7 +201,7 @@ pub const ParticleRenderer = struct {
             .emitter_position = .{ emitter_position.x, emitter_position.y, emitter_position.z, 0.0 },
             .particle_count = self.particle_count,
             .max_particles = self.max_particles,
-            .gravity = .{ 0.0, -9.81, 0.0, 0.0 }, // Default gravity
+            .gravity = .{ 0.0, 9.81, 0.0, 0.0 }, // Default gravity
             .spawn_rate = 100.0, // Default spawn rate
         };
 

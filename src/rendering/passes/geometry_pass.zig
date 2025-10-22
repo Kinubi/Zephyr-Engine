@@ -13,6 +13,7 @@ const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedP
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
+const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const vertex_formats = @import("../vertex_formats.zig");
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -32,6 +33,7 @@ pub const GeometryPass = struct {
     // Rendering context
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
+    resource_binder: ResourceBinder,
     asset_manager: *AssetManager,
     ecs_world: *World,
 
@@ -46,6 +48,10 @@ pub const GeometryPass = struct {
     // Pipeline
     geometry_pipeline: PipelineId = undefined,
     cached_pipeline_handle: vk.Pipeline = .null_handle,
+
+    // Hot reload state
+    resources_need_setup: bool = false,
+    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
     // Render system for extracting entities
     render_system: RenderSystem,
@@ -69,6 +75,7 @@ pub const GeometryPass = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
+            .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .asset_manager = asset_manager,
             .ecs_world = ecs_world,
             .swapchain_color_format = swapchain_color_format,
@@ -130,15 +137,16 @@ pub const GeometryPass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
-        // Bind material buffer from AssetManager
-        try self.bindAssetResources();
+        // Mark resources as needing setup
+        self.resources_need_setup = true;
+        self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
 
         log(.INFO, "geometry_pass", "Setup complete (color: {}, depth: {})", .{ self.color_target.toInt(), self.depth_buffer.toInt() });
     }
 
-    /// Bind material buffer and texture array from AssetManager
-    fn bindAssetResources(self: *GeometryPass) !void {
-        // Bind material buffer
+    /// Bind material buffer and texture array from AssetManager to all frames
+    fn setupResources(self: *GeometryPass) !void {
+        // Bind material buffer for all frames
         if (self.asset_manager.material_buffer) |buffer| {
             const material_resource = Resource{
                 .buffer = .{
@@ -159,7 +167,7 @@ pub const GeometryPass = struct {
             }
         }
 
-        // Bind texture array
+        // Bind texture array for all frames
         const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
         var textures_ready = false;
         if (texture_image_infos.len > 0) {
@@ -185,11 +193,6 @@ pub const GeometryPass = struct {
                 );
             }
         }
-
-        // Update all descriptor sets
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            try self.pipeline_system.updateDescriptorSetsForPipeline(self.geometry_pipeline, @intCast(frame_idx));
-        }
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -202,21 +205,18 @@ pub const GeometryPass = struct {
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
 
         if (pipeline_rebuilt) {
-            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
-            self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
+            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.resource_binder.clearPipeline(self.geometry_pipeline);
         }
 
         // Check if assets were updated (materials or textures)
         const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
 
-        // If pipeline was rebuilt OR assets were updated, rebind descriptors for ALL frames
-        if (pipeline_rebuilt or assets_updated) {
-            try self.updateDescriptors();
+        if (assets_updated or pipeline_rebuilt) {
+            log(.INFO, "geometry_pass", "Assets updated, marking resources for rebind", .{});
+            try self.setupResources();
         }
-
-        // Re-fetch pipeline entry in case updateDescriptors() rebuilt it
-        const current_pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
 
         // Extract renderables from ECS
         var render_data = try self.render_system.extractRenderData(self.ecs_world);
@@ -254,46 +254,29 @@ pub const GeometryPass = struct {
         // Begin rendering (also sets viewport and scissor)
         rendering.begin(self.graphics_context, cmd);
 
-        // Bind pipeline (use current_pipeline_entry which may have been updated by updateDescriptors)
-        self.graphics_context.vkd.cmdBindPipeline(cmd, .graphics, current_pipeline_entry.vulkan_pipeline);
+        // Bind pipeline with automatic Set 0 (global UBO) binding
+        try self.pipeline_system.bindPipelineWithGlobalSet(cmd, self.geometry_pipeline, frame_index);
 
-        // Bind descriptor sets
-        const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
-        if (current_pipeline_entry.descriptor_sets.items.len > 1) {
-            const set_1_frames = current_pipeline_entry.descriptor_sets.items[1];
-            const material_descriptor_set = set_1_frames[frame_index];
+        // Update descriptor sets for this frame using ResourceBinder (handles Set 1: materials/textures)
+        try self.resource_binder.updateFrame(self.geometry_pipeline, frame_index);
 
-            const descriptor_sets = [_]vk.DescriptorSet{
-                frame_info.global_descriptor_set,
-                material_descriptor_set,
-            };
-
+        // Bind Set 1 (materials/textures) - ResourceBinder has updated it, now we need to bind it
+        if (self.pipeline_system.getDescriptorSet(self.geometry_pipeline, 1, frame_index)) |set_1| {
+            const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
             self.graphics_context.vkd.cmdBindDescriptorSets(
                 cmd,
                 .graphics,
                 pipeline_layout,
-                0,
-                descriptor_sets.len,
-                &descriptor_sets,
-                0,
-                null,
-            );
-        } else {
-            const descriptor_sets = [_]vk.DescriptorSet{
-                frame_info.global_descriptor_set,
-            };
-
-            self.graphics_context.vkd.cmdBindDescriptorSets(
-                cmd,
-                .graphics,
-                pipeline_layout,
-                0,
-                descriptor_sets.len,
-                &descriptor_sets,
+                1, // Set 1
+                1,
+                @ptrCast(&set_1),
                 0,
                 null,
             );
         }
+
+        // Get pipeline layout for push constants
+        const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
         // Render each entity
         var rendered_count: usize = 0;
@@ -350,66 +333,13 @@ pub const GeometryPass = struct {
         );
     }
 
-    fn updateDescriptors(self: *GeometryPass) !void {
-        // Rebind resources for ALL frames
-        if (self.asset_manager.material_buffer) |buffer| {
-            const material_resource = Resource{
-                .buffer = .{
-                    .buffer = buffer.buffer,
-                    .offset = 0,
-                    .range = buffer.buffer_size,
-                },
-            };
-
-            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                try self.pipeline_system.bindResource(
-                    self.geometry_pipeline,
-                    1,
-                    0,
-                    material_resource,
-                    @intCast(frame_idx),
-                );
-            }
-        }
-
-        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
-        var textures_ready = false;
-        if (texture_image_infos.len > 0) {
-            textures_ready = true;
-            for (texture_image_infos) |info| {
-                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) {
-                    textures_ready = false;
-                    break;
-                }
-            }
-        }
-
-        if (textures_ready) {
-            const textures_resource = Resource{ .image_array = texture_image_infos };
-
-            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                try self.pipeline_system.bindResource(
-                    self.geometry_pipeline,
-                    1,
-                    1,
-                    textures_resource,
-                    @intCast(frame_idx),
-                );
-            }
-        }
-
-        // Update descriptor sets for ALL frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            try self.pipeline_system.updateDescriptorSetsForPipeline(
-                self.geometry_pipeline,
-                @intCast(frame_idx),
-            );
-        }
-    }
-
     fn teardownImpl(base: *RenderPass) void {
         const self: *GeometryPass = @fieldParentPtr("base", base);
         log(.INFO, "geometry_pass", "Tearing down", .{});
+
+        // Clean up resource binder
+        self.resource_binder.deinit();
+
         // Pipeline cleanup handled by UnifiedPipelineSystem
         self.allocator.destroy(self);
     }
