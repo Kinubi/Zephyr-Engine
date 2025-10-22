@@ -163,6 +163,10 @@ pub const App = struct {
     var scene_v2: SceneV2 = undefined;
     var scene_v2_enabled: bool = false;
 
+    // Path tracing toggle state
+    var last_toggle_time: f64 = 0.0;
+    const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
+
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
@@ -412,6 +416,11 @@ pub const App = struct {
         var window_height: c_int = 0;
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &window_width, &window_height);
 
+        // --- Use new GlobalUboSet abstraction ---
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
+        frame_info.global_descriptor_set = global_ubo_set.sets[0];
+
         try scene_v2.initRenderGraph(
             &self.gc,
             &unified_pipeline_system,
@@ -457,11 +466,6 @@ pub const App = struct {
         camera = Camera{ .fov = 75.0, .window = self.window };
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
-
-        // --- Use new GlobalUboSet abstraction ---
-        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
-        frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
         // Register global descriptor sets with the pipeline system for automatic binding
         unified_pipeline_system.setGlobalDescriptorSets(global_ubo_set.sets);
@@ -673,14 +677,17 @@ pub const App = struct {
 
         camera_controller.processInput(&self.window, viewer_object, dt);
 
-        // Toggle path tracing with 'T' key (no debouncing for simplicity)
+        // Toggle path tracing with 'T' key (with debouncing)
         const GLFW_KEY_T = 84;
-        const GLFW_PRESS = 1;
         const t_key_state = c.glfwGetKey(@ptrCast(self.window.window.?), GLFW_KEY_T);
-        if (t_key_state == GLFW_PRESS) {
+        const toggle_time = c.glfwGetTime();
+
+        if (t_key_state == c.GLFW_PRESS and (toggle_time - last_toggle_time) > TOGGLE_COOLDOWN) {
             if (scene_v2_enabled and scene_v2.path_tracing_pass != null) {
                 const current_state = scene_v2.path_tracing_pass.?.enable_path_tracing;
                 scene_v2.setPathTracingEnabled(!current_state);
+                last_toggle_time = toggle_time;
+                log(.INFO, "app", "Path tracing toggled: {}", .{!current_state});
             }
         }
 

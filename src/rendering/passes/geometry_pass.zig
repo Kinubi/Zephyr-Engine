@@ -80,7 +80,7 @@ pub const GeometryPass = struct {
             .ecs_world = ecs_world,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
-            .render_system = RenderSystem{ .allocator = allocator },
+            .render_system = RenderSystem.init(allocator),
         };
 
         log(.INFO, "geometry_pass", "Created GeometryPass", .{});
@@ -336,6 +336,9 @@ pub const GeometryPass = struct {
     fn teardownImpl(base: *RenderPass) void {
         const self: *GeometryPass = @fieldParentPtr("base", base);
         log(.INFO, "geometry_pass", "Tearing down", .{});
+
+        // Clean up render system
+        self.render_system.deinit();
 
         // Clean up resource binder
         self.resource_binder.deinit();

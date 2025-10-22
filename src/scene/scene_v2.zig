@@ -40,6 +40,7 @@ pub const Scene = struct {
     // Rendering pipeline for this scene
     render_graph: ?RenderGraph = null,
     particle_compute_pass: ?*@import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass = null,
+    geometry_pass: ?*@import("../rendering/passes/geometry_pass.zig").GeometryPass = null,
     path_tracing_pass: ?*@import("../rendering/passes/path_tracing_pass.zig").PathTracingPass = null,
 
     // Emitter tracking: map ECS entity ID to GPU emitter ID
@@ -369,11 +370,12 @@ pub const Scene = struct {
     /// Toggle path tracing on/off (switches between path tracing and raster)
     pub fn setPathTracingEnabled(self: *Scene, enabled: bool) void {
         if (self.path_tracing_pass) |pass| {
-            pass.setEnabled(enabled);
+            pass.enable_path_tracing = enabled;
+
             if (enabled) {
-                log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s}", .{self.name});
+                log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s} (raster will be disabled on next frame)", .{self.name});
             } else {
-                log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s} (using raster)", .{self.name});
+                log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s} (raster will be enabled on next frame)", .{self.name});
             }
         } else {
             log(.WARN, "scene_v2", "Cannot toggle path tracing - pass not initialized", .{});
@@ -432,6 +434,9 @@ pub const Scene = struct {
 
         try self.render_graph.?.addPass(&geometry_pass.base);
 
+        // Save reference for toggling between raster and path tracing
+        self.geometry_pass = geometry_pass;
+
         // Create PathTracingPass (alternative to raster rendering)
         const path_tracing_pass = try PathTracingPass.create(
             self.allocator,
@@ -440,6 +445,8 @@ pub const Scene = struct {
             thread_pool,
             global_ubo_set,
             self.ecs_world,
+            self.asset_manager,
+            swapchain_format,
             width,
             height,
         );
@@ -487,6 +494,21 @@ pub const Scene = struct {
     /// Render the scene using the RenderGraph
     pub fn render(self: *Scene, frame_info: FrameInfo) !void {
         if (self.render_graph) |*graph| {
+            // Toggle geometry pass based on path tracing state
+            if (self.path_tracing_pass) |pt_pass| {
+                // Search for geometry pass in render graph
+                for (graph.passes.items) |pass| {
+                    if (std.mem.eql(u8, pass.name, "geometry_pass")) {
+                        pass.enabled = !pt_pass.enable_path_tracing;
+                    } else if (std.mem.eql(u8, pass.name, "particle_pass")) {
+                        pass.enabled = !pt_pass.enable_path_tracing;
+                    } else if (std.mem.eql(u8, pass.name, "light_volume_pass")) {
+                        pass.enabled = !pt_pass.enable_path_tracing;
+                    } else if (std.mem.eql(u8, pass.name, "path_tracing_pass")) {
+                        pass.enabled = pt_pass.enable_path_tracing;
+                    }
+                }
+            }
             // Execute only graphics passes (compute passes already executed in update())
             for (graph.passes.items) |pass| {
                 if (!pass.enabled) continue;
@@ -510,6 +532,13 @@ pub const Scene = struct {
 
         // Update particles (CPU-side spawning)
         try self.updateParticles(frame_info.dt);
+
+        // Update path tracing state (BVH and descriptors) if enabled
+        if (self.path_tracing_pass) |pt_pass| {
+            if (pt_pass.enable_path_tracing) {
+                try pt_pass.updateState(&frame_info);
+            }
+        }
 
         // Execute compute passes (GPU particle simulation)
         // This must happen between beginCompute/endCompute in app.zig
