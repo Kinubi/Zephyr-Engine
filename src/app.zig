@@ -132,7 +132,7 @@ pub const App = struct {
     // deinitialized after other systems that depend on it have been deinitialized.
 
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
-    
+
     // Scheduled asset loading system
     const ScheduledAsset = struct {
         frame: u64,

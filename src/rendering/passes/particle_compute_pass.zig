@@ -296,7 +296,7 @@ pub const ParticleComputePass = struct {
             (active_particle_slots + workgroup_size - 1) / workgroup_size
         else
             0;
-        
+
         if (workgroups > 0) {
             self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
         }
