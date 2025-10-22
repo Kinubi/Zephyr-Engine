@@ -211,9 +211,19 @@ pub const AssetManager = struct {
     // Dirty flags for resource updates
     materials_dirty: bool = true,
 
+    // External flags for renderers - signal when buffers/descriptors have been updated
+    materials_updated: bool = false,
+    texture_descriptors_updated: bool = false,
+
     // Async update flags to track pending work
     material_buffer_updating: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     texture_descriptors_updating: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    // State tracking for transition detection (like scene_bridge pattern)
+    last_texture_dirty: bool = false,
+    last_texture_updating: bool = false,
+    last_material_dirty: bool = false,
+    last_material_updating: bool = false,
 
     // Thread safety for concurrent asset loading
     models_mutex: std.Thread.Mutex = std.Thread.Mutex{},
@@ -644,7 +654,7 @@ pub const AssetManager = struct {
         }
 
         self.texture_image_infos = image_infos;
-        self.texture_descriptors_dirty = false;
+        // Don't set dirty flag here - the async worker will clear it when complete
     }
 
     /// Queue async texture descriptor array update
@@ -853,6 +863,62 @@ pub const AssetManager = struct {
         self.stale_material_buffers.clearRetainingCapacity();
     }
 
+    /// Begin a new frame - checks for async work completion and queues updates
+    /// Uses state transition detection pattern (like scene_bridge) to reliably catch worker completions
+    /// Call this at the start of each frame, before checking dirty flags
+    pub fn beginFrame(self: *AssetManager) void {
+        // Reset the "updated" flags at the start of the frame
+        self.materials_updated = false;
+        self.texture_descriptors_updated = false;
+
+        // Capture previous state for transition detection
+        const prev_tex_dirty = self.last_texture_dirty;
+        const prev_mat_dirty = self.last_material_dirty;
+        const prev_tex_updating = self.last_texture_updating;
+        const prev_mat_updating = self.last_material_updating;
+
+        // Check if we need to queue texture descriptor updates
+        const tex_updating = self.texture_descriptors_updating.load(.acquire);
+        if (self.texture_descriptors_dirty and !tex_updating) {
+            self.queueTextureDescriptorUpdate() catch |err| {
+                log(.WARN, "asset_manager", "Failed to queue texture descriptor update: {}", .{err});
+            };
+        }
+
+        // Check if we need to queue material buffer updates
+        const mat_updating = self.material_buffer_updating.load(.acquire);
+        if (self.materials_dirty and !mat_updating) {
+            self.queueMaterialBufferUpdate() catch |err| {
+                log(.WARN, "asset_manager", "Failed to queue material buffer update: {}", .{err});
+            };
+        }
+
+        // Capture current state
+        const curr_tex_dirty = self.texture_descriptors_dirty;
+        const curr_mat_dirty = self.materials_dirty;
+        const curr_tex_updating = self.texture_descriptors_updating.load(.acquire);
+        const curr_mat_updating = self.material_buffer_updating.load(.acquire);
+
+        // Update state tracking for next frame
+        self.last_texture_dirty = curr_tex_dirty;
+        self.last_material_dirty = curr_mat_dirty;
+        self.last_texture_updating = curr_tex_updating;
+        self.last_material_updating = curr_mat_updating;
+
+        // Detect transitions: work was in progress (dirty OR updating), now it's done (both false)
+        const texture_completed = (prev_tex_dirty or prev_tex_updating) and !curr_tex_dirty and !curr_tex_updating;
+        const material_completed = (prev_mat_dirty or prev_mat_updating) and !curr_mat_dirty and !curr_mat_updating;
+
+        // Set update flags when transitions are detected
+        if (texture_completed) {
+            self.texture_descriptors_updated = true;
+        }
+
+        if (material_completed) {
+            self.materials_updated = true;
+        }
+    }
+
     /// Check if asset is ready for use
     pub fn isAssetReady(self: *AssetManager, asset_id: AssetId) bool {
         return self.registry.getAssetState(asset_id) == .loaded;
@@ -887,9 +953,13 @@ fn textureDescriptorUpdateWorker(context: ?*anyopaque, work_item: WorkItem) void
 
     asset_manager.buildTextureDescriptorArray() catch |err| {
         log(.WARN, "enhanced_asset_manager", "Failed to build texture descriptor array: {}", .{err});
+        asset_manager.texture_descriptors_updating.store(false, .release);
+        return;
     };
 
-    // Mark as no longer updating
+    // Clear internal dirty flag and set external updated flag for renderers
+    asset_manager.texture_descriptors_dirty = false;
+    asset_manager.texture_descriptors_updated = true;
     asset_manager.texture_descriptors_updating.store(false, .release);
 }
 
@@ -900,12 +970,12 @@ fn materialBufferUpdateWorker(context: ?*anyopaque, work_item: WorkItem) void {
 
     asset_manager.createMaterialBuffer(asset_manager.loader.graphics_context) catch |err| {
         log(.WARN, "enhanced_asset_manager", "Failed to create material buffer: {}", .{err});
-        // Don't mark materials_dirty as false if creation failed
         asset_manager.material_buffer_updating.store(false, .release);
         return;
     };
 
-    // Mark materials as no longer dirty and no longer updating
+    // Clear internal dirty flag and set external updated flag for renderers
     asset_manager.materials_dirty = false;
+    asset_manager.materials_updated = true;
     asset_manager.material_buffer_updating.store(false, .release);
 }

@@ -25,6 +25,7 @@ pub const Buffer = struct {
         var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size, .mapped = null };
         try gc.createBuffer(self.buffer_size, usage_flags, memory_property_flags, @constCast(&self.buffer), @constCast(&self.memory));
         self.descriptor_info = .{ .buffer = self.buffer, .offset = 0, .range = vk.WHOLE_SIZE };
+
         return self;
     }
 

@@ -194,6 +194,352 @@ pub const RenderPass = struct {
 };
 ```
 
+---
+
+## Dynamic Rendering (VK_KHR_dynamic_rendering)
+
+### Why Dynamic Rendering?
+
+**Modern Vulkan (1.3+ core)** replaces the legacy `VkRenderPass`/`VkFramebuffer` model with **dynamic rendering**:
+
+**Old Way (VkRenderPass):**
+- Create `VkRenderPass` object upfront (defines attachments, subpasses, dependencies)
+- Create `VkFramebuffer` objects (binds image views to render pass)
+- Must match pipeline's render pass compatibility
+- Inflexible: changing attachments requires new objects
+- More boilerplate: multiple creation steps
+
+**New Way (vkCmdBeginRendering):**
+- No `VkRenderPass` or `VkFramebuffer` objects needed
+- Define attachments inline at rendering time
+- Pipeline specifies formats but no render pass dependency
+- Flexible: change attachments per frame dynamically
+- Less boilerplate: one command to start rendering
+
+### Benefits for RenderGraph
+
+✅ **Per-Pass Flexibility**: Each pass specifies its own attachments inline  
+✅ **Simpler State Management**: No render pass compatibility checks  
+✅ **Dynamic Reconfiguration**: Change rendering without recreating objects  
+✅ **Cleaner Code**: Fewer Vulkan objects to track  
+✅ **Modern Best Practice**: Industry standard for Vulkan 1.3+  
+✅ **Better for Hot-Reload**: Easier to rebuild pipelines without render passes  
+
+### API Comparison
+
+#### Old: VkRenderPass + VkFramebuffer
+
+```zig
+// 1. Create VkRenderPass (once)
+var render_pass_info = vk.RenderPassCreateInfo{
+    .attachmentCount = 2,
+    .pAttachments = &attachments,  // color, depth
+    .subpassCount = 1,
+    .pSubpasses = &subpass,
+    .dependencyCount = 1,
+    .pDependencies = &dependency,
+};
+var render_pass: vk.RenderPass = undefined;
+try vkd.createRenderPass(device, &render_pass_info, null, &render_pass);
+
+// 2. Create VkFramebuffer (per swapchain image)
+var framebuffer_info = vk.FramebufferCreateInfo{
+    .renderPass = render_pass,
+    .attachmentCount = 2,
+    .pAttachments = &image_views,  // color_view, depth_view
+    .width = extent.width,
+    .height = extent.height,
+    .layers = 1,
+};
+var framebuffer: vk.Framebuffer = undefined;
+try vkd.createFramebuffer(device, &framebuffer_info, null, &framebuffer);
+
+// 3. Begin render pass
+var begin_info = vk.RenderPassBeginInfo{
+    .renderPass = render_pass,
+    .framebuffer = framebuffer,
+    .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+    .clearValueCount = 2,
+    .pClearValues = &clear_values,
+};
+vkd.cmdBeginRenderPass(cmd, &begin_info, .@"inline");
+
+// 4. Draw commands...
+
+// 5. End render pass
+vkd.cmdEndRenderPass(cmd);
+```
+
+#### New: vkCmdBeginRendering (Dynamic Rendering)
+
+```zig
+// 1. Setup color attachment info (inline)
+var color_attachment = vk.RenderingAttachmentInfo{
+    .imageView = swapchain_image_view,
+    .imageLayout = .color_attachment_optimal,
+    .loadOp = .clear,
+    .storeOp = .store,
+    .clearValue = .{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } },
+};
+
+// 2. Setup depth attachment info (inline)
+var depth_attachment = vk.RenderingAttachmentInfo{
+    .imageView = depth_image_view,
+    .imageLayout = .depth_stencil_attachment_optimal,
+    .loadOp = .clear,
+    .storeOp = .dont_care,
+    .clearValue = .{ .depthStencil = .{ .depth = 1.0, .stencil = 0 } },
+};
+
+// 3. Begin rendering (one command)
+var rendering_info = vk.RenderingInfo{
+    .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+    .layerCount = 1,
+    .colorAttachmentCount = 1,
+    .pColorAttachments = &color_attachment,
+    .pDepthAttachment = &depth_attachment,
+};
+vkd.cmdBeginRendering(cmd, &rendering_info);
+
+// 4. Draw commands...
+
+// 5. End rendering
+vkd.cmdEndRendering(cmd);
+```
+
+**Key Differences:**
+- No separate `VkRenderPass`/`VkFramebuffer` creation
+- Attachments specified inline in `VkRenderingInfo`
+- Simpler: 3 structs vs 5+ objects
+- Flexible: can change attachments per frame
+
+### Pipeline Creation Changes
+
+#### Old: Pipeline Needs Render Pass
+
+```zig
+var pipeline_info = vk.GraphicsPipelineCreateInfo{
+    // ... vertex input, shaders, etc ...
+    .renderPass = render_pass,  // ❌ REQUIRED
+    .subpass = 0,
+};
+try vkd.createGraphicsPipelines(device, cache, 1, &pipeline_info, null, &pipeline);
+```
+
+#### New: Pipeline Specifies Formats
+
+```zig
+// 1. Define color/depth formats
+var rendering_info = vk.PipelineRenderingCreateInfo{
+    .colorAttachmentCount = 1,
+    .pColorAttachmentFormats = &[_]vk.Format{.r16g16b16a16_sfloat},  // RGBA16F
+    .depthAttachmentFormat = .d32_sfloat,
+};
+
+// 2. Chain into pipeline creation
+var pipeline_info = vk.GraphicsPipelineCreateInfo{
+    .pNext = &rendering_info,  // ✅ Specify formats instead of render pass
+    // ... vertex input, shaders, etc ...
+    .renderPass = .null_handle,  // ❌ NO LONGER NEEDED
+    .subpass = 0,
+};
+try vkd.createGraphicsPipelines(device, cache, 1, &pipeline_info, null, &pipeline);
+```
+
+**Key Changes:**
+- Pipeline specifies attachment formats via `VkPipelineRenderingCreateInfo`
+- No `renderPass` dependency
+- Pipelines can be used with any compatible attachments (matching formats)
+
+### RenderGraph Integration
+
+Each **RenderPass** uses dynamic rendering in its `execute()` method:
+
+```zig
+fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
+    const self = @fieldParentPtr(GeometryPass, "base", base);
+    const cmd = frame_info.command_buffer;
+    
+    // 1. Define attachments inline (from ResourceRegistry)
+    var color_target = self.graph.resources.getRenderTarget(self.color_target);
+    var depth_buffer = self.graph.resources.getDepthBuffer(self.depth_buffer);
+    
+    var color_attachment = vk.RenderingAttachmentInfo{
+        .imageView = color_target.view,
+        .imageLayout = .color_attachment_optimal,
+        .loadOp = .clear,
+        .storeOp = .store,
+        .clearValue = .{ .color = .{ .float32 = .{ 0.01, 0.01, 0.01, 1.0 } } },
+    };
+    
+    var depth_attachment = vk.RenderingAttachmentInfo{
+        .imageView = depth_buffer.view,
+        .imageLayout = .depth_stencil_attachment_optimal,
+        .loadOp = .clear,
+        .storeOp = .dont_care,
+        .clearValue = .{ .depthStencil = .{ .depth = 1.0, .stencil = 0 } },
+    };
+    
+    // 2. Begin rendering
+    var rendering_info = vk.RenderingInfo{
+        .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = frame_info.extent },
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment,
+        .pDepthAttachment = &depth_attachment,
+    };
+    vkd.cmdBeginRendering(cmd, &rendering_info);
+    
+    // 3. Draw all entities
+    var render_system = RenderSystem{ .allocator = self.scene.allocator };
+    var render_data = try render_system.extractRenderData(self.scene.ecs_world);
+    defer render_data.deinit();
+    
+    for (render_data.renderables.items) |renderable| {
+        // ... bind pipeline, descriptors, draw ...
+    }
+    
+    // 4. End rendering
+    vkd.cmdEndRendering(cmd);
+    
+    log(.TRACE, "geometry_pass", "Rendered {} entities", .{render_data.renderables.items.len});
+}
+```
+
+### Migration Checklist
+
+✅ **Enable Extension** (already done in graphics_context.zig):
+```zig
+const required_extensions = [_][*:0]const u8{
+    vk.extensions.khr_swapchain.name,
+    vk.extensions.khr_dynamic_rendering.name,  // ✅ Add this
+};
+```
+
+✅ **Enable Feature** (already done):
+```zig
+var dynamic_rendering_feature = vk.PhysicalDeviceDynamicRenderingFeatures{
+    .dynamicRendering = vk.TRUE,
+};
+var device_features = vk.PhysicalDeviceFeatures2{
+    .pNext = &dynamic_rendering_feature,
+};
+```
+
+🔄 **Update Pipeline Creation** (UnifiedPipelineSystem):
+- Add `VkPipelineRenderingCreateInfo` to pipeline creation
+- Remove render pass dependency
+- Specify color/depth formats
+
+🔄 **Update RenderPasses** (GeometryPass, LightingPass, etc.):
+- Replace `vkCmdBeginRenderPass` with `vkCmdBeginRendering`
+- Define attachments inline (no framebuffer)
+- Replace `vkCmdEndRenderPass` with `vkCmdEndRendering`
+
+🔄 **Remove Legacy Objects**:
+- Delete `VkRenderPass` creation from swapchain/renderers
+- Delete `VkFramebuffer` creation/tracking
+- Remove render pass compatibility checks
+
+### Example Pass Implementations
+
+#### GeometryPass (Opaque Objects)
+
+```zig
+// Outputs: color + depth
+var color_attachment = vk.RenderingAttachmentInfo{
+    .imageView = color_target_view,
+    .imageLayout = .color_attachment_optimal,
+    .loadOp = .clear,  // Clear to background
+    .storeOp = .store, // Save for lighting pass
+    .clearValue = .{ .color = .{ .float32 = .{ 0.01, 0.01, 0.01, 1.0 } } },
+};
+
+var depth_attachment = vk.RenderingAttachmentInfo{
+    .imageView = depth_buffer_view,
+    .imageLayout = .depth_stencil_attachment_optimal,
+    .loadOp = .clear,  // Clear to 1.0
+    .storeOp = .store, // Save for depth testing in later passes
+    .clearValue = .{ .depthStencil = .{ .depth = 1.0, .stencil = 0 } },
+};
+
+vkd.cmdBeginRendering(cmd, &.{
+    .renderArea = full_viewport,
+    .layerCount = 1,
+    .colorAttachmentCount = 1,
+    .pColorAttachments = &color_attachment,
+    .pDepthAttachment = &depth_attachment,
+});
+// Draw opaque meshes...
+vkd.cmdEndRendering(cmd);
+```
+
+#### LightingPass (Point Lights)
+
+```zig
+// Inputs: depth buffer (read-only)
+// Outputs: color (additive blending)
+var color_attachment = vk.RenderingAttachmentInfo{
+    .imageView = color_target_view,
+    .imageLayout = .color_attachment_optimal,
+    .loadOp = .load,   // Keep existing color from GeometryPass
+    .storeOp = .store, // Save accumulated lighting
+    .clearValue = undefined, // Not used (loadOp = load)
+};
+
+var depth_attachment = vk.RenderingAttachmentInfo{
+    .imageView = depth_buffer_view,
+    .imageLayout = .depth_stencil_read_only_optimal, // Read-only!
+    .loadOp = .load,      // Keep existing depth
+    .storeOp = .dont_care, // Don't modify depth
+    .clearValue = undefined,
+};
+
+vkd.cmdBeginRendering(cmd, &.{
+    .renderArea = full_viewport,
+    .layerCount = 1,
+    .colorAttachmentCount = 1,
+    .pColorAttachments = &color_attachment,
+    .pDepthAttachment = &depth_attachment,
+});
+// Draw light volumes with additive blending...
+vkd.cmdEndRendering(cmd);
+```
+
+#### TransparencyPass (Alpha Blended Objects)
+
+```zig
+// Inputs: depth buffer (read-only for testing)
+// Outputs: color (alpha blending)
+var color_attachment = vk.RenderingAttachmentInfo{
+    .imageView = color_target_view,
+    .imageLayout = .color_attachment_optimal,
+    .loadOp = .load,   // Keep existing scene
+    .storeOp = .store, // Save blended result
+    .clearValue = undefined,
+};
+
+var depth_attachment = vk.RenderingAttachmentInfo{
+    .imageView = depth_buffer_view,
+    .imageLayout = .depth_stencil_read_only_optimal, // Test but don't write
+    .loadOp = .load,
+    .storeOp = .dont_care,
+    .clearValue = undefined,
+};
+
+vkd.cmdBeginRendering(cmd, &.{
+    .renderArea = full_viewport,
+    .layerCount = 1,
+    .colorAttachmentCount = 1,
+    .pColorAttachments = &color_attachment,
+    .pDepthAttachment = &depth_attachment,
+});
+// Draw transparent meshes back-to-front...
+vkd.cmdEndRendering(cmd);
+```
+
+---
+
 ### Example: GeometryPass
 
 ```zig

@@ -437,41 +437,96 @@ pub const GameObject = struct {
 
 ---
 
-### Phase 2: RenderGraph System (NEXT - NOT STARTED)
-**Goal**: Replace GenericRenderer with per-scene RenderGraph
+### Phase 2: RenderGraph System + Dynamic Rendering Migration (NEXT - IN PROGRESS)
+**Goal**: Replace GenericRenderer with per-scene RenderGraph + migrate to VK_KHR_dynamic_rendering
+
+**Rationale for Dynamic Rendering**:
+- Modern Vulkan extension (promoted to core in Vulkan 1.3)
+- Eliminates VkRenderPass and VkFramebuffer objects
+- More flexible - can change attachments per-frame
+- Simpler API - begin/end rendering inline
+- Better fits RenderGraph model - passes define attachments directly
+- Reduces boilerplate and state management
 
 **Tasks**:
+- [x] ✅ Disable GenericRenderer in app.zig (commented out)
+- [ ] Migrate existing renderers to dynamic rendering:
+  - [ ] Update EcsRenderer to use vkCmdBeginRendering/vkCmdEndRendering
+  - [ ] Remove VkRenderPass dependencies
+  - [ ] Update pipeline creation for dynamic rendering
 - [ ] Create render_graph.zig (RenderGraph infrastructure)
-- [ ] Create basic render passes:
-  - [ ] GeometryPass (renders ECS entities)
+- [ ] Create basic render passes with dynamic rendering:
+  - [ ] GeometryPass (renders ECS entities with dynamic rendering)
   - [ ] LightingPass (point lights)
-  - [ ] DepthPrepass
+  - [ ] DepthPrepass (optional early-Z)
   - [ ] ShadowPass (shadow maps + RT)
-  - [ ] TransparencyPass
-  - [ ] PostProcessPass
-- [ ] Resource management in RenderGraph
-- [ ] Automatic dependency resolution
+  - [ ] TransparencyPass (back-to-front sorted)
+  - [ ] PostProcessPass (bloom, tone mapping)
+- [ ] Resource management in RenderGraph (render targets, depth buffers)
+- [ ] Automatic dependency resolution and pass ordering
 - [ ] Update app.zig to use RenderGraph instead of GenericRenderer
-- [ ] Remove GenericRenderer entirely
+- [ ] Remove GenericRenderer entirely (archive for reference)
+
+**Dynamic Rendering Changes**:
+```zig
+// OLD: VkRenderPass API
+vkBeginRenderPass(cmd, &render_pass_begin_info);
+// ... render commands ...
+vkEndRenderPass(cmd);
+
+// NEW: Dynamic Rendering API
+const color_attachment = vk.RenderingAttachmentInfo{
+    .image_view = swapchain_image_view,
+    .image_layout = .color_attachment_optimal,
+    .load_op = .clear,
+    .store_op = .store,
+    .clear_value = .{ .color = .{ .float_32 = .{0, 0, 0, 1} } },
+};
+
+const rendering_info = vk.RenderingInfo{
+    .render_area = .{ .extent = swapchain_extent },
+    .layer_count = 1,
+    .color_attachment_count = 1,
+    .p_color_attachments = &color_attachment,
+    .p_depth_attachment = &depth_attachment,
+};
+
+vkCmdBeginRendering(cmd, &rendering_info);
+// ... render commands ...
+vkCmdEndRendering(cmd);
+```
 
 **Files to Create**:
 **Files to Create**:
 - `src/rendering/render_graph.zig` (pending)
-- `src/rendering/passes/geometry_pass.zig` (pending)
-- `src/rendering/passes/lighting_pass.zig` (pending)
-- `src/rendering/passes/depth_prepass.zig` (pending)
-- `src/rendering/passes/shadow_pass.zig` (pending)
-- `src/rendering/passes/transparency_pass.zig` (pending)
-- `src/rendering/passes/post_process_pass.zig` (pending)
+- `src/rendering/passes/geometry_pass.zig` (with dynamic rendering)
+- `src/rendering/passes/lighting_pass.zig` (with dynamic rendering)
+- `src/rendering/passes/depth_prepass.zig` (with dynamic rendering)
+- `src/rendering/passes/shadow_pass.zig` (with dynamic rendering)
+- `src/rendering/passes/transparency_pass.zig` (with dynamic rendering)
+- `src/rendering/passes/post_process_pass.zig` (with dynamic rendering)
 
 **Files to Change**:
-- `src/app.zig` (replace GenericRenderer with RenderGraph per scene)
+- `src/app.zig` ✅ (GenericRenderer disabled, ready for RenderGraph)
+- `src/renderers/ecs_renderer.zig` (migrate to dynamic rendering)
+- `src/core/swapchain.zig` (may need updates for dynamic rendering)
+- `src/core/pipeline.zig` (update for dynamic rendering pipeline creation)
 
 **Expected Outcome**: 
-- RenderGraph replaces GenericRenderer
-- Per-scene render pipelines
-- Multiple passes working
-- Advanced rendering techniques available
+- ✅ GenericRenderer disabled
+- ⏳ Dynamic rendering working
+- ⏳ RenderGraph replaces GenericRenderer
+- ⏳ Per-scene render pipelines
+- ⏳ Multiple passes working
+- ⏳ Cleaner, more modern rendering API
+
+**Benefits of Dynamic Rendering**:
+- 🎯 No VkRenderPass objects to manage
+- 🎯 No VkFramebuffer objects to manage
+- 🎯 Attachment changes per-frame (useful for RenderGraph)
+- 🎯 Simpler state management
+- 🎯 Better compatibility with modern Vulkan patterns
+- 🎯 Forward compatible (Vulkan 1.3 core feature)
 
 ---
 

@@ -101,11 +101,11 @@ pub const App = struct {
     //var particle_renderer: ParticleRenderer = undefined;
     var particle_renderer: ParticleRenderer = undefined;
 
-    // Generic forward renderer that orchestrates rasterization renderers
-    var forward_renderer: GenericRenderer = undefined;
+    // OLD: Generic forward renderer (DISABLED FOR RENDER GRAPH)
+    // var forward_renderer: GenericRenderer = undefined;
 
-    // Raytracing render pass (separate from forward renderer)
-    var rt_render_pass: GenericRenderer = undefined;
+    // OLD: Raytracing render pass (DISABLED FOR RENDER GRAPH)
+    // var rt_render_pass: GenericRenderer = undefined;
 
     var compute_shader_system: ComputeShaderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
@@ -132,6 +132,7 @@ pub const App = struct {
     // deinitialized after other systems that depend on it have been deinitialized.
 
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
+
     // Scheduled asset loading system
     const ScheduledAsset = struct {
         frame: u64,
@@ -162,6 +163,10 @@ pub const App = struct {
     var scene_v2: SceneV2 = undefined;
     var scene_v2_enabled: bool = false;
 
+    // Path tracing toggle state
+    var last_toggle_time: f64 = 0.0;
+    const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
+
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
         self.window = try Window.init(.{ .width = 1280, .height = 720 });
@@ -174,9 +179,9 @@ pub const App = struct {
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
         log(.INFO, "app", "Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
-        try swapchain.createRenderPass();
+        // try swapchain.createRenderPass();
 
-        try swapchain.createFramebuffers();
+        // try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
 
         // Initialize Thread Pool with dynamic scaling
@@ -228,10 +233,11 @@ pub const App = struct {
 
         // Register all ECS components
         try new_ecs_world.registerComponent(new_ecs.ParticleComponent);
+        try new_ecs_world.registerComponent(new_ecs.ParticleEmitter);
         try new_ecs_world.registerComponent(new_ecs.Transform);
         try new_ecs_world.registerComponent(new_ecs.MeshRenderer);
         try new_ecs_world.registerComponent(new_ecs.Camera);
-        log(.INFO, "app", "Registered ECS components: ParticleComponent, Transform, MeshRenderer, Camera", .{});
+        log(.INFO, "app", "Registered ECS components: ParticleComponent, ParticleEmitter, Transform, MeshRenderer, Camera", .{});
 
         // Initialize ECS systems
         transform_system = new_ecs.TransformSystem.init(self.allocator);
@@ -287,11 +293,11 @@ pub const App = struct {
             Math.Vec3.init(0.5, 0.5, 0.5)); // scale
         log(.INFO, "app", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
 
-        // Add another vase with a different texture (asset-based)
-        const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
-            Math.Vec3.init(0, 0, 0), // rotation
-            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        log(.INFO, "app", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
+        // // Add another vase with a different texture (asset-based)
+        // const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
+        //     Math.Vec3.init(0, 0, 0), // rotation
+        //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
+        // log(.INFO, "app", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -307,51 +313,6 @@ pub const App = struct {
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
 
-        // Create test ECS entities with Transform + MeshRenderer
-        // Wait briefly to ensure assets are loaded
-        log(.INFO, "app", "Creating test ECS entities...", .{});
-
-        // Get asset IDs for cube model and textures
-        const cube_model_id = cube_object.model_asset orelse {
-            log(.WARN, "app", "Cube model asset not available, skipping ECS entities", .{});
-            @panic("Cube model required for ECS test");
-        };
-        const cube_material_id = cube_object.material_asset orelse {
-            log(.WARN, "app", "Cube material asset not available", .{});
-            @panic("Cube material required for ECS test");
-        };
-        const cube_texture_id = cube_object.texture_asset orelse {
-            log(.WARN, "app", "Cube texture asset not available", .{});
-            @panic("Cube texture required for ECS test");
-        };
-
-        // Create ECS cube entity at position (-1.5, 0, 0)
-        const ecs_cube1 = try new_ecs_world.createEntity();
-        const cube1_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0, 0));
-        try new_ecs_world.emplace(new_ecs.Transform, ecs_cube1, cube1_transform);
-
-        var cube1_renderer = new_ecs.MeshRenderer.init(cube_model_id, cube_material_id);
-        cube1_renderer.setTexture(cube_texture_id);
-        cube1_renderer.layer = 100; // Render after scene objects
-        try new_ecs_world.emplace(new_ecs.MeshRenderer, ecs_cube1, cube1_renderer);
-
-        log(.INFO, "app", "Created ECS cube entity at (-1.5, 0, 0)", .{});
-
-        // Create second ECS cube entity at position (1.5, 0, 0) with different texture
-        const cube2_texture_id = cube2_object.texture_asset orelse cube_texture_id;
-
-        const ecs_cube2 = try new_ecs_world.createEntity();
-        const cube2_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0, 0));
-        try new_ecs_world.emplace(new_ecs.Transform, ecs_cube2, cube2_transform);
-
-        var cube2_renderer = new_ecs.MeshRenderer.init(cube_model_id, cube_material_id);
-        cube2_renderer.setTexture(cube2_texture_id);
-        cube2_renderer.layer = 100;
-        try new_ecs_world.emplace(new_ecs.MeshRenderer, ecs_cube2, cube2_renderer);
-
-        log(.INFO, "app", "Created ECS cube entity at (1.5, 0, 0)", .{});
-        log(.INFO, "app", "ECS test scene created with 2 renderable entities", .{});
-
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
@@ -365,39 +326,39 @@ pub const App = struct {
 
         // Floor (white)
         const floor = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
-        try floor.setPosition(Math.Vec3.init(0, -half_size, box_offset_z));
+        try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
         const ceiling = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
-        try ceiling.setPosition(Math.Vec3.init(0, half_size, 0));
+        try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
         // Back wall (white)
         const back_wall = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
-        try back_wall.setPosition(Math.Vec3.init(0, 0, half_size));
+        try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
         // Left wall (red) - using error.png for red color
         const left_wall = try scene_v2.spawnProp("models/cube.obj", "textures/error.png");
-        try left_wall.setPosition(Math.Vec3.init(-half_size, 0, 0));
+        try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
         const right_wall = try scene_v2.spawnProp("models/cube.obj", "textures/default.png");
-        try right_wall.setPosition(Math.Vec3.init(half_size, 0, 0));
+        try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
-        // First vase (left side) - smooth vase
-        const vase1 = try scene_v2.spawnProp("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png");
-        try vase1.setPosition(Math.Vec3.init(-1.2, -half_size + 0.05, 0.5));
-        try vase1.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
-        log(.INFO, "app", "Scene v2: Added vase 1 (smooth)", .{});
+        // // First vase (left side) - smooth vase
+        // const vase1 = try scene_v2.spawnProp("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png");
+        // try vase1.setPosition(Math.Vec3.init(-1.2, -half_size + 0.05, 0.5));
+        // try vase1.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
+        // log(.INFO, "app", "Scene v2: Added vase 1 (smooth)", .{});
 
         // Second vase (right side) - flat vase
         const vase2 = try scene_v2.spawnProp("models/flat_vase.obj", "textures/granitesmooth1-albedo.png");
@@ -406,6 +367,79 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
 
         log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene_v2.entities.items.len});
+
+        // ==================== Add Lights to Scene v2 ====================
+        log(.INFO, "app", "Adding lights to scene v2...", .{});
+
+        // Register PointLight component in scene_v2's ECS world
+        try scene_v2.ecs_world.registerComponent(new_ecs.PointLight);
+
+        // Main light (white, center-top)
+        const main_light = try scene_v2.ecs_world.createEntity();
+        const main_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(0, 1.5, 1.0));
+        try scene_v2.ecs_world.emplace(new_ecs.Transform, main_light, main_light_transform);
+        try scene_v2.ecs_world.emplace(new_ecs.PointLight, main_light, new_ecs.PointLight.initWithRange(
+            Math.Vec3.init(1.0, 1.0, 1.0), // White
+            3.0, // Intensity
+            10.0, // Range
+        ));
+        log(.INFO, "app", "Scene v2: Added main light", .{});
+
+        // Warm accent light (left side, orange)
+        const warm_light = try scene_v2.ecs_world.createEntity();
+        const warm_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0.5, 1.0));
+        try scene_v2.ecs_world.emplace(new_ecs.Transform, warm_light, warm_light_transform);
+        try scene_v2.ecs_world.emplace(new_ecs.PointLight, warm_light, new_ecs.PointLight.initWithRange(
+            Math.Vec3.init(1.0, 0.6, 0.2), // Orange
+            2.0, // Intensity
+            8.0, // Range
+        ));
+        log(.INFO, "app", "Scene v2: Added warm accent light", .{});
+
+        // Cool accent light (right side, blue)
+        const cool_light = try scene_v2.ecs_world.createEntity();
+        const cool_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0.5, 1.0));
+        try scene_v2.ecs_world.emplace(new_ecs.Transform, cool_light, cool_light_transform);
+        try scene_v2.ecs_world.emplace(new_ecs.PointLight, cool_light, new_ecs.PointLight.initWithRange(
+            Math.Vec3.init(0.2, 0.5, 1.0), // Blue
+            2.0, // Intensity
+            8.0, // Range
+        ));
+        log(.INFO, "app", "Scene v2: Added cool accent light", .{});
+
+        log(.INFO, "app", "Scene v2: Lights added successfully", .{});
+
+        asset_manager.beginFrame();
+        // Initialize RenderGraph for scene_v2
+        // Get window dimensions for path tracing pass
+        var window_width: c_int = 0;
+        var window_height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(self.window.window.?), &window_width, &window_height);
+
+        // --- Use new GlobalUboSet abstraction ---
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
+        frame_info.global_descriptor_set = global_ubo_set.sets[0];
+
+        try scene_v2.initRenderGraph(
+            &self.gc,
+            &unified_pipeline_system,
+            swapchain.surface_format.format,
+            try swapchain.depthFormat(),
+            thread_pool,
+            global_ubo_set,
+            @intCast(window_width),
+            @intCast(window_height),
+        );
+        log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
+
+        // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
+        try scene_v2.addParticleEmitter(
+            vase2.entity_id,
+            50.0, // emission_rate: 20 particles per second (increased for better visibility)
+            2.5, // particle_lifetime: 2.5 seconds (slightly longer)
+        );
+        log(.INFO, "app", "Scene v2: Added particle emitter to vase 2", .{});
 
         // ==================== End Scene v2 Setup ====================
 
@@ -433,56 +467,52 @@ pub const App = struct {
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
-        // --- Use new GlobalUboSet abstraction ---
-        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
-        frame_info.global_descriptor_set = global_ubo_set.sets[0];
+        // Register global descriptor sets with the pipeline system for automatic binding
+        unified_pipeline_system.setGlobalDescriptorSets(global_ubo_set.sets);
 
-        log(.INFO, "app", "Pipeline templates registered", .{});
-
-        _ = try scene.updateSyncResources(self.allocator);
+        //_ = try scene.updateSyncResources(self.allocator);
 
         // Initialize unified textured renderer with shared pipeline system
-        textured_renderer = try TexturedRenderer.init(
-            self.allocator,
-            @constCast(&self.gc),
-            &shader_manager,
-            &unified_pipeline_system,
-            swapchain.render_pass,
-        );
+        // textured_renderer = try TexturedRenderer.init(
+        //     self.allocator,
+        //     @constCast(&self.gc),
+        //     &shader_manager,
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        // );
 
         // Initialize ECS renderer with shared pipeline system
-        ecs_renderer = try EcsRenderer.init(
-            self.allocator,
-            @constCast(&self.gc),
-            &shader_manager,
-            asset_manager, // asset_manager is already a pointer
-            &unified_pipeline_system,
-            swapchain.render_pass,
-            &new_ecs_world,
-        );
+        // ecs_renderer = try EcsRenderer.init(
+        //     self.allocator,
+        //     @constCast(&self.gc),
+        //     &shader_manager,
+        //     asset_manager, // asset_manager is already a pointer
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        //     &new_ecs_world,
+        // );
         log(.INFO, "app", "ECS renderer initialized", .{});
 
         // Material data is now managed by the asset_manager and bound via UnifiedPipelineSystem
         // No need for separate updateMaterialData calls
 
-        point_light_renderer = try PointLightRenderer.init(
-            @constCast(&self.gc),
-            &unified_pipeline_system,
-            swapchain.render_pass,
-            scene.asScene(),
-            global_ubo_set,
-        );
+        // point_light_renderer = try PointLightRenderer.init(
+        //     @constCast(&self.gc),
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        //     scene.asScene(),
+        //     global_ubo_set,
+        // );
 
-        // Initialize unified raytracing renderer through the shared pipeline system
-        raytracing_renderer = try RaytracingRenderer.init(
-            self.allocator,
-            @constCast(&self.gc),
-            &unified_pipeline_system,
-            &swapchain,
-            thread_pool,
-            global_ubo_set,
-        );
+        // // Initialize unified raytracing renderer through the shared pipeline system
+        // raytracing_renderer = try RaytracingRenderer.init(
+        //     self.allocator,
+        //     @constCast(&self.gc),
+        //     &unified_pipeline_system,
+        //     &swapchain,
+        //     thread_pool,
+        //     global_ubo_set,
+        // );
 
         // --- Raytracing pipeline setup ---
         // Use the same global descriptor set and layout as the renderer
@@ -490,24 +520,24 @@ pub const App = struct {
         // Create scene bridge for render pass system and raytracing
         scene_bridge = SceneBridge.init(&scene, self.allocator);
 
-        // Connect new ECS World to SceneBridge for particle extraction
-        if (new_ecs_enabled) {
-            scene_bridge.setEcsWorld(&new_ecs_world);
-            log(.INFO, "app", "Connected ECS World to SceneBridge", .{});
-        }
+        // // Connect new ECS World to SceneBridge for particle extraction
+        // if (new_ecs_enabled) {
+        //     scene_bridge.setEcsWorld(&new_ecs_world);
+        //     log(.INFO, "app", "Connected ECS World to SceneBridge", .{});
+        // }
 
         // Note: TLAS creation will be handled in the update loop once BLAS is complete
         // SBT will be created by raytracing renderer when pipeline is ready
 
         log(.INFO, "app", "Creating unified particle renderer...", .{});
-        particle_renderer = try ParticleRenderer.init(
-            self.allocator,
-            &self.gc,
-            &shader_manager,
-            &unified_pipeline_system,
-            swapchain.render_pass,
-            PARTICLE_MAX,
-        );
+        // particle_renderer = try ParticleRenderer.init(
+        //     self.allocator,
+        //     &self.gc,
+        //     &shader_manager,
+        //     &unified_pipeline_system,
+        //     swapchain.render_pass,
+        //     PARTICLE_MAX,
+        // );
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
 
@@ -516,54 +546,52 @@ pub const App = struct {
 
         log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
+        // ==================== OLD GENERIC RENDERER (DISABLED FOR RENDER GRAPH) ====================
         // Initialize Generic Forward Renderer (rasterization only)
-        forward_renderer = GenericRenderer.init(self.allocator);
+        // forward_renderer = GenericRenderer.init(self.allocator);
 
         // Set the scene bridge for renderers that need scene data
-        forward_renderer.setSceneBridge(&scene_bridge);
+        // forward_renderer.setSceneBridge(&scene_bridge);
 
         // Set the swapchain for renderers that need it
-        forward_renderer.setSwapchain(&swapchain);
+        // forward_renderer.setSwapchain(&swapchain);
 
         // Add rasterization renderers to the forward renderer
         // try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
-        try forward_renderer.addRenderer("ecs_renderer", RendererType.raster, &ecs_renderer, EcsRenderer);
-        try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
-        try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
+        // try forward_renderer.addRenderer("ecs_renderer", RendererType.raster, &ecs_renderer, EcsRenderer);
+        // try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
+        // try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
 
         // Prime renderer descriptor bindings once all raster renderers are registered
-        try forward_renderer.onCreate();
+        // try forward_renderer.onCreate();
 
         // Initialize Raytracing Render Pass (separate from forward renderer)
-        rt_render_pass = GenericRenderer.init(self.allocator);
+        // rt_render_pass = GenericRenderer.init(self.allocator);
 
         // Set the scene bridge and swapchain for raytracing
-        rt_render_pass.setSceneBridge(&scene_bridge);
-        rt_render_pass.setSwapchain(&swapchain);
+        // rt_render_pass.setSceneBridge(&scene_bridge);
+        // rt_render_pass.setSwapchain(&swapchain);
 
         // Add raytracing renderer to its own render pass
-        try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
+        // try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
 
         // Ensure raytracing renderer receives initial descriptor bindings before the first frame
-        try rt_render_pass.onCreate();
+        // try rt_render_pass.onCreate();
 
         // Future renderers can be added here:
         // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
         // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
+        // ==================== END OLD GENERIC RENDERER ====================
 
-        log(.INFO, "app", "Render pass manager system initialized", .{});
+        log(.INFO, "app", "Render pass manager system initialized (GenericRenderer disabled)", .{});
 
-        // Prime scene bridge state before entering the main loop so first-frame descriptors are valid
-        _ = scene_bridge.updateAsyncResources() catch |err| {
-            log(.WARN, "app", "Initial async resource update failed: {}", .{err});
-        };
         var init_frame_info = frame_info;
         init_frame_info.current_frame = current_frame;
         init_frame_info.command_buffer = cmdbufs[current_frame];
         init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
         init_frame_info.camera = &camera;
-        try forward_renderer.update(&init_frame_info);
-        try rt_render_pass.update(&init_frame_info);
+        // try forward_renderer.update(&init_frame_info);  // OLD: Disabled for RenderGraph
+        // try rt_render_pass.update(&init_frame_info);    // OLD: Disabled for RenderGraph
 
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
@@ -572,6 +600,10 @@ pub const App = struct {
     }
 
     pub fn update(self: *App) !bool {
+        // Reset AssetManager dirty flags at frame start
+        // Async completion will set them back to true during the frame
+        asset_manager.beginFrame();
+
         // Process deferred pipeline destroys for hot reload safety
         unified_pipeline_system.processDeferredDestroys();
 
@@ -583,17 +615,23 @@ pub const App = struct {
             if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
                 log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
 
-                const loaded_object = try scene.addModelAssetAsync(scheduled_asset.model_path, scheduled_asset.texture_path, scheduled_asset.position, scheduled_asset.rotation, scheduled_asset.scale);
+                var loaded_object = try scene_v2.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
+                try loaded_object.setPosition(scheduled_asset.position);
 
-                log(.INFO, "app", "Successfully queued scheduled asset for loading with IDs: model={}, material={}, texture={}", .{ loaded_object.model_asset orelse @as(@TypeOf(loaded_object.model_asset.?), @enumFromInt(0)), loaded_object.material_asset orelse @as(@TypeOf(loaded_object.material_asset.?), @enumFromInt(0)), loaded_object.texture_asset orelse @as(@TypeOf(loaded_object.texture_asset.?), @enumFromInt(0)) });
+                try loaded_object.setScale(scheduled_asset.scale);
 
                 log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
 
                 scheduled_asset.loaded = true;
+                try scene_v2.addParticleEmitter(
+                    loaded_object.entity_id,
+                    50.0, // emission_rate: 20 particles per second (increased for better visibility)
+                    2.5, // particle_lifetime: 2.5 seconds (slightly longer)
+                );
             }
         }
 
-        _ = try scene_bridge.updateAsyncResources();
+        // _ = try scene_bridge.updateAsyncResources();
 
         //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
@@ -637,25 +675,22 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
-        // Update ECS transform hierarchies
-        if (new_ecs_enabled) {
-            try transform_system.update(&new_ecs_world);
+        camera_controller.processInput(&self.window, viewer_object, dt);
+
+        // Toggle path tracing with 'T' key (with debouncing)
+        const GLFW_KEY_T = 84;
+        const t_key_state = c.glfwGetKey(@ptrCast(self.window.window.?), GLFW_KEY_T);
+        const toggle_time = c.glfwGetTime();
+
+        if (t_key_state == c.GLFW_PRESS and (toggle_time - last_toggle_time) > TOGGLE_COOLDOWN) {
+            if (scene_v2_enabled and scene_v2.path_tracing_pass != null) {
+                const current_state = scene_v2.path_tracing_pass.?.enable_path_tracing;
+                scene_v2.setPathTracingEnabled(!current_state);
+                last_toggle_time = toggle_time;
+                log(.INFO, "app", "Path tracing toggled: {}", .{!current_state});
+            }
         }
 
-        compute_shader_system.beginCompute(frame_info);
-
-        try forward_renderer.update(&frame_info);
-
-        try rt_render_pass.update(&frame_info);
-
-        compute_shader_system.endCompute(frame_info);
-
-        //log(.TRACE, "app", "Frame start", .{});
-        try swapchain.beginFrame(frame_info);
-
-        // NOW begin the rasterization render pass
-        swapchain.beginSwapChainRenderPass(frame_info);
-        camera_controller.processInput(&self.window, viewer_object, dt);
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         frame_info.camera.updateProjectionMatrix();
         var ubo = GlobalUbo{
@@ -663,26 +698,60 @@ pub const App = struct {
             .projection = frame_info.camera.projectionMatrix,
             .dt = @floatCast(dt),
         };
-        // try point_light_renderer.update_point_lights(&frame_info, &ubo);
+
+        // Update ECS transform hierarchies
+        if (new_ecs_enabled) {
+            try transform_system.update(&new_ecs_world);
+        }
+
+        compute_shader_system.beginCompute(frame_info);
+        // Update scene (animations, physics, lights, etc.)
+        if (scene_v2_enabled) {
+            try scene_v2.update(frame_info, &ubo);
+        }
+
+        // try forward_renderer.update(&frame_info);  // OLD: Disabled for RenderGraph
+
+        // try rt_render_pass.update(&frame_info);    // OLD: Disabled for RenderGraph
+
+        compute_shader_system.endCompute(frame_info);
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
-        // Execute rasterization renderers through the forward renderer
-        try forward_renderer.render(frame_info);
+        //log(.TRACE, "app", "Frame start", .{});
+        try swapchain.beginFrame(frame_info);
 
-        swapchain.endSwapChainRenderPass(frame_info);
+        // Populate image views for dynamic rendering
+        const swap_image = swapchain.currentSwapImage();
+        frame_info.color_image = swapchain.currentImage();
+        frame_info.color_image_view = swap_image.view;
+        frame_info.depth_image_view = swap_image.depth_image_view;
+
+        // OLD: Legacy render pass (disabled for dynamic rendering)
+        // swapchain.beginSwapChainRenderPass(frame_info);
+
+        // Execute rasterization renderers through the forward renderer
+        // try forward_renderer.render(frame_info);  // OLD: Disabled for RenderGraph
+
+        // NEW: Execute Scene v2 RenderGraph (uses dynamic rendering)
+        if (scene_v2_enabled) {
+            try scene_v2.render(frame_info);
+        }
+
+        // OLD: Legacy render pass (disabled for dynamic rendering)
+        // swapchain.endSwapChainRenderPass(frame_info);
 
         // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
-        //try rt_render_pass.render(frame_info);
+        // try rt_render_pass.render(frame_info);  // OLD: Disabled for RenderGraph
 
         try swapchain.endFrame(frame_info, &current_frame);
         last_frame_time = current_time;
 
         //log(.TRACE, "app", "Frame end", .{});
 
-        if (frame_counter >= 60_000) {
-            // Stop the app once the frame counter reaches the test threshold.
-            return false;
-        }
+        // if (frame_counter >= 60_000) {
+        //     // Stop the app once the frame counter reaches the test threshold.
+        //     return false;
+        // }
 
         return self.window.isRunning();
     }
@@ -698,8 +767,8 @@ pub const App = struct {
         global_ubo_set.deinit();
 
         // Cleanup generic renderer
-        forward_renderer.deinit();
-        rt_render_pass.deinit();
+        // forward_renderer.deinit();  // OLD: Disabled for RenderGraph
+        // rt_render_pass.deinit();    // OLD: Disabled for RenderGraph
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
 

@@ -14,6 +14,7 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 ambientColor;
     PointLight pointLights[16];
     int numPointLights;
+    float dt;
 } ubo;
 
 layout(push_constant) uniform Push {
@@ -27,5 +28,8 @@ void main() {
     if (dis >= 1.0) {
         discard;
     }
-    outColor = vec4(push.color.xyz, 1.0);
+    // Soft falloff from center to edge for more pleasant appearance
+    float falloff = 1.0 - dis;
+    float alpha = falloff * 0.6; // Semi-transparent with falloff
+    outColor = vec4(push.color.xyz, alpha);
 }

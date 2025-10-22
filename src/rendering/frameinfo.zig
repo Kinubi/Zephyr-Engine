@@ -14,8 +14,8 @@ pub const GlobalUbo = struct {
     projection: Math.Mat4x4 = Math.Mat4x4.identity(),
     view: Math.Mat4x4 = Math.Mat4x4.identity(),
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
-    point_lights: [MAX_LIGHTS]PointLight = undefined,
-    num_point_lights: u32 = 6,
+    point_lights: [MAX_LIGHTS]PointLight = [_]PointLight{.{}} ** MAX_LIGHTS,
+    num_point_lights: u32 = 0,
     dt: f32 = 0,
 };
 
@@ -28,4 +28,9 @@ pub const FrameInfo = struct {
     extent: vk.Extent2D = .{ .width = 1280, .height = 720 },
     global_descriptor_set: vk.DescriptorSet = undefined,
     ray_tracing_descriptor_set: vk.DescriptorSet = undefined,
+
+    // Dynamic rendering attachments (for RenderGraph)
+    color_image: vk.Image = .null_handle,
+    color_image_view: vk.ImageView = .null_handle,
+    depth_image_view: vk.ImageView = .null_handle,
 };

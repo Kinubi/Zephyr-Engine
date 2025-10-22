@@ -89,7 +89,7 @@ pub const EcsRenderer = struct {
             .asset_manager = asset_manager,
             .render_pass = render_pass,
             .ecs_world = ecs_world,
-            .render_system = RenderSystem{ .allocator = allocator },
+            .render_system = RenderSystem.init(allocator),
             .pipeline_system = pipeline_system,
             .resource_binder = resource_binder,
             .ecs_pipeline = ecs_pipeline,
@@ -102,6 +102,7 @@ pub const EcsRenderer = struct {
 
     pub fn deinit(self: *EcsRenderer) void {
         log(.INFO, "ecs_renderer", "Cleaning up ECS renderer", .{});
+        self.render_system.deinit();
         self.resource_binder.deinit();
     }
 

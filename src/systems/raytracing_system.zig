@@ -283,8 +283,136 @@ pub const RaytracingSystem = struct {
         _ = try self.bvh_builder.buildTlasAsync(instances.items, .high, completion_callback, callback_context);
     }
 
+    /// Update BVH state using data from RenderSystem (for modern ECS-based rendering)
+    pub fn update(
+        self: *RaytracingSystem,
+        render_system: *@import("../ecs/systems/render_system.zig").RenderSystem,
+        world: *@import("../ecs/world.zig").World,
+        asset_manager: *@import("../assets/asset_manager.zig").AssetManager,
+        frame_info: *const FrameInfo,
+    ) !bool {
+        _ = frame_info;
+
+        // Check if BVH rebuild is needed
+        if (render_system.checkBvhRebuildNeeded()) {
+            // Get raytracing data from RenderSystem
+            const rebuild_rt_data = try render_system.getRaytracingData(world, asset_manager, self.allocator);
+            defer {
+                self.allocator.free(rebuild_rt_data.instances);
+                self.allocator.free(rebuild_rt_data.geometries);
+                self.allocator.free(rebuild_rt_data.materials);
+            }
+
+            // Destroy old TLAS if it exists
+            if (self.tlas != .null_handle) {
+                self.destroy_tlas_handles.append(self.allocator, self.tlas) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue TLAS handle for destruction: {}", .{err});
+                    self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
+                };
+                self.tlas = vk.AccelerationStructureKHR.null_handle;
+            }
+
+            if (self.tlas_buffer_initialized) {
+                self.destroy_tlas_buffers.append(self.allocator, self.tlas_buffer) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue TLAS buffer for destruction: {}", .{err});
+                    var immediate = self.tlas_buffer;
+                    immediate.deinit();
+                };
+                self.tlas_buffer_initialized = false;
+            }
+
+            if (self.tlas_instance_buffer_initialized) {
+                self.destroy_tlas_instance_buffers.append(self.allocator, self.tlas_instance_buffer) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue TLAS instance buffer for destruction: {}", .{err});
+                    var immediate = self.tlas_instance_buffer;
+                    immediate.deinit();
+                };
+                self.tlas_instance_buffer_initialized = false;
+            }
+
+            for (self.blas_handles.items, self.blas_buffers.items) |handle, buffer| {
+                self.destroy_blas_handles.append(self.allocator, handle) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue BLAS handle for destruction: {}", .{err});
+                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
+                    var immediate = buffer;
+                    immediate.deinit();
+                    continue;
+                };
+
+                self.destroy_blas_buffers.append(self.allocator, buffer) catch |err| {
+                    log(.ERROR, "raytracing", "Failed to queue BLAS buffer for destruction: {}", .{err});
+                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
+                    var temp = buffer;
+                    temp.deinit();
+                    if (self.destroy_blas_handles.items.len > 0) {
+                        self.destroy_blas_handles.items.len -= 1;
+                    }
+                    continue;
+                };
+            }
+
+            self.blas_handles.clearRetainingCapacity();
+            self.blas_buffers.clearRetainingCapacity();
+
+            // Check if we can start rebuild immediately or need to queue it
+            self.bvh_build_in_progress = true;
+
+            // Clear existing results to prevent accumulation from previous rebuilds
+            self.bvh_builder.clearResults();
+            self.completed_tlas = null;
+
+            // Use the new RT data-based BVH building to ensure consistency with BLAS callback
+            self.createBlasAsyncFromRtData(rebuild_rt_data, blasCompletionCallback, self) catch |err| {
+                log(.ERROR, "raytracing", "Failed to start BVH rebuild from RT data: {}", .{err});
+                return false;
+            };
+
+            log(.INFO, "raytracing", "Started BLAS rebuild from RT data ({} geometries)", .{rebuild_rt_data.geometries.len});
+
+            // Mark renderables as synced after starting rebuild
+            render_system.markRenderablesSynced();
+
+            // Return true to indicate rebuild started
+            return true;
+        }
+
+        // Get current raytracing data for checks (BLAS building creates raytracing cache)
+        const rt_data = try render_system.getRaytracingData(world, asset_manager, self.allocator);
+        defer {
+            self.allocator.free(rt_data.instances);
+            self.allocator.free(rt_data.geometries);
+            self.allocator.free(rt_data.materials);
+        }
+
+        // Simple TLAS creation check: BLAS count matches geometry count AND no TLAS exists
+        const blas_count = self.blas_handles.items.len;
+        const geometry_count = rt_data.geometries.len;
+        const has_tlas = self.completed_tlas != null;
+        const counts_match = blas_count == geometry_count;
+        const has_blas = blas_count > 0;
+        const should_create_tlas = counts_match and !has_tlas and has_blas;
+
+        if (should_create_tlas) {
+            // Use RT data-based TLAS creation for consistency with callback
+            self.createTlasAsyncFromRtData(rt_data, tlasCompletionCallback, self) catch |err| {
+                log(.ERROR, "raytracing", "Failed to start TLAS creation from RT data: {}", .{err});
+            };
+
+            // Mark renderables as synced
+            render_system.markRenderablesSynced();
+
+            return true; // TLAS creation started
+        }
+
+        // Mark renderables as synced even if no TLAS was created
+        render_system.markRenderablesSynced();
+
+        return false; // No rebuild needed or already in progress
+    }
+
     /// Update BVH state using data gathered from the scene bridge
-    pub fn update(self: *RaytracingSystem, scene_bridge: *SceneBridge.SceneBridge, frame_info: *const FrameInfo) !bool {
+    /// Update using SceneBridge (for legacy scene system)
+    pub fn updateFromSceneBridge(self: *RaytracingSystem, scene_bridge: *SceneBridge.SceneBridge, frame_info: *const FrameInfo) !bool {
         _ = frame_info;
         // Check if BVH rebuild is needed using SceneBridge's intelligent tracking
         if (scene_bridge.checkBvhRebuildNeeded(false)) {

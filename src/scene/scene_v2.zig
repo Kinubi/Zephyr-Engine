@@ -1,4 +1,5 @@
 const std = @import("std");
+const vk = @import("vulkan");
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
 const Vec3 = Math.Vec3;
@@ -6,6 +7,11 @@ const Mat4x4 = Math.Mat4x4;
 
 const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
+const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 
 // ECS imports
 const ecs = @import("../ecs.zig");
@@ -31,6 +37,24 @@ pub const Scene = struct {
     // Store GameObjects for stable pointer returns
     game_objects: std.ArrayList(GameObject),
 
+    // Rendering pipeline for this scene
+    render_graph: ?RenderGraph = null,
+    particle_compute_pass: ?*@import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass = null,
+    geometry_pass: ?*@import("../rendering/passes/geometry_pass.zig").GeometryPass = null,
+    path_tracing_pass: ?*@import("../rendering/passes/path_tracing_pass.zig").PathTracingPass = null,
+
+    // Emitter tracking: map ECS entity ID to GPU emitter ID
+    emitter_to_gpu_id: std.AutoHashMap(EntityId, u32),
+
+    // Animation time tracking
+    time_elapsed: f32 = 0.0,
+
+    // Random number generator for particle systems
+    random: std.Random.DefaultPrng,
+
+    // Cache view-projection matrix for particle world-to-screen projection
+    cached_view_proj: Math.Mat4x4 = Math.Mat4x4.identity(),
+
     /// Initialize a new scene
     pub fn init(
         allocator: std.mem.Allocator,
@@ -39,6 +63,11 @@ pub const Scene = struct {
         name: []const u8,
     ) Scene {
         log(.INFO, "scene_v2", "Creating scene: {s}", .{name});
+
+        // Initialize random number generator with current time as seed
+        const seed = @as(u64, @intCast(std.time.timestamp()));
+        const prng = std.Random.DefaultPrng.init(seed);
+
         return Scene{
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
@@ -46,6 +75,8 @@ pub const Scene = struct {
             .name = name,
             .entities = std.ArrayList(EntityId){},
             .game_objects = std.ArrayList(GameObject){},
+            .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
+            .random = prng,
         };
     }
 
@@ -179,7 +210,7 @@ pub const Scene = struct {
     pub fn spawnLight(
         self: *Scene,
         _: Vec3, // color - reserved for future Light component
-        _: f32,  // intensity - reserved for future Light component
+        _: f32, // intensity - reserved for future Light component
     ) !*GameObject {
         log(.INFO, "scene_v2", "Spawning light (Light component not yet implemented)", .{});
 
@@ -189,41 +220,76 @@ pub const Scene = struct {
         return light_obj;
     }
 
-    /// Spawn a particle emitter
-    pub fn spawnParticleEmitter(
+    /// Add a particle emitter to an existing entity
+    pub fn addParticleEmitter(
         self: *Scene,
-        max_particles: u32,
+        entity: EntityId,
         emission_rate: f32,
-    ) !*GameObject {
-        log(.INFO, "scene_v2", "Spawning particle emitter (max={}, rate={d:.2})", .{ max_particles, emission_rate });
+        particle_lifetime: f32,
+    ) !void {
+        log(.INFO, "scene_v2", "Adding particle emitter to entity {} (rate={d:.2}, lifetime={d:.2})", .{ @intFromEnum(entity), emission_rate, particle_lifetime });
 
-        const entity = try self.ecs_world.createEntity();
-        try self.entities.append(self.allocator, entity);
+        // Get entity transform for emitter position
+        const transform = self.ecs_world.get(Transform, entity) orelse return error.EntityHasNoTransform;
 
-        // Add Transform
-        const transform = Transform.init();
-        try self.ecs_world.emplace(Transform, entity, transform);
+        // Create ECS emitter component
+        var emitter = ecs.ParticleEmitter.initWithRate(emission_rate);
+        emitter.particle_lifetime = particle_lifetime;
+        emitter.active = true;
+        emitter.velocity_min = .{ .x = -1.5, .y = 5.0, .z = -1.5 };
+        emitter.velocity_max = .{ .x = 1.5, .y = 8.0, .z = 1.5 };
+        emitter.color = .{ .x = 1.0, .y = 0.8, .z = 0.3 }; // Golden color
 
-        // Add ParticleComponent if registered
-        const ParticleComponent = ecs.ParticleComponent;
-        if (self.ecs_world.hasComponentType(ParticleComponent)) {
-            var particle_comp = ParticleComponent.init();
-            particle_comp.max_particles = max_particles;
-            particle_comp.emission_rate = emission_rate;
-            try self.ecs_world.emplace(ParticleComponent, entity, particle_comp);
+        try self.ecs_world.emplace(ecs.ParticleEmitter, entity, emitter);
+
+        // Register emitter with GPU if particle compute pass is initialized
+        if (self.particle_compute_pass) |compute_pass| {
+            const vertex_formats = @import("../rendering/vertex_formats.zig");
+
+            // Create GPU emitter struct
+            const gpu_emitter = vertex_formats.GPUEmitter{
+                .position = .{ transform.position.x, transform.position.y, transform.position.z },
+                .is_active = 1,
+                .velocity_min = .{ emitter.velocity_min.x, -emitter.velocity_min.y, emitter.velocity_min.z },
+                .velocity_max = .{ emitter.velocity_max.x, -emitter.velocity_max.y, emitter.velocity_max.z },
+                .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
+                .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 }, // Fade to darker
+                .lifetime_min = particle_lifetime * 0.8,
+                .lifetime_max = particle_lifetime * 1.2,
+                .spawn_rate = emission_rate,
+                .accumulated_spawn_time = 0.0,
+                .particles_per_spawn = 1,
+            };
+
+            // Spawn some initial particles (more for better visual effect)
+            const initial_particle_count = 200;
+            const initial_particles = try self.allocator.alloc(vertex_formats.Particle, initial_particle_count);
+            defer self.allocator.free(initial_particles);
+
+            // Generate random initial particles (dead, to be spawned by compute shader)
+            for (initial_particles) |*particle| {
+                const rand_x = gpu_emitter.velocity_min[0] + (gpu_emitter.velocity_max[0] - gpu_emitter.velocity_min[0]) * self.random.random().float(f32);
+                const rand_y = gpu_emitter.velocity_min[1] + (gpu_emitter.velocity_max[1] - gpu_emitter.velocity_min[1]) * self.random.random().float(f32);
+                const rand_z = gpu_emitter.velocity_min[2] + (gpu_emitter.velocity_max[2] - gpu_emitter.velocity_min[2]) * self.random.random().float(f32);
+                const lifetime = gpu_emitter.lifetime_min + (gpu_emitter.lifetime_max - gpu_emitter.lifetime_min) * self.random.random().float(f32);
+
+                particle.* = vertex_formats.Particle{
+                    .position = gpu_emitter.position,
+                    .velocity = .{ rand_x, rand_y, rand_z },
+                    .color = gpu_emitter.color_start,
+                    .lifetime = 0.0, // Dead particles - will be assigned emitter_id by spawnParticlesForEmitter
+                    .max_lifetime = lifetime,
+                    .emitter_id = 0, // Will be set by spawnParticlesForEmitter
+
+                };
+            }
+
+            // Add emitter to GPU and track the GPU ID
+            const gpu_emitter_id = try compute_pass.addEmitter(gpu_emitter, initial_particles);
+            try self.emitter_to_gpu_id.put(entity, gpu_emitter_id);
+
+            log(.INFO, "scene_v2", "Added particle emitter {} (gpu_id={})", .{ @intFromEnum(entity), gpu_emitter_id });
         }
-
-        const game_object = GameObject{
-            .entity_id = entity,
-            .scene = self,
-        };
-
-        try self.game_objects.append(self.allocator, game_object);
-        const last_index = self.game_objects.items.len - 1;
-
-        log(.INFO, "scene_v2", "Spawned particle emitter entity {}", .{@intFromEnum(entity)});
-
-        return &self.game_objects.items[last_index];
     }
 
     /// Find a GameObject by entity ID
@@ -239,7 +305,7 @@ pub const Scene = struct {
     /// Destroy a specific GameObject
     pub fn destroyObject(self: *Scene, game_object: *GameObject) void {
         const entity_id = game_object.entity_id;
-        
+
         // Destroy in ECS world
         self.ecs_world.destroyEntity(entity_id);
 
@@ -292,9 +358,306 @@ pub const Scene = struct {
     /// Cleanup scene resources
     pub fn deinit(self: *Scene) void {
         self.unload();
+        if (self.render_graph) |*graph| {
+            graph.deinit();
+        }
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
+        self.emitter_to_gpu_id.deinit();
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
+    }
+
+    /// Toggle path tracing on/off (switches between path tracing and raster)
+    pub fn setPathTracingEnabled(self: *Scene, enabled: bool) void {
+        if (self.path_tracing_pass) |pass| {
+            pass.enable_path_tracing = enabled;
+
+            if (enabled) {
+                log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s} (raster will be disabled on next frame)", .{self.name});
+            } else {
+                log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s} (raster will be enabled on next frame)", .{self.name});
+            }
+        } else {
+            log(.WARN, "scene_v2", "Cannot toggle path tracing - pass not initialized", .{});
+        }
+    }
+
+    /// Initialize rendering pipeline for this scene
+    /// Must be called after scene creation to enable rendering
+    pub fn initRenderGraph(
+        self: *Scene,
+        graphics_context: *GraphicsContext,
+        pipeline_system: *UnifiedPipelineSystem,
+        swapchain_format: vk.Format,
+        swapchain_depth_format: vk.Format,
+        thread_pool: *@import("../threading/thread_pool.zig").ThreadPool,
+        global_ubo_set: *@import("../rendering/ubo_set.zig").GlobalUboSet,
+        width: u32,
+        height: u32,
+    ) !void {
+        const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
+        const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
+        const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
+        const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
+        const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
+
+        // Create render graph
+        self.render_graph = RenderGraph.init(self.allocator, graphics_context);
+
+        // Create and add ParticleComputePass FIRST (runs on compute queue)
+        const max_emitters = 16;
+        const particles_per_emitter = 200;
+        const particle_compute_pass = try ParticleComputePass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            self.ecs_world,
+            particles_per_emitter * max_emitters, // 200 particles per emitter * 16 emitters = 3200 total
+            max_emitters,
+        );
+
+        // Save reference for emitter management
+        self.particle_compute_pass = particle_compute_pass;
+
+        try self.render_graph.?.addPass(&particle_compute_pass.base);
+
+        // Create and add GeometryPass
+        const geometry_pass = try GeometryPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            self.asset_manager,
+            self.ecs_world,
+            swapchain_format,
+            swapchain_depth_format,
+        );
+
+        try self.render_graph.?.addPass(&geometry_pass.base);
+
+        // Save reference for toggling between raster and path tracing
+        self.geometry_pass = geometry_pass;
+
+        // Create PathTracingPass (alternative to raster rendering)
+        const path_tracing_pass = try PathTracingPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            thread_pool,
+            global_ubo_set,
+            self.ecs_world,
+            self.asset_manager,
+            swapchain_format,
+            width,
+            height,
+        );
+
+        // Save reference for toggling path tracing
+        self.path_tracing_pass = path_tracing_pass;
+
+        // NOTE: Path tracing pass starts disabled (enable via setEnabled())
+        // For now, we add it to the graph but it won't execute unless enabled
+        try self.render_graph.?.addPass(&path_tracing_pass.base);
+
+        // Create and add LightVolumePass (renders after geometry)
+        const light_volume_pass = try LightVolumePass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            self.ecs_world,
+            swapchain_format,
+            swapchain_depth_format,
+        );
+
+        try self.render_graph.?.addPass(&light_volume_pass.base);
+
+        // Create and add ParticlePass (renders particles with alpha blending)
+        const particle_pass = try ParticlePass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            swapchain_format,
+            swapchain_depth_format,
+            10000, // Max 10,000 particles
+        );
+
+        // Link render pass to compute pass
+        particle_pass.setComputePass(particle_compute_pass);
+
+        try self.render_graph.?.addPass(&particle_pass.base);
+
+        // Compile the graph (setup passes, validate dependencies)
+        try self.render_graph.?.compile();
+
+        log(.INFO, "scene_v2", "RenderGraph initialized for scene: {s}", .{self.name});
+    }
+
+    /// Render the scene using the RenderGraph
+    pub fn render(self: *Scene, frame_info: FrameInfo) !void {
+        if (self.render_graph) |*graph| {
+            // Toggle geometry pass based on path tracing state
+            if (self.path_tracing_pass) |pt_pass| {
+                // Search for geometry pass in render graph
+                for (graph.passes.items) |pass| {
+                    if (std.mem.eql(u8, pass.name, "geometry_pass")) {
+                        pass.enabled = !pt_pass.enable_path_tracing;
+                    } else if (std.mem.eql(u8, pass.name, "particle_pass")) {
+                        pass.enabled = !pt_pass.enable_path_tracing;
+                    } else if (std.mem.eql(u8, pass.name, "light_volume_pass")) {
+                        pass.enabled = !pt_pass.enable_path_tracing;
+                    } else if (std.mem.eql(u8, pass.name, "path_tracing_pass")) {
+                        pass.enabled = pt_pass.enable_path_tracing;
+                    }
+                }
+            }
+            // Execute only graphics passes (compute passes already executed in update())
+            for (graph.passes.items) |pass| {
+                if (!pass.enabled) continue;
+                if (pass.isComputePass()) continue; // Skip compute passes
+
+                try pass.execute(frame_info);
+            }
+        } else {
+            log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
+        }
+    }
+
+    /// Update scene state (animations, physics, etc.)
+    /// Call this once per frame before rendering
+    pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
+        // Cache view-projection matrix for particle world-to-screen projection
+        self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
+
+        // Update animated lights and extract to GlobalUbo
+        try self.updateLights(global_ubo, frame_info.dt);
+
+        // Update particles (CPU-side spawning)
+        try self.updateParticles(frame_info.dt);
+
+        // Update path tracing state (BVH and descriptors) if enabled
+        if (self.path_tracing_pass) |pt_pass| {
+            if (pt_pass.enable_path_tracing) {
+                try pt_pass.updateState(&frame_info);
+            }
+        }
+
+        // Execute compute passes (GPU particle simulation)
+        // This must happen between beginCompute/endCompute in app.zig
+        if (self.render_graph) |*graph| {
+            for (graph.passes.items) |pass| {
+                if (pass.enabled and pass.isComputePass()) {
+                    try pass.execute(frame_info);
+                }
+            }
+        }
+
+        // Run ECS systems (transforms, physics, etc.)
+        // try self.ecs_world.update(frame_info.dt);
+    }
+
+    /// Extract lights from ECS and populate the GlobalUbo
+    /// Also animates light positions in a circle
+    fn updateLights(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+        self.time_elapsed += dt;
+
+        const LightSystem = @import("../ecs.zig").LightSystem;
+        const PointLight = @import("../ecs.zig").PointLight;
+
+        var light_system = LightSystem.init(self.allocator);
+        defer light_system.deinit();
+
+        // Get view of all light entities
+        var view = try self.ecs_world.view(PointLight);
+        var iter = view.iterator();
+        var light_index: usize = 0;
+
+        // Animate and extract lights
+        while (iter.next()) |entry| : (light_index += 1) {
+            const point_light = entry.component;
+            const transform_ptr = self.ecs_world.get(Transform, entry.entity) orelse continue;
+
+            // Animate position in a circle
+            const radius: f32 = 1.5;
+            const height: f32 = 0.5;
+            const speed: f32 = 1.0;
+            const angle_offset: f32 = @as(f32, @floatFromInt(light_index)) * (2.0 * std.math.pi / 3.0);
+
+            const angle = self.time_elapsed * speed + angle_offset;
+            const x = @cos(angle) * radius;
+            const z = @sin(angle) * radius;
+
+            // Update transform position
+            transform_ptr.position = Math.Vec3.init(x, height, z);
+
+            // Extract to GlobalUbo
+            if (light_index < 16) {
+                global_ubo.point_lights[light_index] = .{
+                    .position = Math.Vec4.init(x, height, z, 1.0),
+                    .color = Math.Vec4.init(
+                        point_light.color.x * point_light.intensity,
+                        point_light.color.y * point_light.intensity,
+                        point_light.color.z * point_light.intensity,
+                        point_light.intensity,
+                    ),
+                };
+            }
+        }
+
+        global_ubo.num_point_lights = @intCast(@min(light_index, 16));
+
+        // Clear remaining light slots
+        for (light_index..16) |i| {
+            global_ubo.point_lights[i] = .{};
+        }
+    }
+
+    /// Update particle emitters - spawn particles based on emission rate
+    fn updateParticles(self: *Scene, dt: f32) !void {
+        _ = dt; // GPU handles all particle updates now
+
+        const ParticleEmitter = @import("../ecs.zig").ParticleEmitter;
+
+        // Update GPU emitter positions when transforms change
+        var view = try self.ecs_world.view(ParticleEmitter);
+        var iter = view.iterator();
+
+        while (iter.next()) |item| {
+            const entity = item.entity;
+            const emitter = item.component;
+
+            if (!emitter.active) continue;
+
+            // Get GPU emitter ID
+            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
+
+            // Get current transform
+            const transform = self.ecs_world.get(Transform, entity) orelse continue;
+
+            // Check if position has changed (simple comparison)
+            // In a real system you might track dirty flags
+            if (self.particle_compute_pass) |compute_pass| {
+                const vertex_formats = @import("../rendering/vertex_formats.zig");
+
+                // Update GPU emitter with new position
+                const gpu_emitter = vertex_formats.GPUEmitter{
+                    .position = .{ transform.position.x, transform.position.y, transform.position.z },
+                    .is_active = if (emitter.active) 1 else 0,
+                    .velocity_min = .{ emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z },
+                    .velocity_max = .{ emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z },
+                    .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
+                    .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 },
+                    .lifetime_min = emitter.particle_lifetime * 0.8,
+                    .lifetime_max = emitter.particle_lifetime * 1.2,
+                    .spawn_rate = emitter.emission_rate,
+                    .accumulated_spawn_time = 0.0,
+                    .particles_per_spawn = 1,
+                };
+
+                try compute_pass.updateEmitter(gpu_id, gpu_emitter);
+            }
+        }
+
+        // No more CPU-side particle spawning or removal!
+        // The GPU compute shader handles all particle lifecycle now.
     }
 };
 

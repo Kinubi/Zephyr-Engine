@@ -22,6 +22,7 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 ambientColor;
     PointLight pointLights[16];
     int numPointLights;
+    float dt;
 } ubo;
 
 layout(push_constant) uniform Push {
@@ -36,7 +37,7 @@ void main() {
 
     v_color = color;
     v_uv = uv;
-    //v_normal = normalize((push.normalMatrix * vec4(normal, 0.0)).xyz);
+    v_normal = normalize(mat3(push.normalMatrix) * normal);
     v_pos = positionWorld.xyz;
     v_material_index = push.materialIndex;
 }
