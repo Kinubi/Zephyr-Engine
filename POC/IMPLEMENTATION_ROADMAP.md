@@ -1,135 +1,154 @@
-# Implementation Roadmap - ECS + Asset Manager Architecture
+# Implementation Roadmap - ECS + Asset Manager + Path Tracing Architecture
 
-## 🎯 Current Status Overview (October 2025)
+## 🎯 Current Status Overview (October 22, 2025)
 
 ### ✅ **Phase 1: Asset Manager** - COMPLETE & PRODUCTION READY
 - **AssetManager**: Full async loading, hot reload, fallback assets, material/texture management
-- **ThreadPool**: Dynamic scaling with subsystem management (hot_reload, bvh_building, custom_work, ecs_update)
+- **ThreadPool**: Dynamic scaling with subsystem management (hot_reload, bvh_building, asset_loading)
 - **FileWatcher**: Hybrid directory/file watching with metadata-based change detection
-- **FallbackAssets**: Production-safe rendering with missing/loading/error/default textures
+- **Material System**: PBR materials with metallic/roughness workflow
 
-### ✅ **Phase 1.5: GenericRenderer System** - COMPLETE & PRODUCTION READY
-- **GenericRenderer**: VTable-based renderer orchestration with RendererType classification
-- **SceneBridge**: Scene data abstraction feeding rasterization/raytracing/compute renderers (now with ECS World support)
-- **Multi-frame Synchronization**: Per-frame descriptor dirty flags eliminate validation errors
-- **Active Renderers**: UnifiedTexturedRenderer, PointLightRenderer, UnifiedRaytracingRenderer, ParticleRenderer
-
-### 🔄 **Phase 2: ECS Foundation** - **✅ COMPLETE** (All 62 Tests Passing)
+### ✅ **Phase 2: ECS Foundation** - COMPLETE & PRODUCTION READY (62 Tests Passing)
 - ✅ **Core ECS**: EntityRegistry, DenseSet storage, View queries, World management
-- ✅ **Parallel Dispatch**: ThreadPool integration with parallel each_parallel() iteration
-- ✅ **ParticleComponent**: Lifecycle management with update/render methods (5 tests)
-- ✅ **Transform Component**: Position, rotation, scale, parent hierarchy, world matrix caching (7 tests)
-- ✅ **MeshRenderer Component**: AssetId references for Model/Material/Texture, render layer sorting (8 tests)
-- ✅ **Camera Component**: Perspective/orthographic projection, primary camera flag (12 tests)
-- ✅ **TransformSystem**: Hierarchical parent-child transform updates (3 tests)
-- ✅ **RenderSystem**: Queries entities, extracts rendering data, layer-based sorting (5 tests)
-- ✅ **SceneBridge Integration**: ECS World access for renderer data extraction
-- ✅ **Integration Guide**: Complete documentation for production usage
+- ✅ **Components**: Transform (hierarchies), MeshRenderer, Camera, Light, Particle
+- ✅ **Systems**: TransformSystem (parent-child updates), RenderSystem (extraction)
+- ✅ **Scene v2**: ECS-based scene management with entity spawning
+- ✅ **Parallel Dispatch**: ThreadPool integration with parallel iteration
 
 ### ✅ **Phase 3: UnifiedPipelineSystem** - COMPLETE & PRODUCTION READY
 - **UnifiedPipelineSystem**: ✅ Automatic descriptor extraction, Vulkan pipeline cache (disk persistence)
-- **ShaderManager**: ✅ GLSL→SPIR-V compilation, file watching, shader caching
-- **ResourceBinder**: ✅ High-level descriptor binding API for renderers
-- **Shader Hot Reload**: ✅ COMPLETE - File watching, shader recompilation, and cache management working
+- **ShaderManager**: ✅ GLSL/HLSL→SPIR-V compilation, file watching, shader caching
+- **ResourceBinder**: ✅ High-level descriptor binding API
+- **Shader Hot Reload**: ✅ COMPLETE - Real-time shader updates working
+
+### ✅ **Phase 4: RenderGraph & Path Tracing** - COMPLETE & PRODUCTION READY
+- **RenderGraph**: ✅ Data-driven pass management with execution ordering
+- **PathTracingPass**: ✅ Real-time ray tracing with 7 descriptor bindings
+- **Multi-threaded BVH**: ✅ Async BLAS/TLAS building with completion callbacks
+- **Async Asset Detection**: ✅ Automatic BVH rebuild on asset loading
+- **GeometryPass**: ✅ G-buffer rendering with mesh extraction
+- **LightingVolumePass**: ✅ Point light rendering with volume calculations
+
+### ✅ **Phase 5: Legacy Cleanup** - COMPLETE
+- ✅ **Removed Systems**: Old Scene, GameObject, SceneBridge, all old renderers
+- ✅ **Simplified**: render_data_types.zig replaces SceneBridge data structures
+- ✅ **Camera Controller**: WASD + arrow keys for ECS scene navigation
+- ✅ **Logging Cleanup**: Removed verbose frame-by-frame logs
 
 ### 📊 **Production Metrics**
-- **Validation Errors**: Zero Vulkan validation errors in raytracing/rasterization/compute
+- **Validation Errors**: Zero Vulkan validation errors
 - **FPS Display**: Real-time performance monitoring in window title
-- **Hot Reload**: Texture/model/shader changes detected and reloaded automatically
-- **Pipeline Cache**: 100MB+ Vulkan cache reused across application launches
+- **Hot Reload**: Shader/model/texture changes detected automatically
+- **Pipeline Cache**: Disk-persisted cache for fast startup
 - **Asset Loading**: Async background loading with GPU staging
 - **Multi-frame Safety**: 3 frames in flight with proper synchronization
-- **ECS Performance**: **62 tests passing**, parallel dispatch with 8 worker threads, 4 components, 2 systems
+- **ECS Performance**: 62 tests passing, parallel dispatch, 5 components, 2 systems
+- **Path Tracing**: Real-time RT with toggle support (T key)
+- **BVH Updates**: Automatic rebuild detection from async asset loads
 
 ---
 
-## Current ZulkanZengine Architecture (October 2025 - Production State)
+## Current ZulkanZengine Architecture (October 22, 2025 - Production State)
 
-### **Current Production Architecture**
+### **Current Production Architecture (October 22, 2025)**
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        ZulkanZengine (October 2025)                          │
-│                  GenericRenderer + ECS Hybrid System                         │
+│                    ZulkanZengine (October 22, 2025)                          │
+│              ECS + Path Tracing + RenderGraph Architecture                   │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────┐      ┌──────────────────────┐      ┌─────────────────┐
-│   Asset Manager      │      │   GenericRenderer    │      │ UnifiedPipeline │
-│  (Phase 1 Complete)  │      │ (Phase 1.5 Complete) │      │ (Phase 3 Complete)│
+│   Asset Manager      │      │   ECS World (v2)     │      │  RenderGraph    │
+│  ✅ COMPLETE         │      │   ✅ COMPLETE        │      │  ✅ COMPLETE    │
 │                      │      │                      │      │                 │
-│ • AssetId system     │─────▶│ • VTable dispatch    │─────▶│ • SPIR-V reflect│
-│ • Hot reload         │      │ • RendererType enum  │      │ • Vulkan cache  │
-│ • Fallback assets    │      │ • SceneBridge        │      │ • ResourceBinder│
-│ • ThreadPool         │      │ • Execution order    │      │ • Descriptor mgr│
-│ • Material/Texture   │      │ • Multi-instance     │      │ • Pipeline mgr  │
-└──────────────────────┘      └──────────────────────┘      └─────────────────┘
-           │                             │                            │
-           │                             ▼                            │
-           │              ┌──────────────────────────┐               │
-           │              │     SceneBridge          │               │
-           │              │  (Scene Abstraction)     │               │
-           │              │                          │               │
-           │              │ • Per-frame invalidation │               │
-           │              │ • Async update detection │               │
-           │              │ • BVH rebuild tracking   │               │
-           │              │ • getRasterizationData() │               │
-           │              │ • getRaytracingData()    │               │
-           │              │ • getComputeData()       │               │
-           │              └──────────────────────────┘               │
-           │                             │                            │
-           ▼                             ▼                            ▼
+│ • AssetId system     │─────▶│ • Entity/Component   │─────▶│ • Pass-based    │
+│ • Hot reload         │      │ • Transform hierarchy│      │ • GeometryPass  │
+│ • Async loading      │      │ • MeshRenderer       │      │ • LightingPass  │
+│ • ThreadPool         │      │ • Camera/Light       │      │ • PathTracingPass│
+│ • Material/Texture   │      │ • TransformSystem    │      │ • Execution order│
+└──────────────────────┘      │ • RenderSystem       │      └─────────────────┘
+           │                  └──────────────────────┘                │
+           │                             │                             │
+           │                             ▼                             │
+           │              ┌──────────────────────────┐                │
+           │              │   RenderSystem           │                │
+           │              │   (ECS Extraction)       │                │
+           │              │                          │                │
+           │              │ • extractRenderData()    │                │
+           │              │ • getRaytracingData()    │                │
+           │              │ • Async asset detection  │                │
+           │              │ • Mesh ID tracking       │                │
+           │              │ • Layer-based sorting    │                │
+           │              └──────────────────────────┘                │
+           │                             │                             │
+           ▼                             ▼                             ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Active Renderer Instances                             │
+│                          Rendering Systems                                   │
 ├──────────────────────┬──────────────────────┬─────────────────────────────────┤
-│ UnifiedTextured      │ PointLight           │ UnifiedRaytracing            │
-│ Renderer             │ Renderer             │ Renderer                     │
+│ PathTracingPass      │ GeometryPass         │ LightingVolumePass           │
+│ ✅ COMPLETE          │ ✅ COMPLETE          │ ✅ COMPLETE                  │
 │                      │                      │                              │
-│ • RendererType.raster│ • RendererType.      │ • RendererType.raytracing    │
-│ • Per-frame dirty    │   lighting           │ • TLAS management            │
-│ • Material/Texture   │ • Frame_info only    │ • SBT (Shader Binding Table) │
-│ • Mesh rendering     │ • Light volumes      │ • Multi-frame descriptors    │
+│ • 7 RT descriptors   │ • G-buffer render    │ • Point light volumes        │
+│ • TLAS/BLAS accel    │ • Mesh extraction    │ • Deferred lighting          │
+│ • BVH auto-rebuild   │ • Material binding   │ • Frame_info driven          │
+│ • Toggle with 'T'    │ • Depth testing      │ • Multi-light support        │
+│ • Output to swapchain│ • Multi-frame sync   │                              │
+└──────────────────────┴──────────────────────┴──────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Core Rendering Infrastructure                         │
+├──────────────────────┬──────────────────────┬─────────────────────────────────┤
+│ UnifiedPipelineSystem│ RaytracingSystem     │ MultiThreadedBVHBuilder      │
+│ ✅ COMPLETE          │ ✅ COMPLETE          │ ✅ COMPLETE                  │
+│                      │                      │                              │
+│ • SPIR-V reflection  │ • BLAS management    │ • Async BVH building         │
+│ • Descriptor layout  │ • TLAS management    │ • Thread pool integration    │
+│ • Vulkan cache       │ • SBT updates        │ • Completion callbacks       │
+│ • ResourceBinder     │ • Dirty tracking     │ • Work prioritization        │
+│ • Pipeline mgr       │ • Multi-frame sync   │                              │
 └──────────────────────┴──────────────────────┴──────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           Supporting Systems                                 │
 ├──────────────────────┬──────────────────────┬─────────────────────────────────┤
 │ ShaderManager        │ FileWatcher          │ ThreadPool                   │
+│ ✅ COMPLETE          │ ✅ COMPLETE          │ ✅ COMPLETE                  │
 │                      │                      │                              │
-│ • GLSL → SPIR-V      │ • Directory watching │ • Subsystem management       │
+│ • GLSL/HLSL→SPIR-V   │ • Directory watching │ • Subsystem management       │
 │ • Shader caching     │ • Metadata tracking  │ • Dynamic scaling            │
-│ • File watching      │ • Debouncing         │ • Asset loading              │
-│ • ⏳ Hot reload      │ • Change detection   │ • BVH building               │
+│ • File watching      │ • Debouncing         │ • hot_reload subsystem       │
+│ • Hot reload         │ • Change detection   │ • bvh_building subsystem     │
+│                      │                      │ • asset_loading subsystem    │
 └──────────────────────┴──────────────────────┴──────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           User Controls                                      │
+│ • WASD: Camera movement                                                      │
+│ • Arrow Keys: Camera rotation                                                │
+│ • Space/Ctrl: Up/Down movement                                               │
+│ • T Key: Toggle path tracing on/off                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### **Original Architecture (Pre-October 2024)**
-```
-┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
-│ Scene               │    │ Individual Renderers│    │ Systems             │
-│ - GameObject list   │    │ - SimpleRenderer    │    │ - RenderSystem      │
-│ - Material array    │    │ - PointLightRenderer│    │ - RaytracingSystem  │
-│ - Texture array     │    │ - ParticleRenderer  │    │ - ComputeSystem     │
-│ - Material buffer   │    │ - Manual setup      │    │ - Fixed pipelines   │
-└─────────────────────┘    └─────────────────────┘    └─────────────────────┘
-           │                           │                           │
-           └─────────────────┬─────────────────────────────────────┘
-                             ▼
-                   ┌─────────────────────┐
-                   │ App (Orchestration) │
-                   │ - Manual renderer   │
-                   │   initialization    │
-                   │ - Fixed render loop │
-                   │ - No optimization   │
-                   └─────────────────────┘
-```
+### **Removed/Deprecated (October 22, 2025)**
+- ❌ **Old Scene System** (GameObject, Transform classes)
+- ❌ **SceneBridge** (replaced with render_data_types.zig)
+- ❌ **Individual Renderers** (TexturedRenderer, EcsRenderer, PointLightRenderer, etc.)
+- ❌ **GenericRenderer** (replaced with RenderGraph)
+- ❌ **RendererType enum** (pass-based architecture now)
 
 ### **Key Improvements October 2024 → October 2025**
-- ✅ **Asset Management**: Manual Scene arrays → AssetManager with hot reload
-- ✅ **Renderer Unification**: Individual renderers → GenericRenderer orchestration
+- ✅ **Asset Management**: Manual Scene arrays → AssetManager with hot reload and async loading
+- ✅ **Scene System**: GameObject/Scene → ECS World with components
+- ✅ **Renderer Architecture**: Individual renderers → RenderGraph with pass system
 - ✅ **Pipeline System**: Fixed pipelines → UnifiedPipelineSystem with automatic descriptors
-- ✅ **Scene Abstraction**: Direct Scene access → SceneBridge with type-specific data
+- ✅ **Data Extraction**: SceneBridge → RenderSystem with render_data_types
 - ✅ **Multi-frame Safety**: Ad-hoc synchronization → Per-frame descriptor tracking
 - ✅ **Thread Management**: No threading → ThreadPool with subsystem management
-- ⏳ **Shader Hot Reload**: Static compilation → ShaderManager (file watching active, rebuild pending)
+- ✅ **Shader Hot Reload**: Static compilation → ShaderManager with real-time updates
+- ✅ **Ray Tracing**: Separate renderer → Integrated PathTracingPass with auto BVH rebuild
+- ✅ **Camera Control**: No controller → WASD + arrow key navigation
+- ✅ **Code Cleanup**: Removed all legacy systems, simplified architecture
 
 
 ### Integration with Existing Systems (Production Implementation)
@@ -2098,29 +2117,56 @@ try forward_renderer.render(frame_info);
 - 🎯 Asset system already supports entity-component asset references
 - 🎯 SceneBridge can be extended to provide ECS query results
 
-### 🎯 **UPDATED PRIORITY ROADMAP**
+### 🎯 **UPDATED PRIORITY ROADMAP** (October 22, 2025)
+
+**Current Status**: Phases 1-5 Complete! ECS, Asset Manager, Path Tracing, RenderGraph all production-ready.
 
 **Immediate Next Steps** (1-2 weeks):
-1. **Shader Hot Reload**: Extend asset hot reload system to include shaders
-2. **Pipeline Caching**: Centralize pipeline management in GenericRenderer
-3. **Documentation**: Update API docs to reflect GenericRenderer patterns
+1. ✅ **Legacy Cleanup**: COMPLETE - Removed old Scene, renderers, SceneBridge
+2. ✅ **Camera Controller**: COMPLETE - WASD + arrow key navigation for ECS
+3. ✅ **Logging Cleanup**: COMPLETE - Removed verbose frame-by-frame logs
+4. 🔄 **Light Integration**: Add lighting volume data to path tracer (binding 7)
+5. 🔄 **Particle Integration**: Add particle data to path tracer (binding 8)
 
-**Phase 4 ECS Implementation** (4-6 weeks):
-1. **ECS World**: Entity manager, component storage, query system
-2. **Component-Asset Bridge**: Integrate ECS components with existing asset system  
-3. **ECS-GenericRenderer Integration**: Connect ECS queries with renderer types
-4. **Performance Optimization**: Batching, culling, GPU-driven rendering
+**Phase 6: Advanced Path Tracing** (2-3 weeks):
+1. **Light/Particle RT Integration**: Complete bindings 7 & 8 from PATH_TRACING_INTEGRATION.md
+2. **Temporal Accumulation**: Multi-frame accumulation for noise reduction
+3. **Adaptive Sampling**: Dynamic sample count based on complexity
+4. **Performance Profiling**: Rays/second, intersection tests metrics
 
-**Phase 5 Advanced Features** (6-8 weeks):
-1. **Deferred Rendering**: Add as new RendererType to GenericRenderer
-2. **GPU-Driven Rendering**: Compute-based culling and draw submission
-3. **Advanced Raytracing**: Multi-bounce, denoising, hybrid techniques
+**Phase 7: Animation & Physics** (3-4 weeks):
+1. **Animation Component**: Skeletal animation with bone transforms
+2. **AnimationSystem**: Frame-by-frame bone updates
+3. **RigidBody/Collider Components**: Physics integration
+4. **PhysicsSystem**: Physics simulation with transform sync
 
-### 🏆 **KEY ARCHITECTURAL DECISIONS VALIDATED**
+**Phase 8: Advanced Features** (4-6 weeks):
+1. **Scene Serialization**: Save/load scenes with entities and components
+2. **GPU-Driven Rendering**: Compute-based culling and indirect drawing
+3. **Denoising Pass**: Add denoising for path traced output
+4. **Frustum Culling**: CPU-side culling for large scenes
+5. **LOD System**: Distance-based level of detail
 
-1. **✅ Enum-based Classification**: Simpler and faster than complex render graphs
-2. **✅ SceneBridge Pattern**: Clean separation between scene management and rendering  
-3. **✅ VTable Dispatch**: Efficient runtime polymorphism for heterogeneous renderers
-4. **✅ Asset Manager Foundation**: Enables all advanced features (hot reload, ECS references, streaming)
+### 🏆 **KEY ACHIEVEMENTS** (October 2024 → October 2025)
 
-**CURRENT FOCUS**: Complete shader hot reload implementation, then begin ECS Phase 4 with GenericRenderer as the proven rendering foundation.
+1. **✅ Complete ECS Implementation**: 62 tests passing, 5 components, 2 systems, hierarchical transforms
+2. **✅ Path Tracing System**: Real-time RT with automatic BVH rebuild on async asset loading
+3. **✅ RenderGraph Architecture**: Pass-based rendering replacing old renderer system
+4. **✅ Multi-threaded BVH**: Async BLAS/TLAS building with thread pool integration
+5. **✅ Asset Manager**: Full hot reload, async loading, material/texture management
+6. **✅ Shader Hot Reload**: Real-time GLSL/HLSL compilation and pipeline updates
+7. **✅ Pipeline Caching**: Disk-persisted Vulkan cache for fast startup
+8. **✅ Clean Architecture**: Removed all legacy code, simplified to core systems
+
+**CURRENT FOCUS**: Integrate lights and particles into path tracer to complete the RT rendering pipeline.
+
+---
+
+## 📚 **DOCUMENTATION STATUS**
+
+All documentation updated to reflect current production state:
+- ✅ Main README.md: Updated with all implemented features
+- ✅ docs/README.md: Comprehensive system status and quick start guides
+- ✅ docs/PATH_TRACING_INTEGRATION.md: Light/particle integration design
+- ✅ POC/IMPLEMENTATION_ROADMAP.md: This document - reflects actual implementation
+- ✅ All component/system docs reflect ECS v2 architecture
