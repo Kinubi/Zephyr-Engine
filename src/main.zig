@@ -6,5 +6,5 @@ pub fn main() !void {
     try app.init();
     defer app.deinit();
 
-    while (try app.onUpdate()) {}
+    while (try app.update()) {}
 }

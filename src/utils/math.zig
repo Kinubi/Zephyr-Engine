@@ -6,6 +6,7 @@
 // You can expand this as needed for your project.
 
 const std = @import("std");
+const simd = @import("simd.zig");
 
 pub const Vec2 = struct {
     x: f32,
@@ -111,15 +112,23 @@ pub const Mat4 = struct {
         } };
     }
     pub fn mul(self: Mat4, other: Mat4) Mat4 {
+        const col01 = simd.buildColumnPair(other.data[0..], 0, 1);
+        const col23 = simd.buildColumnPair(other.data[0..], 2, 3);
         var result: [16]f32 = undefined;
-        for (0..4) |row| {
-            for (0..4) |col| {
-                var sum: f32 = 0;
-                for (0..4) |i| {
-                    sum += self.data[row * 4 + i] * other.data[i * 4 + col];
-                }
-                result[row * 4 + col] = sum;
-            }
+        var row: usize = 0;
+        while (row < 4) : (row += 1) {
+            const row_values = [_]f32{
+                self.data[row * 4 + 0],
+                self.data[row * 4 + 1],
+                self.data[row * 4 + 2],
+                self.data[row * 4 + 3],
+            };
+            const dots01 = simd.dot4x2(row_values, col01);
+            const dots23 = simd.dot4x2(row_values, col23);
+            result[row * 4 + 0] = dots01[0];
+            result[row * 4 + 1] = dots01[1];
+            result[row * 4 + 2] = dots23[0];
+            result[row * 4 + 3] = dots23[1];
         }
         return Mat4{ .data = result };
     }

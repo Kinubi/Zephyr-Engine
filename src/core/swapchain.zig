@@ -192,6 +192,10 @@ pub const Swapchain = struct {
         return &self.swap_images[self.image_index];
     }
 
+    pub fn depthFormat(self: Swapchain) !vk.Format {
+        return try findDepthFormat(self.gc.*);
+    }
+
     pub fn present(self: *Swapchain, cmdbuf: vk.CommandBuffer, current_frame: u32, extent: vk.Extent2D) !void {
         // Simple method:
         // 1) Acquire next image

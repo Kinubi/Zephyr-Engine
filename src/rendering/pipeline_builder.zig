@@ -315,9 +315,15 @@ pub const PipelineBuilder = struct {
     // Dynamic state
     dynamic_states: std.ArrayList(vk.DynamicState),
 
-    // Render pass compatibility
+    // Render pass compatibility (legacy)
     render_pass: ?vk.RenderPass = null,
     subpass: u32 = 0,
+
+    // Dynamic rendering (VK_KHR_dynamic_rendering)
+    // If color_attachment_formats is set, use dynamic rendering instead of render pass
+    color_attachment_formats: ?[]const vk.Format = null,
+    depth_attachment_format: vk.Format = .undefined,
+    stencil_attachment_format: vk.Format = .undefined,
 
     // Compute specific
     compute_shader: ?*const Shader = null,
@@ -493,6 +499,34 @@ pub const PipelineBuilder = struct {
         return self;
     }
 
+    /// Configure pipeline for dynamic rendering (VK_KHR_dynamic_rendering)
+    /// Use this instead of withRenderPass for modern Vulkan 1.3+ rendering
+    pub fn withDynamicRendering(
+        self: *PipelineBuilder,
+        color_formats: []const vk.Format,
+        depth_format: vk.Format,
+    ) *PipelineBuilder {
+        self.color_attachment_formats = color_formats;
+        self.depth_attachment_format = depth_format;
+        self.stencil_attachment_format = .undefined;
+        self.render_pass = null; // Clear render pass
+        return self;
+    }
+
+    /// Configure pipeline for dynamic rendering with stencil
+    pub fn withDynamicRenderingStencil(
+        self: *PipelineBuilder,
+        color_formats: []const vk.Format,
+        depth_format: vk.Format,
+        stencil_format: vk.Format,
+    ) *PipelineBuilder {
+        self.color_attachment_formats = color_formats;
+        self.depth_attachment_format = depth_format;
+        self.stencil_attachment_format = stencil_format;
+        self.render_pass = null; // Clear render pass
+        return self;
+    }
+
     // Build methods
     pub fn buildDescriptorSetLayout(self: *PipelineBuilder) !vk.DescriptorSetLayout {
         var bindings: std.ArrayList(vk.DescriptorSetLayoutBinding) = .{};
@@ -571,7 +605,12 @@ pub const PipelineBuilder = struct {
 
     pub fn buildGraphicsPipeline(self: *PipelineBuilder, pipeline_layout: vk.PipelineLayout) !vk.Pipeline {
         if (self.pipeline_type != .graphics) return error.InvalidPipelineType;
-        if (self.render_pass == null) return error.MissingRenderPass;
+
+        // Either render pass OR dynamic rendering must be configured
+        const use_dynamic_rendering = self.color_attachment_formats != null;
+        if (!use_dynamic_rendering and self.render_pass == null) {
+            return error.MissingRenderPassOrDynamicRendering;
+        }
 
         // Build shader stages
         var stages: std.ArrayList(vk.PipelineShaderStageCreateInfo) = .{};
@@ -701,8 +740,25 @@ pub const PipelineBuilder = struct {
             .p_dynamic_states = if (self.dynamic_states.items.len > 0) self.dynamic_states.items.ptr else null,
         };
 
+        // Dynamic rendering info (VK_KHR_dynamic_rendering)
+        var dynamic_rendering_info: vk.PipelineRenderingCreateInfo = undefined;
+        if (use_dynamic_rendering) {
+            dynamic_rendering_info = vk.PipelineRenderingCreateInfo{
+                .s_type = .pipeline_rendering_create_info,
+                .p_next = null,
+                .view_mask = 0,
+                .color_attachment_count = @intCast(self.color_attachment_formats.?.len),
+                .p_color_attachment_formats = self.color_attachment_formats.?.ptr,
+                .depth_attachment_format = self.depth_attachment_format,
+                .stencil_attachment_format = self.stencil_attachment_format,
+            };
+        }
+
         // Create pipeline
-        const create_info = vk.GraphicsPipelineCreateInfo{
+        var create_info = vk.GraphicsPipelineCreateInfo{
+            .s_type = .graphics_pipeline_create_info,
+            .p_next = if (use_dynamic_rendering) &dynamic_rendering_info else null,
+            .flags = .{},
             .stage_count = @intCast(stages.items.len),
             .p_stages = stages.items.ptr,
             .p_vertex_input_state = &vertex_input_state,
@@ -715,7 +771,7 @@ pub const PipelineBuilder = struct {
             .p_color_blend_state = &color_blend_state,
             .p_dynamic_state = if (self.dynamic_states.items.len > 0) &dynamic_state else null,
             .layout = pipeline_layout,
-            .render_pass = self.render_pass.?,
+            .render_pass = if (use_dynamic_rendering) .null_handle else self.render_pass.?,
             .subpass = self.subpass,
             .base_pipeline_handle = .null_handle,
             .base_pipeline_index = -1,

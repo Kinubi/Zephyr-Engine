@@ -175,7 +175,6 @@ pub const ShaderWatcher = struct {
                     std.log.warn("[hot_reload] Failed to rescan shader directory {s}: {}", .{ dir_path, err });
                 };
             }
-            log(.DEBUG, "shader_hot_reload", "Skipping non-shader file change {s}", .{file_path});
             return;
         }
 

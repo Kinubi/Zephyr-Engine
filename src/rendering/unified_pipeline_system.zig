@@ -65,6 +65,10 @@ pub const UnifiedPipelineSystem = struct {
     vulkan_pipeline_cache: vk.PipelineCache,
     binding_overrides: std.AutoHashMap(u64, BindingOverrideMap),
 
+    // Global descriptor sets (Set 0) - shared across all pipelines
+    // These are managed externally and bound automatically
+    global_descriptor_sets: ?[]vk.DescriptorSet = null,
+
     pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, shader_manager: *ShaderManager) !UnifiedPipelineSystem {
         // Try to load existing pipeline cache
         var cache_data: ?[]u8 = null;
@@ -167,6 +171,12 @@ pub const UnifiedPipelineSystem = struct {
             override_map.deinit();
         }
         self.binding_overrides.deinit();
+    }
+
+    /// Set the global descriptor sets (Set 0) that will be automatically bound
+    /// These are typically the frame UBO containing view/projection matrices
+    pub fn setGlobalDescriptorSets(self: *UnifiedPipelineSystem, descriptor_sets: []vk.DescriptorSet) void {
+        self.global_descriptor_sets = descriptor_sets;
     }
 
     /// Create a unified pipeline with automatic descriptor layout extraction
@@ -298,7 +308,11 @@ pub const UnifiedPipelineSystem = struct {
 
         // Create descriptor set layouts from extracted information
         const descriptor_set_layouts = try self.createDescriptorSetLayouts(&descriptor_layout_info);
-        defer self.allocator.free(descriptor_set_layouts);
+        var descriptor_layouts_owned = false;
+        defer if (!descriptor_layouts_owned) {
+            self.destroyDescriptorSetLayouts(descriptor_set_layouts);
+            self.allocator.free(descriptor_set_layouts);
+        };
 
         // Create pipeline layout
         const pipeline_layout = try self.createPipelineLayout(descriptor_set_layouts, config.push_constant_ranges);
@@ -459,7 +473,15 @@ pub const UnifiedPipelineSystem = struct {
                 _ = builder.withMultisampleState(MultisampleState{ .rasterization_samples = ms_state.rasterization_samples });
             }
 
-            _ = builder.withRenderPass(config.render_pass, config.subpass);
+            // Use dynamic rendering if no render pass specified
+            if (config.render_pass == .null_handle) {
+                // Use provided formats or fall back to defaults
+                const color_formats = config.dynamic_rendering_color_formats orelse &[_]vk.Format{.r16g16b16a16_sfloat};
+                const depth_format = config.dynamic_rendering_depth_format orelse .d32_sfloat_s8_uint;
+                _ = builder.withDynamicRendering(color_formats, depth_format);
+            } else {
+                _ = builder.withRenderPass(config.render_pass, config.subpass);
+            }
 
             for (shaders.items) |shader| {
                 if (shader.shader_type.vertex_bit and !shader.shader_type.compute_bit) {
@@ -482,22 +504,41 @@ pub const UnifiedPipelineSystem = struct {
         const owned_shaders = try shaders.toOwnedSlice(self.allocator);
         shaders_transferred = true; // Mark as transferred so defer won't clean them up
 
+        // Deep copy the config to ensure dynamic rendering formats outlive the original
+        var owned_config = config;
+        if (config.dynamic_rendering_color_formats) |formats| {
+            const formats_copy = try self.allocator.alloc(vk.Format, formats.len);
+            @memcpy(formats_copy, formats);
+            owned_config.dynamic_rendering_color_formats = formats_copy;
+        }
+
         // Create unified pipeline object
         const pipeline = Pipeline{
             .vulkan_pipeline = vulkan_pipeline,
             .pipeline_layout = pipeline_layout,
+            .pipeline_set_layout_handles = descriptor_set_layouts,
             .descriptor_layout_info = descriptor_layout_info,
             .descriptor_pools = descriptor_resources.pools,
             .descriptor_layouts = descriptor_resources.layouts,
             .descriptor_sets = descriptor_resources.sets,
             .shaders = owned_shaders,
-            .config = config,
+            .config = owned_config,
             .is_compute = is_compute_pipeline,
             .is_raytracing = is_raytracing_pipeline,
         };
 
         // Use the provided pipeline ID
+        var pipeline_inserted = false;
+        errdefer if (pipeline_inserted) {
+            if (self.pipelines.fetchRemove(pipeline_id)) |removed| {
+                var removed_pipeline = removed.value;
+                removed_pipeline.deinit(self.graphics_context, self.allocator);
+            }
+        };
+
         try self.pipelines.put(pipeline_id, pipeline);
+        pipeline_inserted = true;
+        descriptor_layouts_owned = true;
 
         // Track shader dependencies for hot-reload
         try self.registerShaderDependency(config.compute_shader, pipeline_id);
@@ -558,10 +599,67 @@ pub const UnifiedPipelineSystem = struct {
         }
     }
 
+    /// Bind a pipeline with automatic global descriptor set binding (Set 0)
+    /// This is the preferred method for graphics/compute passes that need the global UBO
+    pub fn bindPipelineWithGlobalSet(
+        self: *UnifiedPipelineSystem,
+        command_buffer: vk.CommandBuffer,
+        pipeline_id: PipelineId,
+        frame_index: u32,
+    ) !void {
+        const pipeline = self.pipelines.get(pipeline_id) orelse {
+            log(.ERROR, "unified_pipeline", "❌ Pipeline not found when binding: {s} (hash: {})", .{ pipeline_id.name, pipeline_id.hash });
+            return error.PipelineNotFound;
+        };
+
+        // Bind the Vulkan pipeline with correct bind point
+        const bind_point: vk.PipelineBindPoint = if (pipeline.is_raytracing)
+            .ray_tracing_khr
+        else if (pipeline.is_compute)
+            .compute
+        else
+            .graphics;
+        self.graphics_context.vkd.cmdBindPipeline(command_buffer, bind_point, pipeline.vulkan_pipeline);
+
+        // Automatically bind Set 0 (global descriptor set) if available
+        if (self.global_descriptor_sets) |global_sets| {
+            if (frame_index < global_sets.len) {
+                const descriptor_sets = [_]vk.DescriptorSet{global_sets[frame_index]};
+                self.graphics_context.vkd.cmdBindDescriptorSets(
+                    command_buffer,
+                    bind_point,
+                    pipeline.pipeline_layout,
+                    0, // Set 0
+                    1,
+                    &descriptor_sets,
+                    0,
+                    null,
+                );
+            }
+        }
+
+        // NOTE: Set 1+ descriptor sets are managed by ResourceBinder and must be
+        // bound manually by the pass after calling resource_binder.updateFrame()
+        // This is because ResourceBinder creates and updates descriptor sets dynamically,
+        // while pipeline.descriptor_sets contains stale/empty sets from initialization
+    }
+
     /// Get the pipeline layout for a given pipeline
     pub fn getPipelineLayout(self: *UnifiedPipelineSystem, pipeline_id: PipelineId) !vk.PipelineLayout {
         const pipeline = self.pipelines.get(pipeline_id) orelse return error.PipelineNotFound;
         return pipeline.pipeline_layout;
+    }
+
+    /// Get a descriptor set for a specific set index and frame
+    /// Returns null if the pipeline doesn't have descriptor sets or the set index is out of bounds
+    pub fn getDescriptorSet(self: *UnifiedPipelineSystem, pipeline_id: PipelineId, set_index: u32, frame_index: u32) ?vk.DescriptorSet {
+        const pipeline = self.pipelines.get(pipeline_id) orelse return null;
+
+        if (set_index >= pipeline.descriptor_sets.items.len) return null;
+        const frame_sets = pipeline.descriptor_sets.items[set_index];
+
+        if (frame_index >= frame_sets.len) return null;
+        return frame_sets[frame_index];
     }
 
     /// Bind a resource to a descriptor set
@@ -921,13 +1019,6 @@ pub const UnifiedPipelineSystem = struct {
             }
         }
 
-        log(
-            .INFO,
-            "unified_pipeline",
-            "Preparing rebuild for {s}: cleared {} stale resource bindings",
-            .{ pipeline_id.name, cleared_count },
-        );
-
         // Get reference to the old pipeline before we replace it
         const old_pipeline_to_destroy = self.pipelines.get(pipeline_id).?;
 
@@ -1193,6 +1284,12 @@ pub const UnifiedPipelineSystem = struct {
         }
 
         return try layouts.toOwnedSlice(self.allocator);
+    }
+
+    fn destroyDescriptorSetLayouts(self: *UnifiedPipelineSystem, layouts: []const vk.DescriptorSetLayout) void {
+        for (layouts) |layout| {
+            self.graphics_context.vkd.destroyDescriptorSetLayout(self.graphics_context.dev, layout, null);
+        }
     }
 
     fn createPipelineLayout(
@@ -1612,12 +1709,17 @@ pub const PipelineConfig = struct {
     // Render pass
     render_pass: vk.RenderPass,
     subpass: u32 = 0,
+
+    // Dynamic rendering formats (used when render_pass is .null_handle)
+    dynamic_rendering_color_formats: ?[]const vk.Format = null,
+    dynamic_rendering_depth_format: ?vk.Format = null,
 };
 
 /// Unified pipeline representation
 const Pipeline = struct {
     vulkan_pipeline: vk.Pipeline,
     pipeline_layout: vk.PipelineLayout,
+    pipeline_set_layout_handles: []vk.DescriptorSetLayout,
     descriptor_layout_info: DescriptorLayoutInfo,
     descriptor_pools: std.ArrayList(*DescriptorPool),
     descriptor_layouts: std.ArrayList(*DescriptorSetLayout),
@@ -1631,6 +1733,11 @@ const Pipeline = struct {
         // Clean up Vulkan objects
         graphics_context.vkd.destroyPipeline(graphics_context.dev, self.vulkan_pipeline, null);
         graphics_context.vkd.destroyPipelineLayout(graphics_context.dev, self.pipeline_layout, null);
+
+        for (self.pipeline_set_layout_handles) |layout_handle| {
+            graphics_context.vkd.destroyDescriptorSetLayout(graphics_context.dev, layout_handle, null);
+        }
+        allocator.free(self.pipeline_set_layout_handles);
 
         // Clean up descriptor resources using proper builders
         for (self.descriptor_pools.items) |pool| {
@@ -1648,6 +1755,12 @@ const Pipeline = struct {
         for (self.shaders) |shader| {
             shader.deinit(graphics_context.*);
             allocator.destroy(shader);
+        }
+        allocator.free(self.shaders);
+
+        // Free copied dynamic rendering formats
+        if (self.config.dynamic_rendering_color_formats) |formats| {
+            allocator.free(formats);
         }
 
         self.descriptor_layout_info.deinit();

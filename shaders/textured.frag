@@ -29,6 +29,7 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 ambientColor;
     PointLight pointLights[16];
     int numPointLights;
+    float dt;
 } ubo;
 
 layout(set = 1, binding = 0) readonly buffer MaterialBuffer {
@@ -47,24 +48,30 @@ void main() {
     // Get material for this object
     Material mat = materials[materialIndex];
     
-    // Start with vertex color as default
-    vec3 albedo = color;
+    // Sample albedo texture
+    vec3 albedo = texture(textures[mat.albedoTextureIndex], uv).rgb;
 
-    albedo = texture(textures[mat.albedoTextureIndex], uv).rgb;
+    // Start with ambient lighting
+    vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w;
+    vec3 surfaceNormal = normalize(normal);
 
+    // Add point light contributions
+    for (int i = 0; i < ubo.numPointLights; i++) {
+        PointLight light = ubo.pointLights[i];
+        vec3 directionToLight = light.position.xyz - positionWorld;
+        float distanceSquared = dot(directionToLight, directionToLight);
+        float distance = sqrt(distanceSquared);
+        float attenuation = 1.0 / (1.0 + 0.09 * distance + 0.032 * distanceSquared);
+        
+        vec3 lightDir = normalize(directionToLight);
+        float cosAngIncidence = max(dot(surfaceNormal, lightDir), 0.0);
+        
+        vec3 lightColor = light.color.xyz * light.color.w * attenuation;
+        diffuseLight += lightColor * cosAngIncidence;
+    }
 
-    outColor = vec4(albedo, 1.0);
-    // vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w;
-    // vec3 surfaceNormal = normalize(normal);
-
-    // for (int i = 0; i < ubo.numPointLights; i++) {
-    //     PointLight light = ubo.pointLights[i];
-    //     vec3 directionToLight = light.position.xyz - positionWorld;
-    //     float attenuation = 1.0 / dot(directionToLight, directionToLight);
-    //     float cosAngIncidence = max(dot(surfaceNormal, normalize(directionToLight)), 0);
-    //     vec3 lightColor = light.color.xyz * light.color.w * attenuation;
-    //     diffuseLight += lightColor * cosAngIncidence;
-    // }
-
-    // outColor = vec4(diffuseLight * albedo, 1.0);
+    // Add emissive contribution if material has it
+    vec3 emissive = mat.emissive_color.rgb * mat.emissive;
+    
+    outColor = vec4(diffuseLight * albedo + emissive, 1.0);
 }

@@ -4,6 +4,133 @@
 
 This document outlines the integration of an Entity Component System (ECS) architecture into ZulkanZengine, designed to work alongside the existing Asset Manager and Unified Renderer systems. The ECS will replace the current GameObject-based scene management with a more flexible, performance-oriented approach.
 
+## 2025 ECS Blueprint (Detailed)
+
+### Design Goals
+- **Zero Regression Adoption**: allow the current `Scene`/`SceneBridge`/GenericRenderer path to keep working while data begins to flow from ECS mirrors.
+- **Deterministic Rendering Inputs**: rendering systems must see identical mesh/light/material arrays each frame regardless of ECS mutation order.
+- **Asset-Centric Workflow**: components reference `AssetId` only; the AssetManager remains the single source of GPU objects and hot-reload signals.
+- **Thread-Friendly Queries**: read-mostly systems (render extraction, visibility) can iterate without locks, while mutating systems obtain explicit write guards.
+- **Incremental Extensibility**: it must be cheap to introduce new component types without editing switch statements or global arrays.
+
+### Entity Identity Model
+- **EntityId Layout**: 64-bit value, lower 32 bits store the index, upper 24 bits store the generation, upper 8 bits reserved for debug tagging (e.g. entity kind). This covers 4 billion entity slots with 16 million generations.
+- **Registry**: `EntityRegistry` owns a sparse set of indices, a generation array, and a lock-free free-list. Creation pops from free-list or expands tables. Destruction pushes the slot and bumps the generation.
+- **Debug Metadata**: optional `EntityTag` map keyed by `EntityId` to store editor-friendly names, archetype hints, and originating prefab path. Not used in hot-path iteration.
+
+### Component Storage Strategy
+- **Primary Form**: per-component `DenseSet<T>` (sparse set). Stores component data in SoA layout, with parallel arrays for data, entity id, and sparse index. Each storage implements `add`, `removeSwap`, `get`, `iterator`.
+- **Chunk View (Phase 2)**: for high-traffic combinations (e.g. `Transform+StaticMesh+MaterialRef`) we maintain chunk caches built from the constituent storages to avoid pointer chasing. Chunks are rebuilt on write bursts or at frame end.
+- **Type Registry**: `ComponentTypeId` created via comptime hashing of the Zig type name. Registry stores metadata (size, alignment, optional callbacks for load/save and hot-reload).
+- **Memory Arena**: hot components allocate from a dedicated ECS arena to keep locality and simplify lifetime tracking.
+
+### Canonical Component Set
+1. **Transform Layer**
+    - `Transform`: translation/rotation/scale plus cached matrices.
+    - `Parent`: optional parent entity handle for hierarchy; stored separately to avoid padding.
+2. **Rendering**
+    - `StaticMesh`: holds `AssetId` for mesh + LOD mask.
+    - `SkinnedMesh`: `AssetId` for skeleton/mesh, bone palette handle.
+    - `MaterialRef`: `AssetId` + overrides (tints, scalar params).
+    - `InstanceData`: custom per-instance constants (used by particle/light renderers).
+    - `Visibility`: bounding volume, flags for frustum/portal culled state.
+3. **Lighting & Effects**
+    - `PointLight`, `SpotLight`, `DirectionalLight` with photometric units.
+    - `ShadowCaster`: cascaded shadow settings.
+    - `Probe`: reflection/irradiance probes for future GI work.
+4. **Raytracing**
+    - `RaytracingProxy`: link to BLAS handle, material table index.
+    - `AccelerationStructureRequest`: queue entry for BVH builder subsystem.
+5. **Simulation & Gameplay**
+    - `PhysicsProxy`: collider id, mass, integration state.
+    - `AnimationState`: current clip, blend weights, playback time.
+    - `Lifetime`: countdown timers, spawn/despawn scheduling.
+    - `ScriptState`: handle for gameplay scripting VM.
+6. **Meta & Services**
+    - `AssetWatcher`: tracks dependencies, receives hot-reload events and propagates dirty flags.
+    - `NetworkReplicated`: replication channel and authority mode.
+    - `AudioEmitter`: clip id, 3D attenuation parameters.
+
+### Systems Pipeline
+Systems run inside named frame stages orchestrated by `EcsScheduler`. Each stage may push jobs into the existing ThreadPool under the `.ecs_update` subsystem.
+
+1. **Asset Resolve Stage**
+    - Consumes `AssetWatcher` entries; checks AssetManager for load completion.
+    - Updates component-local pointers (e.g. resolves `AssetId` to `Model*` caches) and sets dirty flags.
+2. **Input & Scripting Stage**
+    - Executes scripting VM or high-level gameplay logic, mutating `Transform`, `AnimationState`, etc.
+3. **Physics & Animation Stage**
+    - Calls into physics engine, updates `PhysicsProxy` and writes back to `Transform`.
+    - Advances animation graphs, updates `SkinnedMesh` pose palettes.
+4. **Visibility Stage**
+    - Rebuilds bounding volumes, performs frustum/portal culling, writes results to `Visibility` flags.
+5. **Render Extraction Stage**
+    - Queries relevant component combos and emits frame-local caches consumed by `SceneBridge`.
+    - Populates `RasterizationExtraction`, `RaytracingExtraction`, `LightingExtraction` structures.
+6. **Presentation Stage**
+    - Optional stage for post-frame bookkeeping (statistics, debug overlays).
+
+### SceneBridge Integration
+- SceneBridge becomes a thin layer that reads ECS extraction caches instead of the legacy Scene arrays.
+- The bridge exposes the same API (`getRasterizationData`, `getRaytracingData`, `getComputeData`) so renderers stay unchanged.
+- Dirty flags for textures/materials continue to be toggled by AssetManager; ECS extraction writes into those same flags to maintain compatibility.
+
+### Asset Manager Cross-Talk
+- `AssetWatcher` component subscribes to hot-reload events via a central `AssetEventHub` (fed by `ShaderManager`, `AssetManager`).
+- When a watched asset reloads, the component marks its owning entity and the relevant extraction caches dirty.
+- Material/texture descriptor updates still run through AssetManager, but ECS systems can request updates by calling `queueTextureDescriptorUpdate` / `queueMaterialBufferUpdate` when component state changes.
+
+### Threading and Safety
+- Queries return `QueryView<T...>` objects that expose either immutable or mutable access. Mutable views lock the underlying storage via fine-grained `WriteAccess<T>` guards (one per storage) to maintain determinism.
+- Cross-stage synchronization relies on the scheduler: stages are ordered, and systems inside a stage may run in parallel if they operate on disjoint component sets.
+- ECS frame state is double-buffered for extraction caches to align with the existing three frames-in-flight.
+
+### Multithreaded Rendering Plan
+- **Extraction Fan-Out**: the `Render Extraction Stage` partitions work into deterministic chunks (static mesh, skinned mesh, lights, raytracing proxies) and dispatches them through the existing `ThreadPool` using `.ecs_update` jobs. Each job receives an immutable `QueryView` slice plus a write-only pointer to its portion of the double-buffered extraction cache.
+- **Chunk Metadata**: before worker launch, the scheduler computes chunk descriptors (entity ranges, LOD filters, visibility masks). These descriptors live in a frame-local arena so worker threads avoid allocating while traversing component storages.
+- **Worker Guarantees**: workers must treat all component data as read-only, enqueue descriptor/material updates through the current AssetManager queues, and signal completion via the thread pool fence API to preserve frame ordering.
+- **Command Recording**: every worker records into a secondary Vulkan command buffer (or backend-specific equivalent). During `SceneBridge::buildFrame`, the main thread stitches the secondary buffers into a primary buffer, preserving submission order while exploiting parallel encoding.
+- **Raytracing Support**: raytracing extraction chunks populate per-worker shader table segments. The merge step concatenates these segments and updates `raytracing_max_recursion_depth` metadata before the ray pipeline builds shader binding tables.
+- **Profiling & Validation**: instrumentation hooks record per-chunk timings, command-buffer counts, and cache coherence stats. A `zig build ecs-extract-validate` task runs regression tests comparing multi-threaded extraction output against a serialized single-thread reference to catch races.
+
+### SIMD & CPU Features
+- **Baseline Requirement**: all ECS code paths assume AVX2 (or newer) availability; build asserts fire on CPUs lacking the feature to avoid implicit scalar fallbacks.
+- **Dense Storage Prep**: sparse index expansion, zeroing, and mask clearing routines use 256-bit vector stores to warm caches before jobs run.
+- **Query Math**: batch dot products, matrix transforms, and frustum tests route through new AVX helpers to keep render extraction SIMD-friendly.
+- **Future Extensions**: once AVX-512 deployment is viable, the SIMD layer exposes width-tuned helpers so hot loops can scale without invasive rewrites.
+
+### Events & Messaging
+- `EventBus` (per frame) stores transient messages: spawn/despawn commands, state change notifications, asset reload signals.
+- Subscriptions are typed; systems register handlers for events they care about. Events are processed at the start of the next frame stage to keep execution deterministic.
+
+### Serialization & Prefabs
+- `EcsSerializer` can snapshot selected component sets into JSON/binary (schema stored in the component registry metadata).
+- `PrefabLibrary` loads prefab definitions (component bundles) that can be instantiated by name; instantiation enqueues a spawn command to ensure safe creation during the command stage.
+
+### Debugging & Tooling
+- `EcsInspector` module exposes: entity list, component presence, live values, asset resolve status, generation counters, and query visualizers.
+- Integration with the existing telemetry overlay adds ECS stats (entity count, component counts, average query time).
+- CLI tools: `zig build ecs-dump` dumps current world state, `zig build ecs-validate` runs integrity checks (ensuring sparse indices match dense arrays).
+
+### Migration Strategy
+1. **Phase A**: build ECS core, create mirror components for existing Scene data (Transform, Mesh, Material, Lights).
+2. **Phase B**: during frame update, sync legacy Scene arrays from ECS (keeping Scene authoritative for renderers).
+3. **Phase C**: flip SceneBridge to read the ECS extraction cache; Scene arrays become optional.
+4. **Phase D**: remove legacy arrays, route new gameplay features through ECS directly.
+
+### Testing Plan
+- Unit tests for `EntityRegistry`, component add/remove, and iterator stability.
+- Property tests verifying that removing components does not invalidate unrelated entities (swap-remove correctness).
+- Integration test comparing render extraction output against legacy Scene for a curated data set.
+- Hot-reload regression: ensure shader/material reload path correctly propagates through `AssetWatcher` into render caches.
+
+### Glossary
+- **EntityId**: 64-bit stable handle with generation counter.
+- **Component Storage**: Dense array plus sparse index mapping entity→dense slot.
+- **Extraction Cache**: Frame-local structure filled from ECS queries and consumed by renderers.
+- **Stage**: Named bucket in the ECS scheduler representing an ordered group of systems.
+- **Prefab**: Serialized set of components that can be spawned as a unit.
+
 ## Current State Analysis
 
 ### Existing Architecture Limitations

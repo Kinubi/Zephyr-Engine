@@ -2,7 +2,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Buffer = @import("../core/buffer.zig").Buffer;
-const Scene = @import("../scene/scene.zig").Scene;
 const Vertex = @import("../rendering/mesh.zig").Vertex;
 const Model = @import("../rendering/mesh.zig").Model;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
@@ -12,8 +11,8 @@ const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhB
 const log = @import("../utils/log.zig").log;
 const Math = @import("../utils/math.zig");
 const Mesh = @import("../rendering/mesh.zig").Mesh;
-const SceneBridge = @import("../rendering/scene_bridge.zig");
-const RaytracingData = SceneBridge.RaytracingData;
+
+const RaytracingData = @import("../rendering/render_data_types.zig").RaytracingData;
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {
@@ -307,64 +306,6 @@ pub const MultithreadedBvhBuilder = struct {
             );
             _ = self.thread_pool.requestWorkers(.gpu_work, 2);
             try self.thread_pool.submitWork(work_item);
-        }
-    }
-
-    /// Build scene BVH structures asynchronously
-    pub fn buildSceneBvhAsync(
-        self: *MultithreadedBvhBuilder,
-        scene: *Scene,
-        completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
-        callback_context: ?*anyopaque,
-    ) !void {
-        _ = completion_callback; // TODO: Implement scene-level completion callback
-        // Clear and prepare persistent geometry storage
-        self.geometry_mutex.lock();
-        defer self.geometry_mutex.unlock();
-        self.persistent_geometry.clearRetainingCapacity();
-
-        for (scene.objects.items, 0..) |*object, obj_idx| {
-            if (!object.has_model) continue;
-            var model_opt: ?*const Model = null;
-
-            // Asset-based approach: prioritize asset IDs (same as rasterization system)
-            if (object.model_asset) |model_asset_id| {
-                // Get asset ID with fallback and then get the loaded model
-                const safe_asset_id = scene.asset_manager.getAssetIdForRendering(model_asset_id);
-                if (scene.asset_manager.getLoadedModelConst(safe_asset_id)) |loaded_model| {
-                    model_opt = loaded_model;
-                }
-            }
-
-            if (model_opt) |model| {
-                for (model.meshes.items, 0..) |*model_mesh, mesh_idx| {
-                    const geometry = model_mesh.geometry;
-                    if (geometry.mesh.vertex_buffer == null or geometry.mesh.index_buffer == null) {
-                        log(.WARN, "bvh_builder", "Skipping object {} mesh {} due to missing buffers", .{ obj_idx, mesh_idx });
-                        continue;
-                    }
-
-                    const geometry_data = try self.allocator.create(GeometryData);
-                    // Create geometry data with pointers to existing mesh data (no copies)
-                    geometry_data.* = GeometryData{
-                        .mesh_ptr = geometry.mesh,
-                        .material_id = geometry.mesh.material_id,
-                        .transform = object.transform.local2world,
-                        .mesh_id = @intCast(self.persistent_geometry.items.len),
-                    };
-
-                    // Store in persistent geometry storage (this copies the small GeometryData struct, not the mesh data)
-                    try self.persistent_geometry.append(self.allocator, geometry_data.*);
-
-                    // Submit BLAS build work with pointer to persistent geometry data
-                    _ = try self.buildBlasAsync(
-                        &self.persistent_geometry.items[self.persistent_geometry.items.len - 1],
-                        .high,
-                        sceneBlasBuildCallback,
-                        callback_context,
-                    );
-                }
-            }
         }
     }
 
@@ -671,10 +612,12 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
         };
     }
 
+    const instance_buffer_size = @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len;
+
     // Create instance buffer
     var instance_buffer = try Buffer.init(
         builder.gc,
-        @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len,
+        instance_buffer_size,
         1,
         .{
             .shader_device_address_bit = true,
@@ -684,8 +627,8 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
         .{ .host_visible_bit = true, .host_coherent_bit = true },
     );
 
-    try instance_buffer.map(@sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len, 0);
-    instance_buffer.writeToBuffer(std.mem.sliceAsBytes(vk_instances), @sizeOf(vk.AccelerationStructureInstanceKHR) * instances.len, 0);
+    try instance_buffer.map(instance_buffer_size, 0);
+    instance_buffer.writeToBuffer(std.mem.sliceAsBytes(vk_instances), instance_buffer_size, 0);
 
     // Get instance buffer device address
     var instance_addr_info = vk.BufferDeviceAddressInfo{

@@ -202,16 +202,22 @@ pub const Texture = struct {
         // 1. Create staging buffer and upload pixels using Buffer abstraction
         const pixel_count = image.width * image.height * image.num_components;
         const buffer_size = pixel_count * image.bytes_per_component;
+        const on_main_thread = std.Thread.getCurrentId() == gc.main_thread_id;
         var staging_buffer = try Buffer.init(
             gc,
-            1, // stride (byte-wise)
             buffer_size,
+            1,
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
+        var staging_cleanup_needed = true;
+        defer {
+            if (staging_cleanup_needed) staging_buffer.deinit();
+        }
 
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(image.data, buffer_size, 0);
+        staging_buffer.unmap();
 
         // 2. Create image
         const image_info = vk.ImageCreateInfo{
@@ -259,6 +265,12 @@ pub const Texture = struct {
             image.width,
             image.height,
         );
+        staging_cleanup_needed = on_main_thread;
+        if (!on_main_thread) {
+            staging_buffer.buffer = vk.Buffer.null_handle;
+            staging_buffer.memory = vk.DeviceMemory.null_handle;
+            staging_buffer.descriptor_info.buffer = vk.Buffer.null_handle;
+        }
 
         // 5. Generate mipmaps
         try gc.generateMipmapsSingleTime(
@@ -368,16 +380,22 @@ pub const Texture = struct {
         // 1. Create staging buffer and upload pixels using Buffer abstraction
         const pixel_count = image.width * image.height * image.num_components;
         const buffer_size = pixel_count * image.bytes_per_component;
+        const on_main_thread = std.Thread.getCurrentId() == gc.main_thread_id;
         var staging_buffer = try Buffer.init(
             gc,
-            1, // stride (byte-wise)
             buffer_size,
+            1,
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
+        var staging_cleanup_needed = true;
+        defer {
+            if (staging_cleanup_needed) staging_buffer.deinit();
+        }
 
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(image.data, buffer_size, 0);
+        staging_buffer.unmap();
 
         // 2. Create image
         const image_info = vk.ImageCreateInfo{
@@ -425,6 +443,12 @@ pub const Texture = struct {
             image.width,
             image.height,
         );
+        staging_cleanup_needed = on_main_thread;
+        if (!on_main_thread) {
+            staging_buffer.buffer = vk.Buffer.null_handle;
+            staging_buffer.memory = vk.DeviceMemory.null_handle;
+            staging_buffer.descriptor_info.buffer = vk.Buffer.null_handle;
+        }
 
         // 5. Generate mipmaps
         try gc.generateMipmapsSingleTime(
