@@ -366,12 +366,12 @@ pub const RaytracingSystem = struct {
                 log(.ERROR, "raytracing", "Failed to start BVH rebuild from RT data: {}", .{err});
                 return false;
             };
-            
+
             log(.INFO, "raytracing", "Started BLAS rebuild from RT data ({} geometries)", .{rebuild_rt_data.geometries.len});
-            
+
             // Mark renderables as synced after starting rebuild
             render_system.markRenderablesSynced();
-            
+
             // Return true to indicate rebuild started
             return true;
         }

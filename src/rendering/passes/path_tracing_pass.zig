@@ -620,7 +620,7 @@ pub const PathTracingPass = struct {
 
         // Update BVH using rt_system (handles BLAS/TLAS building)
         const bvh_rebuilt = try self.rt_system.update(&self.render_system, self.ecs_world, self.asset_manager, frame_info);
-        
+
         if (bvh_rebuilt) {
             log(.INFO, "path_tracing_pass", "BVH rebuilt successfully", .{});
             // Mark renderables as synced after BVH rebuild

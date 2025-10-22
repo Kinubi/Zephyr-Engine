@@ -86,15 +86,15 @@ pub const RenderSystem = struct {
         // Check if renderable count or mesh asset IDs changed (detects async loading)
         const current_count = render_data.renderables.items.len;
         var mesh_ids_changed = false;
-        
+
         // Build current mesh asset ID list
         var current_mesh_ids: std.ArrayList(AssetId) = .{};
         defer current_mesh_ids.deinit(self.allocator);
-        
+
         for (render_data.renderables.items) |renderable| {
             try current_mesh_ids.append(self.allocator, renderable.model_asset);
         }
-        
+
         // Compare with last mesh IDs (detects when async assets finish loading)
         if (current_mesh_ids.items.len != self.last_mesh_asset_ids.items.len) {
             mesh_ids_changed = true;
@@ -102,7 +102,7 @@ pub const RenderSystem = struct {
             // Sort both lists for comparison
             std.sort.insertion(AssetId, current_mesh_ids.items, {}, assetIdLessThan);
             std.sort.insertion(AssetId, self.last_mesh_asset_ids.items, {}, assetIdLessThan);
-            
+
             for (current_mesh_ids.items, self.last_mesh_asset_ids.items) |curr, last| {
                 if (curr != last) {
                     mesh_ids_changed = true;
@@ -110,7 +110,7 @@ pub const RenderSystem = struct {
                 }
             }
         }
-        
+
         // Update dirty flag if count or mesh IDs changed
         if (current_count != self.last_renderable_count or mesh_ids_changed) {
             if (current_count != self.last_renderable_count) {
@@ -121,7 +121,7 @@ pub const RenderSystem = struct {
             }
             self.renderables_dirty = true;
             self.last_renderable_count = current_count;
-            
+
             // Update tracked mesh IDs
             self.last_mesh_asset_ids.clearRetainingCapacity();
             try self.last_mesh_asset_ids.appendSlice(self.allocator, current_mesh_ids.items);
