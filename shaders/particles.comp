@@ -114,8 +114,10 @@ void main()
             }
         }
         
-        // Particle stays dead - copy input to output
-        particlesOut[index] = particleIn;
+        // Particle stays dead - make it invisible
+        particleOut = particleIn;
+        particleOut.color.a = 0.0; // Set alpha to 0 to hide dead particles
+        particlesOut[index] = particleOut;
         return;
     }
 

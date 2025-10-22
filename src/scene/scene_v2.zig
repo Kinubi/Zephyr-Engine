@@ -259,15 +259,13 @@ pub const Scene = struct {
                 .particles_per_spawn = 1,
             };
 
-            log(.DEBUG, "scene_v2", "Creating emitter at position ({d:.2}, {d:.2}, {d:.2})", .{ gpu_emitter.position[0], gpu_emitter.position[1], gpu_emitter.position[2] });
-
             // Spawn some initial particles (more for better visual effect)
-            const initial_particle_count = 50;
+            const initial_particle_count = 200;
             const initial_particles = try self.allocator.alloc(vertex_formats.Particle, initial_particle_count);
             defer self.allocator.free(initial_particles);
 
-            // Generate random initial particles
-            for (initial_particles, 0..) |*particle, i| {
+            // Generate random initial particles (dead, to be spawned by compute shader)
+            for (initial_particles) |*particle| {
                 const rand_x = gpu_emitter.velocity_min[0] + (gpu_emitter.velocity_max[0] - gpu_emitter.velocity_min[0]) * self.random.random().float(f32);
                 const rand_y = gpu_emitter.velocity_min[1] + (gpu_emitter.velocity_max[1] - gpu_emitter.velocity_min[1]) * self.random.random().float(f32);
                 const rand_z = gpu_emitter.velocity_min[2] + (gpu_emitter.velocity_max[2] - gpu_emitter.velocity_min[2]) * self.random.random().float(f32);
@@ -277,22 +275,18 @@ pub const Scene = struct {
                     .position = gpu_emitter.position,
                     .velocity = .{ rand_x, rand_y, rand_z },
                     .color = gpu_emitter.color_start,
-                    .lifetime = lifetime,
+                    .lifetime = 0.0, // Dead particles - will be assigned emitter_id by spawnParticlesForEmitter
                     .max_lifetime = lifetime,
-                    .emitter_id = 0, // Will be set by addEmitter
+                    .emitter_id = 0, // Will be set by spawnParticlesForEmitter
 
                 };
-
-                if (i < 2) {
-                    log(.DEBUG, "scene_v2", "Particle {d}: pos=({d:.2}, {d:.2}, {d:.2}), vel=({d:.2}, {d:.2}, {d:.2}), life={d:.2}", .{ i, particle.position[0], particle.position[1], particle.position[2], particle.velocity[0], particle.velocity[1], particle.velocity[2], particle.lifetime });
-                }
             }
 
             // Add emitter to GPU and track the GPU ID
             const gpu_emitter_id = try compute_pass.addEmitter(gpu_emitter, initial_particles);
             try self.emitter_to_gpu_id.put(entity, gpu_emitter_id);
 
-            log(.INFO, "scene_v2", "Registered emitter {} with GPU (gpu_id={})", .{ @intFromEnum(entity), gpu_emitter_id });
+            log(.INFO, "scene_v2", "Added particle emitter {} (gpu_id={})", .{ @intFromEnum(entity), gpu_emitter_id });
         }
     }
 
@@ -389,13 +383,15 @@ pub const Scene = struct {
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
 
         // Create and add ParticleComputePass FIRST (runs on compute queue)
+        const max_emitters = 16;
+        const particles_per_emitter = 200;
         const particle_compute_pass = try ParticleComputePass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
             self.ecs_world,
-            1000, // Max 1,000 particles (reasonable for single emitter)
-            16, // Max 16 emitters
+            particles_per_emitter * max_emitters, // 200 particles per emitter * 16 emitters = 3200 total
+            max_emitters,
         );
 
         // Save reference for emitter management

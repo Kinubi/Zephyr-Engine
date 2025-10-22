@@ -132,7 +132,7 @@ pub const App = struct {
     // deinitialized after other systems that depend on it have been deinitialized.
 
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
-    var last_particle_debug: f64 = 0.0; // Track when we last printed particle debug info
+    
     // Scheduled asset loading system
     const ScheduledAsset = struct {
         frame: u64,
@@ -418,7 +418,7 @@ pub const App = struct {
         // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
         try scene_v2.addParticleEmitter(
             vase2.entity_id,
-            20.0, // emission_rate: 20 particles per second (increased for better visibility)
+            50.0, // emission_rate: 20 particles per second (increased for better visibility)
             2.5, // particle_lifetime: 2.5 seconds (slightly longer)
         );
         log(.INFO, "app", "Scene v2: Added particle emitter to vase 2", .{});
@@ -612,7 +612,7 @@ pub const App = struct {
                 scheduled_asset.loaded = true;
                 try scene_v2.addParticleEmitter(
                     loaded_object.entity_id,
-                    20.0, // emission_rate: 20 particles per second (increased for better visibility)
+                    50.0, // emission_rate: 20 particles per second (increased for better visibility)
                     2.5, // particle_lifetime: 2.5 seconds (slightly longer)
                 );
             }
@@ -628,16 +628,6 @@ pub const App = struct {
             if (current_time - last_performance_report >= 10.0) {
                 asset_manager.printPerformanceReport();
                 last_performance_report = current_time;
-            }
-
-            // Print particle debug info every 3 seconds
-            if (current_time - last_particle_debug >= 3.0) {
-                if (scene_v2.particle_compute_pass) |particle_pass| {
-                    particle_pass.debugPrintAliveParticles(current_frame, self.allocator, 10) catch |err| {
-                        log(.WARN, "app", "Failed to read particle debug info: {}", .{err});
-                    };
-                }
-                last_particle_debug = current_time;
             }
         }
 

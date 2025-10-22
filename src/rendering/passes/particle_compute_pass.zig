@@ -171,9 +171,6 @@ pub const ParticleComputePass = struct {
                 graphics_context,
                 max_particles,
             );
-
-            // Initialize buffers with dead particles
-            try initializeParticleBuffer(allocator, graphics_context, &particle_buffers[i], max_particles);
         }
 
         // Create uniform buffers (per frame in flight)
@@ -194,7 +191,7 @@ pub const ParticleComputePass = struct {
             graphics_context,
             @sizeOf(vertex_formats.GPUEmitter) * max_emitters,
             1,
-            .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+            .{ .storage_buffer_bit = true, .transfer_dst_bit = true, .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
         try emitter_buffer.map(vk.WHOLE_SIZE, 0);
@@ -271,9 +268,13 @@ pub const ParticleComputePass = struct {
         }
 
         // Update compute uniform buffer
+        // Only process particles for active emitters (200 particles per emitter)
+        const particles_per_emitter = self.max_particles / self.max_emitters;
+        const active_particle_slots = particles_per_emitter * self.emitter_count;
+
         const compute_ubo = ComputeUniformBuffer{
             .delta_time = frame_info.dt,
-            .particle_count = self.max_particles, // Process all particle slots
+            .particle_count = active_particle_slots, // Only process slots for active emitters
             .emitter_count = self.emitter_count,
             .max_particles = self.max_particles,
             .gravity = .{ 0.0, 9.81, 0.0, 0.0 }, // Standard gravity
@@ -289,10 +290,16 @@ pub const ParticleComputePass = struct {
         // Update descriptor sets for current frame
         try self.pipeline_system.updateDescriptorSetsForPipeline(self.compute_pipeline, frame_index);
 
-        // Dispatch compute shader
+        // Dispatch compute shader - only process active particle slots
         const workgroup_size = 256; // Match shader local_size_x
-        const workgroups = (self.max_particles + workgroup_size - 1) / workgroup_size;
-        self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
+        const workgroups = if (active_particle_slots > 0)
+            (active_particle_slots + workgroup_size - 1) / workgroup_size
+        else
+            0;
+        
+        if (workgroups > 0) {
+            self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
+        }
 
         // Memory barrier to ensure compute writes are visible to vertex stage
         const memory_barrier = vk.MemoryBarrier{
@@ -450,7 +457,7 @@ pub const ParticleComputePass = struct {
 
         // Write emitter to mapped buffer
         const emitter_bytes = std.mem.asBytes(&emitter);
-        const emitter_size = @sizeOf(vertex_formats.GPUEmitter);
+        const emitter_size = self.emitter_buffer.instance_size;
         const offset = emitter_id * emitter_size;
 
         self.emitter_buffer.writeToBuffer(emitter_bytes, emitter_size, offset);
@@ -458,12 +465,14 @@ pub const ParticleComputePass = struct {
 
         self.emitter_count += 1;
 
+        // Update descriptor sets to rebind the emitter buffer with new emitter data
+        try self.updateDescriptors();
+
         // Spawn initial particles: Read last simulated buffer, add new particles, write to all buffers
         if (initial_particles.len > 0) {
             try self.spawnParticlesForEmitter(emitter_id, initial_particles);
         }
 
-        log(.INFO, "particle_compute_pass", "Added emitter {d} with {d} initial particles", .{ emitter_id, initial_particles.len });
         return emitter_id;
     }
 
@@ -512,6 +521,11 @@ pub const ParticleComputePass = struct {
 
     /// Spawn initial particles for a new emitter
     fn spawnParticlesForEmitter(self: *ParticleComputePass, emitter_id: u32, new_particles: []const vertex_formats.Particle) !void {
+        // Calculate particle range for this emitter
+        const particles_per_emitter = self.max_particles / self.max_emitters;
+        const emitter_start_slot = emitter_id * particles_per_emitter;
+        const emitter_end_slot = emitter_start_slot + particles_per_emitter;
+
         // Get last frame's OUT buffer (most recent simulation)
         const last_frame: usize = if (self.last_particle_count == 0) 0 else (MAX_FRAMES_IN_FLIGHT - 1);
         const buffer_size = self.max_particles * @sizeOf(vertex_formats.Particle);
@@ -537,20 +551,26 @@ pub const ParticleComputePass = struct {
 
         const existing_particles = @as([*]vertex_formats.Particle, @ptrCast(@alignCast(staging_read.mapped.?)))[0..self.max_particles];
 
-        // Find dead particle slots and replace with new particles
+        // Prepare particles to write
         const particles_to_write = try self.allocator.alloc(vertex_formats.Particle, self.max_particles);
         defer self.allocator.free(particles_to_write);
 
         @memcpy(particles_to_write, existing_particles);
 
+        // Assign this emitter's range: set emitter_id on ALL particles in range (dead or alive)
+        // This ensures the compute shader knows which emitter owns these slots
         var spawn_index: usize = 0;
-        for (particles_to_write, 0..) |*particle, i| {
-            if (spawn_index < new_particles.len and particle.lifetime <= 0.0) {
-                particle.* = new_particles[spawn_index];
-                particle.emitter_id = emitter_id; // Assign emitter ID
+        for (emitter_start_slot..emitter_end_slot) |slot_idx| {
+            if (spawn_index < new_particles.len) {
+                // Use initial particle data
+                particles_to_write[slot_idx] = new_particles[spawn_index];
+                particles_to_write[slot_idx].emitter_id = emitter_id;
                 spawn_index += 1;
+            } else {
+                // Fill remaining slots with dead particles owned by this emitter
+                particles_to_write[slot_idx].lifetime = 0.0;
+                particles_to_write[slot_idx].emitter_id = emitter_id;
             }
-            _ = i;
         }
 
         // Write merged particles to all frame buffers
@@ -640,80 +660,9 @@ pub const ParticleComputePass = struct {
         return self.particle_buffers[frame_index].particle_buffer_out.buffer;
     }
 
-    /// Get the current active particle count (returns max since GPU manages everything)
+    /// Get the current active particle count (based on number of active emitters)
     pub fn getParticleCount(self: *ParticleComputePass) u32 {
-        return self.max_particles; // GPU processes all slots
-    }
-
-    /// Debug: Read back particle data from GPU for inspection
-    pub fn debugReadParticles(self: *ParticleComputePass, frame_index: usize, allocator: std.mem.Allocator) ![]vertex_formats.Particle {
-        // Wait for all GPU work to finish before reading back data
-        try self.graphics_context.vkd.deviceWaitIdle(self.graphics_context.dev);
-
-        const buffer_size = self.max_particles * @sizeOf(vertex_formats.Particle);
-
-        // Create staging buffer to read from GPU
-        var staging_buffer = try Buffer.init(
-            self.graphics_context,
-            buffer_size,
-            1,
-            .{ .transfer_dst_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        defer staging_buffer.deinit();
-
-        // Copy from GPU buffer to staging buffer
-        try self.graphics_context.copyBuffer(
-            staging_buffer.buffer,
-            self.particle_buffers[frame_index].particle_buffer_out.buffer,
-            buffer_size,
-        );
-
-        // Map and read particle data
-        try staging_buffer.map(buffer_size, 0);
-        defer staging_buffer.unmap();
-
-        const gpu_particles = @as([*]vertex_formats.Particle, @ptrCast(@alignCast(staging_buffer.mapped.?)))[0..self.max_particles];
-
-        // Allocate and copy particle data
-        const particles = try allocator.alloc(vertex_formats.Particle, self.max_particles);
-        @memcpy(particles, gpu_particles);
-
-        return particles;
-    }
-
-    /// Debug: Print alive particles with their positions and velocities
-    pub fn debugPrintAliveParticles(self: *ParticleComputePass, frame_index: usize, allocator: std.mem.Allocator, max_to_print: usize) !void {
-        const particles = try self.debugReadParticles(frame_index, allocator);
-        defer allocator.free(particles);
-
-        var alive_count: usize = 0;
-        var printed: usize = 0;
-
-        log(.INFO, "particle_compute_pass", "=== PARTICLE DEBUG (Frame {}) ===", .{frame_index});
-
-        for (particles, 0..) |particle, i| {
-            if (particle.lifetime > 0.0) {
-                alive_count += 1;
-
-                if (printed < max_to_print) {
-                    log(.INFO, "particle_compute_pass", "  Particle[{}]: pos=({d:.2}, {d:.2}, {d:.2}), vel=({d:.2}, {d:.2}, {d:.2}), life={d:.2}/{d:.2}, emitter={}", .{
-                        i,
-                        particle.position[0],
-                        particle.position[1],
-                        particle.position[2],
-                        particle.velocity[0],
-                        particle.velocity[1],
-                        particle.velocity[2],
-                        particle.lifetime,
-                        particle.max_lifetime,
-                        particle.emitter_id,
-                    });
-                    printed += 1;
-                }
-            }
-        }
-
-        log(.INFO, "particle_compute_pass", "Total alive particles: {} / {} (showing first {})", .{ alive_count, self.max_particles, max_to_print });
+        const particles_per_emitter = self.max_particles / self.max_emitters;
+        return particles_per_emitter * self.emitter_count; // Only active emitter slots
     }
 };
