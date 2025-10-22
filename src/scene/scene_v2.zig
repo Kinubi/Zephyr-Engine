@@ -11,6 +11,7 @@ const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 
 // ECS imports
 const ecs = @import("../ecs.zig");
@@ -38,6 +39,9 @@ pub const Scene = struct {
 
     // Rendering pipeline for this scene
     render_graph: ?RenderGraph = null,
+
+    // Animation time tracking
+    time_elapsed: f32 = 0.0,
 
     /// Initialize a new scene
     pub fn init(
@@ -318,6 +322,7 @@ pub const Scene = struct {
         swapchain_depth_format: vk.Format,
     ) !void {
         const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
+        const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
 
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
@@ -335,6 +340,18 @@ pub const Scene = struct {
 
         try self.render_graph.?.addPass(&geometry_pass.base);
 
+        // Create and add LightVolumePass (renders after geometry)
+        const light_volume_pass = try LightVolumePass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            self.ecs_world,
+            swapchain_format,
+            swapchain_depth_format,
+        );
+
+        try self.render_graph.?.addPass(&light_volume_pass.base);
+
         // Compile the graph (setup passes, validate dependencies)
         try self.render_graph.?.compile();
 
@@ -347,6 +364,62 @@ pub const Scene = struct {
             try graph.execute(frame_info);
         } else {
             log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
+        }
+    }
+
+    /// Extract lights from ECS and populate the GlobalUbo
+    /// Also animates light positions in a circle
+    pub fn updateLights(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+        self.time_elapsed += dt;
+
+        const LightSystem = @import("../ecs.zig").LightSystem;
+        const PointLight = @import("../ecs.zig").PointLight;
+
+        var light_system = LightSystem.init(self.allocator);
+        defer light_system.deinit();
+
+        // Get view of all light entities
+        var view = try self.ecs_world.view(PointLight);
+        var iter = view.iterator();
+        var light_index: usize = 0;
+
+        // Animate and extract lights
+        while (iter.next()) |entry| : (light_index += 1) {
+            const point_light = entry.component;
+            const transform_ptr = self.ecs_world.get(Transform, entry.entity) orelse continue;
+
+            // Animate position in a circle
+            const radius: f32 = 1.5;
+            const height: f32 = 0.5;
+            const speed: f32 = 1.0;
+            const angle_offset: f32 = @as(f32, @floatFromInt(light_index)) * (2.0 * std.math.pi / 3.0);
+
+            const angle = self.time_elapsed * speed + angle_offset;
+            const x = @cos(angle) * radius;
+            const z = @sin(angle) * radius;
+
+            // Update transform position
+            transform_ptr.position = Math.Vec3.init(x, height, z);
+
+            // Extract to GlobalUbo
+            if (light_index < 16) {
+                global_ubo.point_lights[light_index] = .{
+                    .position = Math.Vec4.init(x, height, z, 1.0),
+                    .color = Math.Vec4.init(
+                        point_light.color.x * point_light.intensity,
+                        point_light.color.y * point_light.intensity,
+                        point_light.color.z * point_light.intensity,
+                        point_light.intensity,
+                    ),
+                };
+            }
+        }
+
+        global_ubo.num_point_lights = @intCast(@min(light_index, 16));
+
+        // Clear remaining light slots
+        for (light_index..16) |i| {
+            global_ubo.point_lights[i] = .{};
         }
     }
 };

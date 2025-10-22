@@ -78,7 +78,7 @@
                 }
             ]
         },
-        "_75" : {
+        "_63" : {
             "name" : "PointLight",
             "members" : [
                 {
@@ -93,7 +93,7 @@
                 }
             ]
         },
-        "_78" : {
+        "_66" : {
             "name" : "GlobalUbo",
             "members" : [
                 {
@@ -115,7 +115,7 @@
                 },
                 {
                     "name" : "pointLights",
-                    "type" : "_75",
+                    "type" : "_63",
                     "array" : [
                         16
                     ],
@@ -129,10 +129,28 @@
                     "name" : "numPointLights",
                     "type" : "int",
                     "offset" : 656
+                },
+                {
+                    "name" : "dt",
+                    "type" : "float",
+                    "offset" : 660
                 }
             ]
         },
-        "_81" : {
+        "_96" : {
+            "name" : "PointLight",
+            "members" : [
+                {
+                    "name" : "position",
+                    "type" : "vec4"
+                },
+                {
+                    "name" : "color",
+                    "type" : "vec4"
+                }
+            ]
+        },
+        "_176" : {
             "name" : "Push",
             "members" : [
                 {
@@ -162,11 +180,6 @@
             "location" : 5
         },
         {
-            "type" : "vec3",
-            "name" : "color",
-            "location" : 1
-        },
-        {
             "type" : "vec2",
             "name" : "uv",
             "location" : 2
@@ -180,6 +193,11 @@
             "type" : "vec3",
             "name" : "positionWorld",
             "location" : 4
+        },
+        {
+            "type" : "vec3",
+            "name" : "color",
+            "location" : 1
         }
     ],
     "outputs" : [
@@ -215,16 +233,16 @@
     ],
     "ubos" : [
         {
-            "type" : "_78",
+            "type" : "_66",
             "name" : "GlobalUbo",
-            "block_size" : 660,
+            "block_size" : 664,
             "set" : 0,
             "binding" : 0
         }
     ],
     "push_constants" : [
         {
-            "type" : "_81",
+            "type" : "_176",
             "name" : "push",
             "push_constant" : true
         }

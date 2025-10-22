@@ -912,12 +912,10 @@ pub const AssetManager = struct {
         // Set update flags when transitions are detected
         if (texture_completed) {
             self.texture_descriptors_updated = true;
-            log(.DEBUG, "asset_manager", "Texture descriptor update completed this frame", .{});
         }
 
         if (material_completed) {
             self.materials_updated = true;
-            log(.DEBUG, "asset_manager", "Material buffer update completed this frame", .{});
         }
     }
 

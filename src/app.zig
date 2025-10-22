@@ -332,7 +332,7 @@ pub const App = struct {
 
         // Back wall (white)
         const back_wall = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
-        try back_wall.setPosition(Math.Vec3.init(0, 0, half_size));
+        try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
@@ -361,6 +361,47 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
 
         log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene_v2.entities.items.len});
+
+        // ==================== Add Lights to Scene v2 ====================
+        log(.INFO, "app", "Adding lights to scene v2...", .{});
+
+        // Register PointLight component in scene_v2's ECS world
+        try scene_v2.ecs_world.registerComponent(new_ecs.PointLight);
+
+        // Main light (white, center-top)
+        const main_light = try scene_v2.ecs_world.createEntity();
+        const main_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(0, 1.5, 1.0));
+        try scene_v2.ecs_world.emplace(new_ecs.Transform, main_light, main_light_transform);
+        try scene_v2.ecs_world.emplace(new_ecs.PointLight, main_light, new_ecs.PointLight.initWithRange(
+            Math.Vec3.init(1.0, 1.0, 1.0), // White
+            3.0, // Intensity
+            10.0, // Range
+        ));
+        log(.INFO, "app", "Scene v2: Added main light", .{});
+
+        // Warm accent light (left side, orange)
+        const warm_light = try scene_v2.ecs_world.createEntity();
+        const warm_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0.5, 1.0));
+        try scene_v2.ecs_world.emplace(new_ecs.Transform, warm_light, warm_light_transform);
+        try scene_v2.ecs_world.emplace(new_ecs.PointLight, warm_light, new_ecs.PointLight.initWithRange(
+            Math.Vec3.init(1.0, 0.6, 0.2), // Orange
+            2.0, // Intensity
+            8.0, // Range
+        ));
+        log(.INFO, "app", "Scene v2: Added warm accent light", .{});
+
+        // Cool accent light (right side, blue)
+        const cool_light = try scene_v2.ecs_world.createEntity();
+        const cool_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0.5, 1.0));
+        try scene_v2.ecs_world.emplace(new_ecs.Transform, cool_light, cool_light_transform);
+        try scene_v2.ecs_world.emplace(new_ecs.PointLight, cool_light, new_ecs.PointLight.initWithRange(
+            Math.Vec3.init(0.2, 0.5, 1.0), // Blue
+            2.0, // Intensity
+            8.0, // Range
+        ));
+        log(.INFO, "app", "Scene v2: Added cool accent light", .{});
+
+        log(.INFO, "app", "Scene v2: Lights added successfully", .{});
 
         asset_manager.beginFrame();
         // Initialize RenderGraph for scene_v2
@@ -642,7 +683,12 @@ pub const App = struct {
             .projection = frame_info.camera.projectionMatrix,
             .dt = @floatCast(dt),
         };
-        // try point_light_renderer.update_point_lights(&frame_info, &ubo);
+
+        // Update lights from scene ECS
+        if (scene_v2_enabled) {
+            try scene_v2.updateLights(&ubo, @floatCast(dt));
+        }
+
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
 
         // Execute rasterization renderers through the forward renderer
