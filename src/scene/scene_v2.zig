@@ -40,6 +40,7 @@ pub const Scene = struct {
     // Rendering pipeline for this scene
     render_graph: ?RenderGraph = null,
     particle_compute_pass: ?*@import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass = null,
+    path_tracing_pass: ?*@import("../rendering/passes/path_tracing_pass.zig").PathTracingPass = null,
 
     // Emitter tracking: map ECS entity ID to GPU emitter ID
     emitter_to_gpu_id: std.AutoHashMap(EntityId, u32),
@@ -365,6 +366,20 @@ pub const Scene = struct {
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
     }
 
+    /// Toggle path tracing on/off (switches between path tracing and raster)
+    pub fn setPathTracingEnabled(self: *Scene, enabled: bool) void {
+        if (self.path_tracing_pass) |pass| {
+            pass.setEnabled(enabled);
+            if (enabled) {
+                log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s}", .{self.name});
+            } else {
+                log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s} (using raster)", .{self.name});
+            }
+        } else {
+            log(.WARN, "scene_v2", "Cannot toggle path tracing - pass not initialized", .{});
+        }
+    }
+
     /// Initialize rendering pipeline for this scene
     /// Must be called after scene creation to enable rendering
     pub fn initRenderGraph(
@@ -373,11 +388,16 @@ pub const Scene = struct {
         pipeline_system: *UnifiedPipelineSystem,
         swapchain_format: vk.Format,
         swapchain_depth_format: vk.Format,
+        thread_pool: *@import("../threading/thread_pool.zig").ThreadPool,
+        global_ubo_set: *@import("../rendering/ubo_set.zig").GlobalUboSet,
+        width: u32,
+        height: u32,
     ) !void {
         const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
         const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
         const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
         const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
+        const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
 
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
@@ -411,6 +431,25 @@ pub const Scene = struct {
         );
 
         try self.render_graph.?.addPass(&geometry_pass.base);
+
+        // Create PathTracingPass (alternative to raster rendering)
+        const path_tracing_pass = try PathTracingPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            thread_pool,
+            global_ubo_set,
+            self.ecs_world,
+            width,
+            height,
+        );
+
+        // Save reference for toggling path tracing
+        self.path_tracing_pass = path_tracing_pass;
+
+        // NOTE: Path tracing pass starts disabled (enable via setEnabled())
+        // For now, we add it to the graph but it won't execute unless enabled
+        try self.render_graph.?.addPass(&path_tracing_pass.base);
 
         // Create and add LightVolumePass (renders after geometry)
         const light_volume_pass = try LightVolumePass.create(

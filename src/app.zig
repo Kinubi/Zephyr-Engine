@@ -407,11 +407,20 @@ pub const App = struct {
 
         asset_manager.beginFrame();
         // Initialize RenderGraph for scene_v2
+        // Get window dimensions for path tracing pass
+        var window_width: c_int = 0;
+        var window_height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(self.window.window.?), &window_width, &window_height);
+
         try scene_v2.initRenderGraph(
             &self.gc,
             &unified_pipeline_system,
             swapchain.surface_format.format,
             try swapchain.depthFormat(),
+            thread_pool,
+            global_ubo_set,
+            @intCast(window_width),
+            @intCast(window_height),
         );
         log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
 
@@ -663,6 +672,18 @@ pub const App = struct {
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
         camera_controller.processInput(&self.window, viewer_object, dt);
+
+        // Toggle path tracing with 'T' key (no debouncing for simplicity)
+        const GLFW_KEY_T = 84;
+        const GLFW_PRESS = 1;
+        const t_key_state = c.glfwGetKey(@ptrCast(self.window.window.?), GLFW_KEY_T);
+        if (t_key_state == GLFW_PRESS) {
+            if (scene_v2_enabled and scene_v2.path_tracing_pass != null) {
+                const current_state = scene_v2.path_tracing_pass.?.enable_path_tracing;
+                scene_v2.setPathTracingEnabled(!current_state);
+            }
+        }
+
         frame_info.camera.viewMatrix = viewer_object.transform.local2world;
         frame_info.camera.updateProjectionMatrix();
         var ubo = GlobalUbo{
