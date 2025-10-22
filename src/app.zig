@@ -19,45 +19,25 @@ const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("rendering/frameinfo.zig").GlobalUbo;
 const GlobalUboSet = @import("rendering/ubo_set.zig").GlobalUboSet;
 
-// Scene imports
-const Scene = @import("scene/scene.zig").Scene;
-const GameObject = @import("scene/game_object.zig").GameObject;
-const Material = @import("assets/asset_manager.zig").Material;
-
-// Scene v2 imports (new ECS-based scene system)
+// Scene v2 imports (ECS-based scene system)
 const SceneV2 = @import("scene/scene_v2.zig").Scene;
 const GameObjectV2 = @import("scene/game_object_v2.zig").GameObject;
 
 // Asset system imports
 const AssetManager = @import("assets/asset_manager.zig").AssetManager;
+const Material = @import("assets/asset_manager.zig").Material;
 const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
 const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
 const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
-
-// Shader-pipeline integration removed in favor of the unified pipeline system
 
 // Unified pipeline system imports
 const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
-// Renderer imports
-const TexturedRenderer = @import("renderers/textured_renderer.zig").TexturedRenderer;
-const EcsRenderer = @import("renderers/ecs_renderer.zig").EcsRenderer;
-const PointLightRenderer = @import("renderers/point_light_renderer.zig").PointLightRenderer;
-const ParticleRenderer = @import("renderers/particle_renderer.zig").ParticleRenderer;
-const RaytracingRenderer = @import("renderers/raytracing_renderer.zig").RaytracingRenderer;
-
 // System imports
-// RaytracingSystem is now integrated into RaytracingRenderer
 const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
 
 const PARTICLE_MAX: u32 = 1024;
-
-// Render Pass System imports
-const GenericRenderer = @import("rendering/generic_renderer.zig").GenericRenderer;
-const RendererType = @import("rendering/generic_renderer.zig").RendererType;
-const RendererEntry = @import("rendering/generic_renderer.zig").RendererEntry;
-const SceneBridge = @import("rendering/scene_bridge.zig").SceneBridge;
 
 // Utility imports
 const Math = @import("utils/math.zig");
@@ -89,27 +69,13 @@ pub const App = struct {
     fps_last_time: f64 = 0.0,
     current_fps: f32 = 0.0,
 
+    // Module-level variables (static state shared across App instances)
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
 
-    // Individual renderers (still needed for initialization)
-    var textured_renderer: TexturedRenderer = undefined;
-    var ecs_renderer: EcsRenderer = undefined;
-    var point_light_renderer: PointLightRenderer = undefined;
-    var raytracing_renderer: RaytracingRenderer = undefined;
-    //var particle_renderer: ParticleRenderer = undefined;
-    var particle_renderer: ParticleRenderer = undefined;
-
-    // OLD: Generic forward renderer (DISABLED FOR RENDER GRAPH)
-    // var forward_renderer: GenericRenderer = undefined;
-
-    // OLD: Raytracing render pass (DISABLED FOR RENDER GRAPH)
-    // var rt_render_pass: GenericRenderer = undefined;
-
     var compute_shader_system: ComputeShaderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
-    // NOTE: Shader-pipeline integration removed - unified pipeline system handles hot reload now
 
     // Unified pipeline system
     var unified_pipeline_system: UnifiedPipelineSystem = undefined;
@@ -117,19 +83,15 @@ pub const App = struct {
 
     var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
-    var viewer_object: *GameObject = undefined;
     var camera_controller: KeyboardMovementController = undefined;
     var global_UBO_buffers: ?[]Buffer = undefined;
     var frame_info: FrameInfo = FrameInfo{};
 
     var frame_index: u32 = 0;
     var frame_counter: u64 = 0; // Global frame counter for scheduling
-    var scene: Scene = undefined;
     var thread_pool: *ThreadPool = undefined;
     var asset_manager: *AssetManager = undefined;
     var file_watcher: *FileWatcher = undefined;
-    // Application-owned FileWatcher for hot-reload; created early so it can be
-    // deinitialized after other systems that depend on it have been deinitialized.
 
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
@@ -148,10 +110,6 @@ pub const App = struct {
     // Raytracing system field
     var global_ubo_set: *GlobalUboSet = undefined;
 
-    // Scene bridge and view for rendering
-    var scene_bridge: SceneBridge = undefined;
-    // Generic renderer system is now the default rendering path
-
     // New coherent ECS system
     var new_ecs_world: new_ecs.World = undefined;
     var new_ecs_enabled: bool = false;
@@ -161,7 +119,7 @@ pub const App = struct {
 
     // Scene v2 (ECS-based scene)
     var scene_v2: SceneV2 = undefined;
-    var scene_v2_enabled: bool = false;
+    var scene_v2_enabled: bool = true; // Always enabled now
 
     // Path tracing toggle state
     var last_toggle_time: f64 = 0.0;
@@ -179,9 +137,7 @@ pub const App = struct {
         self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
         log(.INFO, "app", "Using device: {s}", .{self.gc.deviceName()});
         swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
-        // try swapchain.createRenderPass();
 
-        // try swapchain.createFramebuffers();
         try self.gc.createCommandPool();
 
         // Initialize Thread Pool with dynamic scaling
@@ -270,34 +226,10 @@ pub const App = struct {
 
         log(.INFO, "app", "Unified pipeline system initialized", .{});
 
-        // Shader-pipeline integration intentionally removed. Unified pipeline system is active.
+        // ==================== Scene v2: Cornell Box with Two Vases ====================
+        log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        // Initialize Scene with Asset Manager integration
-        scene = Scene.init(&self.gc, self.allocator, asset_manager);
-
-        // Enhanced Scene registers for asset completion callbacks during its init
-
-        scene.enableHotReload(file_watcher) catch |err| {
-            log(.WARN, "app", "Failed to enable hot reloading: {}", .{err});
-        };
-
-        // --- Load cube mesh using asset-based enhanced scene system ---
-        const cube_object = try scene.addModelAssetAsync("models/cube.obj", "textures/missing.png", Math.Vec3.init(0, 0.5, 0.5), // position
-            Math.Vec3.init(0, 0, 0), // rotation
-            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        log(.INFO, "app", "Added cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube_object.model_asset orelse @as(@TypeOf(cube_object.model_asset.?), @enumFromInt(0)), cube_object.material_asset orelse @as(@TypeOf(cube_object.material_asset.?), @enumFromInt(0)), cube_object.texture_asset orelse @as(@TypeOf(cube_object.texture_asset.?), @enumFromInt(0)) });
-
-        // Create another textured cube with a different texture (asset-based)
-        const cube2_object = try scene.addModelAssetAsync("models/cube.obj", "textures/default.png", Math.Vec3.init(0.7, -0.5, 0.5), // position
-            Math.Vec3.init(0, 0, 0), // rotation
-            Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        log(.INFO, "app", "Added second cube object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ cube2_object.model_asset orelse @as(@TypeOf(cube2_object.model_asset.?), @enumFromInt(0)), cube2_object.material_asset orelse @as(@TypeOf(cube2_object.material_asset.?), @enumFromInt(0)), cube2_object.texture_asset orelse @as(@TypeOf(cube2_object.texture_asset.?), @enumFromInt(0)) });
-
-        // // Add another vase with a different texture (asset-based)
-        // const vase1_object = try scene.addModelAssetAsync("models/smooth_vase.obj", "textures/error.png", Math.Vec3.init(-0.7, -0.5, 0.5), // position
-        //     Math.Vec3.init(0, 0, 0), // rotation
-        //     Math.Vec3.init(0.5, 0.5, 0.5)); // scale
-        // log(.INFO, "app", "Added first vase object (asset-based) with asset IDs: model={}, material={}, texture={}", .{ vase1_object.model_asset orelse @as(@TypeOf(vase1_object.model_asset.?), @enumFromInt(0)), vase1_object.material_asset orelse @as(@TypeOf(vase1_object.material_asset.?), @enumFromInt(0)), vase1_object.texture_asset orelse @as(@TypeOf(vase1_object.texture_asset.?), @enumFromInt(0)) });
+        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, "cornell_box");
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -312,12 +244,6 @@ pub const App = struct {
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
-
-        // ==================== Scene v2: Cornell Box with Two Vases ====================
-        log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
-
-        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, "cornell_box");
-        scene_v2_enabled = true;
 
         // Cornell Box dimensions - smaller and pushed back so camera can see it
         const box_size: f32 = 2.0; // Smaller box
@@ -460,7 +386,6 @@ pub const App = struct {
             self.allocator,
         );
 
-        viewer_object = try scene.addEmpty();
         camera_controller = KeyboardMovementController.init();
 
         camera = Camera{ .fov = 75.0, .window = self.window };
@@ -469,8 +394,6 @@ pub const App = struct {
 
         // Register global descriptor sets with the pipeline system for automatic binding
         unified_pipeline_system.setGlobalDescriptorSets(global_ubo_set.sets);
-
-        //_ = try scene.updateSyncResources(self.allocator);
 
         // Initialize unified textured renderer with shared pipeline system
         // textured_renderer = try TexturedRenderer.init(
@@ -514,23 +437,7 @@ pub const App = struct {
         //     global_ubo_set,
         // );
 
-        // --- Raytracing pipeline setup ---
-        // Use the same global descriptor set and layout as the renderer
-
-        // Create scene bridge for render pass system and raytracing
-        scene_bridge = SceneBridge.init(&scene, self.allocator);
-
-        // // Connect new ECS World to SceneBridge for particle extraction
-        // if (new_ecs_enabled) {
-        //     scene_bridge.setEcsWorld(&new_ecs_world);
-        //     log(.INFO, "app", "Connected ECS World to SceneBridge", .{});
-        // }
-
-        // Note: TLAS creation will be handled in the update loop once BLAS is complete
-        // SBT will be created by raytracing renderer when pipeline is ready
-
-        log(.INFO, "app", "Creating unified particle renderer...", .{});
-        // particle_renderer = try ParticleRenderer.init(
+        log(.INFO, "app", "Initialization complete", .{});
         //     self.allocator,
         //     &self.gc,
         //     &shader_manager,
@@ -675,7 +582,8 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
-        camera_controller.processInput(&self.window, viewer_object, dt);
+        // Process camera input
+        camera_controller.processInput(&self.window, &camera, dt);
 
         // Toggle path tracing with 'T' key (with debouncing)
         const GLFW_KEY_T = 84;
@@ -691,7 +599,7 @@ pub const App = struct {
             }
         }
 
-        frame_info.camera.viewMatrix = viewer_object.transform.local2world;
+        // Use camera view matrix directly (no viewer object needed)
         frame_info.camera.updateProjectionMatrix();
         var ubo = GlobalUbo{
             .view = frame_info.camera.viewMatrix,
@@ -700,9 +608,7 @@ pub const App = struct {
         };
 
         // Update ECS transform hierarchies
-        if (new_ecs_enabled) {
-            try transform_system.update(&new_ecs_world);
-        }
+        try transform_system.update(&new_ecs_world);
 
         compute_shader_system.beginCompute(frame_info);
         // Update scene (animations, physics, lights, etc.)
@@ -775,11 +681,6 @@ pub const App = struct {
         // Clean up unified systems (forward_renderer already deinit'd particle renderer)
         resource_binder.deinit();
         unified_pipeline_system.deinit();
-
-        // Cleanup heap-allocated shader library
-
-        //particle_renderer.deinit();
-        scene.deinit();
 
         // Clean up Scene v2
         if (scene_v2_enabled) {

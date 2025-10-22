@@ -2,115 +2,149 @@
 
 This directory contains technical documentation for the ZulkanZengine rendering system.
 
-## Pipeline & Rendering Systems
+## Core Architecture
 
-### Core Systems
+### ECS & Scene Management ✅ IMPLEMENTED
 
-- **[Pipeline Caching](PIPELINE_CACHING.md)** ✅ *Updated: Oct 2025*
-  - Persistent Vulkan pipeline cache for faster startup times
-  - Automatic load/save of compiled pipelines
-  - ~66% improvement in pipeline creation on subsequent launches
-  - Fully integrated with UnifiedPipelineSystem
-  - **Quick Start**: See [Pipeline Caching Quick Reference](PIPELINE_CACHING_QUICK_REF.md)
+- **[ECS System](ECS_SYSTEM.md)** *Updated: Oct 2025*
+  - Entity lifecycle, component storage, and system execution
+  - Components: Transform, MeshRenderer, Camera, Light
+  - Systems: TransformSystem (hierarchies), RenderSystem (extraction)
+  - Scene v2 with entity spawning and lifecycle management
 
-- **[Unified Pipeline Migration Guide](UNIFIED_PIPELINE_MIGRATION.md)** 
-  - Migration from fragmented pipeline/descriptor systems to unified approach
+- **[ECS Integration Guide](ECS_INTEGRATION_GUIDE.md)**
+  - Adding new components and systems
+  - Query patterns and best practices
+  - Performance optimization
+
+- **[Transform Component Summary](TRANSFORM_COMPONENT_SUMMARY.md)**
+  - Hierarchical transform system
+  - World matrix propagation
+  - Parent-child relationships
+
+### Rendering Systems ✅ IMPLEMENTED
+
+- **[Path Tracing Integration](PATH_TRACING_INTEGRATION.md)** *Updated: Oct 2025*
+  - Real-time ray tracing pass with BVH acceleration
+  - Async BVH rebuild on asset loading
+  - Light and particle integration design (binding 7 & 8)
+  - Toggle between RT and raster modes
+
+- **[Unified Pipeline System](UNIFIED_PIPELINE_MIGRATION.md)** ✅ Complete
+  - Centralized pipeline creation and management
   - Automatic descriptor layout extraction from shaders
-  - Hot-reload integration
-  - Resource binding patterns and best practices
+  - Resource binding patterns and hot-reload integration
+
+- **[Pipeline Caching](PIPELINE_CACHING.md)** ✅ Complete
+  - Persistent Vulkan pipeline cache (~66% faster startup)
+  - Automatic load/save of compiled pipelines
+  - **Quick Ref**: [Pipeline Caching Quick Reference](PIPELINE_CACHING_QUICK_REF.md)
+
+- **[Render Pass Vulkan Integration](RENDER_PASS_VULKAN_INTEGRATION.md)**
+  - RenderGraph system with data-driven passes
+  - Pass coordination: GeometryPass, LightingVolumePass, PathTracingPass
+  - Swapchain integration and presentation
 
 - **[Dynamic Pipeline System](DYNAMIC_PIPELINE_SYSTEM.md)**
   - Real-time pipeline creation and hot reloading
-  - Template-based pipeline configuration
   - Shader change detection and automatic rebuilds
-  - Integration with GenericRenderer
 
-### Specialized Systems
+### Asset & Threading Systems ✅ IMPLEMENTED
 
-- **[Render Pass Vulkan Integration](RENDER_PASS_VULKAN_INTEGRATION.md)**
-  - Current swapchain-driven render pass flow
-  - How renderers coordinate begin/end with the swapchain
-  - Guidance for adding bespoke off-screen passes
-
-- **[Particle Renderer Migration](PARTICLE_RENDERER_MIGRATION.md)**
-  - Unified particle system using compute and render pipelines
-  - Migration from old particle system
-  - GPU-based particle simulation
-
-## Threading & Asset Systems
+- **[Asset System Architecture](ASSET_SYSTEM_ARCHITECTURE.md)**
+  - AssetManager with thread pool integration
+  - Hot reload system for shaders and assets
+  - Material and texture management
+  - **Quick Refs**: 
+    - [Asset System Documentation](ASSET_SYSTEM_DOCUMENTATION.md)
+    - [Asset System Quick Reference](ASSET_SYSTEM_QUICK_REFERENCE.md)
 
 - **[Enhanced Thread Pool](ENHANCED_THREAD_POOL.md)**
-  - Multi-subsystem thread pool architecture
+  - Multi-subsystem work-stealing thread pool
+  - Subsystems: hot_reload, bvh_building, asset_loading
   - Work item prioritization and scheduling
-  - Hot reload, BVH building, and asset loading integration
-  
-- **[Enhanced Thread Pool Summary](ENHANCED_THREAD_POOL_SUMMARY.md)**
-  - Quick reference for thread pool usage
-  - Subsystem configuration
-  - Performance considerations
+  - **Quick Ref**: [Thread Pool Summary](ENHANCED_THREAD_POOL_SUMMARY.md)
 
-- **[Enhanced Asset Management](ENHANCED_ASSET_MANAGEMENT.md)**
-  - Asynchronous asset loading system
-  - Thread pool integration
-  - GPU resource management
-
-## Gameplay & ECS
-
-- **[ECS System](ECS_SYSTEM.md)** ✅ *Updated: Oct 2025*
-  - Entity lifecycle, component storage, and scheduler overview
-  - Job-based system execution and multithreaded guard sharing
-  - Stage metrics, renderer extraction flow, and extension points
+- **[Lighting System](LIGHTING_SYSTEM.md)**
+  - Point light management
+  - Lighting volume pass integration
 
 ## System Status
 
 | System | Status | Last Updated |
 |--------|--------|--------------|
+| ECS Core | ✅ Complete | Oct 22, 2025 |
+| Scene v2 | ✅ Complete | Oct 22, 2025 |
+| Path Tracing Pass | ✅ Complete | Oct 22, 2025 |
+| RenderGraph | ✅ Complete | Oct 22, 2025 |
+| Asset Manager | ✅ Complete | Oct 22, 2025 |
+| Hot Reload System | ✅ Complete | Oct 22, 2025 |
+| Thread Pool | ✅ Complete | Oct 16, 2025 |
 | Pipeline Caching | ✅ Complete | Oct 16, 2025 |
-| Unified Pipeline System | ✅ Complete | - |
-| Dynamic Pipelines | ✅ Complete | - |
-| Enhanced Thread Pool | ✅ Complete | - |
-| Enhanced Asset Management | ✅ Complete | - |
-| Particle Renderer | ✅ Complete | - |
-| Render Pass Integration Notes | ✅ Complete | Oct 19, 2025 |
-| ECS System | ✅ Complete | Oct 19, 2025 |
+| Multi-threaded BVH | ✅ Complete | Oct 22, 2025 |
+| Camera Controller | ✅ Complete | Oct 22, 2025 |
 
-## Quick Start
+## Recent Major Changes
 
-### For New Developers
+### October 22, 2025 - Legacy Cleanup & Camera Controller
+- ✅ **Removed Legacy Systems**
+  - Deleted old Scene, GameObject, SceneBridge
+  - Removed old renderers (TexturedRenderer, EcsRenderer, PointLightRenderer, etc.)
+  - Cleaned up render_system to use render_data_types instead of SceneBridge
+  
+- ✅ **Camera Controller Implementation**
+  - WASD movement, arrow key rotation
+  - Direct camera manipulation for ECS scene
+  - Smooth delta-time based controls
 
-1. Start with **[Unified Pipeline Migration Guide](UNIFIED_PIPELINE_MIGRATION.md)** to understand the core pipeline system
-2. Read **[Pipeline Caching Quick Reference](PIPELINE_CACHING_QUICK_REF.md)** for instant performance boost
-3. Check **[Dynamic Pipeline System](DYNAMIC_PIPELINE_SYSTEM.md)** for hot-reload capabilities
+- ✅ **Path Tracing Logging Cleanup**
+  - Removed verbose frame-by-frame logs
+  - Kept only critical warnings and errors
 
-### For Existing Developers
+### October 2025 - Path Tracing & BVH
+- ✅ **PathTracingPass Implementation**
+  - 7 descriptor bindings (TLAS, output, camera, vertices, indices, materials, textures)
+  - Automatic BVH rebuild detection from async asset loading
+  - Toggle with 'T' key, automatic geometry pass disable
+  - Manual descriptor set binding for proper validation
 
-If you're updating old code:
-1. See **[Unified Pipeline Migration Guide](UNIFIED_PIPELINE_MIGRATION.md)** for migration patterns
-2. Review **[Enhanced Thread Pool Summary](ENHANCED_THREAD_POOL_SUMMARY.md)** for threading changes
-3. Check **[Enhanced Asset Management](ENHANCED_ASSET_MANAGEMENT.md)** for asset system updates
-
-## Recent Changes
-
-### October 16, 2025
-- ✅ **Pipeline Caching System** - Implemented persistent Vulkan pipeline cache
-  - Automatic cache load on startup
-  - Automatic cache save on shutdown
-  - ~66% faster pipeline creation with cache
-  - Disk serialization to `cache/unified_pipeline_cache.bin`
-  - Full integration with UnifiedPipelineSystem and PipelineBuilder
+- ✅ **Async Asset Detection**
+  - Mesh asset ID tracking in RenderSystem
+  - Detects when async loads complete
+  - Triggers BVH rebuild automatically
 
 ### Recent TODO Completions
 - ✅ Pipeline hashing and caching implementation
 - ✅ Vulkan pipeline cache disk serialization
 - ✅ PipelineBuilder cache integration
 
-### Active TODOs (18 remaining)
-See main repository for current TODO list. Major categories:
-- Particle system improvements (emission, buffer management)
-- Per-object uniform buffer management
-- Raytracing pipeline completion
-- Frustum culling implementation
-- Scene data extraction improvements
+### October 16, 2025 - Pipeline Caching
+- ✅ **Pipeline Caching System**
+  - Automatic cache load/save
+  - ~66% faster pipeline creation with cache
+  - Disk serialization to `cache/unified_pipeline_cache.bin`
+
+## Quick Start
+
+### For New Developers
+
+1. **ECS Basics**: Start with [ECS System](ECS_SYSTEM.md) to understand entity-component architecture
+2. **Scene Setup**: Read [ECS Integration Guide](ECS_INTEGRATION_GUIDE.md) for adding entities
+3. **Rendering**: Check [Path Tracing Integration](PATH_TRACING_INTEGRATION.md) for RT rendering
+4. **Assets**: See [Asset System Quick Reference](ASSET_SYSTEM_QUICK_REFERENCE.md) for loading models
+
+### For Rendering Work
+
+1. **Pipeline System**: [Unified Pipeline Migration](UNIFIED_PIPELINE_MIGRATION.md)
+2. **Caching**: [Pipeline Caching Quick Reference](PIPELINE_CACHING_QUICK_REF.md)
+3. **Passes**: [Render Pass Vulkan Integration](RENDER_PASS_VULKAN_INTEGRATION.md)
+4. **RT**: [Path Tracing Integration](PATH_TRACING_INTEGRATION.md)
+
+### For Asset/Threading Work
+
+1. **Asset System**: [Asset System Architecture](ASSET_SYSTEM_ARCHITECTURE.md)
+2. **Threading**: [Enhanced Thread Pool Summary](ENHANCED_THREAD_POOL_SUMMARY.md)
+3. **Hot Reload**: Check shader_hot_reload.zig implementation
 
 ## Contributing
 

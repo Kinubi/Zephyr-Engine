@@ -5,7 +5,9 @@ const Transform = @import("../components/transform.zig").Transform;
 const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
 const Camera = @import("../components/camera.zig").Camera;
 const math = @import("../../utils/math.zig");
-const SceneBridge = @import("../../rendering/scene_bridge.zig");
+const render_data_types = @import("../../rendering/render_data_types.zig");
+const RaytracingData = render_data_types.RaytracingData;
+const RasterizationData = render_data_types.RasterizationData;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../../assets/asset_manager.zig").AssetId;
 const Mesh = @import("../../core/graphics_context.zig").Mesh;
@@ -231,14 +233,14 @@ pub const RenderSystem = struct {
         return self.renderables_dirty;
     }
 
-    /// Get raytracing data from current renderables (analogous to SceneBridge.getRaytracingData)
+    /// Get raytracing data from current renderables
     /// Caller must free the returned RaytracingData's instances and geometries slices
     pub fn getRaytracingData(
         self: *RenderSystem,
         world: *World,
         asset_manager: *AssetManager,
         allocator: std.mem.Allocator,
-    ) !SceneBridge.RaytracingData {
+    ) !RaytracingData {
         // First extract current render data
         var render_data = try self.extractRenderData(world);
         defer render_data.deinit();
@@ -251,14 +253,14 @@ pub const RenderSystem = struct {
         }
 
         // Allocate slices for RT data based on total mesh count
-        var geometries = try allocator.alloc(SceneBridge.RaytracingData.RTGeometry, total_meshes);
+        var geometries = try allocator.alloc(RaytracingData.RTGeometry, total_meshes);
         errdefer allocator.free(geometries);
 
-        var instances = try allocator.alloc(SceneBridge.RaytracingData.RTInstance, total_meshes);
+        var instances = try allocator.alloc(RaytracingData.RTInstance, total_meshes);
         errdefer allocator.free(instances);
 
         // Empty materials for now (will be populated from asset_manager later)
-        const materials = try allocator.alloc(SceneBridge.RasterizationData.MaterialData, 0);
+        const materials = try allocator.alloc(RasterizationData.MaterialData, 0);
         errdefer allocator.free(materials);
 
         // Convert renderables to RT format (one instance per mesh)
@@ -299,7 +301,7 @@ pub const RenderSystem = struct {
             }
         }
 
-        return SceneBridge.RaytracingData{
+        return RaytracingData{
             .instances = instances,
             .geometries = geometries,
             .materials = materials,

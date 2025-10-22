@@ -5,8 +5,7 @@ const Buffer = @import("../core/buffer.zig").Buffer;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const log = @import("../utils/log.zig").log;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
-const SceneBridge = @import("../rendering/scene_bridge.zig");
-
+const RenderData = @import("../rendering/render_data_types.zig");
 // Import the new multithreaded BVH builder
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
 const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
@@ -214,7 +213,7 @@ pub const RaytracingSystem = struct {
     }
 
     /// Create BLAS asynchronously using pre-computed raytracing data from the scene bridge
-    pub fn createBlasAsyncFromRtData(self: *RaytracingSystem, rt_data: SceneBridge.RaytracingData, completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void, callback_context: ?*anyopaque) !void {
+    pub fn createBlasAsyncFromRtData(self: *RaytracingSystem, rt_data: RenderData.RaytracingData, completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void, callback_context: ?*anyopaque) !void {
         if (self.bvh_build_in_progress) {
             // Reset progress flag to allow new build to supersede
             self.bvh_build_in_progress = false;
@@ -225,7 +224,7 @@ pub const RaytracingSystem = struct {
     }
 
     /// Create TLAS asynchronously using pre-computed raytracing data from the scene bridge
-    pub fn createTlasAsyncFromRtData(self: *RaytracingSystem, rt_data: SceneBridge.RaytracingData, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
+    pub fn createTlasAsyncFromRtData(self: *RaytracingSystem, rt_data: RenderData.RaytracingData, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
         // Wait for BLAS to complete first
         // if (!self.bvh_builder.isWorkComplete()) {
         //     log(.WARN, "RaytracingSystem", "BLAS builds still in progress, cannot create TLAS yet", .{});
@@ -411,10 +410,10 @@ pub const RaytracingSystem = struct {
     }
 
     /// Update BVH state using data gathered from the scene bridge
-    /// Update using SceneBridge (for legacy scene system)
-    pub fn updateFromSceneBridge(self: *RaytracingSystem, scene_bridge: *SceneBridge.SceneBridge, frame_info: *const FrameInfo) !bool {
+    /// Update using RenderData (for legacy scene system)
+    pub fn updateFromRenderData(self: *RaytracingSystem, scene_bridge: *RenderData.RenderData, frame_info: *const FrameInfo) !bool {
         _ = frame_info;
-        // Check if BVH rebuild is needed using SceneBridge's intelligent tracking
+        // Check if BVH rebuild is needed using RenderData's intelligent tracking
         if (scene_bridge.checkBvhRebuildNeeded(false)) {
             // Get current raytracing data (will be rebuilt if cache is dirty)
             const rebuild_rt_data = scene_bridge.getRaytracingData();

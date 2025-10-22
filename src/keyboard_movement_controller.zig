@@ -5,62 +5,99 @@ const Math = @import("utils/math.zig");
 const Window = @import("window.zig").Window;
 const Camera = @import("rendering/camera.zig").Camera;
 const glfw = @import("mach-glfw");
-const GameObject = @import("scene/game_object.zig").GameObject;
 
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
+/// Keyboard movement controller for direct camera manipulation
+/// Updates camera position and orientation based on keyboard input
 pub const KeyboardMovementController = struct {
+    move_speed: f32 = 3.0,
+    look_speed: f32 = 1.5,
+
+    // Track camera state
+    position: Math.Vec3 = Math.Vec3.init(0, 0, 0),
+    rotation: Math.Vec3 = Math.Vec3.init(0, 0, 0), // pitch, yaw, roll
+
     pub fn init() KeyboardMovementController {
-        return KeyboardMovementController{};
+        return KeyboardMovementController{
+            .position = Math.Vec3.init(0, 0, 3), // Start slightly back from origin
+            .rotation = Math.Vec3.init(0, 0, 0),
+        };
     }
 
-    pub fn processInput(self: *KeyboardMovementController, window: *Window, object: *GameObject, dt: f64) void {
-        var rotation = Math.Vec3.init(0.0, 0.0, 0.0);
-        const lookspeed: f32 = 1;
-        _ = self;
+    /// Process keyboard input and update camera
+    pub fn processInput(self: *KeyboardMovementController, window: *Window, camera: *Camera, dt: f64) void {
+        const dt_f32 = @as(f32, @floatCast(dt));
+
+        // Handle rotation (arrow keys)
+        var rotation_delta = Math.Vec3.init(0.0, 0.0, 0.0);
 
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_LEFT) == c.GLFW_PRESS) {
-            rotation = rotation.add(Math.Vec3.init(0.0, 1, 0));
+            rotation_delta.y += 1.0; // Yaw left
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_RIGHT) == c.GLFW_PRESS) {
-            rotation = rotation.add(Math.Vec3.init(0.0, -1, 0));
+            rotation_delta.y -= 1.0; // Yaw right
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_UP) == c.GLFW_PRESS) {
-            rotation = rotation.add(Math.Vec3.init(1, 0, 0));
+            rotation_delta.x -= 1.0; // Pitch up
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_DOWN) == c.GLFW_PRESS) {
-            rotation = rotation.add(Math.Vec3.init(-1, 0, 0));
-        }
-        rotation = Math.Vec3.normalize(rotation);
-
-        if (Math.Vec3.dot(rotation, rotation) > std.math.floatMin(f32)) {
-            object.transform.rotate(Math.Quat.fromEuler(lookspeed * @as(f32, @floatCast(dt)) * rotation.x, lookspeed * @as(f32, @floatCast(dt)) * rotation.y, lookspeed * @as(f32, @floatCast(dt)) * rotation.z));
+            rotation_delta.x += 1.0; // Pitch down
         }
 
+        // Apply rotation if any input detected
+        if (Math.Vec3.dot(rotation_delta, rotation_delta) > std.math.floatMin(f32)) {
+            rotation_delta = Math.Vec3.normalize(rotation_delta);
+            self.rotation = Math.Vec3.add(self.rotation, Math.Vec3.scale(rotation_delta, self.look_speed * dt_f32));
+
+            // Clamp pitch to prevent gimbal lock
+            self.rotation.x = std.math.clamp(self.rotation.x, -1.5, 1.5);
+        }
+
+        // Handle movement (WASD + Space/Ctrl)
         var direction = Math.Vec3.init(0.0, 0.0, 0.0);
-        const movespeed: f32 = 1;
+
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_W) == c.GLFW_PRESS) {
-            direction = direction.add(Math.Vec3.init(0.0, 0, -1));
+            direction.z -= 1.0; // Forward
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_S) == c.GLFW_PRESS) {
-            direction = direction.add(Math.Vec3.init(0.0, 0, 1));
+            direction.z += 1.0; // Backward
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_A) == c.GLFW_PRESS) {
-            direction = direction.add(Math.Vec3.init(1, 0, 0));
+            direction.x -= 1.0; // Left
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_D) == c.GLFW_PRESS) {
-            direction = direction.add(Math.Vec3.init(-1, 0, 0));
+            direction.x += 1.0; // Right
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_SPACE) == c.GLFW_PRESS) {
-            direction = direction.add(Math.Vec3.init(0, 1, 0));
+            direction.y -= 1.0; // Down
         }
         if (c.glfwGetKey(@ptrCast(window.window), c.GLFW_KEY_LEFT_CONTROL) == c.GLFW_PRESS) {
-            direction = direction.add(Math.Vec3.init(0, -1, 0));
+            direction.y += 1.0; // Up
         }
+
+        // Apply movement if any input detected
         if (Math.Vec3.dot(direction, direction) > std.math.floatMin(f32)) {
-            object.transform.translate(Math.Vec3.normalize(direction).scale(movespeed * @as(f32, @floatCast(dt))));
+            direction = Math.Vec3.normalize(direction);
+
+            // Calculate forward/right vectors from rotation
+            const yaw = self.rotation.y;
+            const forward = Math.Vec3.init(-std.math.sin(yaw), 0, -std.math.cos(yaw));
+            const right = Math.Vec3.init(std.math.cos(yaw), 0, -std.math.sin(yaw));
+            const up = Math.Vec3.init(0, 1, 0);
+
+            var movement = Math.Vec3.init(0, 0, 0);
+            movement = Math.Vec3.add(movement, Math.Vec3.scale(forward, direction.z));
+            movement = Math.Vec3.add(movement, Math.Vec3.scale(right, direction.x));
+            movement = Math.Vec3.add(movement, Math.Vec3.scale(up, direction.y));
+
+            movement = Math.Vec3.scale(movement, self.move_speed * dt_f32);
+            self.position = Math.Vec3.add(self.position, movement);
         }
+
+        // Update camera view matrix using YXZ rotation (yaw, pitch, roll)
+        camera.setViewYXZ(self.position, self.rotation);
     }
 };
