@@ -182,7 +182,6 @@ pub const PathTracingPass = struct {
             .per_frame = per_frame,
         };
 
-        log(.INFO, "path_tracing_pass", "Created PathTracingPass ({}x{}, format={})", .{ width, height, swapchain_format });
         return pass;
     }
 
@@ -212,7 +211,6 @@ pub const PathTracingPass = struct {
         // Update shader binding table
         try self.rt_system.updateShaderBindingTable(entry.vulkan_pipeline);
 
-        log(.INFO, "path_tracing_pass", "Setup complete", .{});
         try self.updateDescriptors();
     }
 
@@ -333,8 +331,6 @@ pub const PathTracingPass = struct {
             try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
             self.descriptor_dirty_flags[frame_idx] = false;
         }
-
-        log(.INFO, "path_tracing_pass", "Updated descriptors for all frames", .{});
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -610,19 +606,14 @@ pub const PathTracingPass = struct {
         const frame_index = frame_info.current_frame;
 
         // Check various dirty flags BEFORE updating (like rt_renderer.update does)
-        const raytracing_dirty = self.render_system.checkBvhRebuildNeeded();
+        _ = self.render_system.checkBvhRebuildNeeded();
         const materials_dirty = self.asset_manager.materials_updated;
         const textures_dirty = self.asset_manager.texture_descriptors_updated;
-
-        if (raytracing_dirty) {
-            log(.INFO, "path_tracing_pass", "Geometry changed - triggering BVH rebuild", .{});
-        }
 
         // Update BVH using rt_system (handles BLAS/TLAS building)
         const bvh_rebuilt = try self.rt_system.update(&self.render_system, self.ecs_world, self.asset_manager, frame_info);
 
         if (bvh_rebuilt) {
-            log(.INFO, "path_tracing_pass", "BVH rebuilt successfully", .{});
             // Mark renderables as synced after BVH rebuild
             self.render_system.markRenderablesSynced();
         }
@@ -631,7 +622,6 @@ pub const PathTracingPass = struct {
         if (self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
             (!self.tlas_valid or self.rt_system.tlas_dirty))
         {
-            log(.INFO, "path_tracing_pass", "TLAS changed - updating reference", .{});
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
         }
@@ -660,7 +650,6 @@ pub const PathTracingPass = struct {
             per_frame.index_infos.items.len != geometry_count;
 
         if (needs_update) {
-            log(.INFO, "path_tracing_pass", "Updating descriptors - bvh_rebuilt={} materials={} textures={} geom_count={}", .{ bvh_rebuilt, materials_dirty, textures_dirty, geometry_count });
             try self.updateDescriptors();
         }
     }
@@ -668,11 +657,6 @@ pub const PathTracingPass = struct {
     /// Toggle path tracing on/off (allows switching to raster)
     pub fn setEnabled(self: *PathTracingPass, enabled: bool) void {
         self.enable_path_tracing = enabled;
-        if (enabled) {
-            log(.INFO, "path_tracing_pass", "Path tracing enabled", .{});
-        } else {
-            log(.INFO, "path_tracing_pass", "Path tracing disabled", .{});
-        }
     }
 
     /// Get the path-traced output texture

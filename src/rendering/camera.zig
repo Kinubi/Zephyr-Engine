@@ -106,12 +106,12 @@ pub const Camera = struct {
     }
 
     pub fn setViewYXZ(self: *Camera, position: Math.Vec3, rotation: Math.Vec3) void {
-        const c3 = Math.cos(rotation.z);
-        const s3 = Math.sin(rotation.z);
-        const c2 = Math.cos(rotation.x);
-        const s2 = Math.sin(rotation.x);
-        const c1 = Math.cos(rotation.y);
-        const s1 = Math.sin(rotation.y);
+        const c3 = std.math.cos(rotation.z);
+        const s3 = std.math.sin(rotation.z);
+        const c2 = std.math.cos(rotation.x);
+        const s2 = std.math.sin(rotation.x);
+        const c1 = std.math.cos(rotation.y);
+        const s1 = std.math.sin(rotation.y);
         const u = Math.Vec3.init(c1 * c3 + s1 * s2 * s3, c2 * s3, c1 * s2 * s3 - c3 * s1);
         const v = Math.Vec3.init(c3 * s1 * s2 - c1 * s3, c2 * c3, c1 * c3 * s2 + s1 * s3);
         const w = Math.Vec3.init(c2 * s1, -s2, c1 * c2);
