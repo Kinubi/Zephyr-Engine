@@ -12,11 +12,15 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    gl_PointSize = 14.0;
+    // Transform world position to view space
+    vec4 viewPos = ubo.view * vec4(inPosition, 1.0);
     
-    // Transform world position to clip space
-    vec4 worldPos = vec4(inPosition, 1.0);
-    gl_Position = ubo.projection * ubo.view * worldPos;
+    // Scale point size based on distance from camera
+    float distance = length(viewPos.xyz);
+    gl_PointSize = 14.0 / distance;
+    
+    // Transform to clip space
+    gl_Position = ubo.projection * viewPos;
     
     fragColor = inColor; // Pass full RGBA
 }

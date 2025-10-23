@@ -12,6 +12,7 @@ const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig"
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
+const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 
 // ECS imports
 const ecs = @import("../ecs.zig");
@@ -55,6 +56,9 @@ pub const Scene = struct {
     // Cache view-projection matrix for particle world-to-screen projection
     cached_view_proj: Math.Mat4x4 = Math.Mat4x4.identity(),
 
+    // Performance monitoring
+    performance_monitor: ?*PerformanceMonitor = null,
+
     /// Initialize a new scene
     pub fn init(
         allocator: std.mem.Allocator,
@@ -80,13 +84,17 @@ pub const Scene = struct {
         };
     }
 
+    /// Set the performance monitor for profiling
+    pub fn setPerformanceMonitor(self: *Scene, monitor: ?*PerformanceMonitor) void {
+        self.performance_monitor = monitor;
+    }
+
     /// Spawn a static prop with mesh and texture
     pub fn spawnProp(
         self: *Scene,
         model_path: []const u8,
         texture_path: []const u8,
     ) !*GameObject {
-        log(.INFO, "scene_v2", "Spawning prop: {s}", .{model_path});
 
         // Load assets asynchronously using the correct API
         const AssetType = @import("../assets/asset_types.zig").AssetType;
@@ -123,8 +131,6 @@ pub const Scene = struct {
 
         try self.game_objects.append(self.allocator, game_object);
         const last_index = self.game_objects.items.len - 1;
-
-        log(.INFO, "scene_v2", "Spawned prop entity {} with assets: model={}, material={}, texture={}", .{ @intFromEnum(entity), @intFromEnum(model_id), @intFromEnum(material_id), @intFromEnum(texture_id) });
 
         return &self.game_objects.items[last_index];
     }
@@ -428,6 +434,7 @@ pub const Scene = struct {
             pipeline_system,
             self.asset_manager,
             self.ecs_world,
+            global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
         );
@@ -464,6 +471,7 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             self.ecs_world,
+            global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
         );
@@ -475,6 +483,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
+            global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
             10000, // Max 10,000 particles
@@ -514,7 +523,17 @@ pub const Scene = struct {
                 if (!pass.enabled) continue;
                 if (pass.isComputePass()) continue; // Skip compute passes
 
+                // Begin pass timing
+                if (self.performance_monitor) |pm| {
+                    try pm.beginPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
+                }
+
                 try pass.execute(frame_info);
+
+                // End pass timing
+                if (self.performance_monitor) |pm| {
+                    try pm.endPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
+                }
             }
         } else {
             log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
@@ -545,7 +564,17 @@ pub const Scene = struct {
         if (self.render_graph) |*graph| {
             for (graph.passes.items) |pass| {
                 if (pass.enabled and pass.isComputePass()) {
+                    // Begin pass timing (with compute buffer for GPU timing)
+                    if (self.performance_monitor) |pm| {
+                        try pm.beginPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+                    }
+
                     try pass.execute(frame_info);
+
+                    // End pass timing
+                    if (self.performance_monitor) |pm| {
+                        try pm.endPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+                    }
                 }
             }
         }

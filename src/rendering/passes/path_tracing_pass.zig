@@ -12,6 +12,7 @@ const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedP
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
+const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const Texture = @import("../../core/texture.zig").Texture;
 const RaytracingSystem = @import("../../systems/raytracing_system.zig").RaytracingSystem;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
@@ -85,6 +86,7 @@ pub const PathTracingPass = struct {
     // Core rendering infrastructure
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
+    resource_binder: ResourceBinder,
     thread_pool: *ThreadPool,
     global_ubo_set: *GlobalUboSet,
     ecs_world: *World,
@@ -169,6 +171,7 @@ pub const PathTracingPass = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
+            .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .thread_pool = thread_pool,
             .global_ubo_set = global_ubo_set,
             .ecs_world = ecs_world,
@@ -331,6 +334,10 @@ pub const PathTracingPass = struct {
             try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
             self.descriptor_dirty_flags[frame_idx] = false;
         }
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            try self.resource_binder.updateFrame(self.path_tracing_pipeline, @as(u32, @intCast(frame_idx)));
+        }
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -349,50 +356,18 @@ pub const PathTracingPass = struct {
 
         const pipeline_entry = self.pipeline_system.pipelines.get(self.path_tracing_pipeline) orelse return error.PipelineNotFound;
         if (pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle) {
+            log(.INFO, "path_tracing_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
             try self.rt_system.updateShaderBindingTable(pipeline_entry.vulkan_pipeline);
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.path_tracing_pipeline);
-            for (&self.descriptor_dirty_flags) |*flag| {
-                flag.* = true;
-            }
+
+            // Rebind resources after hot reload
+            try self.updateDescriptors();
         }
 
-        const gc = self.graphics_context;
         const cmd = frame_info.command_buffer;
 
-        // Update descriptor sets for this frame (flushes pending bindResource calls)
-        try self.pipeline_system.updateDescriptorSetsForPipeline(
-            self.path_tracing_pipeline,
-            frame_index,
-        );
-
-        // Bind ray tracing pipeline manually (like rt_renderer does)
-        gc.vkd.cmdBindPipeline(cmd, vk.PipelineBindPoint.ray_tracing_khr, pipeline_entry.vulkan_pipeline);
-
-        // Check descriptor sets are available (like rt_renderer does)
-        if (pipeline_entry.descriptor_sets.items.len == 0) {
-            log(.WARN, "path_tracing_pass", "No descriptor sets available for path tracing pipeline", .{});
-            return;
-        }
-
-        // Manually bind descriptor sets (like rt_renderer does)
-        const frame_sets = pipeline_entry.descriptor_sets.items[0];
-        const descriptor_set = frame_sets[frame_index];
-        const descriptor_sets = [_]vk.DescriptorSet{descriptor_set};
-        const descriptor_sets_slice = descriptor_sets[0..];
-        const descriptor_count: u32 = @intCast(descriptor_sets.len);
-
-        gc.vkd.cmdBindDescriptorSets(
-            cmd,
-            vk.PipelineBindPoint.ray_tracing_khr,
-            pipeline_entry.pipeline_layout,
-            0,
-            descriptor_count,
-            descriptor_sets_slice.ptr,
-            0,
-            null,
-        );
-
+        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
         // Dispatch rays
         try self.dispatchRays(cmd, self.rt_system.shader_binding_table);
 

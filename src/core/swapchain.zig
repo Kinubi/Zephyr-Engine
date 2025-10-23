@@ -63,6 +63,11 @@ pub const Swapchain = struct {
         swapchain.frame_fence = frame_fence;
         swapchain.compute_finished = compute_finished;
         swapchain.compute_fence = compute_fence;
+
+        // Create render pass and framebuffers for ImGui compatibility
+        try swapchain.createRenderPass();
+        try swapchain.createFramebuffers();
+
         return swapchain;
     }
 

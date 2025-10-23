@@ -1159,6 +1159,8 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .buffer_device_address = .true,
         .buffer_device_address_capture_replay = .true,
         .buffer_device_address_multi_device = .true,
+        // Host query reset (promoted to Vulkan 1.2) - for performance monitoring
+        .host_query_reset = .true,
     };
     accel_create.p_next = &vulkan12_features;
 

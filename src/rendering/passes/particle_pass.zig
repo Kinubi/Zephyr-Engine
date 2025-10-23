@@ -13,6 +13,8 @@ const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsConte
 const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedPipelineSystem;
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
+const Resource = @import("../unified_pipeline_system.zig").Resource;
+const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
 const Buffer = @import("../../core/buffer.zig").Buffer;
@@ -23,6 +25,9 @@ const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const ParticleComponent = ecs.ParticleComponent;
 
+// Global UBO
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+
 /// Particle rendering pass
 /// Renders particles computed by ParticleComputePass
 pub const ParticlePass = struct {
@@ -32,7 +37,9 @@ pub const ParticlePass = struct {
     // Rendering context
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
+    resource_binder: ResourceBinder,
     compute_pass: ?*@import("particle_compute_pass.zig").ParticleComputePass,
+    global_ubo_set: *GlobalUboSet,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -49,6 +56,7 @@ pub const ParticlePass = struct {
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
+        global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
         max_particles: u32,
@@ -63,7 +71,9 @@ pub const ParticlePass = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
+            .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .compute_pass = null, // Will be set by scene
+            .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .max_particles = max_particles,
@@ -102,7 +112,32 @@ pub const ParticlePass = struct {
         const entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = entry.vulkan_pipeline;
 
+        // Bind global UBO to all frames
+        try self.setupResources();
+
         log(.INFO, "particle_pass", "Setup complete", .{});
+    }
+
+    fn setupResources(self: *ParticlePass) !void {
+        // Bind global UBO for all frames
+        for (0..@import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const ubo_resource = Resource{
+                .buffer = .{
+                    .buffer = self.global_ubo_set.buffers[frame_idx].buffer,
+                    .offset = 0,
+                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
+                },
+            };
+
+            try self.pipeline_system.bindResource(
+                self.particle_pipeline,
+                0, // Set 0
+                0, // Binding 0
+                ubo_resource,
+                @intCast(frame_idx),
+            );
+            try self.resource_binder.updateFrame(self.particle_pipeline, @as(u32, @intCast(frame_idx)));
+        }
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -119,6 +154,9 @@ pub const ParticlePass = struct {
             log(.INFO, "particle_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
             self.pipeline_system.markPipelineResourcesDirty(self.particle_pipeline);
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+
+            // Rebind resources after hot reload
+            try self.setupResources();
 
             pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
         }
@@ -139,9 +177,6 @@ pub const ParticlePass = struct {
         // Begin rendering (also sets viewport and scissor)
         rendering.begin(self.graphics_context, command_buffer);
 
-        // Bind pipeline with automatic Set 0 (global UBO) binding
-        try self.pipeline_system.bindPipelineWithGlobalSet(command_buffer, self.particle_pipeline, frame_index);
-
         // Bind vertex buffer from compute pass output
         const particle_buffer = self.compute_pass.?.getParticleBuffer(frame_index);
         const vertex_buffers = [_]vk.Buffer{particle_buffer};
@@ -153,6 +188,8 @@ pub const ParticlePass = struct {
             &vertex_buffers,
             &offsets,
         );
+
+        try self.pipeline_system.bindPipelineWithDescriptorSets(command_buffer, self.particle_pipeline, frame_index);
 
         // Draw only active particles (not the entire max_particles buffer)
         const active_particle_count = self.compute_pass.?.getParticleCount();

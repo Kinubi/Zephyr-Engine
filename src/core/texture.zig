@@ -54,18 +54,22 @@ pub const Texture = struct {
         sample_count: vk.SampleCountFlags,
     ) !Texture {
         var aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-        var image_layout = vk.ImageLayout.color_attachment_optimal;
+        var image_layout: vk.ImageLayout = undefined;
+
+        // Determine appropriate layout based on usage flags
         if (usage.color_attachment_bit) {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
             image_layout = vk.ImageLayout.color_attachment_optimal;
-        }
-        if (usage.depth_stencil_attachment_bit) {
+        } else if (usage.depth_stencil_attachment_bit) {
             aspect_mask = vk.ImageAspectFlags{ .depth_bit = true };
             image_layout = vk.ImageLayout.depth_stencil_attachment_optimal;
-        }
-        if (usage.storage_bit) {
+        } else if (usage.storage_bit) {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
             image_layout = vk.ImageLayout.general;
+        } else {
+            // Sampled-only texture (no attachment or storage usage)
+            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
+            image_layout = vk.ImageLayout.shader_read_only_optimal;
         }
         const image_info = vk.ImageCreateInfo{
             .s_type = vk.StructureType.image_create_info,

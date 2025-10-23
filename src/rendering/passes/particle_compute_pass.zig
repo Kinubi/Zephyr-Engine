@@ -12,6 +12,7 @@ const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedP
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
+const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const Buffer = @import("../../core/buffer.zig").Buffer;
 const vertex_formats = @import("../vertex_formats.zig");
@@ -79,6 +80,7 @@ pub const ParticleComputePass = struct {
     // Rendering context
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
+    resource_binder: ResourceBinder,
     ecs_world: *World,
 
     // Compute pipeline
@@ -204,6 +206,7 @@ pub const ParticleComputePass = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
+            .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .ecs_world = ecs_world,
             .particle_buffers = particle_buffers,
             .compute_uniform_buffers = compute_uniform_buffers,
@@ -284,11 +287,9 @@ pub const ParticleComputePass = struct {
         const compute_ubo_bytes = std.mem.asBytes(&compute_ubo);
         self.compute_uniform_buffers[frame_index].writeToBuffer(compute_ubo_bytes, @sizeOf(ComputeUniformBuffer), 0);
 
-        // Bind compute pipeline
-        try self.pipeline_system.bindPipeline(command_buffer, self.compute_pipeline);
+        try self.resource_binder.updateFrame(self.compute_pipeline, frame_index);
 
-        // Update descriptor sets for current frame
-        try self.pipeline_system.updateDescriptorSetsForPipeline(self.compute_pipeline, frame_index);
+        try self.pipeline_system.bindPipelineWithDescriptorSets(command_buffer, self.compute_pipeline, frame_index);
 
         // Dispatch compute shader - only process active particle slots
         const workgroup_size = 256; // Match shader local_size_x
@@ -320,7 +321,7 @@ pub const ParticleComputePass = struct {
             null,
         );
 
-        // Copy output to next frame's input buffer to propagate simulated state
+        // Copy output back to input for this frame (ping-pong for next iteration)
         const buffer_size = self.max_particles * @sizeOf(vertex_formats.Particle);
         const copy_region = vk.BufferCopy{
             .src_offset = 0,
@@ -330,20 +331,12 @@ pub const ParticleComputePass = struct {
         self.graphics_context.vkd.cmdCopyBuffer(
             command_buffer,
             self.particle_buffers[frame_index].particle_buffer_out.buffer,
-            self.particle_buffers[frame_index].particle_buffer_in.buffer,
+            self.particle_buffers[(frame_index + 1) % MAX_FRAMES_IN_FLIGHT].particle_buffer_in.buffer,
             1,
             @ptrCast(&copy_region),
         );
 
-        self.graphics_context.vkd.cmdCopyBuffer(
-            command_buffer,
-            self.particle_buffers[frame_index].particle_buffer_out.buffer,
-            self.particle_buffers[(frame_index + 1) % MAX_FRAMES_IN_FLIGHT].particle_buffer_out.buffer,
-            1,
-            @ptrCast(&copy_region),
-        );
-
-        // Barrier to ensure copy completes before next frame
+        // Barrier to ensure copy completes before next compute dispatch
         const copy_barrier = vk.MemoryBarrier{
             .src_access_mask = .{ .transfer_write_bit = true },
             .dst_access_mask = .{ .shader_read_bit = true },

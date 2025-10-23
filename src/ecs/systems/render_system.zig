@@ -115,12 +115,6 @@ pub const RenderSystem = struct {
 
         // Update dirty flag if count or mesh IDs changed
         if (current_count != self.last_renderable_count or mesh_ids_changed) {
-            if (current_count != self.last_renderable_count) {
-                std.log.info("RenderSystem: Renderable count changed: {} -> {}", .{ self.last_renderable_count, current_count });
-            }
-            if (mesh_ids_changed) {
-                std.log.info("RenderSystem: Mesh asset IDs changed (async loading detected)", .{});
-            }
             self.renderables_dirty = true;
             self.last_renderable_count = current_count;
 

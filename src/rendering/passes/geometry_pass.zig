@@ -24,6 +24,9 @@ const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
 
+// Global UBO
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+
 /// GeometryPass renders opaque ECS entities using dynamic rendering
 /// Outputs: color target (RGBA16F) + depth buffer (D32)
 pub const GeometryPass = struct {
@@ -36,6 +39,7 @@ pub const GeometryPass = struct {
     resource_binder: ResourceBinder,
     asset_manager: *AssetManager,
     ecs_world: *World,
+    global_ubo_set: *GlobalUboSet,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -62,6 +66,7 @@ pub const GeometryPass = struct {
         pipeline_system: *UnifiedPipelineSystem,
         asset_manager: *AssetManager,
         ecs_world: *World,
+        global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
     ) !*GeometryPass {
@@ -78,6 +83,7 @@ pub const GeometryPass = struct {
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .asset_manager = asset_manager,
             .ecs_world = ecs_world,
+            .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .render_system = RenderSystem.init(allocator),
@@ -146,6 +152,25 @@ pub const GeometryPass = struct {
 
     /// Bind material buffer and texture array from AssetManager to all frames
     fn setupResources(self: *GeometryPass) !void {
+        // Bind global UBO for all frames (Set 0, Binding 0 - determined by shader reflection)
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const ubo_resource = Resource{
+                .buffer = .{
+                    .buffer = self.global_ubo_set.buffers[frame_idx].buffer,
+                    .offset = 0,
+                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
+                },
+            };
+
+            try self.pipeline_system.bindResource(
+                self.geometry_pipeline,
+                0, // Set 0
+                0, // Binding 0
+                ubo_resource,
+                @intCast(frame_idx),
+            );
+        }
+
         // Bind material buffer for all frames
         if (self.asset_manager.material_buffer) |buffer| {
             const material_resource = Resource{
@@ -193,6 +218,10 @@ pub const GeometryPass = struct {
                 );
             }
         }
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            try self.resource_binder.updateFrame(self.geometry_pipeline, @as(u32, @intCast(frame_idx)));
+        }
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -213,9 +242,10 @@ pub const GeometryPass = struct {
         // Check if assets were updated (materials or textures)
         const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
 
-        if (assets_updated or pipeline_rebuilt) {
+        if (assets_updated or pipeline_rebuilt or self.resources_need_setup) {
             log(.INFO, "geometry_pass", "Assets updated, marking resources for rebind", .{});
             try self.setupResources();
+            self.resources_need_setup = false;
         }
 
         // Extract renderables from ECS
@@ -253,27 +283,10 @@ pub const GeometryPass = struct {
 
         // Begin rendering (also sets viewport and scissor)
         rendering.begin(self.graphics_context, cmd);
-
-        // Bind pipeline with automatic Set 0 (global UBO) binding
-        try self.pipeline_system.bindPipelineWithGlobalSet(cmd, self.geometry_pipeline, frame_index);
-
         // Update descriptor sets for this frame using ResourceBinder (handles Set 1: materials/textures)
-        try self.resource_binder.updateFrame(self.geometry_pipeline, frame_index);
 
-        // Bind Set 1 (materials/textures) - ResourceBinder has updated it, now we need to bind it
-        if (self.pipeline_system.getDescriptorSet(self.geometry_pipeline, 1, frame_index)) |set_1| {
-            const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
-            self.graphics_context.vkd.cmdBindDescriptorSets(
-                cmd,
-                .graphics,
-                pipeline_layout,
-                1, // Set 1
-                1,
-                @ptrCast(&set_1),
-                0,
-                null,
-            );
-        }
+        // Bind pipeline with all descriptor sets (Set 0: global UBO, Set 1: materials/textures)
+        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.geometry_pipeline, frame_index);
 
         // Get pipeline layout for push constants
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);

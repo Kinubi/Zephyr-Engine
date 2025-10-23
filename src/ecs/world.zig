@@ -60,6 +60,13 @@ pub const World = struct {
         return self.entity_registry.isValid(entity);
     }
 
+    /// Returns the number of active entities
+    pub fn entityCount(self: *const World) u32 {
+        const total = self.entity_registry.next_index;
+        const freed = self.entity_registry.free_list.items.len;
+        return @as(u32, total) - @as(u32, @intCast(freed));
+    }
+
     pub fn registerComponent(self: *World, comptime T: type) !void {
         const type_name = @typeName(T);
         if (self.storages.contains(type_name)) return;

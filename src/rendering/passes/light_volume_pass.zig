@@ -11,6 +11,7 @@ const FrameInfo = @import("../frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
 const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedPipelineSystem;
+const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -20,6 +21,10 @@ const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").Dyna
 const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const LightSystem = ecs.LightSystem;
+
+// Global UBO
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+const Resource = @import("../unified_pipeline_system.zig").Resource;
 
 /// Push constants for light volume rendering
 pub const LightVolumePushConstants = extern struct {
@@ -37,7 +42,9 @@ pub const LightVolumePass = struct {
     // Rendering context
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
+    resource_binder: ResourceBinder,
     ecs_world: *World,
+    global_ubo_set: *GlobalUboSet,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -55,6 +62,7 @@ pub const LightVolumePass = struct {
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
         ecs_world: *World,
+        global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
     ) !*LightVolumePass {
@@ -67,7 +75,9 @@ pub const LightVolumePass = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
+            .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .ecs_world = ecs_world,
+            .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .light_system = LightSystem.init(allocator),
@@ -130,7 +140,32 @@ pub const LightVolumePass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.light_volume_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
+        // Bind global UBO to all frames
+        try self.setupResources();
+
         log(.INFO, "light_volume_pass", "Setup complete", .{});
+    }
+
+    fn setupResources(self: *LightVolumePass) !void {
+        // Bind global UBO for all frames
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const ubo_resource = Resource{
+                .buffer = .{
+                    .buffer = self.global_ubo_set.buffers[frame_idx].buffer,
+                    .offset = 0,
+                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
+                },
+            };
+
+            try self.pipeline_system.bindResource(
+                self.light_volume_pipeline,
+                0, // Set 0
+                0, // Binding 0
+                ubo_resource,
+                @intCast(frame_idx),
+            );
+            try self.resource_binder.updateFrame(self.light_volume_pipeline, @as(u32, @intCast(frame_idx)));
+        }
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -163,27 +198,11 @@ pub const LightVolumePass = struct {
             log(.INFO, "light_volume_pass", "Pipeline hot-reloaded", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.light_volume_pipeline);
+            try self.setupResources();
         }
 
-        // Get pipeline layout
+        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.light_volume_pipeline, frame_info.current_frame);
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.light_volume_pipeline);
-
-        // Bind pipeline
-        self.graphics_context.vkd.cmdBindPipeline(cmd, .graphics, pipeline_entry.vulkan_pipeline);
-
-        // Bind global descriptor set (set 0) with camera matrices
-        const global_descriptor_set = frame_info.global_descriptor_set;
-        self.graphics_context.vkd.cmdBindDescriptorSets(
-            cmd,
-            .graphics,
-            pipeline_layout,
-            0, // set 0
-            1,
-            @ptrCast(&global_descriptor_set),
-            0,
-            null,
-        );
-
         // Render each light as a billboard
         for (light_data.lights.items) |light| {
             const push_constants = LightVolumePushConstants{
