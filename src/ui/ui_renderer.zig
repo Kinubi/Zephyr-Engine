@@ -5,6 +5,8 @@ const c = @cImport({
 });
 
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
+const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
+const Scene = @import("../scene/scene_v2.zig").Scene;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic
@@ -13,12 +15,17 @@ pub const UIRenderer = struct {
     show_stats_window: bool = true,
     show_camera_window: bool = true,
 
+    // Scene hierarchy panel
+    hierarchy_panel: SceneHierarchyPanel,
+
     pub fn init() UIRenderer {
-        return .{};
+        return .{
+            .hierarchy_panel = SceneHierarchyPanel.init(),
+        };
     }
 
     pub fn deinit(self: *UIRenderer) void {
-        _ = self;
+        self.hierarchy_panel.deinit();
     }
 
     /// Render all UI windows
@@ -29,6 +36,11 @@ pub const UIRenderer = struct {
 
         if (self.show_camera_window) {
             self.renderCameraWindow(stats.camera_pos, stats.camera_rot);
+        }
+
+        // Render scene hierarchy if scene is provided
+        if (stats.scene) |scene| {
+            self.hierarchy_panel.render(scene);
         }
     }
 
@@ -117,4 +129,7 @@ pub const RenderStats = struct {
 
     // Performance monitoring
     performance_stats: ?PerformanceMonitor.PerformanceStats = null,
+
+    // Scene reference for hierarchy panel
+    scene: ?*Scene = null,
 };

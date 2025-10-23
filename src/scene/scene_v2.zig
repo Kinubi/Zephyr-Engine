@@ -245,6 +245,7 @@ pub const Scene = struct {
 
         // Get entity transform for emitter position
         const transform = self.ecs_world.get(Transform, entity) orelse return error.EntityHasNoTransform;
+        transform.dirty = true;
 
         // Create ECS emitter component
         var emitter = ecs.ParticleEmitter.initWithRate(emission_rate);
@@ -683,6 +684,8 @@ pub const Scene = struct {
         for (light_index..16) |i| {
             global_ubo.point_lights[i] = .{};
         }
+        // Mark light system dirty since we're animating lights
+
     }
 
     /// Update particle emitters - spawn particles based on emission rate
@@ -708,7 +711,7 @@ pub const Scene = struct {
             const transform = self.ecs_world.get(Transform, entity) orelse continue;
 
             // Only update GPU emitter if transform changed (dirty flag)
-            if (!transform.dirty) continue;
+            //if (!transform.dirty) continue;
 
             if (self.particle_compute_pass) |compute_pass| {
                 const vertex_formats = @import("../rendering/vertex_formats.zig");
@@ -729,6 +732,7 @@ pub const Scene = struct {
                 };
 
                 try compute_pass.updateEmitter(gpu_id, gpu_emitter);
+                transform.dirty = false; // Reset dirty flag after update
             }
         }
 
