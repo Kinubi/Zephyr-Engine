@@ -7,6 +7,8 @@ const log = @import("../utils/log.zig").log;
 pub const PerformanceMonitor = struct {
     const MAX_FRAMES = 3; // Match MAX_FRAMES_IN_FLIGHT
     const MAX_PASSES = 16; // Maximum number of passes to track
+    const QUERIES_PER_FRAME = MAX_PASSES * 2 + 2; // Frame start/end + per-pass begin/end
+    const QUERY_RESULT_CAPACITY = QUERIES_PER_FRAME * 2; // Timestamp + availability per query
 
     allocator: std.mem.Allocator,
     gc: *GraphicsContext,
@@ -36,8 +38,10 @@ pub const PerformanceMonitor = struct {
         name: []const u8,
         cpu_start_ns: i128 = 0,
         cpu_end_ns: i128 = 0,
-        gpu_query_start: u32 = 0,
-        gpu_query_end: u32 = 0,
+        gpu_query_start: u32 = 0, // Query index
+        gpu_query_end: u32 = 0, // Query index
+        gpu_start_ticks: u64 = 0, // Actual GPU timestamp value
+        gpu_end_ticks: u64 = 0, // Actual GPU timestamp value
 
         pub fn getCpuTimeMs(self: PassTiming) f32 {
             const duration_ns = self.cpu_end_ns - self.cpu_start_ns;
@@ -45,8 +49,8 @@ pub const PerformanceMonitor = struct {
         }
 
         pub fn getGpuTimeMs(self: PassTiming, timestamp_period: f32) f32 {
-            if (self.gpu_query_start == 0 and self.gpu_query_end == 0) return 0.0;
-            const duration_ticks = self.gpu_query_end - self.gpu_query_start;
+            if (self.gpu_start_ticks == 0 and self.gpu_end_ticks == 0) return 0.0;
+            const duration_ticks = self.gpu_end_ticks - self.gpu_start_ticks;
             const duration_ns = @as(f32, @floatFromInt(duration_ticks)) * timestamp_period;
             return duration_ns / 1_000_000.0;
         }
@@ -55,11 +59,12 @@ pub const PerformanceMonitor = struct {
     pub const FrameTiming = struct {
         frame_cpu_start: i128 = 0,
         frame_cpu_end: i128 = 0,
-        frame_gpu_start_query: u32 = 0,
-        frame_gpu_end_query: u32 = 0,
+        frame_gpu_start_query: u32 = std.math.maxInt(u32), // Use max value as "unset" sentinel
+        frame_gpu_end_query: u32 = std.math.maxInt(u32),
         frame_gpu_time_ns: u64 = 0,
+        query_base_offset: u32 = 0, // The first_query offset used for this frame's queries
         pass_count: usize = 0,
-        passes: [MAX_PASSES]PassTiming = [_]PassTiming{.{ .name = "", .cpu_start_ns = 0, .cpu_end_ns = 0, .gpu_query_start = 0, .gpu_query_end = 0 }} ** MAX_PASSES,
+        passes: [MAX_PASSES]PassTiming = [_]PassTiming{.{ .name = "", .cpu_start_ns = 0, .cpu_end_ns = 0, .gpu_query_start = 0, .gpu_query_end = 0, .gpu_start_ticks = 0, .gpu_end_ticks = 0 }} ** MAX_PASSES,
 
         pub fn getFrameCpuTimeMs(self: FrameTiming) f32 {
             const duration_ns = self.frame_cpu_end - self.frame_cpu_start;
@@ -82,7 +87,7 @@ pub const PerformanceMonitor = struct {
     pub fn init(allocator: std.mem.Allocator, gc: *GraphicsContext) !PerformanceMonitor {
         // Create query pool for timestamp queries
         // +2 for frame start/end timestamps per frame
-        const query_count: u32 = MAX_FRAMES * (MAX_PASSES * 2 + 2); // Start and end for each pass + frame start/end
+        const query_count: u32 = MAX_FRAMES * QUERIES_PER_FRAME; // Start and end for each pass + frame start/end
         const query_pool_info = vk.QueryPoolCreateInfo{
             .query_type = .timestamp,
             .query_count = query_count,
@@ -105,9 +110,11 @@ pub const PerformanceMonitor = struct {
         };
 
         // Initialize frame timings
-        for (&monitor.frame_times) |*ft| {
+        for (&monitor.frame_times, 0..) |*ft, i| {
             ft.* = FrameTiming{};
             ft.pass_count = 0;
+            // Pre-calculate query base offset for each frame
+            ft.query_base_offset = @as(u32, @intCast(i)) * QUERIES_PER_FRAME;
         }
 
         // Reset entire query pool on the host (required before first use)
@@ -127,8 +134,7 @@ pub const PerformanceMonitor = struct {
         const current = &self.frame_times[self.current_frame_idx];
         current.frame_cpu_start = std.time.nanoTimestamp();
         current.pass_count = 0;
-        current.frame_gpu_start_query = 0; // Reset GPU start query marker
-        current.frame_gpu_end_query = 0; // Reset GPU end query marker
+        // Don't reset GPU query markers - they need to persist for reading 2 frames later
         self.queries_reset_for_frame = false;
     }
 
@@ -136,19 +142,28 @@ pub const PerformanceMonitor = struct {
     pub fn resetQueriesForFrame(self: *PerformanceMonitor, command_buffer: vk.CommandBuffer) !void {
         if (self.queries_reset_for_frame) return; // Already reset this frame
 
-        const queries_per_frame = MAX_PASSES * 2 + 2; // +2 for frame start/end
-        const first_query = @as(u32, @intCast(self.current_frame_idx)) * queries_per_frame;
-        self.gc.vkd.cmdResetQueryPool(command_buffer, self.query_pool, first_query, queries_per_frame);
+        const first_query = @as(u32, @intCast(self.current_frame_idx)) * QUERIES_PER_FRAME;
 
-        // Initialize query index for this frame
+        self.gc.vkd.cmdResetQueryPool(command_buffer, self.query_pool, first_query, QUERIES_PER_FRAME);
+
+        // Initialize query index for this frame and store the base offset
         self.next_query_idx = first_query;
+        const current = &self.frame_times[self.current_frame_idx];
+        current.query_base_offset = first_query;
+
+        // Reset GPU query markers for this frame (we're about to overwrite them)
+        current.frame_gpu_start_query = std.math.maxInt(u32);
+        current.frame_gpu_end_query = std.math.maxInt(u32);
+
         self.queries_reset_for_frame = true;
     }
 
     /// Write frame start timestamp (call from whichever command buffer starts first)
     pub fn writeFrameStartTimestamp(self: *PerformanceMonitor, command_buffer: vk.CommandBuffer) !void {
         const current = &self.frame_times[self.current_frame_idx];
-        if (current.frame_gpu_start_query != 0) return; // Already written
+        if (current.frame_gpu_start_query != std.math.maxInt(u32)) {
+            return; // Already written
+        }
 
         current.frame_gpu_start_query = self.next_query_idx;
         self.gc.vkd.cmdWriteTimestamp(command_buffer, .{ .top_of_pipe_bit = true }, self.query_pool, self.next_query_idx);
@@ -225,68 +240,117 @@ pub const PerformanceMonitor = struct {
         current.pass_count += 1;
     }
 
-    /// Retrieve GPU query results for previous frame (call after fence wait)
-    pub fn updateGpuTimings(self: *PerformanceMonitor, frame_index: u32) !void {
+    /// Retrieve GPU query results for the most recently completed frame.
+    pub fn updateGpuTimings(
+        self: *PerformanceMonitor,
+        frame_index: u32,
+        graphics_fences: []vk.Fence,
+        compute_fences: []vk.Fence,
+    ) !void {
         _ = frame_index;
 
-        // Don't try to read queries until we've recorded at least MAX_FRAMES frames
-        // Otherwise we'll try to wait on queries that haven't been written yet
-        if (self.total_frames_recorded < MAX_FRAMES) return;
+        if (self.total_frames_recorded == 0) {
+            return;
+        }
 
-        // Get results from the previous frame (GPU work should be complete by now)
-        const result_idx = if (self.current_frame_idx == 0) MAX_FRAMES - 1 else self.current_frame_idx - 1;
-        const frame = &self.frame_times[result_idx];
+        const completed_idx = if (self.current_frame_idx == 0) MAX_FRAMES - 1 else self.current_frame_idx - 1;
+        if (completed_idx >= graphics_fences.len) {
+            log(.ERROR, "perf", "Graphics fence array too small for completed_idx={} (len={})", .{ completed_idx, graphics_fences.len });
+            return;
+        }
 
-        // Skip if no GPU timestamps were written this frame
-        if (frame.frame_gpu_start_query == 0 or frame.frame_gpu_end_query == 0) return;
-        if (frame.pass_count == 0) return; // No passes to query
+        const frame = &self.frame_times[completed_idx];
 
-        // Calculate query range for this frame
-        const queries_per_frame = MAX_PASSES * 2 + 2;
-        const first_query = @as(u32, @intCast(result_idx)) * queries_per_frame;
-        const query_count: u32 = @intCast(2 + frame.pass_count * 2); // frame start/end + all pass start/ends
+        if (frame.frame_gpu_start_query == std.math.maxInt(u32) or frame.frame_gpu_end_query == std.math.maxInt(u32)) {
+            return;
+        }
+        if (frame.pass_count == 0) {
+            return;
+        }
 
-        // Retrieve all timestamps for this frame (don't wait - skip if not ready)
-        var timestamps: [64]u64 = undefined; // MAX_PASSES * 2 + 2 = 34 max
+        _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&graphics_fences[completed_idx]), .true, std.math.maxInt(u64));
+
+        if (completed_idx < compute_fences.len) {
+            _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&compute_fences[completed_idx]), .true, std.math.maxInt(u64));
+        }
+
+        const first_query = frame.query_base_offset;
+        const last_query = frame.frame_gpu_end_query;
+        if (last_query < first_query) {
+            return;
+        }
+
+        const query_count: u32 = last_query - first_query + 1;
+        if (query_count == 0) {
+            return;
+        }
+
+        const query_count_usize = @as(usize, @intCast(query_count));
+        const required_entries = query_count_usize * 2;
+
+        if (required_entries > QUERY_RESULT_CAPACITY) {
+            log(.ERROR, "perf", "Query result capacity exceeded: required={}, capacity={}", .{ required_entries, QUERY_RESULT_CAPACITY });
+            return;
+        }
+        if (query_count_usize > QUERIES_PER_FRAME) {
+            log(.ERROR, "perf", "Timestamp buffer exceeded: queries={}, capacity={}", .{ query_count_usize, QUERIES_PER_FRAME });
+            return;
+        }
+
+        var raw_results: [QUERY_RESULT_CAPACITY]u64 = undefined;
+        const raw_slice = raw_results[0..required_entries];
+
         const result = self.gc.vkd.getQueryPoolResults(
             self.gc.dev,
             self.query_pool,
             first_query,
             query_count,
-            @sizeOf(u64) * timestamps.len,
-            &timestamps,
-            @sizeOf(u64),
-            .{ .@"64_bit" = true },
+            raw_slice.len * @sizeOf(u64),
+            raw_slice.ptr,
+            @sizeOf(u64) * 2,
+            .{ .@"64_bit" = true, .with_availability_bit = true, .wait_bit = true },
         ) catch |err| {
-            if (err == error.NotReady) return; // Queries not ready yet, skip this frame
+            log(.ERROR, "perf", "Query fetch error: {}", .{err});
             return err;
         };
 
-        if (result == .not_ready) return;
+        _ = result;
 
-        // Calculate frame GPU time
-        const frame_start_idx = frame.frame_gpu_start_query - first_query;
-        const frame_end_idx = frame.frame_gpu_end_query - first_query;
+        var timestamps: [QUERIES_PER_FRAME]u64 = undefined;
+        for (0..query_count_usize) |i| {
+            const availability = raw_results[i * 2 + 1];
+            if (availability == 0) {
+                return;
+            }
+
+            timestamps[i] = raw_results[i * 2];
+        }
+
+        const frame_start_idx = @as(usize, @intCast(frame.frame_gpu_start_query - first_query));
+        const frame_end_idx = @as(usize, @intCast(frame.frame_gpu_end_query - first_query));
+        if (frame_end_idx >= query_count_usize or frame_start_idx >= query_count_usize) {
+            log(.ERROR, "perf", "Timestamp indices out of range: start={}, end={}, available={}", .{ frame_start_idx, frame_end_idx, query_count_usize });
+            return;
+        }
+
         const frame_gpu_ticks = timestamps[frame_end_idx] - timestamps[frame_start_idx];
         frame.frame_gpu_time_ns = @as(u64, @intFromFloat(@as(f32, @floatFromInt(frame_gpu_ticks)) * self.timestamp_period));
 
-        // Update rolling average for GPU time
         const gpu_time_ms = frame.getFrameGpuTimeMs();
         self.avg_gpu_time_ms = self.avg_gpu_time_ms * 0.95 + gpu_time_ms * 0.05;
 
-        // Store GPU timestamps in passes for individual pass timings
         for (0..frame.pass_count) |i| {
             const pass = &frame.passes[i];
-            if (pass.gpu_query_start == 0) continue; // No GPU timing for this pass
+            if (pass.gpu_query_start == 0 or pass.gpu_query_end == 0) continue;
 
-            const start_idx = pass.gpu_query_start - first_query;
-            const end_idx = pass.gpu_query_end - first_query;
+            if (pass.gpu_query_start < first_query or pass.gpu_query_end < first_query) continue;
 
-            // Store raw tick values - will be converted to ms when needed
-            const start_ticks: u32 = @truncate(timestamps[start_idx]);
-            const end_ticks: u32 = @truncate(timestamps[end_idx]);
-            pass.gpu_query_start = start_ticks;
-            pass.gpu_query_end = end_ticks;
+            const start_idx = @as(usize, @intCast(pass.gpu_query_start - first_query));
+            const end_idx = @as(usize, @intCast(pass.gpu_query_end - first_query));
+            if (start_idx >= query_count_usize or end_idx >= query_count_usize) continue;
+
+            pass.gpu_start_ticks = timestamps[start_idx];
+            pass.gpu_end_ticks = timestamps[end_idx];
         }
     }
 

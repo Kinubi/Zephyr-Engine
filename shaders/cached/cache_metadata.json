@@ -21,9 +21,9 @@
     },
     "shaders/RayTracingTriangle.rchit.hlsl": {
       "cached_spirv_path": "shaders/cached/RayTracingTriangle.rchit.hlsl.spv",
-      "file_hash": "12217228841631695529",
+      "file_hash": "13094439608886470466",
       "options_hash": "13509613240315378116",
-      "compile_time": 1760679012
+      "compile_time": 1761224380
     },
     "shaders/point_light.vert": {
       "cached_spirv_path": "shaders/cached/point_light.vert.spv",

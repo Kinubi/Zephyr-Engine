@@ -35,8 +35,7 @@ pub const UIRenderer = struct {
     fn renderStatsWindow(self: *UIRenderer, stats: RenderStats) void {
         _ = self;
 
-        const window_flags = c.ImGuiWindowFlags_NoResize |
-            c.ImGuiWindowFlags_NoCollapse;
+        const window_flags = c.ImGuiWindowFlags_NoCollapse;
 
         if (c.ImGui_Begin("Render Stats", null, window_flags)) {
             c.ImGui_Text("FPS: %.1f", stats.fps);
@@ -87,8 +86,7 @@ pub const UIRenderer = struct {
     fn renderCameraWindow(self: *UIRenderer, pos: [3]f32, rot: [3]f32) void {
         _ = self;
 
-        const window_flags = c.ImGuiWindowFlags_NoResize |
-            c.ImGuiWindowFlags_NoCollapse;
+        const window_flags = c.ImGuiWindowFlags_NoCollapse;
 
         if (c.ImGui_Begin("Camera", null, window_flags)) {
             c.ImGui_Text("Position:");

@@ -57,8 +57,8 @@ pub const GeometryPass = struct {
     resources_need_setup: bool = false,
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
-    // Render system for extracting entities
-    render_system: RenderSystem,
+    // Shared render system (pointer to scene's render system)
+    render_system: *RenderSystem,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -69,11 +69,12 @@ pub const GeometryPass = struct {
         global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
+        render_system: *RenderSystem,
     ) !*GeometryPass {
         const pass = try allocator.create(GeometryPass);
         pass.* = GeometryPass{
             .base = RenderPass{
-                .name = "GeometryPass",
+                .name = "geometry_pass",
                 .enabled = true,
                 .vtable = &vtable,
             },
@@ -86,10 +87,10 @@ pub const GeometryPass = struct {
             .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
-            .render_system = RenderSystem.init(allocator),
+            .render_system = render_system,
         };
 
-        log(.INFO, "geometry_pass", "Created GeometryPass", .{});
+        log(.INFO, "geometry_pass", "Created geometry_pass", .{});
         return pass;
     }
 
@@ -148,6 +149,36 @@ pub const GeometryPass = struct {
         self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
 
         log(.INFO, "geometry_pass", "Setup complete (color: {}, depth: {})", .{ self.color_target.toInt(), self.depth_buffer.toInt() });
+    }
+
+    /// Check for asset updates and rebind resources if needed
+    /// Called even when pass is disabled to keep descriptors up to date
+    pub fn checkAssetUpdates(self: *GeometryPass, frame_index: u32) !void {
+        _ = frame_index;
+
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return;
+        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+
+        if (pipeline_rebuilt) {
+            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
+            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.resource_binder.clearPipeline(self.geometry_pipeline);
+        }
+
+        // Check if assets were updated (materials or textures)
+        const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
+
+        // Check if render system detected geometry changes (sets flag for both raster and RT)
+        const geometry_changed = self.render_system.raster_descriptors_dirty;
+
+        if (assets_updated or pipeline_rebuilt or self.resources_need_setup or geometry_changed) {
+            log(.INFO, "geometry_pass", "Assets/geometry updated, rebinding descriptors", .{});
+            try self.setupResources();
+            self.resources_need_setup = false;
+
+            // Clear the raster flag after updating descriptors
+            self.render_system.raster_descriptors_dirty = false;
+        }
     }
 
     /// Bind material buffer and texture array from AssetManager to all frames
@@ -229,30 +260,10 @@ pub const GeometryPass = struct {
         const cmd = frame_info.command_buffer;
         const frame_index = frame_info.current_frame;
 
-        // Check if pipeline was hot-reloaded
-        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
-        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+        // Get rasterization data from render system (cached, no asset manager queries needed)
+        const raster_data = try self.render_system.getRasterData();
 
-        if (pipeline_rebuilt) {
-            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
-            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
-            self.resource_binder.clearPipeline(self.geometry_pipeline);
-        }
-
-        // Check if assets were updated (materials or textures)
-        const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
-
-        if (assets_updated or pipeline_rebuilt or self.resources_need_setup) {
-            log(.INFO, "geometry_pass", "Assets updated, marking resources for rebind", .{});
-            try self.setupResources();
-            self.resources_need_setup = false;
-        }
-
-        // Extract renderables from ECS
-        var render_data = try self.render_system.extractRenderData(self.ecs_world);
-        defer render_data.deinit();
-
-        if (render_data.renderables.items.len == 0) {
+        if (raster_data.objects.len == 0) {
             log(.TRACE, "geometry_pass", "No entities to render", .{});
             return;
         }
@@ -291,23 +302,16 @@ pub const GeometryPass = struct {
         // Get pipeline layout for push constants
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
-        // Render each entity
+        // Render each object (mesh pointers and material indices already resolved in cache)
         var rendered_count: usize = 0;
-        for (render_data.renderables.items) |renderable| {
-            // Get model
-            const model = self.asset_manager.getModel(renderable.model_asset) orelse {
-                continue;
-            };
+        for (raster_data.objects) |object| {
+            if (!object.visible) continue;
 
-            // Get material index
-            const material_asset = renderable.material_asset orelse continue;
-            const material_index = self.asset_manager.getMaterialIndex(material_asset) orelse continue;
-
-            // Push constants
+            // Push constants (data already resolved in cache)
             const push_constants = GeometryPushConstants{
-                .transform = renderable.world_matrix.data,
-                .normal_matrix = renderable.world_matrix.data, // TODO: Compute proper normal matrix
-                .material_index = @intCast(material_index),
+                .transform = object.transform,
+                .normal_matrix = object.transform, // TODO: Compute proper normal matrix
+                .material_index = object.material_index,
             };
 
             self.graphics_context.vkd.cmdPushConstants(
@@ -319,10 +323,8 @@ pub const GeometryPass = struct {
                 &push_constants,
             );
 
-            // Draw all meshes
-            for (model.meshes.items) |model_mesh| {
-                model_mesh.geometry.mesh.draw(self.graphics_context.*, cmd);
-            }
+            // Draw mesh (pointer already resolved in cache)
+            object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
 
             rendered_count += 1;
         }
@@ -350,8 +352,7 @@ pub const GeometryPass = struct {
         const self: *GeometryPass = @fieldParentPtr("base", base);
         log(.INFO, "geometry_pass", "Tearing down", .{});
 
-        // Clean up render system
-        self.render_system.deinit();
+        // render_system is shared with scene, don't deinit here
 
         // Clean up resource binder
         self.resource_binder.deinit();

@@ -91,7 +91,7 @@ pub const PathTracingPass = struct {
     global_ubo_set: *GlobalUboSet,
     ecs_world: *World,
     asset_manager: *AssetManager,
-    render_system: RenderSystem,
+    render_system: *RenderSystem,
 
     // Path tracing pipeline
     path_tracing_pipeline: PipelineId = undefined,
@@ -127,6 +127,7 @@ pub const PathTracingPass = struct {
         global_ubo_set: *GlobalUboSet,
         ecs_world: *World,
         asset_manager: *AssetManager,
+        render_system: *RenderSystem,
         swapchain_format: vk.Format,
         width: u32,
         height: u32,
@@ -176,7 +177,7 @@ pub const PathTracingPass = struct {
             .global_ubo_set = global_ubo_set,
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
-            .render_system = RenderSystem.init(allocator),
+            .render_system = render_system,
             .rt_system = rt_system,
             .output_texture = output_texture,
             .width = width,
@@ -213,23 +214,18 @@ pub const PathTracingPass = struct {
 
         // Update shader binding table
         try self.rt_system.updateShaderBindingTable(entry.vulkan_pipeline);
-
         try self.updateDescriptors();
     }
 
     /// Update descriptors for all frames (exactly like rt_renderer.update does)
     fn updateDescriptors(self: *PathTracingPass) !void {
         if (!self.tlas_valid) {
-            log(.WARN, "path_tracing_pass", "TLAS not valid, skipping descriptor update", .{});
+            // TLAS not ready yet - this is normal during async BVH building
             return;
         }
 
-        // Get raytracing data from render system (like rt_renderer gets from scene_bridge)
-        const rt_data = try self.render_system.getRaytracingData(
-            self.ecs_world,
-            self.asset_manager,
-            self.allocator,
-        );
+        // Get raytracing data from render system (already cached)
+        const rt_data = try self.render_system.getRaytracingData();
         defer {
             self.allocator.free(rt_data.geometries);
             self.allocator.free(rt_data.instances);
@@ -338,6 +334,9 @@ pub const PathTracingPass = struct {
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             try self.resource_binder.updateFrame(self.path_tracing_pipeline, @as(u32, @intCast(frame_idx)));
         }
+
+        // Don't flush here - resources may still be in use by descriptors/command buffers
+        // They'll be flushed during deinit when GPU is idle
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -580,52 +579,47 @@ pub const PathTracingPass = struct {
     pub fn updateState(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
         const frame_index = frame_info.current_frame;
 
-        // Check various dirty flags BEFORE updating (like rt_renderer.update does)
-        _ = self.render_system.checkBvhRebuildNeeded();
+        // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago
+        // At this point, the fence has been waited on (in swapchain.beginFrame),
+        // so resources queued during that frame are safe to destroy
+        self.rt_system.flushDeferredFrame(frame_index);
+
+        // // Check various dirty flags BEFORE updating (like rt_renderer.update does)
+        // _ = self.render_system.checkBvhRebuildNeeded();
         const materials_dirty = self.asset_manager.materials_updated;
         const textures_dirty = self.asset_manager.texture_descriptors_updated;
 
+        // Check if render system detected geometry changes
+        const geometry_changed = self.render_system.raytracing_descriptors_dirty;
+
         // Update BVH using rt_system (handles BLAS/TLAS building)
-        const bvh_rebuilt = try self.rt_system.update(&self.render_system, self.ecs_world, self.asset_manager, frame_info);
+        const bvh_rebuilt = try self.rt_system.update(self.render_system, frame_info, geometry_changed);
 
-        if (bvh_rebuilt) {
-            // Mark renderables as synced after BVH rebuild
-            self.render_system.markRenderablesSynced();
-        }
+        // Check if TLAS changed (handle changed OR dirty flag set)
+        const tlas_changed = self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
+            (!self.tlas_valid or self.rt_system.tlas_dirty or self.tlas != self.rt_system.tlas);
 
-        // Check if TLAS changed
-        if (self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
-            (!self.tlas_valid or self.rt_system.tlas_dirty))
-        {
+        if (tlas_changed) {
+            log(.INFO, "path_tracing_pass", "TLAS changed, updating PathTracingPass TLAS", .{});
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
+
+            // Clear renderables dirty flag now that TLAS is built and ready
+            self.render_system.renderables_dirty = false;
         }
 
-        // Get current geometry count to detect changes
-        const rt_data = try self.render_system.getRaytracingData(
-            self.ecs_world,
-            self.asset_manager,
-            self.allocator,
-        );
-        defer {
-            self.allocator.free(rt_data.geometries);
-            self.allocator.free(rt_data.instances);
-            self.allocator.free(rt_data.materials);
-        }
-
-        const per_frame = &self.per_frame[frame_index];
-        const geometry_count = rt_data.geometries.len;
-
-        // Check if descriptors need updating (like rt_renderer.update does)
         const needs_update = bvh_rebuilt or
             materials_dirty or
             textures_dirty or
-            self.descriptor_dirty_flags[frame_index] or
-            per_frame.vertex_infos.items.len != geometry_count or
-            per_frame.index_infos.items.len != geometry_count;
+            geometry_changed or
+            self.descriptor_dirty_flags[frame_index] or tlas_changed;
 
-        if (needs_update) {
+        // Only update descriptors if TLAS is valid
+        if (needs_update and self.tlas_valid) {
             try self.updateDescriptors();
+
+            // Clear the raytracing flag after updating descriptors
+            self.render_system.raytracing_descriptors_dirty = false;
         }
     }
 

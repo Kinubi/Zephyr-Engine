@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const Mesh = @import("mesh.zig").Mesh;
+const AssetId = @import("../assets/asset_types.zig").AssetId;
 
 /// Shared data structure definitions for rendering systems
 /// These types are used by render_system, raytracing_system, and rendering passes
@@ -49,6 +50,7 @@ pub const RaytracingData = struct {
     pub const RTGeometry = struct {
         mesh_ptr: *Mesh,
         blas: ?vk.AccelerationStructureKHR = null,
+        model_asset: AssetId, // Track which asset this geometry came from
     };
 
     pub const BvhChangeTracker = struct {

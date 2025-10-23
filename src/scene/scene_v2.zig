@@ -56,6 +56,12 @@ pub const Scene = struct {
     // Cache view-projection matrix for particle world-to-screen projection
     cached_view_proj: Math.Mat4x4 = Math.Mat4x4.identity(),
 
+    // Light system (reused across frames instead of recreating)
+    light_system: ecs.LightSystem,
+
+    // Shared render system for both raster and ray tracing passes
+    render_system: ecs.RenderSystem,
+
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
 
@@ -81,6 +87,8 @@ pub const Scene = struct {
             .game_objects = std.ArrayList(GameObject){},
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
+            .light_system = ecs.LightSystem.init(allocator),
+            .render_system = ecs.RenderSystem.init(allocator),
         };
     }
 
@@ -370,6 +378,8 @@ pub const Scene = struct {
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
         self.emitter_to_gpu_id.deinit();
+        self.light_system.deinit();
+        self.render_system.deinit();
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
     }
 
@@ -437,6 +447,7 @@ pub const Scene = struct {
             global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
+            &self.render_system,
         );
 
         try self.render_graph.?.addPass(&geometry_pass.base);
@@ -453,6 +464,7 @@ pub const Scene = struct {
             global_ubo_set,
             self.ecs_world,
             self.asset_manager,
+            &self.render_system,
             swapchain_format,
             width,
             height,
@@ -552,6 +564,19 @@ pub const Scene = struct {
         // Update particles (CPU-side spawning)
         try self.updateParticles(frame_info.dt);
 
+        // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
+        try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
+        if (self.geometry_pass) |geom_pass| {
+            // Update path tracing state (BVH and descriptors) if enabled
+            if (self.path_tracing_pass) |pt_pass| {
+                if (!pt_pass.enable_path_tracing) {
+                    try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                }
+            } else {
+                try geom_pass.checkAssetUpdates(frame_info.current_frame);
+            }
+        }
+
         // Update path tracing state (BVH and descriptors) if enabled
         if (self.path_tracing_pass) |pt_pass| {
             if (pt_pass.enable_path_tracing) {
@@ -588,11 +613,10 @@ pub const Scene = struct {
     fn updateLights(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
         self.time_elapsed += dt;
 
-        const LightSystem = @import("../ecs.zig").LightSystem;
         const PointLight = @import("../ecs.zig").PointLight;
 
-        var light_system = LightSystem.init(self.allocator);
-        defer light_system.deinit();
+        // Use cached light_system instead of creating a new one each frame
+        // (No longer need: var light_system = LightSystem.init(self.allocator); defer light_system.deinit();)
 
         // Get view of all light entities
         var view = try self.ecs_world.view(PointLight);
@@ -614,8 +638,8 @@ pub const Scene = struct {
             const x = @cos(angle) * radius;
             const z = @sin(angle) * radius;
 
-            // Update transform position
-            transform_ptr.position = Math.Vec3.init(x, height, z);
+            // Update transform position using setter to mark dirty flag
+            transform_ptr.setPosition(Math.Vec3.init(x, height, z));
 
             // Extract to GlobalUbo
             if (light_index < 16) {

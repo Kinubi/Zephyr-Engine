@@ -648,34 +648,21 @@ pub const App = struct {
 
         compute_shader_system.beginCompute(frame_info);
 
-        // Reset query pool and write frame start timestamp (compute buffer runs first)
         if (performance_monitor) |pm| {
-            try pm.resetQueriesForFrame(computebuf);
-            try pm.writeFrameStartTimestamp(computebuf);
+            try pm.resetQueriesForFrame(frame_info.compute_buffer);
+            try pm.writeFrameStartTimestamp(frame_info.compute_buffer);
         }
 
-        // Update scene (animations, physics, lights, etc.)
-        if (scene_v2_enabled) {
-            if (performance_monitor) |pm| {
-                try pm.beginPass("scene_update", current_frame, null); // CPU-only wrapper timing
-            }
-            try scene_v2.update(frame_info, &ubo);
-            if (performance_monitor) |pm| {
-                try pm.endPass("scene_update", current_frame, null);
-            }
+        if (performance_monitor) |pm| {
+            try pm.beginPass("scene_update", current_frame, null); // CPU-only wrapper timing
         }
-
-        // try forward_renderer.update(&frame_info);  // OLD: Disabled for RenderGraph
-
-        // try rt_render_pass.update(&frame_info);    // OLD: Disabled for RenderGraph
+        try scene_v2.update(frame_info, &ubo);
+        if (performance_monitor) |pm| {
+            try pm.endPass("scene_update", current_frame, null);
+        }
 
         compute_shader_system.endCompute(frame_info);
         try swapchain.beginFrame(frame_info);
-
-        // Update GPU timings from previous frame (after fence wait)
-        if (performance_monitor) |pm| {
-            try pm.updateGpuTimings(frame_info.current_frame);
-        }
 
         if (performance_monitor) |pm| {
             try pm.beginPass("ubo_update", current_frame, null); // CPU-only
@@ -717,21 +704,16 @@ pub const App = struct {
             ui_renderer.render(stats);
 
             if (performance_monitor) |pm| {
-                try pm.beginPass("imgui", current_frame, cmdbuf); // GPU timing with graphics buffer
+                try pm.beginPass("imgui", current_frame, frame_info.command_buffer); // GPU timing with graphics buffer
             }
 
             // Render ImGui using our custom dynamic rendering backend
             // This renders on top of the existing frame without clearing
-            try imgui_context.render(cmdbuf, &swapchain, current_frame);
+            try imgui_context.render(frame_info.command_buffer, &swapchain, current_frame);
 
             if (performance_monitor) |pm| {
                 try pm.endPass("imgui", current_frame, frame_info.command_buffer);
             }
-        }
-
-        // End performance monitoring
-        if (performance_monitor) |pm| {
-            try pm.endFrame(frame_info.current_frame);
         }
 
         // End performance monitoring and write frame end timestamp (graphics buffer is last)
@@ -741,6 +723,11 @@ pub const App = struct {
         }
 
         try swapchain.endFrame(frame_info, &current_frame);
+        // Update GPU timings from previous frame (after fence wait)
+        if (performance_monitor) |pm| {
+            const prev_frame = if (current_frame == 0) MAX_FRAMES_IN_FLIGHT - 1 else current_frame - 1;
+            try pm.updateGpuTimings(prev_frame, swapchain.frame_fence, swapchain.compute_fence);
+        }
 
         last_frame_time = current_time;
 

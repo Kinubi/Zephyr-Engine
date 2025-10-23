@@ -19,8 +19,16 @@ pub const RenderSystem = struct {
 
     // Change tracking (similar to SceneBridge)
     last_renderable_count: usize = 0,
-    last_mesh_asset_ids: std.ArrayList(AssetId) = .{},
+    last_geometry_count: usize = 0, // Track mesh count separately
     renderables_dirty: bool = true,
+
+    // Separate flags for raster and ray tracing descriptor updates
+    raster_descriptors_dirty: bool = true,
+    raytracing_descriptors_dirty: bool = true,
+
+    // Cached render data (rebuilt when changes detected)
+    cached_raster_data: ?RasterizationData = null,
+    cached_raytracing_data: ?RaytracingData = null,
 
     pub fn init(allocator: std.mem.Allocator) RenderSystem {
         return .{
@@ -29,7 +37,14 @@ pub const RenderSystem = struct {
     }
 
     pub fn deinit(self: *RenderSystem) void {
-        self.last_mesh_asset_ids.deinit(self.allocator);
+        if (self.cached_raster_data) |data| {
+            self.allocator.free(data.objects);
+        }
+        if (self.cached_raytracing_data) |*data| {
+            self.allocator.free(data.instances);
+            self.allocator.free(data.geometries);
+            self.allocator.free(data.materials);
+        }
     }
 
     /// Rendering data for a single frame
@@ -84,44 +99,6 @@ pub const RenderSystem = struct {
 
         // Extract all renderable entities
         try self.extractRenderables(world, &render_data.renderables);
-
-        // Check if renderable count or mesh asset IDs changed (detects async loading)
-        const current_count = render_data.renderables.items.len;
-        var mesh_ids_changed = false;
-
-        // Build current mesh asset ID list
-        var current_mesh_ids: std.ArrayList(AssetId) = .{};
-        defer current_mesh_ids.deinit(self.allocator);
-
-        for (render_data.renderables.items) |renderable| {
-            try current_mesh_ids.append(self.allocator, renderable.model_asset);
-        }
-
-        // Compare with last mesh IDs (detects when async assets finish loading)
-        if (current_mesh_ids.items.len != self.last_mesh_asset_ids.items.len) {
-            mesh_ids_changed = true;
-        } else {
-            // Sort both lists for comparison
-            std.sort.insertion(AssetId, current_mesh_ids.items, {}, assetIdLessThan);
-            std.sort.insertion(AssetId, self.last_mesh_asset_ids.items, {}, assetIdLessThan);
-
-            for (current_mesh_ids.items, self.last_mesh_asset_ids.items) |curr, last| {
-                if (curr != last) {
-                    mesh_ids_changed = true;
-                    break;
-                }
-            }
-        }
-
-        // Update dirty flag if count or mesh IDs changed
-        if (current_count != self.last_renderable_count or mesh_ids_changed) {
-            self.renderables_dirty = true;
-            self.last_renderable_count = current_count;
-
-            // Update tracked mesh IDs
-            self.last_mesh_asset_ids.clearRetainingCapacity();
-            try self.last_mesh_asset_ids.appendSlice(self.allocator, current_mesh_ids.items);
-        }
 
         // Sort by layer (optional, for render ordering)
         std.sort.insertion(RenderableEntity, render_data.renderables.items, {}, compareByLayer);
@@ -216,57 +193,158 @@ pub const RenderSystem = struct {
         return a.layer < b.layer;
     }
 
-    /// Comparison function for sorting AssetIds
-    fn assetIdLessThan(context: void, a: AssetId, b: AssetId) bool {
-        _ = context;
-        return @intFromEnum(a) < @intFromEnum(b);
+    /// Check for any changes that require cache/descriptor updates
+    /// This runs every frame (very lightweight) and sets dirty flags
+    pub fn checkForChanges(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
+        // Count current renderables and geometry
+        var current_renderable_count: usize = 0;
+        var current_geometry_count: usize = 0;
+        var current_mesh_asset_ids = std.ArrayList(AssetId){};
+        defer current_mesh_asset_ids.deinit(self.allocator);
+
+        // Quick query to count entities and geometry
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+        while (iter.next()) |entry| {
+            const renderer = entry.component;
+            if (!renderer.hasValidAssets()) continue;
+
+            current_renderable_count += 1;
+
+            if (renderer.model_asset) |model_asset_id| {
+                try current_mesh_asset_ids.append(self.allocator, model_asset_id);
+
+                // Count geometry from loaded model
+                if (asset_manager.getModel(model_asset_id)) |model| {
+                    current_geometry_count += model.meshes.items.len;
+                }
+            }
+        }
+
+        // Progressive change detection - each check only runs if previous checks didn't detect changes
+        var changes_detected = false;
+        var reason: []const u8 = "";
+
+        // Check 1: Count changes (cheap)
+        if (!changes_detected) {
+            if (current_renderable_count != self.last_renderable_count or
+                current_geometry_count != self.last_geometry_count)
+            {
+                changes_detected = true;
+                reason = "count_changed";
+            }
+        }
+
+        // Check 2: Cache missing (cheap)
+        if (!changes_detected) {
+            if (self.cached_raster_data == null) {
+                changes_detected = true;
+                reason = "cache_missing";
+            }
+        }
+
+        // Check 3: Asset IDs and mesh pointers changed - async asset loading (medium cost)
+        if (!changes_detected) {
+            if (self.cached_raytracing_data) |rt_cache| {
+                if (current_mesh_asset_ids.items.len != rt_cache.geometries.len) {
+                    changes_detected = true;
+                    reason = "rt_geom_count_mismatch";
+                } else {
+                    var geom_idx: usize = 0;
+                    for (current_mesh_asset_ids.items) |current_asset_id| {
+                        const model = asset_manager.getModel(current_asset_id) orelse continue;
+
+                        for (model.meshes.items) |model_mesh| {
+                            if (geom_idx >= rt_cache.geometries.len) {
+                                changes_detected = true;
+                                reason = "rt_geom_overflow";
+                                break;
+                            }
+
+                            const rt_geom = rt_cache.geometries[geom_idx];
+
+                            // Compare asset ID AND mesh pointer (detects async asset loads)
+                            if (rt_geom.model_asset != current_asset_id or
+                                rt_geom.mesh_ptr != model_mesh.geometry.mesh)
+                            {
+                                changes_detected = true;
+                                reason = "mesh_ptr_changed";
+                                break;
+                            }
+
+                            geom_idx += 1;
+                        }
+
+                        if (changes_detected) break;
+                    }
+                }
+            }
+        }
+
+        // Update tracking state
+        self.last_renderable_count = current_renderable_count;
+        self.last_geometry_count = current_geometry_count;
+
+        // Rebuild if any changes detected
+        if (changes_detected) {
+            self.renderables_dirty = true;
+            self.raster_descriptors_dirty = true;
+            self.raytracing_descriptors_dirty = true;
+
+            try self.rebuildCaches(world, asset_manager);
+
+            std.debug.print("RenderSystem: Rebuilt caches - {} renderables, {} geometries (reason: {s})\n", .{
+                current_renderable_count,
+                current_geometry_count,
+                reason,
+            });
+        }
     }
 
-    /// Check if BVH needs to be rebuilt (analogous to SceneBridge.checkBvhRebuildNeeded)
-    pub fn checkBvhRebuildNeeded(self: *RenderSystem) bool {
-        return self.renderables_dirty;
-    }
+    /// Rebuild both raster and raytracing caches in one pass
+    /// Called by checkForChanges when geometry changes detected
+    fn rebuildCaches(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
+        // Clean up old cached data
+        if (self.cached_raster_data) |data| {
+            self.allocator.free(data.objects);
+        }
+        if (self.cached_raytracing_data) |*data| {
+            self.allocator.free(data.instances);
+            self.allocator.free(data.geometries);
+            self.allocator.free(data.materials);
+        }
 
-    /// Get raytracing data from current renderables
-    /// Caller must free the returned RaytracingData's instances and geometries slices
-    pub fn getRaytracingData(
-        self: *RenderSystem,
-        world: *World,
-        asset_manager: *AssetManager,
-        allocator: std.mem.Allocator,
-    ) !RaytracingData {
-        // First extract current render data
-        var render_data = try self.extractRenderData(world);
-        defer render_data.deinit();
+        // Extract renderables from ECS
+        var temp_renderables = std.ArrayList(RenderableEntity){};
+        defer temp_renderables.deinit(self.allocator);
+        try self.extractRenderables(world, &temp_renderables);
 
-        // Count total meshes across all models
+        // Count total meshes
         var total_meshes: usize = 0;
-        for (render_data.renderables.items) |renderable| {
+        for (temp_renderables.items) |renderable| {
             const model = asset_manager.getModel(renderable.model_asset) orelse continue;
             total_meshes += model.meshes.items.len;
         }
 
-        // Allocate slices for RT data based on total mesh count
-        var geometries = try allocator.alloc(RaytracingData.RTGeometry, total_meshes);
-        errdefer allocator.free(geometries);
+        // Allocate arrays for both raster and RT data
+        var raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        errdefer self.allocator.free(raster_objects);
 
-        var instances = try allocator.alloc(RaytracingData.RTInstance, total_meshes);
-        errdefer allocator.free(instances);
+        var geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
+        errdefer self.allocator.free(geometries);
 
-        // Empty materials for now (will be populated from asset_manager later)
-        const materials = try allocator.alloc(RasterizationData.MaterialData, 0);
-        errdefer allocator.free(materials);
+        var instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
+        errdefer self.allocator.free(instances);
 
-        // Convert renderables to RT format (one instance per mesh)
-        var geometry_idx: usize = 0;
-        for (render_data.renderables.items) |renderable| {
-            // Get model from asset manager
-            const model = asset_manager.getModel(renderable.model_asset) orelse {
-                std.log.warn("RenderSystem: Failed to get model for asset {}", .{@intFromEnum(renderable.model_asset)});
-                continue;
-            };
+        const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
+        errdefer self.allocator.free(materials);
 
-            // Get material index from AssetManager (like SceneBridge does)
+        // Build both raster and RT data in one loop
+        var mesh_idx: usize = 0;
+        for (temp_renderables.items) |renderable| {
+            const model = asset_manager.getModel(renderable.model_asset) orelse continue;
+
+            // Get material index
             var material_index: u32 = 0;
             if (renderable.material_asset) |material_asset_id| {
                 if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
@@ -274,31 +352,96 @@ pub const RenderSystem = struct {
                 }
             }
 
-            // Create geometry/instance pair for each mesh in the model
+            // Create raster and RT data for each mesh in the model
             for (model.meshes.items) |model_mesh| {
-                // Create geometry entry
-                geometries[geometry_idx] = .{
-                    .mesh_ptr = model_mesh.geometry.mesh,
-                    .blas = null, // Will be filled by rt_system
+                // Raster data
+                raster_objects[mesh_idx] = .{
+                    .transform = renderable.world_matrix.data,
+                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
+                    .material_index = material_index,
+                    .visible = true,
                 };
 
-                // Create instance entry with 3x4 transform matrix
-                instances[geometry_idx] = .{
+                // RT geometry
+                geometries[mesh_idx] = .{
+                    .mesh_ptr = model_mesh.geometry.mesh,
+                    .blas = null,
+                    .model_asset = renderable.model_asset,
+                };
+
+                // RT instance
+                instances[mesh_idx] = .{
                     .transform = renderable.world_matrix.to_3x4(),
-                    .instance_id = @intCast(geometry_idx),
+                    .instance_id = @intCast(mesh_idx),
                     .mask = 0xFF,
-                    .geometry_index = @intCast(geometry_idx),
+                    .geometry_index = @intCast(mesh_idx),
                     .material_index = material_index,
                 };
 
-                geometry_idx += 1;
+                mesh_idx += 1;
             }
         }
 
-        return RaytracingData{
+        // Store both caches
+        self.cached_raster_data = RasterizationData{
+            .objects = raster_objects,
+        };
+        self.cached_raytracing_data = RaytracingData{
             .instances = instances,
             .geometries = geometries,
             .materials = materials,
+        };
+    }
+
+    /// Check if BVH needs to be rebuilt (for ray tracing system)
+    /// Returns true if renderables_dirty flag is set OR if cache doesn't exist yet
+    pub fn checkBvhRebuildNeeded(self: *RenderSystem) !bool {
+
+        // The actual checking is done by checkForChanges() which runs every frame
+        // Also check if cache doesn't exist yet (first frame)
+        return self.renderables_dirty or self.cached_raytracing_data == null;
+    }
+
+    /// Get cached raster data (already built by checkForChanges)
+    /// Returns a COPY of the cached data that the caller owns
+    pub fn getRasterData(self: *RenderSystem) !RasterizationData {
+        if (self.cached_raster_data) |cached| {
+            // Return a copy with duplicated array
+            const objects_copy = try self.allocator.dupe(RasterizationData.RenderableObject, cached.objects);
+
+            return RasterizationData{
+                .objects = objects_copy,
+            };
+        }
+
+        // If no cache exists, return empty data
+        const empty_objects = try self.allocator.alloc(RasterizationData.RenderableObject, 0);
+        return RasterizationData{
+            .objects = empty_objects,
+        };
+    }
+
+    /// Get cached raytracing data (already built by checkForChanges)
+    /// Returns a COPY of the cached data that the caller owns
+    pub fn getRaytracingData(self: *RenderSystem) !RaytracingData {
+        if (self.cached_raytracing_data) |cached| {
+            // Return a copy with duplicated arrays
+            const instances_copy = try self.allocator.dupe(RaytracingData.RTInstance, cached.instances);
+            const geometries_copy = try self.allocator.dupe(RaytracingData.RTGeometry, cached.geometries);
+            const materials_copy = try self.allocator.dupe(RasterizationData.MaterialData, cached.materials);
+
+            return RaytracingData{
+                .instances = instances_copy,
+                .geometries = geometries_copy,
+                .materials = materials_copy,
+            };
+        }
+
+        // If no cache exists, return empty data
+        return RaytracingData{
+            .instances = &[_]RaytracingData.RTInstance{},
+            .geometries = &[_]RaytracingData.RTGeometry{},
+            .materials = &[_]RasterizationData.MaterialData{},
         };
     }
 };
