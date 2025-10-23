@@ -172,9 +172,8 @@ pub const LightVolumePass = struct {
         const self: *LightVolumePass = @fieldParentPtr("base", base);
         const cmd = frame_info.command_buffer;
 
-        // Extract lights from ECS
-        var light_data = try self.light_system.extractLights(self.ecs_world);
-        defer light_data.deinit();
+        // Get cached lights (light system handles caching internally)
+        const light_data = try self.light_system.getLights(self.ecs_world);
 
         if (light_data.lights.items.len == 0) {
             return; // No lights to render

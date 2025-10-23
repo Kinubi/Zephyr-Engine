@@ -322,11 +322,13 @@ pub const ParticleComputePass = struct {
         );
 
         // Copy output back to input for this frame (ping-pong for next iteration)
-        const buffer_size = self.max_particles * @sizeOf(vertex_formats.Particle);
+        // OPTIMIZATION: Only copy active particle slots instead of entire buffer
+        const active_buffer_size = active_particle_slots * @sizeOf(vertex_formats.Particle);
+
         const copy_region = vk.BufferCopy{
             .src_offset = 0,
             .dst_offset = 0,
-            .size = buffer_size,
+            .size = if (active_buffer_size > 0) active_buffer_size else @sizeOf(vertex_formats.Particle), // Minimum 1 particle
         };
         self.graphics_context.vkd.cmdCopyBuffer(
             command_buffer,
@@ -458,8 +460,10 @@ pub const ParticleComputePass = struct {
 
         self.emitter_count += 1;
 
-        // Update descriptor sets to rebind the emitter buffer with new emitter data
-        try self.updateDescriptors();
+        // NOTE: No need to call updateDescriptors() here!
+        // The descriptor set already points to the emitter buffer.
+        // We're just updating the data in mapped memory, not changing the binding.
+        // Descriptors only need updating on pipeline reload (handled in executeImpl).
 
         // Spawn initial particles: Read last simulated buffer, add new particles, write to all buffers
         if (initial_particles.len > 0) {
@@ -513,47 +517,21 @@ pub const ParticleComputePass = struct {
     }
 
     /// Spawn initial particles for a new emitter
+    /// OPTIMIZATION: Only reads/writes the emitter's particle range, not the entire buffer
     fn spawnParticlesForEmitter(self: *ParticleComputePass, emitter_id: u32, new_particles: []const vertex_formats.Particle) !void {
         // Calculate particle range for this emitter
         const particles_per_emitter = self.max_particles / self.max_emitters;
         const emitter_start_slot = emitter_id * particles_per_emitter;
-        const emitter_end_slot = emitter_start_slot + particles_per_emitter;
+        const range_size = particles_per_emitter * @sizeOf(vertex_formats.Particle);
+        const range_offset = emitter_start_slot * @sizeOf(vertex_formats.Particle);
 
-        // Get last frame's OUT buffer (most recent simulation)
-        const last_frame: usize = if (self.last_particle_count == 0) 0 else (MAX_FRAMES_IN_FLIGHT - 1);
-        const buffer_size = self.max_particles * @sizeOf(vertex_formats.Particle);
-
-        // Read existing particles from last simulated buffer
-        var staging_read = try Buffer.init(
-            self.graphics_context,
-            buffer_size,
-            1,
-            .{ .transfer_dst_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        defer staging_read.deinit();
-
-        try self.graphics_context.copyBuffer(
-            staging_read.buffer,
-            self.particle_buffers[last_frame].particle_buffer_out.buffer,
-            buffer_size,
-        );
-
-        try staging_read.map(buffer_size, 0);
-        defer staging_read.unmap();
-
-        const existing_particles = @as([*]vertex_formats.Particle, @ptrCast(@alignCast(staging_read.mapped.?)))[0..self.max_particles];
-
-        // Prepare particles to write
-        const particles_to_write = try self.allocator.alloc(vertex_formats.Particle, self.max_particles);
+        // Prepare particles for this emitter's range only
+        const particles_to_write = try self.allocator.alloc(vertex_formats.Particle, particles_per_emitter);
         defer self.allocator.free(particles_to_write);
 
-        @memcpy(particles_to_write, existing_particles);
-
-        // Assign this emitter's range: set emitter_id on ALL particles in range (dead or alive)
-        // This ensures the compute shader knows which emitter owns these slots
+        // Initialize all particles in this emitter's range
         var spawn_index: usize = 0;
-        for (emitter_start_slot..emitter_end_slot) |slot_idx| {
+        for (0..particles_per_emitter) |slot_idx| {
             if (spawn_index < new_particles.len) {
                 // Use initial particle data
                 particles_to_write[slot_idx] = new_particles[spawn_index];
@@ -561,38 +539,58 @@ pub const ParticleComputePass = struct {
                 spawn_index += 1;
             } else {
                 // Fill remaining slots with dead particles owned by this emitter
-                particles_to_write[slot_idx].lifetime = 0.0;
-                particles_to_write[slot_idx].emitter_id = emitter_id;
+                particles_to_write[slot_idx] = vertex_formats.Particle{
+                    .position = .{ 0.0, 0.0, 0.0 },
+                    .velocity = .{ 0.0, 0.0, 0.0 },
+                    .color = .{ 0.0, 0.0, 0.0, 0.0 },
+                    .lifetime = 0.0,
+                    .max_lifetime = 1.0,
+                    .emitter_id = emitter_id,
+                };
             }
         }
 
-        // Write merged particles to all frame buffers
+        // Create staging buffer for just this emitter's range
         var staging_write = try Buffer.init(
             self.graphics_context,
-            buffer_size,
+            range_size,
             1,
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
         defer staging_write.deinit();
 
-        try staging_write.map(buffer_size, 0);
+        try staging_write.map(range_size, 0);
         defer staging_write.unmap();
 
         const particle_bytes = std.mem.sliceAsBytes(particles_to_write);
-        staging_write.writeToBuffer(particle_bytes, buffer_size, 0);
+        staging_write.writeToBuffer(particle_bytes, range_size, 0);
 
-        // Copy to all frame buffers (IN and OUT)
+        // Copy only this emitter's range to all frame buffers (IN and OUT)
+        // Use immediate command buffer for the copy
+        const cmd_buffer = try self.graphics_context.beginSingleTimeCommands();
+        defer self.graphics_context.endSingleTimeCommands(cmd_buffer) catch {};
+
+        const copy_region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = range_offset,
+            .size = range_size,
+        };
+
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            try self.graphics_context.copyBuffer(
+            self.graphics_context.vkd.cmdCopyBuffer(
+                cmd_buffer,
+                staging_write.buffer,
                 self.particle_buffers[frame_idx].particle_buffer_in.buffer,
-                staging_write.buffer,
-                buffer_size,
+                1,
+                @ptrCast(&copy_region),
             );
-            try self.graphics_context.copyBuffer(
-                self.particle_buffers[frame_idx].particle_buffer_out.buffer,
+            self.graphics_context.vkd.cmdCopyBuffer(
+                cmd_buffer,
                 staging_write.buffer,
-                buffer_size,
+                self.particle_buffers[frame_idx].particle_buffer_out.buffer,
+                1,
+                @ptrCast(&copy_region),
             );
         }
 
@@ -600,50 +598,81 @@ pub const ParticleComputePass = struct {
     }
 
     /// Kill all particles belonging to an emitter
+    /// OPTIMIZATION: Only reads/writes the emitter's particle range, not the entire buffer
     fn killParticlesForEmitter(self: *ParticleComputePass, emitter_id: u32) !void {
         const last_frame: usize = if (self.last_particle_count == 0) 0 else (MAX_FRAMES_IN_FLIGHT - 1);
-        const buffer_size = self.max_particles * @sizeOf(vertex_formats.Particle);
 
-        // Read existing particles
+        // Calculate particle range for this emitter
+        const particles_per_emitter = self.max_particles / self.max_emitters;
+        const emitter_start_slot = emitter_id * particles_per_emitter;
+        const range_size = particles_per_emitter * @sizeOf(vertex_formats.Particle);
+        const range_offset = emitter_start_slot * @sizeOf(vertex_formats.Particle);
+
+        // Read only this emitter's particle range
         var staging_buffer = try Buffer.init(
             self.graphics_context,
-            buffer_size,
+            range_size,
             1,
             .{ .transfer_dst_bit = true, .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
         defer staging_buffer.deinit();
 
-        try self.graphics_context.copyBuffer(
-            staging_buffer.buffer,
-            self.particle_buffers[last_frame].particle_buffer_out.buffer,
-            buffer_size,
-        );
+        // Use immediate command for reading
+        {
+            const cmd_buffer = try self.graphics_context.beginSingleTimeCommands();
+            defer self.graphics_context.endSingleTimeCommands(cmd_buffer) catch {};
 
-        try staging_buffer.map(buffer_size, 0);
-        defer staging_buffer.unmap();
+            const read_region = vk.BufferCopy{
+                .src_offset = range_offset,
+                .dst_offset = 0,
+                .size = range_size,
+            };
 
-        const particles = @as([*]vertex_formats.Particle, @ptrCast(@alignCast(staging_buffer.mapped.?)))[0..self.max_particles];
-
-        // Kill particles belonging to this emitter
-        for (particles) |*particle| {
-            if (particle.emitter_id == emitter_id) {
-                particle.lifetime = 0.0;
-                particle.color[3] = 0.0; // Set alpha to 0
-            }
+            self.graphics_context.vkd.cmdCopyBuffer(
+                cmd_buffer,
+                self.particle_buffers[last_frame].particle_buffer_out.buffer,
+                staging_buffer.buffer,
+                1,
+                @ptrCast(&read_region),
+            );
         }
 
-        // Write back to all frame buffers
+        try staging_buffer.map(range_size, 0);
+        defer staging_buffer.unmap();
+
+        const particles = @as([*]vertex_formats.Particle, @ptrCast(@alignCast(staging_buffer.mapped.?)))[0..particles_per_emitter];
+
+        // Kill all particles in this emitter's range
+        for (particles) |*particle| {
+            particle.lifetime = 0.0;
+            particle.color[3] = 0.0; // Set alpha to 0
+        }
+
+        // Write back only this emitter's range to all frame buffers
+        const cmd_buffer = try self.graphics_context.beginSingleTimeCommands();
+        defer self.graphics_context.endSingleTimeCommands(cmd_buffer) catch {};
+
+        const write_region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = range_offset,
+            .size = range_size,
+        };
+
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            try self.graphics_context.copyBuffer(
+            self.graphics_context.vkd.cmdCopyBuffer(
+                cmd_buffer,
+                staging_buffer.buffer,
                 self.particle_buffers[frame_idx].particle_buffer_in.buffer,
-                staging_buffer.buffer,
-                buffer_size,
+                1,
+                @ptrCast(&write_region),
             );
-            try self.graphics_context.copyBuffer(
-                self.particle_buffers[frame_idx].particle_buffer_out.buffer,
+            self.graphics_context.vkd.cmdCopyBuffer(
+                cmd_buffer,
                 staging_buffer.buffer,
-                buffer_size,
+                self.particle_buffers[frame_idx].particle_buffer_out.buffer,
+                1,
+                @ptrCast(&write_region),
             );
         }
     }

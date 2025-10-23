@@ -196,11 +196,9 @@ pub const RenderSystem = struct {
     /// Check for any changes that require cache/descriptor updates
     /// This runs every frame (very lightweight) and sets dirty flags
     pub fn checkForChanges(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
-        // Count current renderables and geometry
+        // OPTIMIZATION: Fast-path count check first (no allocations)
         var current_renderable_count: usize = 0;
         var current_geometry_count: usize = 0;
-        var current_mesh_asset_ids = std.ArrayList(AssetId){};
-        defer current_mesh_asset_ids.deinit(self.allocator);
 
         // Quick query to count entities and geometry
         var mesh_view = try world.view(MeshRenderer);
@@ -212,8 +210,6 @@ pub const RenderSystem = struct {
             current_renderable_count += 1;
 
             if (renderer.model_asset) |model_asset_id| {
-                try current_mesh_asset_ids.append(self.allocator, model_asset_id);
-
                 // Count geometry from loaded model
                 if (asset_manager.getModel(model_asset_id)) |model| {
                     current_geometry_count += model.meshes.items.len;
@@ -225,26 +221,38 @@ pub const RenderSystem = struct {
         var changes_detected = false;
         var reason: []const u8 = "";
 
-        // Check 1: Count changes (cheap)
-        if (!changes_detected) {
-            if (current_renderable_count != self.last_renderable_count or
-                current_geometry_count != self.last_geometry_count)
-            {
-                changes_detected = true;
-                reason = "count_changed";
-            }
+        // Check 1: Count changes (cheap - no allocations!)
+        if (current_renderable_count != self.last_renderable_count or
+            current_geometry_count != self.last_geometry_count)
+        {
+            changes_detected = true;
+            reason = "count_changed";
         }
 
         // Check 2: Cache missing (cheap)
-        if (!changes_detected) {
-            if (self.cached_raster_data == null) {
-                changes_detected = true;
-                reason = "cache_missing";
-            }
+        if (!changes_detected and self.cached_raster_data == null) {
+            changes_detected = true;
+            reason = "cache_missing";
         }
 
         // Check 3: Asset IDs and mesh pointers changed - async asset loading (medium cost)
+        // OPTIMIZATION: Only do this expensive check if counts haven't changed
         if (!changes_detected) {
+            // Now allocate ArrayList only if needed for deep comparison
+            var current_mesh_asset_ids = std.ArrayList(AssetId){};
+            defer current_mesh_asset_ids.deinit(self.allocator);
+
+            // Re-iterate to collect asset IDs (only when needed)
+            var mesh_view2 = try world.view(MeshRenderer);
+            var iter2 = mesh_view2.iterator();
+            while (iter2.next()) |entry| {
+                const renderer = entry.component;
+                if (!renderer.hasValidAssets()) continue;
+                if (renderer.model_asset) |model_asset_id| {
+                    try current_mesh_asset_ids.append(self.allocator, model_asset_id);
+                }
+            }
+
             if (self.cached_raytracing_data) |rt_cache| {
                 if (current_mesh_asset_ids.items.len != rt_cache.geometries.len) {
                     changes_detected = true;
@@ -292,12 +300,6 @@ pub const RenderSystem = struct {
             self.raytracing_descriptors_dirty = true;
 
             try self.rebuildCaches(world, asset_manager);
-
-            std.debug.print("RenderSystem: Rebuilt caches - {} renderables, {} geometries (reason: {s})\n", .{
-                current_renderable_count,
-                current_geometry_count,
-                reason,
-            });
         }
     }
 

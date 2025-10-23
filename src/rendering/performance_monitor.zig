@@ -218,26 +218,42 @@ pub const PerformanceMonitor = struct {
             .gpu_query_start = gpu_start_query,
             .gpu_query_end = 0,
         };
+
+        // Increment pass count immediately so nested passes work correctly
+        current.pass_count += 1;
     }
 
     /// End timing a render pass (can use compute or graphics command buffer)
     pub fn endPass(self: *PerformanceMonitor, pass_name: []const u8, frame_index: u32, command_buffer: ?vk.CommandBuffer) !void {
-        _ = pass_name;
         _ = frame_index;
         const current = &self.frame_times[self.current_frame_idx];
-        if (current.pass_count >= MAX_PASSES) return;
+        if (current.pass_count == 0) return;
 
-        const pass_idx = current.pass_count;
-        current.passes[pass_idx].cpu_end_ns = std.time.nanoTimestamp();
+        // Find the matching pass by name (search backwards for most recent match)
+        var pass_idx: ?usize = null;
+        var i: usize = current.pass_count;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, current.passes[i].name, pass_name)) {
+                pass_idx = i;
+                break;
+            }
+        }
+
+        if (pass_idx == null) {
+            log(.WARN, "perf", "endPass called for '{s}' but no matching beginPass found", .{pass_name});
+            return;
+        }
+
+        const idx = pass_idx.?;
+        current.passes[idx].cpu_end_ns = std.time.nanoTimestamp();
 
         // Write GPU end timestamp if command buffer is provided
         if (command_buffer) |cmdbuf| {
-            current.passes[pass_idx].gpu_query_end = self.next_query_idx;
+            current.passes[idx].gpu_query_end = self.next_query_idx;
             self.gc.vkd.cmdWriteTimestamp(cmdbuf, .{ .bottom_of_pipe_bit = true }, self.query_pool, self.next_query_idx);
             self.next_query_idx += 1;
         }
-
-        current.pass_count += 1;
     }
 
     /// Retrieve GPU query results for the most recently completed frame.

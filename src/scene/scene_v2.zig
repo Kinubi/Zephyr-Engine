@@ -264,8 +264,8 @@ pub const Scene = struct {
             const gpu_emitter = vertex_formats.GPUEmitter{
                 .position = .{ transform.position.x, transform.position.y, transform.position.z },
                 .is_active = 1,
-                .velocity_min = .{ emitter.velocity_min.x, -emitter.velocity_min.y, emitter.velocity_min.z },
-                .velocity_max = .{ emitter.velocity_max.x, -emitter.velocity_max.y, emitter.velocity_max.z },
+                .velocity_min = .{ emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z },
+                .velocity_max = .{ emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z },
                 .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
                 .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 }, // Fade to darker
                 .lifetime_min = particle_lifetime * 0.8,
@@ -559,28 +559,50 @@ pub const Scene = struct {
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
         // Update animated lights and extract to GlobalUbo
+
         try self.updateLights(global_ubo, frame_info.dt);
 
         // Update particles (CPU-side spawning)
+
         try self.updateParticles(frame_info.dt);
 
         // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
+
         try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
+
         if (self.geometry_pass) |geom_pass| {
             // Update path tracing state (BVH and descriptors) if enabled
             if (self.path_tracing_pass) |pt_pass| {
                 if (!pt_pass.enable_path_tracing) {
+                    if (self.performance_monitor) |pm| {
+                        try pm.beginPass("geo_update", frame_info.current_frame, null);
+                    }
                     try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                    if (self.performance_monitor) |pm| {
+                        try pm.endPass("geo_update", frame_info.current_frame, null);
+                    }
                 }
             } else {
+                if (self.performance_monitor) |pm| {
+                    try pm.beginPass("geo_update", frame_info.current_frame, null);
+                }
                 try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                if (self.performance_monitor) |pm| {
+                    try pm.endPass("geo_update", frame_info.current_frame, null);
+                }
             }
         }
 
         // Update path tracing state (BVH and descriptors) if enabled
         if (self.path_tracing_pass) |pt_pass| {
             if (pt_pass.enable_path_tracing) {
+                if (self.performance_monitor) |pm| {
+                    try pm.beginPass("pt_update", frame_info.current_frame, null);
+                }
                 try pt_pass.updateState(&frame_info);
+                if (self.performance_monitor) |pm| {
+                    try pm.endPass("pt_update", frame_info.current_frame, null);
+                }
             }
         }
 
@@ -685,8 +707,9 @@ pub const Scene = struct {
             // Get current transform
             const transform = self.ecs_world.get(Transform, entity) orelse continue;
 
-            // Check if position has changed (simple comparison)
-            // In a real system you might track dirty flags
+            // Only update GPU emitter if transform changed (dirty flag)
+            if (!transform.dirty) continue;
+
             if (self.particle_compute_pass) |compute_pass| {
                 const vertex_formats = @import("../rendering/vertex_formats.zig");
 
