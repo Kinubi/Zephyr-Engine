@@ -3,6 +3,7 @@ const World = @import("../world.zig").World;
 const Transform = @import("../components/transform.zig").Transform;
 const PointLight = @import("../components/point_light.zig").PointLight;
 const Math = @import("../../utils/math.zig");
+const log = @import("../../utils/log.zig").log;
 
 /// Extracted light data for rendering
 pub const ExtractedLight = struct {
@@ -71,8 +72,8 @@ pub const LightSystem = struct {
 
         // Check if we need to re-extract
         const count_changed = count != self.last_light_count;
-
         if (count_changed or self.lights_dirty or self.cached_light_data == null) {
+
             // Re-extract lights
             if (self.cached_light_data) |*old_data| {
                 old_data.deinit();
@@ -80,7 +81,7 @@ pub const LightSystem = struct {
 
             self.cached_light_data = try self.extractLights(world);
             self.last_light_count = count;
-            self.lights_dirty = false;
+            //self.lights_dirty = false;
         }
 
         return &(self.cached_light_data.?);

@@ -482,19 +482,9 @@ pub const PathTracingPass = struct {
     fn copyOutputToSwapchain(self: *PathTracingPass, command_buffer: vk.CommandBuffer, swapchain_image: vk.Image) !void {
         const gc = self.graphics_context;
 
-        // Transition output texture from GENERAL to TRANSFER_SRC_OPTIMAL
-        try self.output_texture.transitionImageLayout(
-            command_buffer,
-            vk.ImageLayout.general,
-            vk.ImageLayout.transfer_src_optimal,
-            .{
-                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // OPTIMIZATION: Keep output texture in GENERAL layout (supports all operations including transfer)
+        // This eliminates 2 image transitions per frame (GENERAL→TRANSFER_SRC→GENERAL)
+        // Only transition the swapchain image (required for presentation)
 
         // Transition swapchain image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
         gc.transitionImageLayout(
@@ -512,6 +502,7 @@ pub const PathTracingPass = struct {
         );
 
         // Copy from output texture to swapchain
+        // Output texture stays in GENERAL layout (valid for both storage writes and transfer src)
         const copy_info = vk.ImageCopy{
             .src_subresource = .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
@@ -537,25 +528,11 @@ pub const PathTracingPass = struct {
         gc.vkd.cmdCopyImage(
             command_buffer,
             self.output_texture.image,
-            vk.ImageLayout.transfer_src_optimal,
+            vk.ImageLayout.general, // Source stays in GENERAL
             swapchain_image,
             vk.ImageLayout.transfer_dst_optimal,
             1,
             @ptrCast(&copy_info),
-        );
-
-        // Transition output texture back to GENERAL
-        try self.output_texture.transitionImageLayout(
-            command_buffer,
-            vk.ImageLayout.transfer_src_optimal,
-            vk.ImageLayout.general,
-            .{
-                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
         );
 
         // Transition swapchain image back to PRESENT_SRC
@@ -576,7 +553,8 @@ pub const PathTracingPass = struct {
 
     /// Update path tracing state (call this each frame from scene.update, before render)
     /// This is analogous to rt_renderer.update() - it updates descriptors and BVH
-    pub fn updateState(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
+    /// Update path tracing state (BVH rebuild, descriptor updates)
+    pub fn update(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
         const frame_index = frame_info.current_frame;
 
         // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago
@@ -600,7 +578,6 @@ pub const PathTracingPass = struct {
             (!self.tlas_valid or self.rt_system.tlas_dirty or self.tlas != self.rt_system.tlas);
 
         if (tlas_changed) {
-            log(.INFO, "path_tracing_pass", "TLAS changed, updating PathTracingPass TLAS", .{});
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
 

@@ -5,6 +5,8 @@ const c = @cImport({
 });
 
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
+const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
+const Scene = @import("../scene/scene_v2.zig").Scene;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic
@@ -13,22 +15,67 @@ pub const UIRenderer = struct {
     show_stats_window: bool = true,
     show_camera_window: bool = true,
 
+    // Scene hierarchy panel
+    hierarchy_panel: SceneHierarchyPanel,
+
     pub fn init() UIRenderer {
-        return .{};
+        return .{
+            .hierarchy_panel = SceneHierarchyPanel.init(),
+        };
     }
 
     pub fn deinit(self: *UIRenderer) void {
-        _ = self;
+        self.hierarchy_panel.deinit();
     }
 
     /// Render all UI windows
     pub fn render(self: *UIRenderer, stats: RenderStats) void {
+        // Note: Dockspace disabled - requires ImGui docking branch
+        // For now, windows will be regular floating windows
+
+        const viewport = c.ImGui_GetMainViewport();
+        c.ImGui_SetNextWindowPos(viewport.*.Pos, c.ImGuiCond_Always);
+        c.ImGui_SetNextWindowSize(viewport.*.Size, c.ImGuiCond_Always);
+        c.ImGui_SetNextWindowViewport(viewport.*.ID);
+
+        const window_flags = c.ImGuiWindowFlags_NoDocking |
+            c.ImGuiWindowFlags_NoTitleBar | c.ImGuiWindowFlags_NoCollapse |
+            c.ImGuiWindowFlags_NoResize | c.ImGuiWindowFlags_NoMove |
+            c.ImGuiWindowFlags_NoBringToFrontOnFocus | c.ImGuiWindowFlags_NoNavFocus |
+            c.ImGuiWindowFlags_NoBackground; // Transparent background for dockspace host
+
+        c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowRounding, 0.0);
+        c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowBorderSize, 0.0);
+        c.ImGui_PushStyleVarImVec2(c.ImGuiStyleVar_WindowPadding, .{ .x = 0, .y = 0 });
+
+        _ = c.ImGui_Begin("DockSpace", null, window_flags);
+        c.ImGui_PopStyleVar();
+        c.ImGui_PopStyleVar();
+        c.ImGui_PopStyleVar();
+
+        // DockSpace
+        const dockspace_id = c.ImGui_GetID("MyDockSpace");
+        _ = c.ImGui_DockSpace(dockspace_id);
+
+        c.ImGui_End();
+
+        // Transparent viewport window in the center
+        const viewport_flags = c.ImGuiWindowFlags_NoBackground | c.ImGuiWindowFlags_NoScrollbar;
+        _ = c.ImGui_Begin("Viewport", null, viewport_flags);
+        c.ImGui_Text("3D Viewport");
+        c.ImGui_End();
+
         if (self.show_stats_window) {
             self.renderStatsWindow(stats);
         }
 
         if (self.show_camera_window) {
             self.renderCameraWindow(stats.camera_pos, stats.camera_rot);
+        }
+
+        // Render scene hierarchy if scene is provided
+        if (stats.scene) |scene| {
+            self.hierarchy_panel.render(scene);
         }
     }
 
@@ -117,4 +164,7 @@ pub const RenderStats = struct {
 
     // Performance monitoring
     performance_stats: ?PerformanceMonitor.PerformanceStats = null,
+
+    // Scene reference for hierarchy panel
+    scene: ?*Scene = null,
 };

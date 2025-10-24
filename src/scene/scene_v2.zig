@@ -245,6 +245,7 @@ pub const Scene = struct {
 
         // Get entity transform for emitter position
         const transform = self.ecs_world.get(Transform, entity) orelse return error.EntityHasNoTransform;
+        transform.dirty = true;
 
         // Create ECS emitter component
         var emitter = ecs.ParticleEmitter.initWithRate(emission_rate);
@@ -577,7 +578,7 @@ pub const Scene = struct {
                     if (self.performance_monitor) |pm| {
                         try pm.beginPass("geo_update", frame_info.current_frame, null);
                     }
-                    try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                    try geom_pass.update(frame_info.current_frame);
                     if (self.performance_monitor) |pm| {
                         try pm.endPass("geo_update", frame_info.current_frame, null);
                     }
@@ -586,7 +587,7 @@ pub const Scene = struct {
                 if (self.performance_monitor) |pm| {
                     try pm.beginPass("geo_update", frame_info.current_frame, null);
                 }
-                try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                try geom_pass.update(frame_info.current_frame);
                 if (self.performance_monitor) |pm| {
                     try pm.endPass("geo_update", frame_info.current_frame, null);
                 }
@@ -599,7 +600,7 @@ pub const Scene = struct {
                 if (self.performance_monitor) |pm| {
                     try pm.beginPass("pt_update", frame_info.current_frame, null);
                 }
-                try pt_pass.updateState(&frame_info);
+                try pt_pass.update(&frame_info);
                 if (self.performance_monitor) |pm| {
                     try pm.endPass("pt_update", frame_info.current_frame, null);
                 }
@@ -683,6 +684,8 @@ pub const Scene = struct {
         for (light_index..16) |i| {
             global_ubo.point_lights[i] = .{};
         }
+        // Mark light system dirty since we're animating lights
+
     }
 
     /// Update particle emitters - spawn particles based on emission rate
@@ -701,14 +704,14 @@ pub const Scene = struct {
 
             if (!emitter.active) continue;
 
-            // Get GPU emitter ID
-            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
-
             // Get current transform
             const transform = self.ecs_world.get(Transform, entity) orelse continue;
 
             // Only update GPU emitter if transform changed (dirty flag)
             if (!transform.dirty) continue;
+
+            // Get GPU emitter ID
+            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
 
             if (self.particle_compute_pass) |compute_pass| {
                 const vertex_formats = @import("../rendering/vertex_formats.zig");
@@ -729,6 +732,8 @@ pub const Scene = struct {
                 };
 
                 try compute_pass.updateEmitter(gpu_id, gpu_emitter);
+                // NOTE: Don't clear dirty flag here - RenderSystem needs to detect transform changes!
+                // The dirty flag will be cleared by RenderSystem after rebuilding the cache.
             }
         }
 

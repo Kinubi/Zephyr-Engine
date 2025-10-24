@@ -699,6 +699,7 @@ pub const App = struct {
                 .camera_pos = .{ camera_controller.position.x, camera_controller.position.y, camera_controller.position.z },
                 .camera_rot = .{ camera_controller.rotation.x, camera_controller.rotation.y, camera_controller.rotation.z },
                 .performance_stats = perf_stats,
+                .scene = &scene_v2,
             };
 
             ui_renderer.render(stats);

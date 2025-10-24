@@ -70,8 +70,8 @@
             .hash = "zstbi-0.11.0-dev-L0Ea_yaWBwAHwFoCuyjkFyaiSsbjt4UOrkntR0c_nmzz",
         },
         .cimgui_zig = .{
-            .url = "git+https://github.com/tiawl/cimgui.zig#9d201ac8ba9c030ddf47a442ad0d02dfc2318a7d",
-            .hash = "cimgui_zig-1.0.0-2Xubkl5zVgAlbbvSibcrWXDKjzeqr4M789yE-W3hz31n",
+            .url = "git+https://github.com/tiawl/cimgui.zig?ref=docking#9f4be1f74650c44fe62651e5b473ab56136becc8",
+            .hash = "cimgui_zig-1.0.0-2XubkkN6YAAoR0N6dlSVl2oNZneCb7dAanftB9Du4sIc",
         },
     },
 
