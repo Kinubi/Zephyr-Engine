@@ -323,7 +323,7 @@ pub const RenderSystem = struct {
             const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
 
             self.renderables_dirty = true;
-            self.transform_only_change = is_transform_only;            // Only mark descriptors dirty if geometry actually changed (not just transforms)
+            self.transform_only_change = is_transform_only; // Only mark descriptors dirty if geometry actually changed (not just transforms)
             if (!is_transform_only) {
                 self.raster_descriptors_dirty = true;
                 self.raytracing_descriptors_dirty = true;
