@@ -45,18 +45,16 @@ pub const PerformanceLayer = struct {
     fn begin(base: *Layer, frame_info: *const FrameInfo) !void {
         const self: *PerformanceLayer = @fieldParentPtr("base", base);
 
-        // Begin frame monitoring
+        // Begin frame monitoring (must happen before swapchain.beginFrame)
         try self.performance_monitor.beginFrame(frame_info.current_frame);
-
-        // Reset queries for this frame (after command buffers started)
-        try self.performance_monitor.resetQueriesForFrame(frame_info.compute_buffer);
-        try self.performance_monitor.writeFrameStartTimestamp(frame_info.compute_buffer);
     }
 
     fn update(base: *Layer, frame_info: *const FrameInfo) !void {
-        _ = base;
-        _ = frame_info;
-        // Performance monitoring happens in begin/end
+        const self: *PerformanceLayer = @fieldParentPtr("base", base);
+
+        // Reset queries and write frame start timestamp after command buffers are started
+        try self.performance_monitor.resetQueriesForFrame(frame_info.compute_buffer);
+        try self.performance_monitor.writeFrameStartTimestamp(frame_info.compute_buffer);
     }
 
     fn render(base: *Layer, frame_info: *const FrameInfo) !void {
@@ -65,7 +63,7 @@ pub const PerformanceLayer = struct {
         // Performance data collected via pass timing
     }
 
-    fn end(base: *Layer, frame_info: *const FrameInfo) !void {
+    fn end(base: *Layer, frame_info: *FrameInfo) !void {
         const self: *PerformanceLayer = @fieldParentPtr("base", base);
 
         // Write frame end timestamp and complete monitoring

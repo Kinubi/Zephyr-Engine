@@ -28,7 +28,7 @@ pub const Layer = struct {
         render: *const fn (layer: *Layer, frame_info: *const FrameInfo) anyerror!void,
 
         /// Called at the end of the frame (after rendering)
-        end: *const fn (layer: *Layer, frame_info: *const FrameInfo) anyerror!void,
+        end: *const fn (layer: *Layer, frame_info: *FrameInfo) anyerror!void,
 
         /// Called when an event is dispatched
         event: *const fn (layer: *Layer, event: *Event) void,
@@ -63,7 +63,7 @@ pub const Layer = struct {
     }
 
     /// End frame for this layer
-    pub fn end(self: *Layer, frame_info: *const FrameInfo) !void {
+    pub fn end(self: *Layer, frame_info: *FrameInfo) !void {
         if (!self.enabled) return;
         return self.vtable.end(self, frame_info);
     }

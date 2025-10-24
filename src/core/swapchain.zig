@@ -507,7 +507,7 @@ pub const Swapchain = struct {
         }
     }
 
-    pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
+    pub fn endFrame(self: *Swapchain, frame_info: *FrameInfo) !void {
         // End and submit compute buffer first (if compute is enabled)
         if (self.compute) {
             self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
@@ -527,11 +527,12 @@ pub const Swapchain = struct {
         };
 
         // Present (submits graphics buffer with semaphore wait on compute)
-        self.present(frame_info.command_buffer, current_frame.*, frame_info.extent) catch |err| {
+        self.present(frame_info.command_buffer, frame_info.current_frame, frame_info.extent) catch |err| {
             log(.ERROR, "swapchain", "Error presenting frame: {any}", .{err});
         };
 
-        current_frame.* = (current_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
+        // Advance to next frame index
+        frame_info.current_frame = (frame_info.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     pub fn endComputePass(self: *Swapchain, frame_info: FrameInfo) !void {

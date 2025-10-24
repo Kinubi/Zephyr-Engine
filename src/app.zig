@@ -57,6 +57,7 @@ const PerformanceMonitor = @import("rendering/performance_monitor.zig").Performa
 const Layer = @import("core/layer.zig").Layer;
 const LayerStack = @import("core/layer_stack.zig").LayerStack;
 const RenderLayer = @import("layers/render_layer.zig").RenderLayer;
+const PerformanceLayer = @import("layers/performance_layer.zig").PerformanceLayer;
 
 // Vulkan bindings and external C libraries
 const vk = @import("vulkan");
@@ -80,7 +81,7 @@ pub const App = struct {
     current_fps: f32 = 0.0,
 
     // Module-level variables (static state shared across App instances)
-    var current_frame: u32 = 0;
+
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
     var compute_bufs: []vk.CommandBuffer = undefined;
@@ -143,6 +144,7 @@ pub const App = struct {
     // Layer system
     var layer_stack: LayerStack = undefined;
     var render_layer: RenderLayer = undefined;
+    var performance_layer: PerformanceLayer = undefined;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -516,8 +518,7 @@ pub const App = struct {
         log(.INFO, "app", "Render pass manager system initialized (GenericRenderer disabled)", .{});
 
         var init_frame_info = frame_info;
-        init_frame_info.current_frame = current_frame;
-        init_frame_info.command_buffer = cmdbufs[current_frame];
+        init_frame_info.command_buffer = cmdbufs[frame_info.current_frame];
         init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
         init_frame_info.camera = &camera;
         // try forward_renderer.update(&init_frame_info);  // OLD: Disabled for RenderGraph
@@ -550,6 +551,10 @@ pub const App = struct {
         // Initialize Layer System
         log(.INFO, "app", "Initializing Layer System...", .{});
         layer_stack = LayerStack.init(self.allocator);
+
+        // Create performance layer (should be first to track all frame timing)
+        performance_layer = PerformanceLayer.init(performance_monitor.?);
+        try layer_stack.pushLayer(&performance_layer.base);
 
         // Create render layer
         render_layer = RenderLayer.init(&swapchain);
@@ -623,17 +628,11 @@ pub const App = struct {
         }
         const dt = current_time - last_frame_time;
 
-        // Begin performance monitoring for this frame (at the very start)
-        if (performance_monitor) |pm| {
-            try pm.beginFrame(current_frame);
-        }
-
-        const cmdbuf = cmdbufs[current_frame];
-        const computebuf = compute_bufs[current_frame];
-        frame_info.command_buffer = cmdbuf;
-        frame_info.compute_buffer = computebuf;
+        // ==================== PREPARE FRAME ====================
+        // Set up frame_info with command buffers, timing, and window state
+        frame_info.command_buffer = cmdbufs[frame_info.current_frame];
+        frame_info.compute_buffer = compute_bufs[frame_info.current_frame];
         frame_info.dt = @floatCast(dt);
-        frame_info.current_frame = current_frame;
 
         var width: c_int = 0;
         var height: c_int = 0;
@@ -670,36 +669,31 @@ pub const App = struct {
         // Update ECS transform hierarchies
         try transform_system.update(&new_ecs_world);
 
-        // Begin frame via layer system (starts command buffers)
+        // ==================== BEGIN FRAME (via Layer System) ====================
+        // PerformanceLayer.begin() -> calls performance_monitor.beginFrame()
+        // RenderLayer.begin() -> calls swapchain.beginFrame() and populates frame_info images
         try layer_stack.begin(&frame_info);
 
-        // Populate image views for dynamic rendering
-        const swap_image = swapchain.currentSwapImage();
-        frame_info.color_image = swapchain.currentImage();
-        frame_info.color_image_view = swap_image.view;
-        frame_info.depth_image_view = swap_image.depth_image_view;
+        // ==================== UPDATE LAYERS ====================
+        // PerformanceLayer.update() -> resets queries and writes frame start timestamp
+        try layer_stack.update(&frame_info);
 
         //log(.TRACE, "app", "Frame start", .{});
 
         if (performance_monitor) |pm| {
-            try pm.resetQueriesForFrame(frame_info.compute_buffer);
-            try pm.writeFrameStartTimestamp(frame_info.compute_buffer);
-        }
-
-        if (performance_monitor) |pm| {
-            try pm.beginPass("scene_update", current_frame, null); // CPU-only wrapper timing
+            try pm.beginPass("scene_update", frame_info.current_frame, null); // CPU-only wrapper timing
         }
         try scene_v2.update(frame_info, &ubo);
         if (performance_monitor) |pm| {
-            try pm.endPass("scene_update", current_frame, null);
+            try pm.endPass("scene_update", frame_info.current_frame, null);
         }
 
         if (performance_monitor) |pm| {
-            try pm.beginPass("ubo_update", current_frame, null); // CPU-only
+            try pm.beginPass("ubo_update", frame_info.current_frame, null); // CPU-only
         }
         global_ubo_set.*.update(frame_info.current_frame, &ubo);
         if (performance_monitor) |pm| {
-            try pm.endPass("ubo_update", current_frame, null);
+            try pm.endPass("ubo_update", frame_info.current_frame, null);
         }
 
         if (scene_v2_enabled) {
@@ -731,32 +725,24 @@ pub const App = struct {
             ui_renderer.render(stats);
 
             if (performance_monitor) |pm| {
-                try pm.beginPass("imgui", current_frame, frame_info.command_buffer); // GPU timing with graphics buffer
+                try pm.beginPass("imgui", frame_info.current_frame, frame_info.command_buffer); // GPU timing with graphics buffer
             }
 
             // Render ImGui using our custom dynamic rendering backend
             // This renders on top of the existing frame without clearing
-            try imgui_context.render(frame_info.command_buffer, &swapchain, current_frame);
+            try imgui_context.render(frame_info.command_buffer, &swapchain, frame_info.current_frame);
 
             if (performance_monitor) |pm| {
-                try pm.endPass("imgui", current_frame, frame_info.command_buffer);
+                try pm.endPass("imgui", frame_info.current_frame, frame_info.command_buffer);
             }
-        }
-
-        // End performance monitoring and write frame end timestamp (graphics buffer is last)
-        if (performance_monitor) |pm| {
-            try pm.writeFrameEndTimestamp(frame_info.command_buffer);
-            try pm.endFrame(frame_info.current_frame);
         }
 
         // End all layers (cleanup, etc.)
         try layer_stack.end(&frame_info);
 
-        // End frame and present
-        try swapchain.endFrame(frame_info, &current_frame);
         // Update GPU timings from previous frame (after fence wait)
         if (performance_monitor) |pm| {
-            const prev_frame = if (current_frame == 0) MAX_FRAMES_IN_FLIGHT - 1 else current_frame - 1;
+            const prev_frame = if (frame_info.current_frame == 0) MAX_FRAMES_IN_FLIGHT - 1 else frame_info.current_frame - 1;
             try pm.updateGpuTimings(prev_frame, swapchain.frame_fence, swapchain.compute_fence);
         }
 

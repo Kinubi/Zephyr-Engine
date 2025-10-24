@@ -72,7 +72,7 @@ pub const LayerStack = struct {
     }
 
     /// End frame for all layers
-    pub fn end(self: *LayerStack, frame_info: *const FrameInfo) !void {
+    pub fn end(self: *LayerStack, frame_info: *FrameInfo) !void {
         for (self.layers.items) |layer| {
             try layer.end(frame_info);
         }

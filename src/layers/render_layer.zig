@@ -43,8 +43,18 @@ pub const RenderLayer = struct {
 
     fn begin(base: *Layer, frame_info: *const FrameInfo) !void {
         const self: *RenderLayer = @fieldParentPtr("base", base);
+
         // Begin frame - starts both graphics and compute command buffers
         try self.swapchain.beginFrame(frame_info.*);
+
+        // Populate image views for dynamic rendering (swapchain images are now ready)
+        const swap_image = self.swapchain.currentSwapImage();
+        // Note: We need to cast away const here to populate frame_info
+        // This is safe because we're in the begin phase
+        const mutable_frame_info: *FrameInfo = @constCast(frame_info);
+        mutable_frame_info.color_image = self.swapchain.currentImage();
+        mutable_frame_info.color_image_view = swap_image.view;
+        mutable_frame_info.depth_image_view = swap_image.depth_image_view;
     }
 
     fn update(base: *Layer, frame_info: *const FrameInfo) !void {
@@ -59,10 +69,9 @@ pub const RenderLayer = struct {
         // Actual rendering happens in SceneLayer
     }
 
-    fn end(base: *Layer, frame_info: *const FrameInfo) !void {
-        _ = base;
-        _ = frame_info;
-        // Frame will be ended in app.zig after all layers complete
+    fn end(base: *Layer, frame_info: *FrameInfo) !void {
+        const self: *RenderLayer = @fieldParentPtr("base", base);
+        try self.swapchain.endFrame(frame_info);
     }
 
     fn event(base: *Layer, evt: *Event) void {
