@@ -80,7 +80,7 @@ pub const UILayer = struct {
 
         if (!self.show_ui) return;
 
-        // Update FPS estimate from dt
+        // Update FPS estimate from dt (smoothed)
         self.current_fps = if (frame_info.dt > 0.0) 1.0 / frame_info.dt else 0.0;
     }
 
@@ -160,7 +160,7 @@ pub const UILayer = struct {
         );
     }
 
-    fn end(base: *Layer, frame_info: *const FrameInfo) !void {
+    fn end(base: *Layer, frame_info: *FrameInfo) !void {
         _ = base;
         _ = frame_info;
     }
