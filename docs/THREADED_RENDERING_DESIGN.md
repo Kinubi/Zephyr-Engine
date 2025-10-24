@@ -25,16 +25,32 @@
 
 This document outlines a design for leveraging the existing ThreadPool infrastructure to parallelize rendering operations in ZulkanZengine. The current rendering pipeline is entirely single-threaded on the CPU side, leaving significant performance on the table for multi-core systems.
 
+**Prerequisites**: This design depends on the RenderGraph system implementing full DAG (Directed Acyclic Graph) compilation with topological sorting. See [RenderGraph System Documentation](RENDER_GRAPH_SYSTEM.md#dag-compilation) for details.
+
 ### Goals
 - **Reduce frame time** by parallelizing CPU-bound rendering tasks
 - **Improve scalability** across systems with varying core counts
 - **Maintain determinism** and avoid race conditions
 - **Leverage existing ThreadPool** with minimal architectural changes
+- **Utilize RenderGraph DAG** for safe parallel pass execution
 
 ### Key Metrics
 - **Current CPU bottleneck:** ~60-70% of frame time spent in single-threaded ECS queries and command buffer recording
 - **Target improvement:** 30-50% reduction in CPU frame time on 8+ core systems
 - **Risk level:** Medium (Vulkan thread safety requires careful design)
+
+### Dependencies
+
+**Critical**: The RenderGraph must implement:
+1. ✅ Pass dependency declaration during `setup()`
+2. ⏳ DAG construction from resource dependencies
+3. ⏳ Topological sort for execution order
+4. ⏳ Cycle detection and validation
+
+**Why DAG is Required**:
+- Determines which passes can execute in parallel (no data dependencies)
+- Ensures correct execution order (reads after writes)
+- Enables safe thread assignment without race conditions
 
 ---
 
@@ -136,6 +152,76 @@ buildRasterCache() -> buildRaytracingCache()
 ---
 
 ## Proposed Architecture
+
+### Prerequisites: RenderGraph DAG
+
+**Before implementing threaded rendering**, the RenderGraph must complete DAG compilation:
+
+```zig
+// RenderGraph must provide:
+pub const RenderGraph = struct {
+    // ... existing fields ...
+    
+    dependency_graph: DependencyGraph,  // Node = Pass, Edge = Resource dependency
+    sorted_passes: []const *RenderPass, // Topologically sorted execution order
+    
+    /// Build dependency graph and sort passes
+    pub fn compile(self: *RenderGraph) !void {
+        // 1. Call setup() on all passes (declare dependencies)
+        for (self.passes.items) |pass| {
+            try pass.setup(self);
+        }
+        
+        // 2. Build dependency graph from resource reads/writes
+        try self.dependency_graph.build(self.passes.items);
+        
+        // 3. Topological sort for execution order
+        self.sorted_passes = try self.dependency_graph.topologicalSort();
+        
+        // 4. Validate (check for cycles, missing deps)
+        try self.dependency_graph.validate();
+        
+        self.compiled = true;
+    }
+    
+    /// Get independent passes that can execute in parallel
+    pub fn getParallelBatches(self: *RenderGraph) []const []const *RenderPass {
+        // Returns groups of passes with no dependencies between them
+        // Example: [[GeometryPass], [ShadowPass, ParticleCompute], [Lighting]]
+        return self.dependency_graph.getIndependentGroups();
+    }
+};
+```
+
+**Why DAG is Critical**:
+
+1. **Safety**: Prevents data races by ensuring reads happen after writes
+2. **Correctness**: Guarantees execution order respects dependencies
+3. **Parallelism**: Identifies which passes can run concurrently
+4. **Validation**: Detects circular dependencies at compile time
+
+**Example Dependency Analysis**:
+
+```
+ParticleComputePass  ───writes───> particle_buffer
+                                         │
+                                     reads by
+                                         ▼
+GeometryPass ──writes─> color_buffer, depth_buffer
+                              │              │
+                          reads by       reads by
+                              ▼              ▼
+                        LightVolumePass ─writes─> color_buffer (blend)
+                                                        │
+                                                    reads by
+                                                        ▼
+                                                  ParticlePass
+
+Parallel Groups:
+- Batch 0: [ParticleComputePass, GeometryPass]  ← Can run in parallel!
+- Batch 1: [LightVolumePass]                    ← Waits for GeometryPass
+- Batch 2: [ParticlePass]                       ← Waits for both
+```
 
 ### Phase 1: Parallel ECS Queries
 

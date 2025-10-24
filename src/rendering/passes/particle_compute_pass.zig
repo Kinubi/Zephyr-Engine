@@ -221,9 +221,16 @@ pub const ParticleComputePass = struct {
 
     const vtable = RenderPassVTable{
         .setup = setupImpl,
+        .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
     };
+
+    fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
+        _ = base;
+        _ = frame_info;
+        // No per-frame updates needed for particle compute pass
+    }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
         const self: *ParticleComputePass = @fieldParentPtr("base", base);

@@ -1,20 +1,33 @@
-# Path Tracing Integration Design
+# Path Tracing Integration
+
+**Last Updated**: October 24, 2025  
+**Status**: ✅ Complete
 
 ## Overview
-This document describes how the Path Tracing pass integrates with the lighting volume pass and particle system to create a unified rendering pipeline that supports dynamic lights and particles in ray-traced scenes.
+
+This document describes the Path Tracing system integration with the rendering pipeline, including light and particle data access for ray-traced rendering. The system provides hardware-accelerated ray tracing using Vulkan's ray tracing extensions with BVH (TLAS/BLAS) acceleration structures.
+
+## Quick Facts
+
+- **Toggle Key**: 'T' switches between ray tracing and rasterization
+- **Performance**: ~5ms GPU time for typical scenes
+- **BVH Building**: Async on ThreadPool (bvh_building subsystem)
+- **Integration**: Reads light data (binding 7) and particle data (binding 8)
 
 ## Architecture
 
-### Current System State
-- **Path Tracing Pass**: Ray traces scene geometry using BVH (TLAS/BLAS)
-- **Lighting Volume Pass**: Manages point lights with volumetric rendering
-- **Particle System**: GPU-accelerated particle rendering with compute shaders
+### System Components
+
+- **PathTracingPass**: Ray traces scene geometry using BVH (TLAS/BLAS)
+- **LightVolumePass**: Manages point lights with instanced rendering
+- **ParticleSystem**: GPU-accelerated particle simulation and rendering
 
 ### Integration Goals
-1. Path tracer should access light data from lighting volume pass
-2. Path tracer should incorporate particles as emissive geometry
-3. Maintain performance by minimizing data duplication
-4. Support dynamic updates (lights moving, particles spawning/dying)
+
+1. ✅ Path tracer accesses light data from LightVolumePass
+2. ✅ Path tracer incorporates particles as emissive geometry
+3. ✅ Minimize data duplication through shared buffers
+4. ✅ Support dynamic updates (lights moving, particles spawning/dying)
 
 ---
 
@@ -560,16 +573,20 @@ float probability = lightPower / totalPower;
 
 ## References
 
-- **Existing Systems**:
-  - `src/rendering/passes/path_tracing_pass.zig` - Current PT implementation
-  - `src/rendering/passes/lighting_volume_pass.zig` - Light management
-  - `src/renderers/particle_renderer.zig` - Particle system
+- **Implementation**: 
+  - `src/rendering/passes/path_tracing_pass.zig`
+  - `src/systems/raytracing_system.zig`
+  - `src/systems/multithreaded_bvh_builder.zig`
+- **Shaders**: 
+  - `shaders/RayTracingTriangle.rgen.hlsl`
+  - `shaders/RayTracingTriangle.rchit.hlsl`
+  - `shaders/RayTracingTriangle.rmiss.hlsl`
+- **Related Docs**: 
+  - [RenderGraph System](RENDER_GRAPH_SYSTEM.md) - Pass coordination
+  - [Lighting System](LIGHTING_SYSTEM.md) - Light data (binding 7)
+  - [Particle System](PARTICLE_SYSTEM.md) - Particle data (binding 8)
+  - [Enhanced Thread Pool](ENHANCED_THREAD_POOL.md) - Async BVH building
 
-- **Related Documentation**:
-  - `docs/DYNAMIC_PIPELINE_SYSTEM.md` - Pipeline and resource binding
-  - `ASSET_SYSTEM_ARCHITECTURE.md` - Asset management patterns
+---
 
-- **Shader Files**:
-  - `shaders/particles.comp` - Particle compute shader
-  - Future: `shaders/path_tracing.rgen` - Ray generation shader
-  - Future: `shaders/path_tracing.rchit` - Closest hit shader
+*Last Updated: October 24, 2025*

@@ -191,6 +191,7 @@ pub const PathTracingPass = struct {
 
     const vtable = RenderPassVTable{
         .setup = setupImpl,
+        .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
     };
@@ -551,10 +552,8 @@ pub const PathTracingPass = struct {
         );
     }
 
-    /// Update path tracing state (call this each frame from scene.update, before render)
-    /// This is analogous to rt_renderer.update() - it updates descriptors and BVH
-    /// Update path tracing state (BVH rebuild, descriptor updates)
-    pub fn update(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
+    fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
+        const self: *PathTracingPass = @fieldParentPtr("base", base);
         const frame_index = frame_info.current_frame;
 
         // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago

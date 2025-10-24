@@ -1,10 +1,11 @@
-# Pipeline Caching - Quick Reference
+# Pipeline Caching Quick Reference
 
-**Status**: ✅ Implemented (October 16, 2025)
+**Last Updated**: October 24, 2025  
+**Status**: ✅ Complete
 
-## What It Does
+## Overview
 
-Automatically saves compiled Vulkan pipelines to disk, making subsequent application launches ~66% faster.
+Automatically saves compiled Vulkan pipelines to disk, making subsequent application launches **~66% faster** (~150ms → ~50ms typical).
 
 ## How It Works
 
@@ -115,8 +116,8 @@ Cache is automatically invalidated when:
 
 ## See Also
 
-- **Full Documentation**: `docs/PIPELINE_CACHING.md`
-- **Migration Guide**: `docs/UNIFIED_PIPELINE_MIGRATION.md`
+- [Unified Pipeline System](UNIFIED_PIPELINE_MIGRATION.md) - Main pipeline system
+- [RenderGraph System](RENDER_GRAPH_SYSTEM.md) - Pass coordination
 - **Source Code**: 
   - `src/rendering/unified_pipeline_system.zig`
   - `src/rendering/pipeline_builder.zig`
@@ -124,3 +125,7 @@ Cache is automatically invalidated when:
 ---
 
 **TL;DR**: It just works. Your pipelines are now automatically cached to disk for faster startups. No code changes needed.
+
+---
+
+*Last Updated: October 24, 2025*

@@ -512,6 +512,7 @@ pub const App = struct {
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
+        frame_info.performance_monitor = null; // Will be set after initialization
 
         // Initialize ImGui
         log(.INFO, "app", "Initializing ImGui...", .{});
@@ -523,6 +524,7 @@ pub const App = struct {
         log(.INFO, "app", "Initializing Performance Monitor...", .{});
         performance_monitor = try self.allocator.create(PerformanceMonitor);
         performance_monitor.?.* = try PerformanceMonitor.init(self.allocator, &self.gc);
+        frame_info.performance_monitor = performance_monitor;
         last_performance_report = c.glfwGetTime();
         log(.INFO, "app", "Performance Monitor initialized", .{});
 
@@ -624,11 +626,12 @@ pub const App = struct {
         const toggle_time = c.glfwGetTime();
 
         if (t_key_state == c.GLFW_PRESS and (toggle_time - last_toggle_time) > TOGGLE_COOLDOWN) {
-            if (scene_v2_enabled and scene_v2.path_tracing_pass != null) {
-                const current_state = scene_v2.path_tracing_pass.?.enable_path_tracing;
-                scene_v2.setPathTracingEnabled(!current_state);
+            if (scene_v2_enabled and scene_v2.render_graph != null) {
+                // Check current path tracing state via the render graph
+                const pt_enabled = if (scene_v2.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                scene_v2.setPathTracingEnabled(!pt_enabled);
                 last_toggle_time = toggle_time;
-                log(.INFO, "app", "Path tracing toggled: {}", .{!current_state});
+                log(.INFO, "app", "Path tracing toggled: {}", .{!pt_enabled});
             }
         }
 
@@ -694,7 +697,9 @@ pub const App = struct {
                 .frame_time_ms = @as(f32, @floatCast(dt * 1000.0)),
                 .entity_count = new_ecs_world.entityCount(),
                 .draw_calls = 0, // TODO: track this
-                .path_tracing_enabled = if (scene_v2.path_tracing_pass) |pt| pt.enable_path_tracing else false,
+                .path_tracing_enabled = if (scene_v2.render_graph) |*graph| blk: {
+                    break :blk if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                } else false,
                 .sample_count = 0, // TODO: track accumulated samples
                 .camera_pos = .{ camera_controller.position.x, camera_controller.position.y, camera_controller.position.z },
                 .camera_rot = .{ camera_controller.rotation.x, camera_controller.rotation.y, camera_controller.rotation.z },

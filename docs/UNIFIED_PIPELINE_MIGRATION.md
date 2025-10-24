@@ -1,17 +1,27 @@
-# Pipeline/Descriptor Set Unification Migration Guide
+# Unified Pipeline System
+
+**Last Updated**: October 24, 2025  
+**Status**: ✅ Complete
 
 ## Overview
 
-The new unified pipeline system replaces the fragmented approach of having separate systems for pipeline management, descriptor set management, and resource binding. This document shows how to migrate from the old system to the new unified approach.
+The Unified Pipeline System replaces the fragmented approach of separate pipeline management, descriptor sets, and resource binding with a single, cohesive API. This system provides automatic descriptor layout extraction, hot-reload integration, and persistent pipeline caching.
+
+## Quick Facts
+
+- **Automatic Descriptor Layouts**: Extracted from shader reflection
+- **Hot-Reload**: Automatic pipeline recreation on shader changes
+- **Pipeline Caching**: ~66% faster startup (see [Pipeline Caching](PIPELINE_CACHING_QUICK_REF.md))
+- **Type-Safe**: Compile-time safety for resource types
 
 ## Key Benefits
 
-1. **Automatic Descriptor Layout Extraction**: Descriptor layouts are automatically extracted from shader reflection data
-2. **Unified Resource Binding**: Single API for binding all types of resources
-3. **Hot-Reload Integration**: Automatic pipeline recreation when shaders change
-4. **Frame-based Resource Management**: Proper handling of per-frame resources
-5. **Type-Safe Resource Binding**: Compile-time safety for resource types
-6. **Pipeline Caching**: Persistent disk cache for faster startup times (see `PIPELINE_CACHING.md`)
+1. ✅ **Automatic Descriptor Layout Extraction**: Layouts extracted from shader reflection data
+2. ✅ **Unified Resource Binding**: Single API for all resource types
+3. ✅ **Hot-Reload Integration**: Automatic pipeline recreation when shaders change
+4. ✅ **Frame-based Resource Management**: Proper handling of per-frame resources
+5. ✅ **Type-Safe Resource Binding**: Compile-time safety for resource types
+6. ✅ **Pipeline Caching**: Persistent disk cache for ~66% faster startup ([docs](PIPELINE_CACHING_QUICK_REF.md))
 
 ## Architecture Overview
 
@@ -275,40 +285,49 @@ const pipeline_config = UnifiedPipelineSystem.PipelineConfig{
 
 ## Migration Checklist
 
-- [ ] Replace PipelineBuilder usage with UnifiedPipelineSystem.createPipeline()
-- [ ] Replace manual descriptor layout creation with automatic extraction
-- [ ] Replace RenderPassDescriptorManager with ResourceBinder
-- [ ] Update resource binding calls to use ResourceBinder methods
+- [ ] Replace `PipelineBuilder` usage with `UnifiedPipelineSystem.createPipeline()`
+- [ ] Remove manual descriptor layout creation (now automatic)
+- [ ] Replace `RenderPassDescriptorManager` with `ResourceBinder`
+- [ ] Update resource binding calls to use `ResourceBinder` methods
 - [ ] Add hot-reload callbacks for dynamic pipelines
 - [ ] Update frame management to use per-frame resource binding
-- [ ] Remove manual descriptor pool management
+- [ ] Remove manual descriptor pool management (now automatic)
 - [ ] Update error handling for new error types
+- [ ] Test pipeline caching (should see speedup on second launch)
 
 ## Common Migration Issues
 
 ### Issue: Missing Descriptor Bindings
-**Problem**: Shader expects bindings that aren't being set.
-**Solution**: Use the ResourceBinder.getBound* methods to verify bindings are correct.
+**Problem**: Shader expects bindings that aren't being set.  
+**Solution**: Use the `ResourceBinder.getBound*` methods to verify bindings are correct.
 
 ### Issue: Frame Synchronization
-**Problem**: Resources bound to wrong frame indices.
-**Solution**: Ensure frame_index parameter matches the current frame in flight.
+**Problem**: Resources bound to wrong frame indices.  
+**Solution**: Ensure `frame_index` parameter matches the current frame in flight.
 
 ### Issue: Hot-Reload Crashes
-**Problem**: Resources become invalid after shader reload.
+**Problem**: Resources become invalid after shader reload.  
 **Solution**: Implement proper pipeline reload callbacks to rebind resources.
 
 ### Issue: Performance Degradation
-**Problem**: Too many individual resource updates.
-**Solution**: Batch resource binding calls and use single updateFrame() call.
+**Problem**: Too many individual resource updates.  
+**Solution**: Batch resource binding calls and use single `updateFrame()` call.
 
 ### Issue: Slow Initial Startup
-**Problem**: Pipeline compilation takes too long on first launch.
-**Solution**: The pipeline caching system automatically speeds up subsequent launches. See `docs/PIPELINE_CACHING.md` for details.
+**Problem**: Pipeline compilation takes too long on first launch.  
+**Solution**: Pipeline caching automatically speeds up subsequent launches. See [Pipeline Caching](PIPELINE_CACHING_QUICK_REF.md) for details.
 
-## See Also
+## References
 
-- `docs/PIPELINE_CACHING.md` - Pipeline cache system for faster startups
-- `docs/DYNAMIC_PIPELINE_SYSTEM.md` - Dynamic pipeline management
-- `src/rendering/unified_pipeline_system.zig` - Main implementation
-- `src/rendering/pipeline_builder.zig` - Pipeline creation utilities
+- **Implementation**: 
+  - `src/rendering/unified_pipeline_system.zig`
+  - `src/rendering/pipeline_builder.zig`
+  - `src/rendering/resource_binder.zig`
+- **Related Docs**: 
+  - [Pipeline Caching Quick Reference](PIPELINE_CACHING_QUICK_REF.md)
+  - [RenderGraph System](RENDER_GRAPH_SYSTEM.md)
+  - [Asset System](ASSET_SYSTEM.md) - Shader hot-reload
+
+---
+
+*Last Updated: October 24, 2025*

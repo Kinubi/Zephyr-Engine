@@ -136,6 +136,9 @@ pub const RenderPassVTable = struct {
     /// Setup resources and declare dependencies
     setup: *const fn (pass: *RenderPass, graph: *RenderGraph) anyerror!void,
 
+    /// Update pass state each frame (e.g., BVH rebuilds, descriptor updates)
+    update: *const fn (pass: *RenderPass, frame_info: *const FrameInfo) anyerror!void,
+
     /// Execute the pass (record commands)
     execute: *const fn (pass: *RenderPass, frame_info: FrameInfo) anyerror!void,
 
@@ -152,6 +155,11 @@ pub const RenderPass = struct {
     /// Call setup through vtable
     pub fn setup(self: *RenderPass, graph: *RenderGraph) !void {
         return self.vtable.setup(self, graph);
+    }
+
+    /// Call update through vtable
+    pub fn update(self: *RenderPass, frame_info: *const FrameInfo) !void {
+        return self.vtable.update(self, frame_info);
     }
 
     /// Call execute through vtable
@@ -230,6 +238,29 @@ pub const RenderGraph = struct {
         log(.INFO, "render_graph", "Render graph compiled successfully", .{});
     }
 
+    /// Update all enabled passes (call each frame before execute)
+    pub fn update(self: *RenderGraph, frame_info: *const FrameInfo) !void {
+        if (!self.compiled) {
+            return error.GraphNotCompiled;
+        }
+
+        for (self.passes.items) |pass| {
+            if (!pass.enabled) {
+                continue;
+            }
+
+            if (frame_info.performance_monitor) |pm| {
+                try pm.beginPass(pass.name, frame_info.current_frame, null);
+            }
+
+            try pass.update(frame_info);
+
+            if (frame_info.performance_monitor) |pm| {
+                try pm.endPass(pass.name, frame_info.current_frame, null);
+            }
+        }
+    }
+
     /// Execute all enabled passes
     pub fn execute(self: *RenderGraph, frame_info: FrameInfo) !void {
         if (!self.compiled) {
@@ -243,6 +274,50 @@ pub const RenderGraph = struct {
             }
 
             try pass.execute(frame_info);
+        }
+    }
+
+    /// Execute only compute passes (should be called during compute command recording)
+    pub fn executeComputePasses(self: *RenderGraph, frame_info: FrameInfo) !void {
+        if (!self.compiled) {
+            return error.GraphNotCompiled;
+        }
+
+        for (self.passes.items) |pass| {
+            if (!pass.enabled) continue;
+            if (!pass.isComputePass()) continue; // Only execute compute passes
+
+            if (frame_info.performance_monitor) |pm| {
+                try pm.beginPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+            }
+
+            try pass.execute(frame_info);
+
+            if (frame_info.performance_monitor) |pm| {
+                try pm.endPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+            }
+        }
+    }
+
+    /// Execute only graphics passes (should be called during graphics command recording)
+    pub fn executeGraphicsPasses(self: *RenderGraph, frame_info: FrameInfo) !void {
+        if (!self.compiled) {
+            return error.GraphNotCompiled;
+        }
+
+        for (self.passes.items) |pass| {
+            if (!pass.enabled) continue;
+            if (pass.isComputePass()) continue; // Skip compute passes
+
+            if (frame_info.performance_monitor) |pm| {
+                try pm.beginPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
+            }
+
+            try pass.execute(frame_info);
+
+            if (frame_info.performance_monitor) |pm| {
+                try pm.endPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
+            }
         }
     }
 
