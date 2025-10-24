@@ -52,6 +52,7 @@ pub const GeometryPass = struct {
     // Pipeline
     geometry_pipeline: PipelineId = undefined,
     cached_pipeline_handle: vk.Pipeline = .null_handle,
+    cached_pipeline_layout: vk.PipelineLayout = .null_handle,
 
     // Hot reload state
     resources_need_setup: bool = false,
@@ -143,6 +144,7 @@ pub const GeometryPass = struct {
         self.geometry_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+        self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
         // Mark resources as needing setup
         self.resources_need_setup = true;
@@ -163,6 +165,7 @@ pub const GeometryPass = struct {
         if (pipeline_rebuilt) {
             log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
             self.resource_binder.clearPipeline(self.geometry_pipeline);
         }
 
@@ -300,14 +303,13 @@ pub const GeometryPass = struct {
         // Bind pipeline with all descriptor sets (Set 0: global UBO, Set 1: materials/textures)
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.geometry_pipeline, frame_index);
 
-        // Get pipeline layout for push constants
-        const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
+        // Use cached pipeline layout (no hashmap lookup needed)
+        const pipeline_layout = self.cached_pipeline_layout;
 
         // Render each object (mesh pointers and material indices already resolved in cache)
-        var rendered_count: usize = 0;
+        // NOTE: All objects in cache are currently visible (visibility culling not yet implemented)
+        // When adding visibility culling, filter at cache build time in RenderSystem, not here
         for (raster_data.objects) |object| {
-            if (!object.visible) continue;
-
             // Push constants (data already resolved in cache)
             const push_constants = GeometryPushConstants{
                 .transform = object.transform,
@@ -326,8 +328,6 @@ pub const GeometryPass = struct {
 
             // Draw mesh (pointer already resolved in cache)
             object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
-
-            rendered_count += 1;
         }
 
         // End rendering

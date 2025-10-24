@@ -2,6 +2,8 @@
 
 layout (location = 0) out vec4 outColor;
 layout(location = 4) in vec2 positionWorld;
+layout(location = 5) in vec4 v_color;
+layout(location = 6) in float v_radius;
 
 struct PointLight {
     vec4 position;
@@ -17,12 +19,6 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     float dt;
 } ubo;
 
-layout(push_constant) uniform Push {
-    vec4 position;
-    vec4 color;
-    float radius;
-} push;
-
 void main() {
     float dis = sqrt(dot(positionWorld, positionWorld));
     if (dis >= 1.0) {
@@ -31,5 +27,5 @@ void main() {
     // Soft falloff from center to edge for more pleasant appearance
     float falloff = 1.0 - dis;
     float alpha = falloff * 0.6; // Semi-transparent with falloff
-    outColor = vec4(push.color.xyz, alpha);
+    outColor = vec4(v_color.xyz, alpha);
 }

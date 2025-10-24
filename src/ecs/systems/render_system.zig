@@ -387,11 +387,13 @@ pub const RenderSystem = struct {
             // Create raster and RT data for each mesh in the model
             for (model.meshes.items) |model_mesh| {
                 // Raster data
+                // TODO: Implement frustum/occlusion culling here and set visible = false for culled objects
+                // This avoids runtime branches in the render loop
                 raster_objects[mesh_idx] = .{
                     .transform = renderable.world_matrix.data,
                     .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
                     .material_index = material_index,
-                    .visible = true,
+                    .visible = true, // Currently all objects are visible
                 };
 
                 // RT geometry

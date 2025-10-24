@@ -302,6 +302,12 @@ pub const ParticleComputePass = struct {
             self.graphics_context.vkd.cmdDispatch(command_buffer, workgroups, 1, 1);
         }
 
+        // OPTIMIZATION: Early exit if no particles to process
+        // Avoids memory barriers and buffer copy when no particles are active
+        if (active_particle_slots == 0) {
+            return;
+        }
+
         // Memory barrier to ensure compute writes are visible to vertex stage
         const memory_barrier = vk.MemoryBarrier{
             .src_access_mask = .{ .shader_write_bit = true },
@@ -322,13 +328,13 @@ pub const ParticleComputePass = struct {
         );
 
         // Copy output back to input for this frame (ping-pong for next iteration)
-        // OPTIMIZATION: Only copy active particle slots instead of entire buffer
+        // Only copy active particle slots instead of entire buffer
         const active_buffer_size = active_particle_slots * @sizeOf(vertex_formats.Particle);
 
         const copy_region = vk.BufferCopy{
             .src_offset = 0,
             .dst_offset = 0,
-            .size = if (active_buffer_size > 0) active_buffer_size else @sizeOf(vertex_formats.Particle), // Minimum 1 particle
+            .size = active_buffer_size,
         };
         self.graphics_context.vkd.cmdCopyBuffer(
             command_buffer,
