@@ -704,14 +704,14 @@ pub const Scene = struct {
 
             if (!emitter.active) continue;
 
-            // Get GPU emitter ID
-            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
-
             // Get current transform
             const transform = self.ecs_world.get(Transform, entity) orelse continue;
 
             // Only update GPU emitter if transform changed (dirty flag)
-            //if (!transform.dirty) continue;
+            if (!transform.dirty) continue;
+
+            // Get GPU emitter ID
+            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
 
             if (self.particle_compute_pass) |compute_pass| {
                 const vertex_formats = @import("../rendering/vertex_formats.zig");
@@ -732,7 +732,8 @@ pub const Scene = struct {
                 };
 
                 try compute_pass.updateEmitter(gpu_id, gpu_emitter);
-                transform.dirty = false; // Reset dirty flag after update
+                // NOTE: Don't clear dirty flag here - RenderSystem needs to detect transform changes!
+                // The dirty flag will be cleared by RenderSystem after rebuilding the cache.
             }
         }
 

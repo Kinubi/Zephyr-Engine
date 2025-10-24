@@ -26,6 +26,11 @@ pub const RenderSystem = struct {
     raster_descriptors_dirty: bool = true,
     raytracing_descriptors_dirty: bool = true,
 
+    // NEW: Track what KIND of change occurred
+    // transform_only_change: only transforms changed (TLAS update needed, no BLAS rebuild, no descriptor rebind)
+    // geometry_change: mesh count/assets changed (full rebuild + descriptors)
+    transform_only_change: bool = false,
+
     // Cached render data (rebuilt when changes detected)
     cached_raster_data: ?RasterizationData = null,
     cached_raytracing_data: ?RaytracingData = null,
@@ -289,15 +294,40 @@ pub const RenderSystem = struct {
             }
         }
 
+        // Check 4: Transform dirty flags (cheap - detects inspector edits)
+        // Check ALL transforms for dirty flags, not just renderables
+        // This ensures inspector edits to any object are detected
+        if (!changes_detected) {
+            var transform_view = try world.view(Transform);
+            var transform_iter = transform_view.iterator();
+            while (transform_iter.next()) |entry| {
+                if (entry.component.dirty) {
+                    const has_mesh = world.has(MeshRenderer, entry.entity);
+                    // Only trigger rebuild if this entity has a MeshRenderer
+                    if (has_mesh) {
+                        changes_detected = true;
+                        reason = "transform_dirty";
+                        break;
+                    }
+                }
+            }
+        }
+
         // Update tracking state
         self.last_renderable_count = current_renderable_count;
         self.last_geometry_count = current_geometry_count;
 
         // Rebuild if any changes detected
         if (changes_detected) {
+            // Determine if this is ONLY a transform change (no geometry/asset changes)
+            const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
+
             self.renderables_dirty = true;
-            self.raster_descriptors_dirty = true;
-            self.raytracing_descriptors_dirty = true;
+            self.transform_only_change = is_transform_only;            // Only mark descriptors dirty if geometry actually changed (not just transforms)
+            if (!is_transform_only) {
+                self.raster_descriptors_dirty = true;
+                self.raytracing_descriptors_dirty = true;
+            }
 
             try self.rebuildCaches(world, asset_manager);
         }
@@ -393,6 +423,19 @@ pub const RenderSystem = struct {
             .geometries = geometries,
             .materials = materials,
         };
+
+        // Clear dirty flags only for renderable entities (not lights, cameras, etc.)
+        var mesh_view_clear = try world.view(MeshRenderer);
+        var mesh_iter_clear = mesh_view_clear.iterator();
+        var cleared_count: usize = 0;
+        while (mesh_iter_clear.next()) |entry| {
+            if (world.get(Transform, entry.entity)) |transform| {
+                if (transform.dirty) {
+                    cleared_count += 1;
+                }
+                transform.dirty = false;
+            }
+        }
     }
 
     /// Check if BVH needs to be rebuilt (for ray tracing system)

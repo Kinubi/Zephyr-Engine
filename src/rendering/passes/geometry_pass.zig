@@ -169,10 +169,10 @@ pub const GeometryPass = struct {
         const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
 
         // Check if render system detected geometry changes (sets flag for both raster and RT)
+        // OPTIMIZATION: Only rebind descriptors if geometry actually changed (not just transforms)
         const geometry_changed = self.render_system.raster_descriptors_dirty;
 
         if (assets_updated or pipeline_rebuilt or self.resources_need_setup or geometry_changed) {
-            log(.INFO, "geometry_pass", "Assets/geometry updated, rebinding descriptors", .{});
             try self.setupResources();
             self.resources_need_setup = false;
 

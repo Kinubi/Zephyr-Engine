@@ -600,7 +600,6 @@ pub const PathTracingPass = struct {
             (!self.tlas_valid or self.rt_system.tlas_dirty or self.tlas != self.rt_system.tlas);
 
         if (tlas_changed) {
-            log(.INFO, "path_tracing_pass", "TLAS changed, updating PathTracingPass TLAS", .{});
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
 

@@ -30,6 +30,41 @@ pub const UIRenderer = struct {
 
     /// Render all UI windows
     pub fn render(self: *UIRenderer, stats: RenderStats) void {
+        // Note: Dockspace disabled - requires ImGui docking branch
+        // For now, windows will be regular floating windows
+
+        const viewport = c.ImGui_GetMainViewport();
+        c.ImGui_SetNextWindowPos(viewport.*.Pos, c.ImGuiCond_Always);
+        c.ImGui_SetNextWindowSize(viewport.*.Size, c.ImGuiCond_Always);
+        c.ImGui_SetNextWindowViewport(viewport.*.ID);
+
+        const window_flags = c.ImGuiWindowFlags_NoDocking |
+            c.ImGuiWindowFlags_NoTitleBar | c.ImGuiWindowFlags_NoCollapse |
+            c.ImGuiWindowFlags_NoResize | c.ImGuiWindowFlags_NoMove |
+            c.ImGuiWindowFlags_NoBringToFrontOnFocus | c.ImGuiWindowFlags_NoNavFocus |
+            c.ImGuiWindowFlags_NoBackground; // Transparent background for dockspace host
+
+        c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowRounding, 0.0);
+        c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowBorderSize, 0.0);
+        c.ImGui_PushStyleVarImVec2(c.ImGuiStyleVar_WindowPadding, .{ .x = 0, .y = 0 });
+
+        _ = c.ImGui_Begin("DockSpace", null, window_flags);
+        c.ImGui_PopStyleVar();
+        c.ImGui_PopStyleVar();
+        c.ImGui_PopStyleVar();
+
+        // DockSpace
+        const dockspace_id = c.ImGui_GetID("MyDockSpace");
+        _ = c.ImGui_DockSpace(dockspace_id);
+
+        c.ImGui_End();
+
+        // Transparent viewport window in the center
+        const viewport_flags = c.ImGuiWindowFlags_NoBackground | c.ImGuiWindowFlags_NoScrollbar;
+        _ = c.ImGui_Begin("Viewport", null, viewport_flags);
+        c.ImGui_Text("3D Viewport");
+        c.ImGui_End();
+
         if (self.show_stats_window) {
             self.renderStatsWindow(stats);
         }

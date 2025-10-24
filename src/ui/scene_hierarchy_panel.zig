@@ -188,29 +188,25 @@ pub const SceneHierarchyPanel = struct {
     /// Render Transform component inspector with editable fields
     fn renderTransformInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, transform: *Transform) void {
         _ = self;
+        _ = world;
+        _ = entity;
 
         // Position
         var pos = [3]f32{ transform.position.x, transform.position.y, transform.position.z };
         if (c.ImGui_DragFloat3("Position", &pos)) {
-            if (world.get(Transform, entity)) |t| {
-                t.setPosition(Math.Vec3.init(pos[0], pos[1], pos[2]));
-            }
+            transform.setPosition(Math.Vec3.init(pos[0], pos[1], pos[2]));
         }
 
         // Rotation
         var rot = [3]f32{ transform.rotation.x, transform.rotation.y, transform.rotation.z };
         if (c.ImGui_DragFloat3("Rotation", &rot)) {
-            if (world.get(Transform, entity)) |t| {
-                t.setRotation(Math.Vec3.init(rot[0], rot[1], rot[2]));
-            }
+            transform.setRotation(Math.Vec3.init(rot[0], rot[1], rot[2]));
         }
 
         // Scale
         var scale = [3]f32{ transform.scale.x, transform.scale.y, transform.scale.z };
         if (c.ImGui_DragFloat3("Scale", &scale)) {
-            if (world.get(Transform, entity)) |t| {
-                t.setScale(Math.Vec3.init(scale[0], scale[1], scale[2]));
-            }
+            transform.setScale(Math.Vec3.init(scale[0], scale[1], scale[2]));
         }
 
         // Show dirty flag
@@ -269,60 +265,52 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render PointLight component inspector with editable fields
-    fn renderPointLightInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, light: *const PointLight) void {
+    fn renderPointLightInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, light: *PointLight) void {
         _ = self;
+        _ = world;
+        _ = entity;
 
         // Color picker
         var color = [3]f32{ light.color.x, light.color.y, light.color.z };
         if (c.ImGui_ColorEdit3("Color", &color, 0)) {
-            if (world.get(PointLight, entity)) |l| {
-                l.color = Math.Vec3.init(color[0], color[1], color[2]);
-            }
+            light.color = Math.Vec3.init(color[0], color[1], color[2]);
         }
 
         // Intensity slider
         var intensity = light.intensity;
         if (c.ImGui_SliderFloat("Intensity", &intensity, 0.0, 10.0)) {
-            if (world.get(PointLight, entity)) |l| {
-                l.intensity = intensity;
-            }
+            light.intensity = intensity;
         }
     }
 
     /// Render ParticleEmitter component inspector with editable fields
-    fn renderParticleEmitterInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, emitter: *const ParticleEmitter) void {
+    fn renderParticleEmitterInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, emitter: *ParticleEmitter) void {
         _ = self;
+        _ = world;
+        _ = entity;
 
         // Active toggle
         var active: bool = emitter.active;
         if (c.ImGui_Checkbox("Active", &active)) {
-            if (world.get(ParticleEmitter, entity)) |e| {
-                e.active = active;
-            }
+            emitter.active = active;
         }
 
         // Emission rate
         var emission_rate = emitter.emission_rate;
         if (c.ImGui_SliderFloat("Emission Rate", &emission_rate, 1.0, 100.0)) {
-            if (world.get(ParticleEmitter, entity)) |e| {
-                e.emission_rate = emission_rate;
-            }
+            emitter.emission_rate = emission_rate;
         }
 
         // Particle lifetime
         var lifetime = emitter.particle_lifetime;
         if (c.ImGui_SliderFloat("Lifetime", &lifetime, 0.1, 10.0)) {
-            if (world.get(ParticleEmitter, entity)) |e| {
-                e.particle_lifetime = lifetime;
-            }
+            emitter.particle_lifetime = lifetime;
         }
 
         // Color picker
         var color = [3]f32{ emitter.color.x, emitter.color.y, emitter.color.z };
         if (c.ImGui_ColorEdit3("Color", &color, 0)) {
-            if (world.get(ParticleEmitter, entity)) |e| {
-                e.color = Math.Vec3.init(color[0], color[1], color[2]);
-            }
+            emitter.color = Math.Vec3.init(color[0], color[1], color[2]);
         }
 
         // Velocity range

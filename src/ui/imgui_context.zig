@@ -29,6 +29,8 @@ pub const ImGuiContext = struct {
 
         const io = c.ImGui_GetIO();
         io.*.ConfigFlags |= c.ImGuiConfigFlags_NavEnableKeyboard;
+        // Note: Docking may not be available in all ImGui builds
+        io.*.ConfigFlags |= c.ImGuiConfigFlags_DockingEnable;
 
         // Setup Dear ImGui style
         c.ImGui_StyleColorsDark(null);
