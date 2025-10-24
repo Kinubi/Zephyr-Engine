@@ -24,6 +24,9 @@ const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
 
+// Global UBO
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+
 /// GeometryPass renders opaque ECS entities using dynamic rendering
 /// Outputs: color target (RGBA16F) + depth buffer (D32)
 pub const GeometryPass = struct {
@@ -36,6 +39,7 @@ pub const GeometryPass = struct {
     resource_binder: ResourceBinder,
     asset_manager: *AssetManager,
     ecs_world: *World,
+    global_ubo_set: *GlobalUboSet,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -48,13 +52,14 @@ pub const GeometryPass = struct {
     // Pipeline
     geometry_pipeline: PipelineId = undefined,
     cached_pipeline_handle: vk.Pipeline = .null_handle,
+    cached_pipeline_layout: vk.PipelineLayout = .null_handle,
 
     // Hot reload state
     resources_need_setup: bool = false,
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
 
-    // Render system for extracting entities
-    render_system: RenderSystem,
+    // Shared render system (pointer to scene's render system)
+    render_system: *RenderSystem,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -62,13 +67,15 @@ pub const GeometryPass = struct {
         pipeline_system: *UnifiedPipelineSystem,
         asset_manager: *AssetManager,
         ecs_world: *World,
+        global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
+        render_system: *RenderSystem,
     ) !*GeometryPass {
         const pass = try allocator.create(GeometryPass);
         pass.* = GeometryPass{
             .base = RenderPass{
-                .name = "GeometryPass",
+                .name = "geometry_pass",
                 .enabled = true,
                 .vtable = &vtable,
             },
@@ -78,12 +85,13 @@ pub const GeometryPass = struct {
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .asset_manager = asset_manager,
             .ecs_world = ecs_world,
+            .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
-            .render_system = RenderSystem.init(allocator),
+            .render_system = render_system,
         };
 
-        log(.INFO, "geometry_pass", "Created GeometryPass", .{});
+        log(.INFO, "geometry_pass", "Created geometry_pass", .{});
         return pass;
     }
 
@@ -136,6 +144,7 @@ pub const GeometryPass = struct {
         self.geometry_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+        self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
         // Mark resources as needing setup
         self.resources_need_setup = true;
@@ -144,8 +153,59 @@ pub const GeometryPass = struct {
         log(.INFO, "geometry_pass", "Setup complete (color: {}, depth: {})", .{ self.color_target.toInt(), self.depth_buffer.toInt() });
     }
 
+    /// Check for asset updates and rebind resources if needed
+    /// Called even when pass is disabled to keep descriptors up to date
+    /// Update geometry pass state (check for asset updates, rebuild descriptors if needed)
+    pub fn update(self: *GeometryPass, frame_index: u32) !void {
+        _ = frame_index;
+
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return;
+        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+
+        if (pipeline_rebuilt) {
+            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
+            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
+            self.resource_binder.clearPipeline(self.geometry_pipeline);
+        }
+
+        // Check if assets were updated (materials or textures)
+        const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
+
+        // Check if render system detected geometry changes (sets flag for both raster and RT)
+        // OPTIMIZATION: Only rebind descriptors if geometry actually changed (not just transforms)
+        const geometry_changed = self.render_system.raster_descriptors_dirty;
+
+        if (assets_updated or pipeline_rebuilt or self.resources_need_setup or geometry_changed) {
+            try self.updateDescriptors();
+            self.resources_need_setup = false;
+
+            // Clear the raster flag after updating descriptors
+            self.render_system.raster_descriptors_dirty = false;
+        }
+    }
+
     /// Bind material buffer and texture array from AssetManager to all frames
-    fn setupResources(self: *GeometryPass) !void {
+    fn updateDescriptors(self: *GeometryPass) !void {
+        // Bind global UBO for all frames (Set 0, Binding 0 - determined by shader reflection)
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const ubo_resource = Resource{
+                .buffer = .{
+                    .buffer = self.global_ubo_set.buffers[frame_idx].buffer,
+                    .offset = 0,
+                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
+                },
+            };
+
+            try self.pipeline_system.bindResource(
+                self.geometry_pipeline,
+                0, // Set 0
+                0, // Binding 0
+                ubo_resource,
+                @intCast(frame_idx),
+            );
+        }
+
         // Bind material buffer for all frames
         if (self.asset_manager.material_buffer) |buffer| {
             const material_resource = Resource{
@@ -193,6 +253,10 @@ pub const GeometryPass = struct {
                 );
             }
         }
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            try self.resource_binder.updateFrame(self.geometry_pipeline, @as(u32, @intCast(frame_idx)));
+        }
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -200,29 +264,10 @@ pub const GeometryPass = struct {
         const cmd = frame_info.command_buffer;
         const frame_index = frame_info.current_frame;
 
-        // Check if pipeline was hot-reloaded
-        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
-        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+        // Get rasterization data from render system (cached, no asset manager queries needed)
+        const raster_data = try self.render_system.getRasterData();
 
-        if (pipeline_rebuilt) {
-            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
-            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
-            self.resource_binder.clearPipeline(self.geometry_pipeline);
-        }
-
-        // Check if assets were updated (materials or textures)
-        const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
-
-        if (assets_updated or pipeline_rebuilt) {
-            log(.INFO, "geometry_pass", "Assets updated, marking resources for rebind", .{});
-            try self.setupResources();
-        }
-
-        // Extract renderables from ECS
-        var render_data = try self.render_system.extractRenderData(self.ecs_world);
-        defer render_data.deinit();
-
-        if (render_data.renderables.items.len == 0) {
+        if (raster_data.objects.len == 0) {
             log(.TRACE, "geometry_pass", "No entities to render", .{});
             return;
         }
@@ -253,48 +298,23 @@ pub const GeometryPass = struct {
 
         // Begin rendering (also sets viewport and scissor)
         rendering.begin(self.graphics_context, cmd);
-
-        // Bind pipeline with automatic Set 0 (global UBO) binding
-        try self.pipeline_system.bindPipelineWithGlobalSet(cmd, self.geometry_pipeline, frame_index);
-
         // Update descriptor sets for this frame using ResourceBinder (handles Set 1: materials/textures)
-        try self.resource_binder.updateFrame(self.geometry_pipeline, frame_index);
 
-        // Bind Set 1 (materials/textures) - ResourceBinder has updated it, now we need to bind it
-        if (self.pipeline_system.getDescriptorSet(self.geometry_pipeline, 1, frame_index)) |set_1| {
-            const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
-            self.graphics_context.vkd.cmdBindDescriptorSets(
-                cmd,
-                .graphics,
-                pipeline_layout,
-                1, // Set 1
-                1,
-                @ptrCast(&set_1),
-                0,
-                null,
-            );
-        }
+        // Bind pipeline with all descriptor sets (Set 0: global UBO, Set 1: materials/textures)
+        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.geometry_pipeline, frame_index);
 
-        // Get pipeline layout for push constants
-        const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
+        // Use cached pipeline layout (no hashmap lookup needed)
+        const pipeline_layout = self.cached_pipeline_layout;
 
-        // Render each entity
-        var rendered_count: usize = 0;
-        for (render_data.renderables.items) |renderable| {
-            // Get model
-            const model = self.asset_manager.getModel(renderable.model_asset) orelse {
-                continue;
-            };
-
-            // Get material index
-            const material_asset = renderable.material_asset orelse continue;
-            const material_index = self.asset_manager.getMaterialIndex(material_asset) orelse continue;
-
-            // Push constants
+        // Render each object (mesh pointers and material indices already resolved in cache)
+        // NOTE: All objects in cache are currently visible (visibility culling not yet implemented)
+        // When adding visibility culling, filter at cache build time in RenderSystem, not here
+        for (raster_data.objects) |object| {
+            // Push constants (data already resolved in cache)
             const push_constants = GeometryPushConstants{
-                .transform = renderable.world_matrix.data,
-                .normal_matrix = renderable.world_matrix.data, // TODO: Compute proper normal matrix
-                .material_index = @intCast(material_index),
+                .transform = object.transform,
+                .normal_matrix = object.transform, // TODO: Compute proper normal matrix
+                .material_index = object.material_index,
             };
 
             self.graphics_context.vkd.cmdPushConstants(
@@ -306,12 +326,8 @@ pub const GeometryPass = struct {
                 &push_constants,
             );
 
-            // Draw all meshes
-            for (model.meshes.items) |model_mesh| {
-                model_mesh.geometry.mesh.draw(self.graphics_context.*, cmd);
-            }
-
-            rendered_count += 1;
+            // Draw mesh (pointer already resolved in cache)
+            object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
         }
 
         // End rendering
@@ -337,8 +353,7 @@ pub const GeometryPass = struct {
         const self: *GeometryPass = @fieldParentPtr("base", base);
         log(.INFO, "geometry_pass", "Tearing down", .{});
 
-        // Clean up render system
-        self.render_system.deinit();
+        // render_system is shared with scene, don't deinit here
 
         // Clean up resource binder
         self.resource_binder.deinit();

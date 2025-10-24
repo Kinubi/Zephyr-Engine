@@ -304,7 +304,6 @@ pub const AssetManager = struct {
         try self.loaded_materials.append(self.allocator, material);
         try self.asset_to_material.put(asset_id, index);
         self.materials_dirty = true; // Mark materials as dirty when added
-        log(.INFO, "asset_manager", "Added material asset {} at index {}", .{ asset_id.toU64(), index });
     }
 
     /// Create a material asset asynchronously

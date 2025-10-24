@@ -65,10 +65,6 @@ pub const UnifiedPipelineSystem = struct {
     vulkan_pipeline_cache: vk.PipelineCache,
     binding_overrides: std.AutoHashMap(u64, BindingOverrideMap),
 
-    // Global descriptor sets (Set 0) - shared across all pipelines
-    // These are managed externally and bound automatically
-    global_descriptor_sets: ?[]vk.DescriptorSet = null,
-
     pub fn init(allocator: std.mem.Allocator, graphics_context: *GraphicsContext, shader_manager: *ShaderManager) !UnifiedPipelineSystem {
         // Try to load existing pipeline cache
         var cache_data: ?[]u8 = null;
@@ -171,12 +167,6 @@ pub const UnifiedPipelineSystem = struct {
             override_map.deinit();
         }
         self.binding_overrides.deinit();
-    }
-
-    /// Set the global descriptor sets (Set 0) that will be automatically bound
-    /// These are typically the frame UBO containing view/projection matrices
-    pub fn setGlobalDescriptorSets(self: *UnifiedPipelineSystem, descriptor_sets: []vk.DescriptorSet) void {
-        self.global_descriptor_sets = descriptor_sets;
     }
 
     /// Create a unified pipeline with automatic descriptor layout extraction
@@ -554,6 +544,8 @@ pub const UnifiedPipelineSystem = struct {
     }
 
     /// Bind a pipeline for rendering
+    /// Bind a pipeline without any descriptor sets
+    /// Use this for pipelines that don't need descriptor sets or when you want to bind them manually
     pub fn bindPipeline(self: *UnifiedPipelineSystem, command_buffer: vk.CommandBuffer, pipeline_id: PipelineId) !void {
         const pipeline = self.pipelines.get(pipeline_id) orelse {
             log(.ERROR, "unified_pipeline", "❌ Pipeline not found when binding: {s} (hash: {})", .{ pipeline_id.name, pipeline_id.hash });
@@ -573,35 +565,12 @@ pub const UnifiedPipelineSystem = struct {
         else
             .graphics;
         self.graphics_context.vkd.cmdBindPipeline(command_buffer, bind_point, pipeline.vulkan_pipeline);
-
-        // Bind descriptor sets
-        if (pipeline.descriptor_sets.items.len > 0) {
-            // For now, bind all sets from frame 0 (we'll update this when we implement frame indexing)
-            var descriptor_sets_to_bind = std.ArrayList(vk.DescriptorSet){};
-            defer descriptor_sets_to_bind.deinit(self.allocator);
-
-            for (pipeline.descriptor_sets.items) |frame_sets| {
-                try descriptor_sets_to_bind.append(self.allocator, frame_sets[0]); // Use frame 0 for now
-            }
-
-            if (descriptor_sets_to_bind.items.len > 0) {
-                self.graphics_context.vkd.cmdBindDescriptorSets(
-                    command_buffer,
-                    bind_point,
-                    pipeline.pipeline_layout,
-                    0, // First set
-                    @intCast(descriptor_sets_to_bind.items.len),
-                    descriptor_sets_to_bind.items.ptr,
-                    0,
-                    null,
-                );
-            }
-        }
     }
 
-    /// Bind a pipeline with automatic global descriptor set binding (Set 0)
-    /// This is the preferred method for graphics/compute passes that need the global UBO
-    pub fn bindPipelineWithGlobalSet(
+    /// Bind a pipeline with all its descriptor sets for the given frame
+    /// This binds all descriptor sets that have been set up via bindResource()
+    /// Descriptor sets must be contiguous starting from set 0 (Vulkan requirement)
+    pub fn bindPipelineWithDescriptorSets(
         self: *UnifiedPipelineSystem,
         command_buffer: vk.CommandBuffer,
         pipeline_id: PipelineId,
@@ -621,27 +590,36 @@ pub const UnifiedPipelineSystem = struct {
             .graphics;
         self.graphics_context.vkd.cmdBindPipeline(command_buffer, bind_point, pipeline.vulkan_pipeline);
 
-        // Automatically bind Set 0 (global descriptor set) if available
-        if (self.global_descriptor_sets) |global_sets| {
-            if (frame_index < global_sets.len) {
-                const descriptor_sets = [_]vk.DescriptorSet{global_sets[frame_index]};
+        // Bind all descriptor sets for this frame
+        // All descriptor sets (including what was previously "global") are now managed via bindResource()
+        if (pipeline.descriptor_sets.items.len > 0) {
+            var descriptor_sets_to_bind = std.ArrayList(vk.DescriptorSet){};
+            defer descriptor_sets_to_bind.deinit(self.allocator);
+
+            // Collect all descriptor sets for this frame
+            for (pipeline.descriptor_sets.items) |frame_sets| {
+                if (frame_index < frame_sets.len) {
+                    try descriptor_sets_to_bind.append(self.allocator, frame_sets[frame_index]);
+                } else {
+                    log(.WARN, "unified_pipeline", "Frame index {} out of range for descriptor sets (max {})", .{ frame_index, frame_sets.len });
+                    return error.InvalidFrameIndex;
+                }
+            }
+
+            // Bind all descriptor sets starting from set 0
+            if (descriptor_sets_to_bind.items.len > 0) {
                 self.graphics_context.vkd.cmdBindDescriptorSets(
                     command_buffer,
                     bind_point,
                     pipeline.pipeline_layout,
-                    0, // Set 0
-                    1,
-                    &descriptor_sets,
+                    0, // First set index
+                    @intCast(descriptor_sets_to_bind.items.len),
+                    descriptor_sets_to_bind.items.ptr,
                     0,
                     null,
                 );
             }
         }
-
-        // NOTE: Set 1+ descriptor sets are managed by ResourceBinder and must be
-        // bound manually by the pass after calling resource_binder.updateFrame()
-        // This is because ResourceBinder creates and updates descriptor sets dynamically,
-        // while pipeline.descriptor_sets contains stale/empty sets from initialization
     }
 
     /// Get the pipeline layout for a given pipeline

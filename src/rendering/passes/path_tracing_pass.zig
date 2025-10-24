@@ -12,6 +12,7 @@ const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedP
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
+const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const Texture = @import("../../core/texture.zig").Texture;
 const RaytracingSystem = @import("../../systems/raytracing_system.zig").RaytracingSystem;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
@@ -85,11 +86,12 @@ pub const PathTracingPass = struct {
     // Core rendering infrastructure
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
+    resource_binder: ResourceBinder,
     thread_pool: *ThreadPool,
     global_ubo_set: *GlobalUboSet,
     ecs_world: *World,
     asset_manager: *AssetManager,
-    render_system: RenderSystem,
+    render_system: *RenderSystem,
 
     // Path tracing pipeline
     path_tracing_pipeline: PipelineId = undefined,
@@ -125,6 +127,7 @@ pub const PathTracingPass = struct {
         global_ubo_set: *GlobalUboSet,
         ecs_world: *World,
         asset_manager: *AssetManager,
+        render_system: *RenderSystem,
         swapchain_format: vk.Format,
         width: u32,
         height: u32,
@@ -169,11 +172,12 @@ pub const PathTracingPass = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
+            .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .thread_pool = thread_pool,
             .global_ubo_set = global_ubo_set,
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
-            .render_system = RenderSystem.init(allocator),
+            .render_system = render_system,
             .rt_system = rt_system,
             .output_texture = output_texture,
             .width = width,
@@ -210,23 +214,18 @@ pub const PathTracingPass = struct {
 
         // Update shader binding table
         try self.rt_system.updateShaderBindingTable(entry.vulkan_pipeline);
-
         try self.updateDescriptors();
     }
 
     /// Update descriptors for all frames (exactly like rt_renderer.update does)
     fn updateDescriptors(self: *PathTracingPass) !void {
         if (!self.tlas_valid) {
-            log(.WARN, "path_tracing_pass", "TLAS not valid, skipping descriptor update", .{});
+            // TLAS not ready yet - this is normal during async BVH building
             return;
         }
 
-        // Get raytracing data from render system (like rt_renderer gets from scene_bridge)
-        const rt_data = try self.render_system.getRaytracingData(
-            self.ecs_world,
-            self.asset_manager,
-            self.allocator,
-        );
+        // Get raytracing data from render system (already cached)
+        const rt_data = try self.render_system.getRaytracingData();
         defer {
             self.allocator.free(rt_data.geometries);
             self.allocator.free(rt_data.instances);
@@ -331,6 +330,13 @@ pub const PathTracingPass = struct {
             try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
             self.descriptor_dirty_flags[frame_idx] = false;
         }
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            try self.resource_binder.updateFrame(self.path_tracing_pipeline, @as(u32, @intCast(frame_idx)));
+        }
+
+        // Don't flush here - resources may still be in use by descriptors/command buffers
+        // They'll be flushed during deinit when GPU is idle
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -349,50 +355,18 @@ pub const PathTracingPass = struct {
 
         const pipeline_entry = self.pipeline_system.pipelines.get(self.path_tracing_pipeline) orelse return error.PipelineNotFound;
         if (pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle) {
+            log(.INFO, "path_tracing_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
             try self.rt_system.updateShaderBindingTable(pipeline_entry.vulkan_pipeline);
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.path_tracing_pipeline);
-            for (&self.descriptor_dirty_flags) |*flag| {
-                flag.* = true;
-            }
+
+            // Rebind resources after hot reload
+            try self.updateDescriptors();
         }
 
-        const gc = self.graphics_context;
         const cmd = frame_info.command_buffer;
 
-        // Update descriptor sets for this frame (flushes pending bindResource calls)
-        try self.pipeline_system.updateDescriptorSetsForPipeline(
-            self.path_tracing_pipeline,
-            frame_index,
-        );
-
-        // Bind ray tracing pipeline manually (like rt_renderer does)
-        gc.vkd.cmdBindPipeline(cmd, vk.PipelineBindPoint.ray_tracing_khr, pipeline_entry.vulkan_pipeline);
-
-        // Check descriptor sets are available (like rt_renderer does)
-        if (pipeline_entry.descriptor_sets.items.len == 0) {
-            log(.WARN, "path_tracing_pass", "No descriptor sets available for path tracing pipeline", .{});
-            return;
-        }
-
-        // Manually bind descriptor sets (like rt_renderer does)
-        const frame_sets = pipeline_entry.descriptor_sets.items[0];
-        const descriptor_set = frame_sets[frame_index];
-        const descriptor_sets = [_]vk.DescriptorSet{descriptor_set};
-        const descriptor_sets_slice = descriptor_sets[0..];
-        const descriptor_count: u32 = @intCast(descriptor_sets.len);
-
-        gc.vkd.cmdBindDescriptorSets(
-            cmd,
-            vk.PipelineBindPoint.ray_tracing_khr,
-            pipeline_entry.pipeline_layout,
-            0,
-            descriptor_count,
-            descriptor_sets_slice.ptr,
-            0,
-            null,
-        );
-
+        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
         // Dispatch rays
         try self.dispatchRays(cmd, self.rt_system.shader_binding_table);
 
@@ -508,19 +482,9 @@ pub const PathTracingPass = struct {
     fn copyOutputToSwapchain(self: *PathTracingPass, command_buffer: vk.CommandBuffer, swapchain_image: vk.Image) !void {
         const gc = self.graphics_context;
 
-        // Transition output texture from GENERAL to TRANSFER_SRC_OPTIMAL
-        try self.output_texture.transitionImageLayout(
-            command_buffer,
-            vk.ImageLayout.general,
-            vk.ImageLayout.transfer_src_optimal,
-            .{
-                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // OPTIMIZATION: Keep output texture in GENERAL layout (supports all operations including transfer)
+        // This eliminates 2 image transitions per frame (GENERAL→TRANSFER_SRC→GENERAL)
+        // Only transition the swapchain image (required for presentation)
 
         // Transition swapchain image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
         gc.transitionImageLayout(
@@ -538,6 +502,7 @@ pub const PathTracingPass = struct {
         );
 
         // Copy from output texture to swapchain
+        // Output texture stays in GENERAL layout (valid for both storage writes and transfer src)
         const copy_info = vk.ImageCopy{
             .src_subresource = .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
@@ -563,25 +528,11 @@ pub const PathTracingPass = struct {
         gc.vkd.cmdCopyImage(
             command_buffer,
             self.output_texture.image,
-            vk.ImageLayout.transfer_src_optimal,
+            vk.ImageLayout.general, // Source stays in GENERAL
             swapchain_image,
             vk.ImageLayout.transfer_dst_optimal,
             1,
             @ptrCast(&copy_info),
-        );
-
-        // Transition output texture back to GENERAL
-        try self.output_texture.transitionImageLayout(
-            command_buffer,
-            vk.ImageLayout.transfer_src_optimal,
-            vk.ImageLayout.general,
-            .{
-                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
         );
 
         // Transition swapchain image back to PRESENT_SRC
@@ -602,55 +553,50 @@ pub const PathTracingPass = struct {
 
     /// Update path tracing state (call this each frame from scene.update, before render)
     /// This is analogous to rt_renderer.update() - it updates descriptors and BVH
-    pub fn updateState(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
+    /// Update path tracing state (BVH rebuild, descriptor updates)
+    pub fn update(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
         const frame_index = frame_info.current_frame;
 
-        // Check various dirty flags BEFORE updating (like rt_renderer.update does)
-        _ = self.render_system.checkBvhRebuildNeeded();
+        // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago
+        // At this point, the fence has been waited on (in swapchain.beginFrame),
+        // so resources queued during that frame are safe to destroy
+        self.rt_system.flushDeferredFrame(frame_index);
+
+        // // Check various dirty flags BEFORE updating (like rt_renderer.update does)
+        // _ = self.render_system.checkBvhRebuildNeeded();
         const materials_dirty = self.asset_manager.materials_updated;
         const textures_dirty = self.asset_manager.texture_descriptors_updated;
 
+        // Check if render system detected geometry changes
+        const geometry_changed = self.render_system.raytracing_descriptors_dirty;
+
         // Update BVH using rt_system (handles BLAS/TLAS building)
-        const bvh_rebuilt = try self.rt_system.update(&self.render_system, self.ecs_world, self.asset_manager, frame_info);
+        const bvh_rebuilt = try self.rt_system.update(self.render_system, frame_info, geometry_changed);
 
-        if (bvh_rebuilt) {
-            // Mark renderables as synced after BVH rebuild
-            self.render_system.markRenderablesSynced();
-        }
+        // Check if TLAS changed (handle changed OR dirty flag set)
+        const tlas_changed = self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
+            (!self.tlas_valid or self.rt_system.tlas_dirty or self.tlas != self.rt_system.tlas);
 
-        // Check if TLAS changed
-        if (self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
-            (!self.tlas_valid or self.rt_system.tlas_dirty))
-        {
+        if (tlas_changed) {
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
+
+            // Clear renderables dirty flag now that TLAS is built and ready
+            self.render_system.renderables_dirty = false;
         }
 
-        // Get current geometry count to detect changes
-        const rt_data = try self.render_system.getRaytracingData(
-            self.ecs_world,
-            self.asset_manager,
-            self.allocator,
-        );
-        defer {
-            self.allocator.free(rt_data.geometries);
-            self.allocator.free(rt_data.instances);
-            self.allocator.free(rt_data.materials);
-        }
-
-        const per_frame = &self.per_frame[frame_index];
-        const geometry_count = rt_data.geometries.len;
-
-        // Check if descriptors need updating (like rt_renderer.update does)
         const needs_update = bvh_rebuilt or
             materials_dirty or
             textures_dirty or
-            self.descriptor_dirty_flags[frame_index] or
-            per_frame.vertex_infos.items.len != geometry_count or
-            per_frame.index_infos.items.len != geometry_count;
+            geometry_changed or
+            self.descriptor_dirty_flags[frame_index] or tlas_changed;
 
-        if (needs_update) {
+        // Only update descriptors if TLAS is valid
+        if (needs_update and self.tlas_valid) {
             try self.updateDescriptors();
+
+            // Clear the raytracing flag after updating descriptors
+            self.render_system.raytracing_descriptors_dirty = false;
         }
     }
 

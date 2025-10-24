@@ -200,7 +200,6 @@ pub const RenderGraph = struct {
 
         // Teardown all passes
         for (self.passes.items) |pass| {
-            log(.DEBUG, "render_graph", "Tearing down pass: {s}", .{pass.name});
             pass.teardown();
         }
 
@@ -221,7 +220,6 @@ pub const RenderGraph = struct {
 
         // Call setup on all passes to register resources
         for (self.passes.items) |pass| {
-            log(.DEBUG, "render_graph", "Setting up pass: {s}", .{pass.name});
             try pass.setup(self);
         }
 

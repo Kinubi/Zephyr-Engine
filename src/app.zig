@@ -48,6 +48,14 @@ const new_ecs = @import("ecs.zig"); // New coherent ECS system
 // Input controller
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
 
+// UI system
+const ImGuiContext = @import("ui/imgui_context.zig").ImGuiContext;
+const UIRenderer = @import("ui/ui_renderer.zig").UIRenderer;
+const RenderStats = @import("ui/ui_renderer.zig").RenderStats;
+
+// Performance monitoring
+const PerformanceMonitor = @import("rendering/performance_monitor.zig").PerformanceMonitor;
+
 // Vulkan bindings and external C libraries
 const vk = @import("vulkan");
 const c = @cImport({
@@ -93,6 +101,7 @@ pub const App = struct {
     var asset_manager: *AssetManager = undefined;
     var file_watcher: *FileWatcher = undefined;
 
+    var performance_monitor: ?*PerformanceMonitor = null;
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Scheduled asset loading system
@@ -124,6 +133,10 @@ pub const App = struct {
     // Path tracing toggle state
     var last_toggle_time: f64 = 0.0;
     const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
+
+    // UI system
+    var imgui_context: ImGuiContext = undefined;
+    var ui_renderer: UIRenderer = undefined;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -345,7 +358,6 @@ pub const App = struct {
         // --- Use new GlobalUboSet abstraction ---
         global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
         global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
-        frame_info.global_descriptor_set = global_ubo_set.sets[0];
 
         try scene_v2.initRenderGraph(
             &self.gc,
@@ -391,9 +403,6 @@ pub const App = struct {
         camera = Camera{ .fov = 75.0, .window = self.window };
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
-
-        // Register global descriptor sets with the pipeline system for automatic binding
-        unified_pipeline_system.setGlobalDescriptorSets(global_ubo_set.sets);
 
         // Initialize unified textured renderer with shared pipeline system
         // textured_renderer = try TexturedRenderer.init(
@@ -503,6 +512,25 @@ pub const App = struct {
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
+
+        // Initialize ImGui
+        log(.INFO, "app", "Initializing ImGui...", .{});
+        imgui_context = try ImGuiContext.init(self.allocator, &self.gc, @ptrCast(self.window.window.?), &swapchain, &unified_pipeline_system);
+        ui_renderer = UIRenderer.init();
+        log(.INFO, "app", "ImGui initialized", .{});
+
+        // Initialize Performance Monitor
+        log(.INFO, "app", "Initializing Performance Monitor...", .{});
+        performance_monitor = try self.allocator.create(PerformanceMonitor);
+        performance_monitor.?.* = try PerformanceMonitor.init(self.allocator, &self.gc);
+        last_performance_report = c.glfwGetTime();
+        log(.INFO, "app", "Performance Monitor initialized", .{});
+
+        // Connect performance monitor to scene
+        if (scene_v2_enabled) {
+            scene_v2.setPerformanceMonitor(performance_monitor);
+        }
+
         // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
     }
 
@@ -570,6 +598,11 @@ pub const App = struct {
         }
         const dt = current_time - last_frame_time;
 
+        // Begin performance monitoring for this frame (at the very start)
+        if (performance_monitor) |pm| {
+            try pm.beginFrame(current_frame);
+        }
+
         const cmdbuf = cmdbufs[current_frame];
         const computebuf = compute_shader_system.compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
@@ -601,6 +634,7 @@ pub const App = struct {
 
         // Use camera view matrix directly (no viewer object needed)
         frame_info.camera.updateProjectionMatrix();
+
         var ubo = GlobalUbo{
             .view = frame_info.camera.viewMatrix,
             .projection = frame_info.camera.projectionMatrix,
@@ -610,21 +644,33 @@ pub const App = struct {
         // Update ECS transform hierarchies
         try transform_system.update(&new_ecs_world);
 
+        //log(.TRACE, "app", "Frame start", .{});
+
         compute_shader_system.beginCompute(frame_info);
-        // Update scene (animations, physics, lights, etc.)
-        if (scene_v2_enabled) {
-            try scene_v2.update(frame_info, &ubo);
+
+        if (performance_monitor) |pm| {
+            try pm.resetQueriesForFrame(frame_info.compute_buffer);
+            try pm.writeFrameStartTimestamp(frame_info.compute_buffer);
         }
 
-        // try forward_renderer.update(&frame_info);  // OLD: Disabled for RenderGraph
-
-        // try rt_render_pass.update(&frame_info);    // OLD: Disabled for RenderGraph
+        if (performance_monitor) |pm| {
+            try pm.beginPass("scene_update", current_frame, null); // CPU-only wrapper timing
+        }
+        try scene_v2.update(frame_info, &ubo);
+        if (performance_monitor) |pm| {
+            try pm.endPass("scene_update", current_frame, null);
+        }
 
         compute_shader_system.endCompute(frame_info);
-        global_ubo_set.*.update(frame_info.current_frame, &ubo);
-
-        //log(.TRACE, "app", "Frame start", .{});
         try swapchain.beginFrame(frame_info);
+
+        if (performance_monitor) |pm| {
+            try pm.beginPass("ubo_update", current_frame, null); // CPU-only
+        }
+        global_ubo_set.*.update(frame_info.current_frame, &ubo);
+        if (performance_monitor) |pm| {
+            try pm.endPass("ubo_update", current_frame, null);
+        }
 
         // Populate image views for dynamic rendering
         const swap_image = swapchain.currentSwapImage();
@@ -632,32 +678,59 @@ pub const App = struct {
         frame_info.color_image_view = swap_image.view;
         frame_info.depth_image_view = swap_image.depth_image_view;
 
-        // OLD: Legacy render pass (disabled for dynamic rendering)
-        // swapchain.beginSwapChainRenderPass(frame_info);
-
-        // Execute rasterization renderers through the forward renderer
-        // try forward_renderer.render(frame_info);  // OLD: Disabled for RenderGraph
-
-        // NEW: Execute Scene v2 RenderGraph (uses dynamic rendering)
         if (scene_v2_enabled) {
             try scene_v2.render(frame_info);
         }
 
-        // OLD: Legacy render pass (disabled for dynamic rendering)
-        // swapchain.endSwapChainRenderPass(frame_info);
+        // Render ImGui UI on top of everything
+        const imgui_enabled = true; // Optimized implementation
+        if (imgui_enabled) {
+            imgui_context.newFrame();
 
-        // Execute raytracing render pass BEFORE any render pass begins (raytracing must be outside render passes)
-        // try rt_render_pass.render(frame_info);  // OLD: Disabled for RenderGraph
+            // Prepare render stats for UI
+            const perf_stats = if (performance_monitor) |pm| pm.getStats() else null;
+            const stats = RenderStats{
+                .fps = self.current_fps,
+                .frame_time_ms = @as(f32, @floatCast(dt * 1000.0)),
+                .entity_count = new_ecs_world.entityCount(),
+                .draw_calls = 0, // TODO: track this
+                .path_tracing_enabled = if (scene_v2.path_tracing_pass) |pt| pt.enable_path_tracing else false,
+                .sample_count = 0, // TODO: track accumulated samples
+                .camera_pos = .{ camera_controller.position.x, camera_controller.position.y, camera_controller.position.z },
+                .camera_rot = .{ camera_controller.rotation.x, camera_controller.rotation.y, camera_controller.rotation.z },
+                .performance_stats = perf_stats,
+                .scene = &scene_v2,
+            };
+
+            ui_renderer.render(stats);
+
+            if (performance_monitor) |pm| {
+                try pm.beginPass("imgui", current_frame, frame_info.command_buffer); // GPU timing with graphics buffer
+            }
+
+            // Render ImGui using our custom dynamic rendering backend
+            // This renders on top of the existing frame without clearing
+            try imgui_context.render(frame_info.command_buffer, &swapchain, current_frame);
+
+            if (performance_monitor) |pm| {
+                try pm.endPass("imgui", current_frame, frame_info.command_buffer);
+            }
+        }
+
+        // End performance monitoring and write frame end timestamp (graphics buffer is last)
+        if (performance_monitor) |pm| {
+            try pm.writeFrameEndTimestamp(frame_info.command_buffer);
+            try pm.endFrame(frame_info.current_frame);
+        }
 
         try swapchain.endFrame(frame_info, &current_frame);
+        // Update GPU timings from previous frame (after fence wait)
+        if (performance_monitor) |pm| {
+            const prev_frame = if (current_frame == 0) MAX_FRAMES_IN_FLIGHT - 1 else current_frame - 1;
+            try pm.updateGpuTimings(prev_frame, swapchain.frame_fence, swapchain.compute_fence);
+        }
+
         last_frame_time = current_time;
-
-        //log(.TRACE, "app", "Frame end", .{});
-
-        // if (frame_counter >= 60_000) {
-        //     // Stop the app once the frame counter reaches the test threshold.
-        //     return false;
-        // }
 
         return self.window.isRunning();
     }
@@ -666,6 +739,16 @@ pub const App = struct {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
         swapchain.waitForAllFences() catch unreachable;
+
+        // Clean up Performance Monitor
+        if (performance_monitor) |pm| {
+            pm.deinit();
+            self.allocator.destroy(pm);
+        }
+
+        // Clean up UI
+        ui_renderer.deinit();
+        imgui_context.deinit();
 
         // Clean up scheduled assets list
         scheduled_assets.deinit(self.allocator);

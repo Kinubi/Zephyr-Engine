@@ -3,6 +3,7 @@ const World = @import("../world.zig").World;
 const Transform = @import("../components/transform.zig").Transform;
 const PointLight = @import("../components/point_light.zig").PointLight;
 const Math = @import("../../utils/math.zig");
+const log = @import("../../utils/log.zig").log;
 
 /// Extracted light data for rendering
 pub const ExtractedLight = struct {
@@ -38,16 +39,56 @@ pub const LightData = struct {
 pub const LightSystem = struct {
     allocator: std.mem.Allocator,
 
+    // Cache to avoid re-extracting lights every frame
+    cached_light_data: ?LightData = null,
+    last_light_count: usize = 0,
+    lights_dirty: bool = true,
+
     pub fn init(allocator: std.mem.Allocator) LightSystem {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .cached_light_data = null,
+            .last_light_count = 0,
+            .lights_dirty = true,
+        };
     }
 
     pub fn deinit(self: *LightSystem) void {
-        _ = self;
+        if (self.cached_light_data) |*data| {
+            data.deinit();
+        }
     }
 
-    /// Extract all point lights from the ECS world
-    pub fn extractLights(self: *LightSystem, world: *World) !LightData {
+    /// Get lights (uses cache if nothing changed, otherwise re-extracts)
+    /// Returns a pointer to the cached data - do NOT deinit it!
+    pub fn getLights(self: *LightSystem, world: *World) !*const LightData {
+        // Quick check: count the lights in the ECS
+        var view = try world.view(PointLight);
+        var count: usize = 0;
+        var iter = view.iterator();
+        while (iter.next()) |_| {
+            count += 1;
+        }
+
+        // Check if we need to re-extract
+        const count_changed = count != self.last_light_count;
+        if (count_changed or self.lights_dirty or self.cached_light_data == null) {
+
+            // Re-extract lights
+            if (self.cached_light_data) |*old_data| {
+                old_data.deinit();
+            }
+
+            self.cached_light_data = try self.extractLights(world);
+            self.last_light_count = count;
+            //self.lights_dirty = false;
+        }
+
+        return &(self.cached_light_data.?);
+    }
+
+    /// Extract all point lights from the ECS world (internal, use getLights instead)
+    fn extractLights(self: *LightSystem, world: *World) !LightData {
         var light_data = LightData.init(self.allocator);
         errdefer light_data.deinit();
 
@@ -79,5 +120,11 @@ pub const LightSystem = struct {
         }
 
         return light_data;
+    }
+
+    /// Mark lights as dirty to force re-extraction next frame
+    /// Call this when lights are added/removed/modified programmatically
+    pub fn markDirty(self: *LightSystem) void {
+        self.lights_dirty = true;
     }
 };

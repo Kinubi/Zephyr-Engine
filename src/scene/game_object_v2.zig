@@ -34,8 +34,7 @@ pub const GameObject = struct {
     /// Set world position
     pub fn setPosition(self: GameObject, position: Vec3) !void {
         var transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return error.ComponentNotFound;
-        transform.position = position;
-        transform.dirty = true;
+        transform.setPosition(position);
     }
 
     /// Get rotation (quaternion)
@@ -64,22 +63,20 @@ pub const GameObject = struct {
     /// Set scale
     pub fn setScale(self: GameObject, scale: Vec3) !void {
         var transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return error.ComponentNotFound;
-        transform.scale = scale;
-        transform.dirty = true;
+        transform.setScale(scale);
     }
 
     /// Set uniform scale
     pub fn setUniformScale(self: GameObject, scale: f32) !void {
         var transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return error.ComponentNotFound;
-        transform.scale = Vec3.init(scale, scale, scale);
-        transform.dirty = true;
+        transform.setScale(Vec3.init(scale, scale, scale));
     }
 
     /// Translate (move by offset)
     pub fn translate(self: GameObject, offset: Vec3) !void {
         var transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return error.ComponentNotFound;
-        transform.position = transform.position.add(offset);
-        transform.dirty = true;
+        const new_pos = transform.position.add(offset);
+        transform.setPosition(new_pos);
     }
 
     /// Rotate around axis by angle (radians)

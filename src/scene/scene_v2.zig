@@ -12,6 +12,7 @@ const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig"
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
+const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 
 // ECS imports
 const ecs = @import("../ecs.zig");
@@ -55,6 +56,15 @@ pub const Scene = struct {
     // Cache view-projection matrix for particle world-to-screen projection
     cached_view_proj: Math.Mat4x4 = Math.Mat4x4.identity(),
 
+    // Light system (reused across frames instead of recreating)
+    light_system: ecs.LightSystem,
+
+    // Shared render system for both raster and ray tracing passes
+    render_system: ecs.RenderSystem,
+
+    // Performance monitoring
+    performance_monitor: ?*PerformanceMonitor = null,
+
     /// Initialize a new scene
     pub fn init(
         allocator: std.mem.Allocator,
@@ -77,7 +87,14 @@ pub const Scene = struct {
             .game_objects = std.ArrayList(GameObject){},
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
+            .light_system = ecs.LightSystem.init(allocator),
+            .render_system = ecs.RenderSystem.init(allocator),
         };
+    }
+
+    /// Set the performance monitor for profiling
+    pub fn setPerformanceMonitor(self: *Scene, monitor: ?*PerformanceMonitor) void {
+        self.performance_monitor = monitor;
     }
 
     /// Spawn a static prop with mesh and texture
@@ -86,7 +103,6 @@ pub const Scene = struct {
         model_path: []const u8,
         texture_path: []const u8,
     ) !*GameObject {
-        log(.INFO, "scene_v2", "Spawning prop: {s}", .{model_path});
 
         // Load assets asynchronously using the correct API
         const AssetType = @import("../assets/asset_types.zig").AssetType;
@@ -123,8 +139,6 @@ pub const Scene = struct {
 
         try self.game_objects.append(self.allocator, game_object);
         const last_index = self.game_objects.items.len - 1;
-
-        log(.INFO, "scene_v2", "Spawned prop entity {} with assets: model={}, material={}, texture={}", .{ @intFromEnum(entity), @intFromEnum(model_id), @intFromEnum(material_id), @intFromEnum(texture_id) });
 
         return &self.game_objects.items[last_index];
     }
@@ -231,6 +245,7 @@ pub const Scene = struct {
 
         // Get entity transform for emitter position
         const transform = self.ecs_world.get(Transform, entity) orelse return error.EntityHasNoTransform;
+        transform.dirty = true;
 
         // Create ECS emitter component
         var emitter = ecs.ParticleEmitter.initWithRate(emission_rate);
@@ -250,8 +265,8 @@ pub const Scene = struct {
             const gpu_emitter = vertex_formats.GPUEmitter{
                 .position = .{ transform.position.x, transform.position.y, transform.position.z },
                 .is_active = 1,
-                .velocity_min = .{ emitter.velocity_min.x, -emitter.velocity_min.y, emitter.velocity_min.z },
-                .velocity_max = .{ emitter.velocity_max.x, -emitter.velocity_max.y, emitter.velocity_max.z },
+                .velocity_min = .{ emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z },
+                .velocity_max = .{ emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z },
                 .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
                 .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 }, // Fade to darker
                 .lifetime_min = particle_lifetime * 0.8,
@@ -364,6 +379,8 @@ pub const Scene = struct {
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
         self.emitter_to_gpu_id.deinit();
+        self.light_system.deinit();
+        self.render_system.deinit();
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
     }
 
@@ -428,8 +445,10 @@ pub const Scene = struct {
             pipeline_system,
             self.asset_manager,
             self.ecs_world,
+            global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
+            &self.render_system,
         );
 
         try self.render_graph.?.addPass(&geometry_pass.base);
@@ -446,6 +465,7 @@ pub const Scene = struct {
             global_ubo_set,
             self.ecs_world,
             self.asset_manager,
+            &self.render_system,
             swapchain_format,
             width,
             height,
@@ -464,6 +484,7 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             self.ecs_world,
+            global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
         );
@@ -475,6 +496,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
+            global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
             10000, // Max 10,000 particles
@@ -514,7 +536,17 @@ pub const Scene = struct {
                 if (!pass.enabled) continue;
                 if (pass.isComputePass()) continue; // Skip compute passes
 
+                // Begin pass timing
+                if (self.performance_monitor) |pm| {
+                    try pm.beginPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
+                }
+
                 try pass.execute(frame_info);
+
+                // End pass timing
+                if (self.performance_monitor) |pm| {
+                    try pm.endPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
+                }
             }
         } else {
             log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
@@ -528,15 +560,50 @@ pub const Scene = struct {
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
         // Update animated lights and extract to GlobalUbo
+
         try self.updateLights(global_ubo, frame_info.dt);
 
         // Update particles (CPU-side spawning)
+
         try self.updateParticles(frame_info.dt);
+
+        // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
+
+        try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
+
+        if (self.geometry_pass) |geom_pass| {
+            // Update path tracing state (BVH and descriptors) if enabled
+            if (self.path_tracing_pass) |pt_pass| {
+                if (!pt_pass.enable_path_tracing) {
+                    if (self.performance_monitor) |pm| {
+                        try pm.beginPass("geo_update", frame_info.current_frame, null);
+                    }
+                    try geom_pass.update(frame_info.current_frame);
+                    if (self.performance_monitor) |pm| {
+                        try pm.endPass("geo_update", frame_info.current_frame, null);
+                    }
+                }
+            } else {
+                if (self.performance_monitor) |pm| {
+                    try pm.beginPass("geo_update", frame_info.current_frame, null);
+                }
+                try geom_pass.update(frame_info.current_frame);
+                if (self.performance_monitor) |pm| {
+                    try pm.endPass("geo_update", frame_info.current_frame, null);
+                }
+            }
+        }
 
         // Update path tracing state (BVH and descriptors) if enabled
         if (self.path_tracing_pass) |pt_pass| {
             if (pt_pass.enable_path_tracing) {
-                try pt_pass.updateState(&frame_info);
+                if (self.performance_monitor) |pm| {
+                    try pm.beginPass("pt_update", frame_info.current_frame, null);
+                }
+                try pt_pass.update(&frame_info);
+                if (self.performance_monitor) |pm| {
+                    try pm.endPass("pt_update", frame_info.current_frame, null);
+                }
             }
         }
 
@@ -545,7 +612,17 @@ pub const Scene = struct {
         if (self.render_graph) |*graph| {
             for (graph.passes.items) |pass| {
                 if (pass.enabled and pass.isComputePass()) {
+                    // Begin pass timing (with compute buffer for GPU timing)
+                    if (self.performance_monitor) |pm| {
+                        try pm.beginPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+                    }
+
                     try pass.execute(frame_info);
+
+                    // End pass timing
+                    if (self.performance_monitor) |pm| {
+                        try pm.endPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+                    }
                 }
             }
         }
@@ -559,11 +636,10 @@ pub const Scene = struct {
     fn updateLights(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
         self.time_elapsed += dt;
 
-        const LightSystem = @import("../ecs.zig").LightSystem;
         const PointLight = @import("../ecs.zig").PointLight;
 
-        var light_system = LightSystem.init(self.allocator);
-        defer light_system.deinit();
+        // Use cached light_system instead of creating a new one each frame
+        // (No longer need: var light_system = LightSystem.init(self.allocator); defer light_system.deinit();)
 
         // Get view of all light entities
         var view = try self.ecs_world.view(PointLight);
@@ -585,8 +661,8 @@ pub const Scene = struct {
             const x = @cos(angle) * radius;
             const z = @sin(angle) * radius;
 
-            // Update transform position
-            transform_ptr.position = Math.Vec3.init(x, height, z);
+            // Update transform position using setter to mark dirty flag
+            transform_ptr.setPosition(Math.Vec3.init(x, height, z));
 
             // Extract to GlobalUbo
             if (light_index < 16) {
@@ -608,6 +684,8 @@ pub const Scene = struct {
         for (light_index..16) |i| {
             global_ubo.point_lights[i] = .{};
         }
+        // Mark light system dirty since we're animating lights
+
     }
 
     /// Update particle emitters - spawn particles based on emission rate
@@ -626,14 +704,15 @@ pub const Scene = struct {
 
             if (!emitter.active) continue;
 
-            // Get GPU emitter ID
-            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
-
             // Get current transform
             const transform = self.ecs_world.get(Transform, entity) orelse continue;
 
-            // Check if position has changed (simple comparison)
-            // In a real system you might track dirty flags
+            // Only update GPU emitter if transform changed (dirty flag)
+            if (!transform.dirty) continue;
+
+            // Get GPU emitter ID
+            const gpu_id = self.emitter_to_gpu_id.get(entity) orelse continue;
+
             if (self.particle_compute_pass) |compute_pass| {
                 const vertex_formats = @import("../rendering/vertex_formats.zig");
 
@@ -653,6 +732,8 @@ pub const Scene = struct {
                 };
 
                 try compute_pass.updateEmitter(gpu_id, gpu_emitter);
+                // NOTE: Don't clear dirty flag here - RenderSystem needs to detect transform changes!
+                // The dirty flag will be cleared by RenderSystem after rebuilding the cache.
             }
         }
 

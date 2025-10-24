@@ -80,14 +80,16 @@ pub const Transform = struct {
     /// Update world matrix from local transform (no parent)
     pub fn updateWorldMatrix(self: *Transform) void {
         self.world_matrix = self.getLocalMatrix();
-        self.dirty = false;
+        // NOTE: Don't clear dirty flag here - let RenderSystem clear it after rebuild
+        // self.dirty = false;
     }
 
     /// Update world matrix with parent's world matrix
     pub fn updateWorldMatrixWithParent(self: *Transform, parent_world: math.Mat4) void {
         const local = self.getLocalMatrix();
         self.world_matrix = parent_world.mul(local);
-        self.dirty = false;
+        // NOTE: Don't clear dirty flag here - let RenderSystem clear it after rebuild
+        // self.dirty = false;
     }
 
     /// Set position and mark dirty

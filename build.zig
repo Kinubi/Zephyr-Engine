@@ -1,4 +1,5 @@
 const std = @import("std");
+const cimgui = @import("cimgui_zig");
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
@@ -61,6 +62,15 @@ pub fn build(b: *std.Build) !void {
 
     const zstbi = b.dependency("zstbi", .{});
     exe.root_module.addImport("zstbi", zstbi.module("root"));
+
+    const cimgui_dep = b.dependency("cimgui_zig", .{
+        .target = target,
+        .optimize = optimize,
+        .platform = cimgui.Platform.GLFW,
+        .renderer = cimgui.Renderer.Vulkan,
+    });
+
+    exe.linkLibrary(cimgui_dep.artifact("cimgui"));
 
     // Build SPIRV-Cross as a static library with C API
     const spirv_cross_sources = [_][]const u8{
