@@ -53,6 +53,11 @@ const RenderStats = @import("ui/ui_renderer.zig").RenderStats;
 // Performance monitoring
 const PerformanceMonitor = @import("rendering/performance_monitor.zig").PerformanceMonitor;
 
+// Layer system
+const Layer = @import("core/layer.zig").Layer;
+const LayerStack = @import("core/layer_stack.zig").LayerStack;
+const RenderLayer = @import("layers/render_layer.zig").RenderLayer;
+
 // Vulkan bindings and external C libraries
 const vk = @import("vulkan");
 const c = @cImport({
@@ -134,6 +139,10 @@ pub const App = struct {
     // UI system
     var imgui_context: ImGuiContext = undefined;
     var ui_renderer: UIRenderer = undefined;
+
+    // Layer system
+    var layer_stack: LayerStack = undefined;
+    var render_layer: RenderLayer = undefined;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -538,6 +547,18 @@ pub const App = struct {
             scene_v2.setPerformanceMonitor(performance_monitor);
         }
 
+        // Initialize Layer System
+        log(.INFO, "app", "Initializing Layer System...", .{});
+        layer_stack = LayerStack.init(self.allocator);
+
+        // Create render layer
+        render_layer = RenderLayer.init(&swapchain);
+
+        // Push render layer
+        try layer_stack.pushLayer(&render_layer.base);
+
+        log(.INFO, "app", "Layer System initialized with {} layers", .{layer_stack.count()});
+
         // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
     }
 
@@ -573,9 +594,6 @@ pub const App = struct {
             }
         }
 
-        // _ = try scene_bridge.updateAsyncResources();
-
-        //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
 
         // Print performance report every 10 seconds in debug builds
@@ -652,10 +670,16 @@ pub const App = struct {
         // Update ECS transform hierarchies
         try transform_system.update(&new_ecs_world);
 
-        //log(.TRACE, "app", "Frame start", .{});
+        // Begin frame via layer system (starts command buffers)
+        try layer_stack.begin(&frame_info);
 
-        // Begin frame - starts both graphics and compute command buffers
-        try swapchain.beginFrame(frame_info);
+        // Populate image views for dynamic rendering
+        const swap_image = swapchain.currentSwapImage();
+        frame_info.color_image = swapchain.currentImage();
+        frame_info.color_image_view = swap_image.view;
+        frame_info.depth_image_view = swap_image.depth_image_view;
+
+        //log(.TRACE, "app", "Frame start", .{});
 
         if (performance_monitor) |pm| {
             try pm.resetQueriesForFrame(frame_info.compute_buffer);
@@ -677,12 +701,6 @@ pub const App = struct {
         if (performance_monitor) |pm| {
             try pm.endPass("ubo_update", current_frame, null);
         }
-
-        // Populate image views for dynamic rendering
-        const swap_image = swapchain.currentSwapImage();
-        frame_info.color_image = swapchain.currentImage();
-        frame_info.color_image_view = swap_image.view;
-        frame_info.depth_image_view = swap_image.depth_image_view;
 
         if (scene_v2_enabled) {
             try scene_v2.render(frame_info);
@@ -731,6 +749,10 @@ pub const App = struct {
             try pm.endFrame(frame_info.current_frame);
         }
 
+        // End all layers (cleanup, etc.)
+        try layer_stack.end(&frame_info);
+
+        // End frame and present
         try swapchain.endFrame(frame_info, &current_frame);
         // Update GPU timings from previous frame (after fence wait)
         if (performance_monitor) |pm| {
@@ -747,6 +769,10 @@ pub const App = struct {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
         swapchain.waitForAllFences() catch unreachable;
+
+        // Clean up Layer System
+        layer_stack.deinit();
+        log(.INFO, "app", "Layer System cleaned up", .{});
 
         // Clean up Performance Monitor
         if (performance_monitor) |pm| {
