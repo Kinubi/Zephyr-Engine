@@ -174,6 +174,7 @@ pub const Swapchain = struct {
         const gc = self.gc;
         const allocator = self.allocator;
         const old_handle = self.handle;
+        const old_compute = self.compute;
         self.deinitExceptSwapchain();
         const old_acquire = self.image_acquired;
         const old_finished = self.render_finished;
@@ -186,6 +187,7 @@ pub const Swapchain = struct {
         self.*.render_finished = old_finished;
         self.*.compute_finished = old_compute_finished;
         self.*.compute_fence = old_compute_fence;
+        self.*.compute = old_compute;
         try self.createRenderPass();
     }
 
@@ -452,25 +454,41 @@ pub const Swapchain = struct {
             self.gc.cleanupSubmittedSecondaryBuffers();
         }
 
+        // Handle resize - recreate swapchain if extent changed
         if (frame_info.extent.width != self.extent.width or frame_info.extent.height != self.extent.height) {
+            log(.INFO, "swapchain", "Window resized: {}x{} -> {}x{}", .{ self.extent.width, self.extent.height, frame_info.extent.width, frame_info.extent.height });
             self.extent = frame_info.extent;
             self.recreate(self.extent) catch |err| {
                 log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
+                return err;
             };
-            try self.createFramebuffers();
+            log(.INFO, "swapchain", "Swapchain recreated successfully", .{});
         }
 
-        const result = self.acquireNextImage(frame_info.current_frame) catch |err| switch (err) {
+        // Acquire next image from swapchain
+        var result = self.acquireNextImage(frame_info.current_frame) catch |err| switch (err) {
             error.OutOfDateKHR => Swapchain.PresentState.suboptimal,
             else => |narrow| return narrow,
         };
 
+        // If suboptimal or out of date, recreate and retry acquire
         if (result == .suboptimal) {
+            log(.INFO, "swapchain", "Swapchain suboptimal, recreating...", .{});
             self.extent = frame_info.extent;
             self.recreate(self.extent) catch |err| {
                 log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
+                return err;
             };
-            try self.createFramebuffers();
+
+            // Retry acquiring image after recreation
+            result = self.acquireNextImage(frame_info.current_frame) catch |err| switch (err) {
+                error.OutOfDateKHR => {
+                    log(.WARN, "swapchain", "Swapchain still out of date after recreation", .{});
+                    return error.OutOfDateKHR;
+                },
+                else => |narrow| return narrow,
+            };
+            log(.INFO, "swapchain", "Swapchain recreated and image acquired", .{});
         }
 
         try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]));

@@ -554,9 +554,57 @@ pub const PathTracingPass = struct {
         );
     }
 
+    /// Resize the output texture when swapchain is recreated
+    pub fn resize(self: *PathTracingPass, new_width: u32, new_height: u32) !void {
+        if (self.width == new_width and self.height == new_height) {
+            return; // No change needed
+        }
+
+        log(.INFO, "path_tracing_pass", "Resizing output texture: {}x{} -> {}x{}", .{ self.width, self.height, new_width, new_height });
+
+        // Destroy old texture
+        self.output_texture.deinit();
+
+        // Use swapchain format for output texture (with special case for packed formats)
+        var output_format = self.swapchain_format;
+        if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
+            output_format = vk.Format.a2b10g10r10_unorm_pack32;
+        }
+
+        // Create new output texture with new dimensions
+        self.output_texture = try Texture.init(
+            self.graphics_context,
+            output_format,
+            .{ .width = new_width, .height = new_height, .depth = 1 },
+            vk.ImageUsageFlags{
+                .storage_bit = true,
+                .transfer_src_bit = true,
+                .transfer_dst_bit = true,
+                .sampled_bit = true,
+            },
+            vk.SampleCountFlags{ .@"1_bit" = true },
+        );
+
+        // Update dimensions
+        self.width = new_width;
+        self.height = new_height;
+
+        // Mark all descriptors as dirty so they get updated with new image
+        for (&self.descriptor_dirty_flags) |*flag| {
+            flag.* = true;
+        }
+
+        log(.INFO, "path_tracing_pass", "Output texture resized successfully", .{});
+    }
+
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
         const frame_index = frame_info.current_frame;
+
+        // Check if window was resized and recreate output texture if needed
+        if (self.width != frame_info.extent.width or self.height != frame_info.extent.height) {
+            try self.resize(frame_info.extent.width, frame_info.extent.height);
+        }
 
         // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago
         // At this point, the fence has been waited on (in swapchain.beginFrame),

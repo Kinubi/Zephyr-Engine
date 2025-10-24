@@ -67,6 +67,7 @@ pub const Scene = struct {
         allocator: std.mem.Allocator,
         ecs_world: *World,
         asset_manager: *AssetManager,
+        thread_pool: ?*@import("../threading/thread_pool.zig").ThreadPool,
         name: []const u8,
     ) Scene {
         log(.INFO, "scene_v2", "Creating scene: {s}", .{name});
@@ -85,7 +86,7 @@ pub const Scene = struct {
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
-            .render_system = ecs.RenderSystem.init(allocator),
+            .render_system = ecs.RenderSystem.init(allocator, thread_pool),
         };
     }
 
@@ -689,7 +690,7 @@ test "Scene v2: init creates empty scene" {
     try world.registerComponent(MeshRenderer);
 
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, "test_scene");
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
 
     try testing.expectEqual(@as(usize, 0), scene.entities.items.len);
@@ -705,7 +706,7 @@ test "Scene v2: spawnEmpty creates entity with Transform" {
     try world.registerComponent(MeshRenderer);
 
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, "test_scene");
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
 
     const obj = try scene.spawnEmpty("empty_object");
@@ -731,7 +732,7 @@ test "Scene v2: unload destroys all entities" {
     try world.registerComponent(MeshRenderer);
 
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, "test_scene");
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
 
     // Spawn some objects

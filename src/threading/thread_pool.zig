@@ -16,6 +16,7 @@ pub const WorkItemType = enum {
     ecs_update,
     gpu_work,
     custom,
+    render_extraction, // Parallel ECS queries and cache building
 };
 
 /// Priority levels for work items
@@ -61,6 +62,7 @@ pub const WorkItem = struct {
         ecs_update: EcsUpdateData,
         gpu_work: GpuWorkData,
         custom: CustomData,
+        render_extraction: RenderExtractionData,
     };
 
     const AssetLoadingData = struct {
@@ -93,6 +95,12 @@ pub const WorkItem = struct {
     const EcsUpdateData = struct {
         stage_index: u32,
         job_index: u32,
+    };
+
+    const RenderExtractionData = struct {
+        chunk_index: u32,
+        total_chunks: u32,
+        user_data: *anyopaque, // Points to work context
     };
 
     const CustomData = struct {

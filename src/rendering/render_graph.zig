@@ -352,13 +352,13 @@ pub const RenderGraph = struct {
             const update_name = std.fmt.bufPrint(&name_buf, "{s}_update", .{pass.name}) catch pass.name;
 
             if (frame_info.performance_monitor) |pm| {
-                try pm.beginPass(update_name, frame_info.current_frame, null);
+                try pm.beginPass(update_name, frame_info.current_frame, frame_info.command_buffer);
             }
 
             try pass.update(frame_info);
 
             if (frame_info.performance_monitor) |pm| {
-                try pm.endPass(update_name, frame_info.current_frame, null);
+                try pm.endPass(update_name, frame_info.current_frame, frame_info.command_buffer);
             }
         }
     }
@@ -371,11 +371,11 @@ pub const RenderGraph = struct {
 
         for (self.execution_order.items) |pass| {
             if (frame_info.performance_monitor) |pm| {
-                try pm.beginPass(pass.name, frame_info.current_frame, null);
+                try pm.beginPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
             }
             try pass.execute(frame_info);
             if (frame_info.performance_monitor) |pm| {
-                try pm.endPass(pass.name, frame_info.current_frame, null);
+                try pm.endPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
             }
         }
     }

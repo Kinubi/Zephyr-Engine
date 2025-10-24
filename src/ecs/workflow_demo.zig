@@ -26,7 +26,7 @@ test "Complete ECS Workflow: Create Scene, Update, and Render" {
     var transform_system = ecs.TransformSystem.init(allocator);
     defer transform_system.deinit();
 
-    var render_system = ecs.RenderSystem.init(allocator);
+    var render_system = ecs.RenderSystem.init(allocator, null);
     defer render_system.deinit();
 
     // ========================================================================
@@ -202,7 +202,7 @@ test "ECS Performance: 1000 entities" {
     var transform_system = ecs.TransformSystem.init(allocator);
     defer transform_system.deinit();
 
-    var render_system = ecs.RenderSystem.init(allocator);
+    var render_system = ecs.RenderSystem.init(allocator, null);
     defer render_system.deinit();
 
     // Create 1000 entities

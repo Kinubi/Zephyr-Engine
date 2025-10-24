@@ -189,6 +189,14 @@ pub const App = struct {
             .work_item_type = .ecs_update,
         });
 
+        try thread_pool.registerSubsystem(.{
+            .name = "render_extraction",
+            .min_workers = 2,
+            .max_workers = 8,
+            .priority = .high, // Frame-critical work
+            .work_item_type = .render_extraction,
+        });
+
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 4 workers
 
@@ -239,7 +247,7 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, "cornell_box");
+        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
