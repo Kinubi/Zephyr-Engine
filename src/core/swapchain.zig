@@ -174,6 +174,7 @@ pub const Swapchain = struct {
         const gc = self.gc;
         const allocator = self.allocator;
         const old_handle = self.handle;
+        const old_compute = self.compute;
         self.deinitExceptSwapchain();
         const old_acquire = self.image_acquired;
         const old_finished = self.render_finished;
@@ -186,6 +187,7 @@ pub const Swapchain = struct {
         self.*.render_finished = old_finished;
         self.*.compute_finished = old_compute_finished;
         self.*.compute_fence = old_compute_fence;
+        self.*.compute = old_compute;
         try self.createRenderPass();
     }
 
@@ -452,43 +454,79 @@ pub const Swapchain = struct {
             self.gc.cleanupSubmittedSecondaryBuffers();
         }
 
+        // Handle resize - recreate swapchain if extent changed
         if (frame_info.extent.width != self.extent.width or frame_info.extent.height != self.extent.height) {
+            log(.INFO, "swapchain", "Window resized: {}x{} -> {}x{}", .{ self.extent.width, self.extent.height, frame_info.extent.width, frame_info.extent.height });
             self.extent = frame_info.extent;
             self.recreate(self.extent) catch |err| {
                 log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
+                return err;
             };
-            try self.createFramebuffers();
+            log(.INFO, "swapchain", "Swapchain recreated successfully", .{});
         }
 
-        const result = self.acquireNextImage(frame_info.current_frame) catch |err| switch (err) {
+        // Acquire next image from swapchain
+        var result = self.acquireNextImage(frame_info.current_frame) catch |err| switch (err) {
             error.OutOfDateKHR => Swapchain.PresentState.suboptimal,
             else => |narrow| return narrow,
         };
 
+        // If suboptimal or out of date, recreate and retry acquire
         if (result == .suboptimal) {
+            log(.INFO, "swapchain", "Swapchain suboptimal, recreating...", .{});
             self.extent = frame_info.extent;
             self.recreate(self.extent) catch |err| {
                 log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
+                return err;
             };
-            try self.createFramebuffers();
+
+            // Retry acquiring image after recreation
+            result = self.acquireNextImage(frame_info.current_frame) catch |err| switch (err) {
+                error.OutOfDateKHR => {
+                    log(.WARN, "swapchain", "Swapchain still out of date after recreation", .{});
+                    return error.OutOfDateKHR;
+                },
+                else => |narrow| return narrow,
+            };
+            log(.INFO, "swapchain", "Swapchain recreated and image acquired", .{});
         }
 
         try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]));
 
+        // Begin graphics command buffer
         try self.gc.vkd.resetCommandBuffer(frame_info.command_buffer, .{});
-
         const begin_info = vk.CommandBufferBeginInfo{};
-
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
+
+        // Also begin compute buffer (if compute is enabled)
+        if (self.compute) {
+            try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
+            try self.gc.vkd.resetCommandBuffer(frame_info.compute_buffer, .{});
+            const begin_info_compute = vk.CommandBufferBeginInfo{};
+            try self.gc.vkd.beginCommandBuffer(frame_info.compute_buffer, &begin_info_compute);
+        }
     }
 
     pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
+        // End and submit compute buffer first (if compute is enabled)
+        if (self.compute) {
+            self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
+                log(.ERROR, "swapchain", "Error ending compute command buffer: {any}", .{err});
+            };
+            self.submitCompute(frame_info.compute_buffer, frame_info.current_frame) catch |err| {
+                log(.ERROR, "swapchain", "Error submitting compute command buffer: {any}", .{err});
+            };
+        }
+
         // Execute all pending secondary command buffers from worker threads
         try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
 
+        // End graphics buffer
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             log(.ERROR, "swapchain", "Error ending command buffer: {any}", .{err});
         };
+
+        // Present (submits graphics buffer with semaphore wait on compute)
         self.present(frame_info.command_buffer, current_frame.*, frame_info.extent) catch |err| {
             log(.ERROR, "swapchain", "Error presenting frame: {any}", .{err});
         };

@@ -162,7 +162,7 @@ test "GameObject v2: setPosition updates transform" {
 
     const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, "test_scene");
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
 
     const obj = try scene.spawnEmpty(null);
@@ -189,7 +189,7 @@ test "GameObject v2: translate moves object by offset" {
 
     const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, "test_scene");
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
 
     const obj = try scene.spawnEmpty(null);
@@ -218,7 +218,7 @@ test "GameObject v2: setParent creates hierarchy" {
 
     const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, "test_scene");
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
 
     const parent = try scene.spawnEmpty(null);

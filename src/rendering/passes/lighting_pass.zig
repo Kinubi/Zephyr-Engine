@@ -73,7 +73,10 @@ pub const LightingPass = struct {
         const pass = try allocator.create(LightingPass);
         pass.* = LightingPass{
             .base = RenderPass{
+                .name = "lighting_pass",
+                .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,
@@ -89,9 +92,16 @@ pub const LightingPass = struct {
 
     const vtable = RenderPassVTable{
         .setup = setupImpl,
+        .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
     };
+
+    fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
+        _ = base;
+        _ = frame_info;
+        // No per-frame updates needed for lighting pass
+    }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
         const self: *LightingPass = @fieldParentPtr("base", base);

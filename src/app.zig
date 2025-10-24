@@ -34,9 +34,6 @@ const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
 const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
-// System imports
-const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
-
 const PARTICLE_MAX: u32 = 1024;
 
 // Utility imports
@@ -81,8 +78,8 @@ pub const App = struct {
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
+    var compute_bufs: []vk.CommandBuffer = undefined;
 
-    var compute_shader_system: ComputeShaderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
 
     // Unified pipeline system
@@ -192,6 +189,14 @@ pub const App = struct {
             .work_item_type = .ecs_update,
         });
 
+        try thread_pool.registerSubsystem(.{
+            .name = "render_extraction",
+            .min_workers = 2,
+            .max_workers = 8,
+            .priority = .high, // Frame-critical work
+            .work_item_type = .render_extraction,
+        });
+
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 4 workers
 
@@ -242,7 +247,7 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, "cornell_box");
+        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -398,6 +403,11 @@ pub const App = struct {
             self.allocator,
         );
 
+        compute_bufs = try self.gc.createCommandBuffers(
+            self.allocator,
+        );
+        swapchain.compute = true;
+
         camera_controller = KeyboardMovementController.init();
 
         camera = Camera{ .fov = 75.0, .window = self.window };
@@ -457,11 +467,6 @@ pub const App = struct {
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
 
-        // --- Compute shader system initialization ---
-        compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
-
-        log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
-
         // ==================== OLD GENERIC RENDERER (DISABLED FOR RENDER GRAPH) ====================
         // Initialize Generic Forward Renderer (rasterization only)
         // forward_renderer = GenericRenderer.init(self.allocator);
@@ -512,6 +517,7 @@ pub const App = struct {
         last_frame_time = c.glfwGetTime();
         self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
+        frame_info.performance_monitor = null; // Will be set after initialization
 
         // Initialize ImGui
         log(.INFO, "app", "Initializing ImGui...", .{});
@@ -523,6 +529,7 @@ pub const App = struct {
         log(.INFO, "app", "Initializing Performance Monitor...", .{});
         performance_monitor = try self.allocator.create(PerformanceMonitor);
         performance_monitor.?.* = try PerformanceMonitor.init(self.allocator, &self.gc);
+        frame_info.performance_monitor = performance_monitor;
         last_performance_report = c.glfwGetTime();
         log(.INFO, "app", "Performance Monitor initialized", .{});
 
@@ -604,7 +611,7 @@ pub const App = struct {
         }
 
         const cmdbuf = cmdbufs[current_frame];
-        const computebuf = compute_shader_system.compute_bufs[current_frame];
+        const computebuf = compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
         frame_info.compute_buffer = computebuf;
         frame_info.dt = @floatCast(dt);
@@ -624,11 +631,12 @@ pub const App = struct {
         const toggle_time = c.glfwGetTime();
 
         if (t_key_state == c.GLFW_PRESS and (toggle_time - last_toggle_time) > TOGGLE_COOLDOWN) {
-            if (scene_v2_enabled and scene_v2.path_tracing_pass != null) {
-                const current_state = scene_v2.path_tracing_pass.?.enable_path_tracing;
-                scene_v2.setPathTracingEnabled(!current_state);
+            if (scene_v2_enabled and scene_v2.render_graph != null) {
+                // Check current path tracing state via the render graph
+                const pt_enabled = if (scene_v2.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                try scene_v2.setPathTracingEnabled(!pt_enabled);
                 last_toggle_time = toggle_time;
-                log(.INFO, "app", "Path tracing toggled: {}", .{!current_state});
+                log(.INFO, "app", "Path tracing toggled: {}", .{!pt_enabled});
             }
         }
 
@@ -646,7 +654,8 @@ pub const App = struct {
 
         //log(.TRACE, "app", "Frame start", .{});
 
-        compute_shader_system.beginCompute(frame_info);
+        // Begin frame - starts both graphics and compute command buffers
+        try swapchain.beginFrame(frame_info);
 
         if (performance_monitor) |pm| {
             try pm.resetQueriesForFrame(frame_info.compute_buffer);
@@ -660,9 +669,6 @@ pub const App = struct {
         if (performance_monitor) |pm| {
             try pm.endPass("scene_update", current_frame, null);
         }
-
-        compute_shader_system.endCompute(frame_info);
-        try swapchain.beginFrame(frame_info);
 
         if (performance_monitor) |pm| {
             try pm.beginPass("ubo_update", current_frame, null); // CPU-only
@@ -694,7 +700,9 @@ pub const App = struct {
                 .frame_time_ms = @as(f32, @floatCast(dt * 1000.0)),
                 .entity_count = new_ecs_world.entityCount(),
                 .draw_calls = 0, // TODO: track this
-                .path_tracing_enabled = if (scene_v2.path_tracing_pass) |pt| pt.enable_path_tracing else false,
+                .path_tracing_enabled = if (scene_v2.render_graph) |*graph| blk: {
+                    break :blk if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                } else false,
                 .sample_count = 0, // TODO: track accumulated samples
                 .camera_pos = .{ camera_controller.position.x, camera_controller.position.y, camera_controller.position.z },
                 .camera_rot = .{ camera_controller.rotation.x, camera_controller.rotation.y, camera_controller.rotation.z },
@@ -755,11 +763,12 @@ pub const App = struct {
 
         global_ubo_set.deinit();
 
-        // Cleanup generic renderer
+        // Clean up generic renderer
         // forward_renderer.deinit();  // OLD: Disabled for RenderGraph
         // rt_render_pass.deinit();    // OLD: Disabled for RenderGraph
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
+        self.gc.destroyCommandBuffers(compute_bufs, self.allocator);
 
         // Clean up unified systems (forward_renderer already deinit'd particle renderer)
         resource_binder.deinit();

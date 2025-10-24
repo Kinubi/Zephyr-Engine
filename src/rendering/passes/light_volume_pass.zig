@@ -94,7 +94,9 @@ pub const LightVolumePass = struct {
         pass.* = LightVolumePass{
             .base = RenderPass{
                 .name = "light_volume_pass",
+                .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,
@@ -115,9 +117,16 @@ pub const LightVolumePass = struct {
 
     const vtable = RenderPassVTable{
         .setup = setupImpl,
+        .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
     };
+
+    fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
+        _ = base;
+        _ = frame_info;
+        // No per-frame updates needed for light volume pass
+    }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
         const self: *LightVolumePass = @fieldParentPtr("base", base);

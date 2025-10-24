@@ -4,6 +4,7 @@ const View = @import("../view.zig").View;
 const Transform = @import("../components/transform.zig").Transform;
 const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
 const Camera = @import("../components/camera.zig").Camera;
+const EntityId = @import("../entity_registry.zig").EntityId;
 const math = @import("../../utils/math.zig");
 const render_data_types = @import("../../rendering/render_data_types.zig");
 const RaytracingData = render_data_types.RaytracingData;
@@ -11,11 +12,15 @@ const RasterizationData = render_data_types.RasterizationData;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../../assets/asset_manager.zig").AssetId;
 const Mesh = @import("../../core/graphics_context.zig").Mesh;
+const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
+const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
+const log = @import("../../utils/log.zig").log;
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
 pub const RenderSystem = struct {
     allocator: std.mem.Allocator,
+    thread_pool: ?*ThreadPool,
 
     // Change tracking (similar to SceneBridge)
     last_renderable_count: usize = 0,
@@ -35,9 +40,10 @@ pub const RenderSystem = struct {
     cached_raster_data: ?RasterizationData = null,
     cached_raytracing_data: ?RaytracingData = null,
 
-    pub fn init(allocator: std.mem.Allocator) RenderSystem {
+    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) RenderSystem {
         return .{
             .allocator = allocator,
+            .thread_pool = thread_pool,
         };
     }
 
@@ -161,8 +167,18 @@ pub const RenderSystem = struct {
         return null;
     }
 
-    /// Extract all renderable entities
+    /// Extract all renderable entities (with optional parallelization)
     fn extractRenderables(self: *RenderSystem, world: *World, renderables: *std.ArrayList(RenderableEntity)) !void {
+        // Use parallel extraction if thread_pool is available
+        if (self.thread_pool) |pool| {
+            try self.extractRenderablesParallel(world, renderables, pool);
+        } else {
+            try self.extractRenderablesSingleThreaded(world, renderables);
+        }
+    }
+
+    /// Single-threaded extraction (fallback for tests)
+    fn extractRenderablesSingleThreaded(self: *RenderSystem, world: *World, renderables: *std.ArrayList(RenderableEntity)) !void {
         // Query all entities that have MeshRenderer
         var mesh_view = try world.view(MeshRenderer);
 
@@ -189,6 +205,143 @@ pub const RenderSystem = struct {
                 .casts_shadows = renderer.casts_shadows,
                 .receives_shadows = renderer.receives_shadows,
             });
+        }
+    }
+
+    /// Context for parallel extraction work
+    const ExtractionWorkContext = struct {
+        system: *RenderSystem,
+        world: *World,
+        entities: []const EntityId,
+        start_idx: usize,
+        end_idx: usize,
+        results: *std.ArrayList(RenderableEntity),
+        mutex: *std.Thread.Mutex,
+        completion: *std.atomic.Value(usize),
+    };
+
+    /// Worker function for parallel extraction
+    fn extractionWorker(context: *anyopaque, work_item: WorkItem) void {
+        const ctx = @as(*ExtractionWorkContext, @ptrCast(@alignCast(context)));
+        _ = work_item;
+
+        // Extract renderables for this chunk
+        var local_results = std.ArrayList(RenderableEntity){};
+        defer local_results.deinit(ctx.system.allocator);
+
+        for (ctx.entities[ctx.start_idx..ctx.end_idx]) |entity| {
+            // Check if entity has MeshRenderer
+            const renderer = ctx.world.get(MeshRenderer, entity) orelse continue;
+
+            // Skip if not enabled or doesn't have valid assets
+            if (!renderer.hasValidAssets()) {
+                continue;
+            }
+
+            // Try to get transform (default to identity if missing)
+            const transform = ctx.world.get(Transform, entity);
+            const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
+
+            // Create renderable entry
+            local_results.append(ctx.system.allocator, RenderableEntity{
+                .model_asset = renderer.model_asset.?,
+                .material_asset = renderer.material_asset,
+                .texture_asset = renderer.getTextureAsset(),
+                .world_matrix = world_matrix,
+                .layer = renderer.layer,
+                .casts_shadows = renderer.casts_shadows,
+                .receives_shadows = renderer.receives_shadows,
+            }) catch |err| {
+                std.log.err("Failed to append renderable in worker: {}", .{err});
+                _ = ctx.completion.fetchSub(1, .release);
+                return;
+            };
+        }
+
+        // Merge results with mutex protection
+        ctx.mutex.lock();
+        defer ctx.mutex.unlock();
+
+        for (local_results.items) |item| {
+            ctx.results.append(ctx.system.allocator, item) catch |err| {
+                std.log.err("Failed to merge worker results: {}", .{err});
+                _ = ctx.completion.fetchSub(1, .release);
+                return;
+            };
+        }
+
+        // Signal completion
+        _ = ctx.completion.fetchSub(1, .release);
+    }
+
+    /// Parallel extraction using thread pool
+    fn extractRenderablesParallel(
+        self: *RenderSystem,
+        world: *World,
+        renderables: *std.ArrayList(RenderableEntity),
+        pool: *ThreadPool,
+    ) !void {
+        // Get all entities that have MeshRenderer component
+        const mesh_view = try world.view(MeshRenderer);
+        const all_entities = mesh_view.storage.entities.items;
+        if (all_entities.len == 0) return;
+
+        // Use fixed chunk count for simplicity (can be tuned later)
+        const worker_count: usize = 4; // Conservative default, balances overhead vs parallelism
+        const chunk_size = (all_entities.len + worker_count - 1) / worker_count;
+
+        // If entity count is too small, fall back to single-threaded
+        if (all_entities.len < 100) {
+            try self.extractRenderablesSingleThreaded(world, renderables);
+            return;
+        }
+
+        log(.DEBUG, "render_system", "Parallel extraction: {} entities, {} workers, {} chunk size", .{ all_entities.len, worker_count, chunk_size });
+
+        // Create mutex for result merging and atomic completion counter
+        var mutex = std.Thread.Mutex{};
+        var completion = std.atomic.Value(usize).init(worker_count);
+
+        // Submit work for each chunk
+        var contexts = try self.allocator.alloc(ExtractionWorkContext, worker_count);
+        defer self.allocator.free(contexts);
+
+        var submitted_count: usize = 0;
+        for (0..worker_count) |i| {
+            const start_idx = i * chunk_size;
+            if (start_idx >= all_entities.len) break;
+            const end_idx = @min(start_idx + chunk_size, all_entities.len);
+
+            contexts[i] = ExtractionWorkContext{
+                .system = self,
+                .world = world,
+                .entities = all_entities,
+                .start_idx = start_idx,
+                .end_idx = end_idx,
+                .results = renderables,
+                .mutex = &mutex,
+                .completion = &completion,
+            };
+
+            try pool.submitWork(.{
+                .id = i,
+                .item_type = .render_extraction,
+                .priority = .high,
+                .data = .{ .render_extraction = .{
+                    .chunk_index = @intCast(i),
+                    .total_chunks = @intCast(worker_count),
+                    .user_data = &contexts[i],
+                } },
+                .worker_fn = extractionWorker,
+                .context = &contexts[i],
+            });
+
+            submitted_count += 1;
+        }
+
+        // Wait for all workers to complete
+        while (completion.load(.acquire) > 0) {
+            std.Thread.yield() catch {};
         }
     }
 
@@ -336,6 +489,8 @@ pub const RenderSystem = struct {
     /// Rebuild both raster and raytracing caches in one pass
     /// Called by checkForChanges when geometry changes detected
     fn rebuildCaches(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
+        const start_time = std.time.nanoTimestamp();
+
         // Clean up old cached data
         if (self.cached_raster_data) |data| {
             self.allocator.free(data.objects);
@@ -346,85 +501,42 @@ pub const RenderSystem = struct {
             self.allocator.free(data.materials);
         }
 
-        // Extract renderables from ECS
+        const extraction_start = std.time.nanoTimestamp();
+
+        // Extract renderables from ECS (already parallel)
         var temp_renderables = std.ArrayList(RenderableEntity){};
         defer temp_renderables.deinit(self.allocator);
         try self.extractRenderables(world, &temp_renderables);
 
-        // Count total meshes
-        var total_meshes: usize = 0;
-        for (temp_renderables.items) |renderable| {
-            const model = asset_manager.getModel(renderable.model_asset) orelse continue;
-            total_meshes += model.meshes.items.len;
+        const extraction_time_ns = std.time.nanoTimestamp() - extraction_start;
+        const extraction_time_ms = @as(f64, @floatFromInt(extraction_time_ns)) / 1_000_000.0;
+
+        const cache_build_start = std.time.nanoTimestamp();
+
+        // Use parallel cache building if thread_pool available and enough work
+        if (self.thread_pool != null and temp_renderables.items.len >= 50) {
+            try self.buildCachesParallel(temp_renderables.items, asset_manager);
+        } else {
+            try self.buildCachesSingleThreaded(temp_renderables.items, asset_manager);
         }
 
-        // Allocate arrays for both raster and RT data
-        var raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
-        errdefer self.allocator.free(raster_objects);
+        const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
+        const cache_build_time_ms = @as(f64, @floatFromInt(cache_build_time_ns)) / 1_000_000.0;
 
-        var geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
-        errdefer self.allocator.free(geometries);
+        const total_time_ns = std.time.nanoTimestamp() - start_time;
+        const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
 
-        var instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
-        errdefer self.allocator.free(instances);
+        // Frame budget enforcement: warn if we exceed 2ms
+        const budget_ms: f64 = 2.0;
 
-        const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
-        errdefer self.allocator.free(materials);
-
-        // Build both raster and RT data in one loop
-        var mesh_idx: usize = 0;
-        for (temp_renderables.items) |renderable| {
-            const model = asset_manager.getModel(renderable.model_asset) orelse continue;
-
-            // Get material index
-            var material_index: u32 = 0;
-            if (renderable.material_asset) |material_asset_id| {
-                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
-            }
-
-            // Create raster and RT data for each mesh in the model
-            for (model.meshes.items) |model_mesh| {
-                // Raster data
-                // TODO: Implement frustum/occlusion culling here and set visible = false for culled objects
-                // This avoids runtime branches in the render loop
-                raster_objects[mesh_idx] = .{
-                    .transform = renderable.world_matrix.data,
-                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
-                    .material_index = material_index,
-                    .visible = true, // Currently all objects are visible
-                };
-
-                // RT geometry
-                geometries[mesh_idx] = .{
-                    .mesh_ptr = model_mesh.geometry.mesh,
-                    .blas = null,
-                    .model_asset = renderable.model_asset,
-                };
-
-                // RT instance
-                instances[mesh_idx] = .{
-                    .transform = renderable.world_matrix.to_3x4(),
-                    .instance_id = @intCast(mesh_idx),
-                    .mask = 0xFF,
-                    .geometry_index = @intCast(mesh_idx),
-                    .material_index = material_index,
-                };
-
-                mesh_idx += 1;
-            }
+        if (total_time_ms > budget_ms) {
+            log(.WARN, "render_system", "Frame budget exceeded! Total: {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms) Budget: {d:.2}ms", .{ total_time_ms, extraction_time_ms, cache_build_time_ms, budget_ms });
+        } else if (total_time_ms > budget_ms * 0.8) {
+            // Warn at 80% of budget
+            log(.INFO, "render_system", "Approaching frame budget: {d:.2}ms / {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, budget_ms, extraction_time_ms, cache_build_time_ms });
+        } else {
+            log(.DEBUG, "render_system", "Rebuild complete: {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, extraction_time_ms, cache_build_time_ms });
         }
-
-        // Store both caches
-        self.cached_raster_data = RasterizationData{
-            .objects = raster_objects,
-        };
-        self.cached_raytracing_data = RaytracingData{
-            .instances = instances,
-            .geometries = geometries,
-            .materials = materials,
-        };
 
         // Clear dirty flags only for renderable entities (not lights, cameras, etc.)
         var mesh_view_clear = try world.view(MeshRenderer);
@@ -438,6 +550,242 @@ pub const RenderSystem = struct {
                 transform.dirty = false;
             }
         }
+    }
+
+    /// Single-threaded cache building
+    fn buildCachesSingleThreaded(self: *RenderSystem, renderables: []const RenderableEntity, asset_manager: *AssetManager) !void {
+        // Count total meshes
+        var total_meshes: usize = 0;
+        for (renderables) |renderable| {
+            const model = asset_manager.getModel(renderable.model_asset) orelse continue;
+            total_meshes += model.meshes.items.len;
+        }
+
+        // Allocate arrays
+        var raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        errdefer self.allocator.free(raster_objects);
+
+        var geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
+        errdefer self.allocator.free(geometries);
+
+        var instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
+        errdefer self.allocator.free(instances);
+
+        const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
+        errdefer self.allocator.free(materials);
+
+        // Build data
+        var mesh_idx: usize = 0;
+        for (renderables) |renderable| {
+            const model = asset_manager.getModel(renderable.model_asset) orelse continue;
+
+            var material_index: u32 = 0;
+            if (renderable.material_asset) |material_asset_id| {
+                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
+                    material_index = @intCast(mat_idx);
+                }
+            }
+
+            for (model.meshes.items) |model_mesh| {
+                raster_objects[mesh_idx] = .{
+                    .transform = renderable.world_matrix.data,
+                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
+                    .material_index = material_index,
+                    .visible = true,
+                };
+
+                geometries[mesh_idx] = .{
+                    .mesh_ptr = model_mesh.geometry.mesh,
+                    .blas = null,
+                    .model_asset = renderable.model_asset,
+                };
+
+                instances[mesh_idx] = .{
+                    .transform = renderable.world_matrix.to_3x4(),
+                    .instance_id = @intCast(mesh_idx),
+                    .mask = 0xFF,
+                    .geometry_index = @intCast(mesh_idx),
+                    .material_index = material_index,
+                };
+
+                mesh_idx += 1;
+            }
+        }
+
+        // Store caches
+        self.cached_raster_data = RasterizationData{
+            .objects = raster_objects,
+        };
+        self.cached_raytracing_data = RaytracingData{
+            .instances = instances,
+            .geometries = geometries,
+            .materials = materials,
+        };
+    }
+
+    /// Context for parallel cache building
+    const CacheBuildContext = struct {
+        system: *RenderSystem,
+        asset_manager: *AssetManager,
+        renderables: []const RenderableEntity,
+        raster_objects: []RasterizationData.RenderableObject,
+        geometries: []RaytracingData.RTGeometry,
+        instances: []RaytracingData.RTInstance,
+        start_idx: usize,
+        end_idx: usize,
+        output_offset: usize, // Where to write in output arrays
+        completion: *std.atomic.Value(usize),
+    };
+
+    /// Worker function for parallel cache building
+    fn cacheBuilderWorker(context: *anyopaque, work_item: WorkItem) void {
+        const ctx = @as(*CacheBuildContext, @ptrCast(@alignCast(context)));
+        _ = work_item;
+
+        var mesh_offset: usize = 0;
+
+        // Process this chunk of renderables
+        for (ctx.renderables[ctx.start_idx..ctx.end_idx]) |renderable| {
+            const model = ctx.asset_manager.getModel(renderable.model_asset) orelse continue;
+
+            var material_index: u32 = 0;
+            if (renderable.material_asset) |material_asset_id| {
+                if (ctx.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
+                    material_index = @intCast(mat_idx);
+                }
+            }
+
+            for (model.meshes.items) |model_mesh| {
+                const output_idx = ctx.output_offset + mesh_offset;
+
+                ctx.raster_objects[output_idx] = .{
+                    .transform = renderable.world_matrix.data,
+                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
+                    .material_index = material_index,
+                    .visible = true,
+                };
+
+                ctx.geometries[output_idx] = .{
+                    .mesh_ptr = model_mesh.geometry.mesh,
+                    .blas = null,
+                    .model_asset = renderable.model_asset,
+                };
+
+                ctx.instances[output_idx] = .{
+                    .transform = renderable.world_matrix.to_3x4(),
+                    .instance_id = @intCast(output_idx),
+                    .mask = 0xFF,
+                    .geometry_index = @intCast(output_idx),
+                    .material_index = material_index,
+                };
+
+                mesh_offset += 1;
+            }
+        }
+
+        // Signal completion
+        _ = ctx.completion.fetchSub(1, .release);
+    }
+
+    /// Parallel cache building
+    fn buildCachesParallel(
+        self: *RenderSystem,
+        renderables: []const RenderableEntity,
+        asset_manager: *AssetManager,
+    ) !void {
+        const pool = self.thread_pool.?;
+
+        // First pass: count meshes per renderable to calculate offsets
+        var mesh_counts = try self.allocator.alloc(usize, renderables.len);
+        defer self.allocator.free(mesh_counts);
+
+        var total_meshes: usize = 0;
+        for (renderables, 0..) |renderable, i| {
+            const model = asset_manager.getModel(renderable.model_asset) orelse {
+                mesh_counts[i] = 0;
+                continue;
+            };
+            mesh_counts[i] = model.meshes.items.len;
+            total_meshes += model.meshes.items.len;
+        }
+
+        // Allocate output arrays
+        const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        errdefer self.allocator.free(raster_objects);
+
+        const geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
+        errdefer self.allocator.free(geometries);
+
+        const instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
+        errdefer self.allocator.free(instances);
+
+        const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
+        errdefer self.allocator.free(materials);
+
+        // Split work into chunks
+        const worker_count: usize = 4;
+        const chunk_size = (renderables.len + worker_count - 1) / worker_count;
+
+        var completion = std.atomic.Value(usize).init(worker_count);
+        var contexts = try self.allocator.alloc(CacheBuildContext, worker_count);
+        defer self.allocator.free(contexts);
+
+        log(.DEBUG, "render_system", "Parallel cache build: {} renderables, {} workers", .{ renderables.len, worker_count });
+
+        // Calculate output offsets for each chunk
+        var current_offset: usize = 0;
+        for (0..worker_count) |i| {
+            const start_idx = i * chunk_size;
+            if (start_idx >= renderables.len) break;
+            const end_idx = @min(start_idx + chunk_size, renderables.len);
+
+            // Calculate offset for this chunk
+            const chunk_offset = current_offset;
+            for (mesh_counts[start_idx..end_idx]) |count| {
+                current_offset += count;
+            }
+
+            contexts[i] = CacheBuildContext{
+                .system = self,
+                .asset_manager = asset_manager,
+                .renderables = renderables,
+                .raster_objects = raster_objects,
+                .geometries = geometries,
+                .instances = instances,
+                .start_idx = start_idx,
+                .end_idx = end_idx,
+                .output_offset = chunk_offset,
+                .completion = &completion,
+            };
+
+            try pool.submitWork(.{
+                .id = i,
+                .item_type = .render_extraction,
+                .priority = .high,
+                .data = .{ .render_extraction = .{
+                    .chunk_index = @intCast(i),
+                    .total_chunks = @intCast(worker_count),
+                    .user_data = &contexts[i],
+                } },
+                .worker_fn = cacheBuilderWorker,
+                .context = &contexts[i],
+            });
+        }
+
+        // Wait for completion
+        while (completion.load(.acquire) > 0) {
+            std.Thread.yield() catch {};
+        }
+
+        // Store caches
+        self.cached_raster_data = RasterizationData{
+            .objects = raster_objects,
+        };
+        self.cached_raytracing_data = RaytracingData{
+            .instances = instances,
+            .geometries = geometries,
+            .materials = materials,
+        };
     }
 
     /// Check if BVH needs to be rebuilt (for ray tracing system)
@@ -507,7 +855,7 @@ test "RenderSystem: extract empty world" {
     try world.registerComponent(Camera);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator);
+    var system = RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     var render_data = try system.extractRenderData(&world);
@@ -527,7 +875,7 @@ test "RenderSystem: extract single renderable" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator);
+    var system = RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create entity with transform and renderer
@@ -559,7 +907,7 @@ test "RenderSystem: disabled renderer not extracted" {
     try world.registerComponent(Camera);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator);
+    var system = RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create entity with disabled renderer
@@ -586,7 +934,7 @@ test "RenderSystem: extract primary camera" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator);
+    var system = RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create camera entity
@@ -620,7 +968,7 @@ test "RenderSystem: sort by layer" {
     try world.registerComponent(Camera);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator);
+    var system = RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create entities with different layers (in reverse order)

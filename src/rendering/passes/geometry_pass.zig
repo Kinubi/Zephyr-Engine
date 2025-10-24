@@ -78,6 +78,7 @@ pub const GeometryPass = struct {
                 .name = "geometry_pass",
                 .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,
@@ -97,6 +98,7 @@ pub const GeometryPass = struct {
 
     const vtable = RenderPassVTable{
         .setup = setupImpl,
+        .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
     };
@@ -153,11 +155,9 @@ pub const GeometryPass = struct {
         log(.INFO, "geometry_pass", "Setup complete (color: {}, depth: {})", .{ self.color_target.toInt(), self.depth_buffer.toInt() });
     }
 
-    /// Check for asset updates and rebind resources if needed
-    /// Called even when pass is disabled to keep descriptors up to date
-    /// Update geometry pass state (check for asset updates, rebuild descriptors if needed)
-    pub fn update(self: *GeometryPass, frame_index: u32) !void {
-        _ = frame_index;
+    pub fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
+        const self: *GeometryPass = @fieldParentPtr("base", base);
+        _ = frame_info;
 
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return;
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;

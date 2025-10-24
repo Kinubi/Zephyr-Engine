@@ -2,6 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const Camera = @import("camera.zig").Camera;
 const Math = @import("../utils/math.zig");
+const PerformanceMonitor = @import("performance_monitor.zig").PerformanceMonitor;
 
 const MAX_LIGHTS: usize = 16;
 
@@ -33,4 +34,7 @@ pub const FrameInfo = struct {
     color_image: vk.Image = .null_handle,
     color_image_view: vk.ImageView = .null_handle,
     depth_image_view: vk.ImageView = .null_handle,
+
+    // Performance monitoring (optional)
+    performance_monitor: ?*PerformanceMonitor = null,
 };
