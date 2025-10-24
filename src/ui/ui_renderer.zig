@@ -14,6 +14,7 @@ pub const UIRenderer = struct {
     show_demo_window: bool = false, // Disabled by default - very expensive!
     show_stats_window: bool = true,
     show_camera_window: bool = true,
+    show_performance_graphs: bool = true,
 
     // Scene hierarchy panel
     hierarchy_panel: SceneHierarchyPanel,
@@ -71,6 +72,10 @@ pub const UIRenderer = struct {
 
         if (self.show_camera_window) {
             self.renderCameraWindow(stats.camera_pos, stats.camera_rot);
+        }
+
+        if (self.show_performance_graphs) {
+            self.renderPerformanceGraphs(stats);
         }
 
         // Render scene hierarchy if scene is provided
@@ -149,6 +154,53 @@ pub const UIRenderer = struct {
             c.ImGui_Text("  Roll:  %.2f", rot[2]);
         }
         c.ImGui_End();
+    }
+
+    fn renderPerformanceGraphs(self: *UIRenderer, stats: RenderStats) void {
+        _ = self;
+
+        if (stats.performance_stats) |perf| {
+            const window_flags = c.ImGuiWindowFlags_NoCollapse;
+
+            if (c.ImGui_Begin("Performance Graphs", null, window_flags)) {
+                // Show last 2000 frames (about 1.4 seconds at 1400fps)
+                const visible_frames: c_int = 2000;
+                const graph_width: f32 = 800.0;
+                const graph_height: f32 = 120.0;
+
+                // CPU Frame Time Graph
+                c.ImGui_Text("CPU Frame Time");
+                c.ImGui_Text("Min: %.2f ms | Max: %.2f ms | Avg: %.2f ms", perf.cpu_min_ms, perf.cpu_max_ms, perf.cpu_avg_ms);
+
+                // Show most recent N frames, scrolling right as new data comes in
+                // Offset determines where to start reading from the circular buffer
+                const history_size: usize = perf.cpu_frame_history.len;
+                const write_pos: usize = perf.history_offset;
+
+                // Start reading from (write_pos - visible_frames) to show the most recent data
+                // This creates a scrolling effect where new frames appear on the right
+                const frames_to_show: usize = @min(visible_frames, history_size);
+                const start_pos: usize = if (write_pos >= frames_to_show)
+                    write_pos - frames_to_show
+                else
+                    history_size - (frames_to_show - write_pos);
+
+                c.ImGui_PlotLinesEx("##cpu", perf.cpu_frame_history.ptr, @intCast(frames_to_show), @intCast(start_pos), null, 0.0, perf.cpu_max_ms * 1.1, // Add 10% headroom
+                    .{ .x = graph_width, .y = graph_height }, @sizeOf(f32));
+
+                c.ImGui_Spacing();
+                c.ImGui_Separator();
+                c.ImGui_Spacing();
+
+                // GPU Frame Time Graph
+                c.ImGui_Text("GPU Frame Time");
+                c.ImGui_Text("Min: %.2f ms | Max: %.2f ms | Avg: %.2f ms", perf.gpu_min_ms, perf.gpu_max_ms, perf.gpu_avg_ms);
+
+                c.ImGui_PlotLinesEx("##gpu", perf.gpu_frame_history.ptr, @intCast(frames_to_show), @intCast(start_pos), null, 0.0, perf.gpu_max_ms * 1.1, // Add 10% headroom
+                    .{ .x = graph_width, .y = graph_height }, @sizeOf(f32));
+            }
+            c.ImGui_End();
+        }
     }
 };
 
