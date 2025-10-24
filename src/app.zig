@@ -58,6 +58,8 @@ const Layer = @import("core/layer.zig").Layer;
 const LayerStack = @import("core/layer_stack.zig").LayerStack;
 const RenderLayer = @import("layers/render_layer.zig").RenderLayer;
 const PerformanceLayer = @import("layers/performance_layer.zig").PerformanceLayer;
+const InputLayer = @import("layers/input_layer.zig").InputLayer;
+const SceneLayer = @import("layers/scene_layer.zig").SceneLayer;
 
 // Vulkan bindings and external C libraries
 const vk = @import("vulkan");
@@ -133,10 +135,6 @@ pub const App = struct {
     var scene_v2: SceneV2 = undefined;
     var scene_v2_enabled: bool = true; // Always enabled now
 
-    // Path tracing toggle state
-    var last_toggle_time: f64 = 0.0;
-    const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
-
     // UI system
     var imgui_context: ImGuiContext = undefined;
     var ui_renderer: UIRenderer = undefined;
@@ -145,6 +143,8 @@ pub const App = struct {
     var layer_stack: LayerStack = undefined;
     var render_layer: RenderLayer = undefined;
     var performance_layer: PerformanceLayer = undefined;
+    var input_layer: InputLayer = undefined;
+    var scene_layer: SceneLayer = undefined;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -553,14 +553,20 @@ pub const App = struct {
         layer_stack = LayerStack.init(self.allocator);
 
         // Create performance layer (should be first to track all frame timing)
-        performance_layer = PerformanceLayer.init(performance_monitor.?);
+        performance_layer = PerformanceLayer.init(performance_monitor.?, &swapchain);
         try layer_stack.pushLayer(&performance_layer.base);
 
         // Create render layer
         render_layer = RenderLayer.init(&swapchain);
-
-        // Push render layer
         try layer_stack.pushLayer(&render_layer.base);
+
+        // Create input layer (handles camera movement and input)
+        input_layer = InputLayer.init(&self.window, &camera, &camera_controller, &scene_v2);
+        try layer_stack.pushLayer(&input_layer.base);
+
+        // Create scene layer (updates scene, ECS systems, UBO)
+        scene_layer = SceneLayer.init(&camera, &scene_v2, global_ubo_set, &transform_system, &new_ecs_world, performance_monitor);
+        try layer_stack.pushLayer(&scene_layer.base);
 
         log(.INFO, "app", "Layer System initialized with {} layers", .{layer_stack.count()});
 
@@ -639,36 +645,6 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
-        // Process camera input
-        camera_controller.processInput(&self.window, &camera, dt);
-
-        // Toggle path tracing with 'T' key (with debouncing)
-        const GLFW_KEY_T = 84;
-        const t_key_state = c.glfwGetKey(@ptrCast(self.window.window.?), GLFW_KEY_T);
-        const toggle_time = c.glfwGetTime();
-
-        if (t_key_state == c.GLFW_PRESS and (toggle_time - last_toggle_time) > TOGGLE_COOLDOWN) {
-            if (scene_v2_enabled and scene_v2.render_graph != null) {
-                // Check current path tracing state via the render graph
-                const pt_enabled = if (scene_v2.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
-                try scene_v2.setPathTracingEnabled(!pt_enabled);
-                last_toggle_time = toggle_time;
-                log(.INFO, "app", "Path tracing toggled: {}", .{!pt_enabled});
-            }
-        }
-
-        // Use camera view matrix directly (no viewer object needed)
-        frame_info.camera.updateProjectionMatrix();
-
-        var ubo = GlobalUbo{
-            .view = frame_info.camera.viewMatrix,
-            .projection = frame_info.camera.projectionMatrix,
-            .dt = @floatCast(dt),
-        };
-
-        // Update ECS transform hierarchies
-        try transform_system.update(&new_ecs_world);
-
         // ==================== BEGIN FRAME (via Layer System) ====================
         // PerformanceLayer.begin() -> calls performance_monitor.beginFrame()
         // RenderLayer.begin() -> calls swapchain.beginFrame() and populates frame_info images
@@ -676,29 +652,13 @@ pub const App = struct {
 
         // ==================== UPDATE LAYERS ====================
         // PerformanceLayer.update() -> resets queries and writes frame start timestamp
+        // InputLayer.update() -> processes input, camera movement
+        // SceneLayer.update() -> updates transforms, scene, UBO
         try layer_stack.update(&frame_info);
 
-        //log(.TRACE, "app", "Frame start", .{});
-
-        if (performance_monitor) |pm| {
-            try pm.beginPass("scene_update", frame_info.current_frame, null); // CPU-only wrapper timing
-        }
-        try scene_v2.update(frame_info, &ubo);
-        if (performance_monitor) |pm| {
-            try pm.endPass("scene_update", frame_info.current_frame, null);
-        }
-
-        if (performance_monitor) |pm| {
-            try pm.beginPass("ubo_update", frame_info.current_frame, null); // CPU-only
-        }
-        global_ubo_set.*.update(frame_info.current_frame, &ubo);
-        if (performance_monitor) |pm| {
-            try pm.endPass("ubo_update", frame_info.current_frame, null);
-        }
-
-        if (scene_v2_enabled) {
-            try scene_v2.render(frame_info);
-        }
+        // ==================== RENDER LAYERS ====================
+        // SceneLayer.render() -> renders the scene
+        try layer_stack.render(&frame_info);
 
         // Render ImGui UI on top of everything
         const imgui_enabled = true; // Optimized implementation
@@ -739,12 +699,6 @@ pub const App = struct {
 
         // End all layers (cleanup, etc.)
         try layer_stack.end(&frame_info);
-
-        // Update GPU timings from previous frame (after fence wait)
-        if (performance_monitor) |pm| {
-            const prev_frame = if (frame_info.current_frame == 0) MAX_FRAMES_IN_FLIGHT - 1 else frame_info.current_frame - 1;
-            try pm.updateGpuTimings(prev_frame, swapchain.frame_fence, swapchain.compute_fence);
-        }
 
         last_frame_time = current_time;
 

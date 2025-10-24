@@ -6,6 +6,8 @@ const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const Window = @import("../window.zig").Window;
 const Camera = @import("../rendering/camera.zig").Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
+const SceneV2 = @import("../scene/scene_v2.zig").Scene;
+const log = @import("../utils/log.zig").log;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -17,9 +19,17 @@ pub const InputLayer = struct {
     window: *Window,
     camera: *Camera,
     camera_controller: *KeyboardMovementController,
+    scene: *SceneV2,
     last_toggle_time: f64 = 0.0,
 
-    pub fn init(window: *Window, camera: *Camera, camera_controller: *KeyboardMovementController) InputLayer {
+    const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
+
+    pub fn init(
+        window: *Window,
+        camera: *Camera,
+        camera_controller: *KeyboardMovementController,
+        scene: *SceneV2,
+    ) InputLayer {
         return .{
             .base = .{
                 .name = "InputLayer",
@@ -29,6 +39,7 @@ pub const InputLayer = struct {
             .window = window,
             .camera = camera,
             .camera_controller = camera_controller,
+            .scene = scene,
         };
     }
 
@@ -62,6 +73,21 @@ pub const InputLayer = struct {
 
         // Process camera movement using dt from frame_info
         self.camera_controller.processInput(self.window, self.camera, frame_info.dt);
+
+        // Toggle path tracing with 'T' key (with debouncing)
+        const GLFW_KEY_T = 84;
+        const t_key_state = c.glfwGetKey(@ptrCast(self.window.window.?), GLFW_KEY_T);
+        const toggle_time = c.glfwGetTime();
+
+        if (t_key_state == c.GLFW_PRESS and (toggle_time - self.last_toggle_time) > TOGGLE_COOLDOWN) {
+            if (self.scene.render_graph != null) {
+                // Check current path tracing state via the render graph
+                const pt_enabled = if (self.scene.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                try self.scene.setPathTracingEnabled(!pt_enabled);
+                self.last_toggle_time = toggle_time;
+                log(.INFO, "InputLayer", "Path tracing toggled: {}", .{!pt_enabled});
+            }
+        }
     }
 
     fn render(base: *Layer, frame_info: *const FrameInfo) !void {
@@ -70,7 +96,7 @@ pub const InputLayer = struct {
         // No rendering for input layer
     }
 
-    fn end(base: *Layer, frame_info: *const FrameInfo) !void {
+    fn end(base: *Layer, frame_info: *FrameInfo) !void {
         _ = base;
         _ = frame_info;
     }

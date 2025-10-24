@@ -119,7 +119,7 @@ pub const SceneLayer = struct {
         try self.scene.render(frame_info.*);
     }
 
-    fn end(base: *Layer, frame_info: *const FrameInfo) !void {
+    fn end(base: *Layer, frame_info: *FrameInfo) !void {
         _ = base;
         _ = frame_info;
     }
