@@ -578,7 +578,7 @@ pub const Scene = struct {
                     if (self.performance_monitor) |pm| {
                         try pm.beginPass("geo_update", frame_info.current_frame, null);
                     }
-                    try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                    try geom_pass.update(frame_info.current_frame);
                     if (self.performance_monitor) |pm| {
                         try pm.endPass("geo_update", frame_info.current_frame, null);
                     }
@@ -587,7 +587,7 @@ pub const Scene = struct {
                 if (self.performance_monitor) |pm| {
                     try pm.beginPass("geo_update", frame_info.current_frame, null);
                 }
-                try geom_pass.checkAssetUpdates(frame_info.current_frame);
+                try geom_pass.update(frame_info.current_frame);
                 if (self.performance_monitor) |pm| {
                     try pm.endPass("geo_update", frame_info.current_frame, null);
                 }
@@ -600,7 +600,7 @@ pub const Scene = struct {
                 if (self.performance_monitor) |pm| {
                     try pm.beginPass("pt_update", frame_info.current_frame, null);
                 }
-                try pt_pass.updateState(&frame_info);
+                try pt_pass.update(&frame_info);
                 if (self.performance_monitor) |pm| {
                     try pm.endPass("pt_update", frame_info.current_frame, null);
                 }

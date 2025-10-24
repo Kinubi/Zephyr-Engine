@@ -141,12 +141,12 @@ pub const LightVolumePass = struct {
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
         // Bind global UBO to all frames
-        try self.setupResources();
+        try self.updateDescriptors();
 
         log(.INFO, "light_volume_pass", "Setup complete", .{});
     }
 
-    fn setupResources(self: *LightVolumePass) !void {
+    fn updateDescriptors(self: *LightVolumePass) !void {
         // Bind global UBO for all frames
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const ubo_resource = Resource{
@@ -197,7 +197,7 @@ pub const LightVolumePass = struct {
             log(.INFO, "light_volume_pass", "Pipeline hot-reloaded", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.light_volume_pipeline);
-            try self.setupResources();
+            try self.updateDescriptors();
         }
 
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.light_volume_pipeline, frame_info.current_frame);

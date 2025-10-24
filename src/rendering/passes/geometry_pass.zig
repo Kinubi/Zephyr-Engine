@@ -153,7 +153,8 @@ pub const GeometryPass = struct {
 
     /// Check for asset updates and rebind resources if needed
     /// Called even when pass is disabled to keep descriptors up to date
-    pub fn checkAssetUpdates(self: *GeometryPass, frame_index: u32) !void {
+    /// Update geometry pass state (check for asset updates, rebuild descriptors if needed)
+    pub fn update(self: *GeometryPass, frame_index: u32) !void {
         _ = frame_index;
 
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return;
@@ -173,7 +174,7 @@ pub const GeometryPass = struct {
         const geometry_changed = self.render_system.raster_descriptors_dirty;
 
         if (assets_updated or pipeline_rebuilt or self.resources_need_setup or geometry_changed) {
-            try self.setupResources();
+            try self.updateDescriptors();
             self.resources_need_setup = false;
 
             // Clear the raster flag after updating descriptors
@@ -182,7 +183,7 @@ pub const GeometryPass = struct {
     }
 
     /// Bind material buffer and texture array from AssetManager to all frames
-    fn setupResources(self: *GeometryPass) !void {
+    fn updateDescriptors(self: *GeometryPass) !void {
         // Bind global UBO for all frames (Set 0, Binding 0 - determined by shader reflection)
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const ubo_resource = Resource{

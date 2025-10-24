@@ -576,7 +576,8 @@ pub const PathTracingPass = struct {
 
     /// Update path tracing state (call this each frame from scene.update, before render)
     /// This is analogous to rt_renderer.update() - it updates descriptors and BVH
-    pub fn updateState(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
+    /// Update path tracing state (BVH rebuild, descriptor updates)
+    pub fn update(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
         const frame_index = frame_info.current_frame;
 
         // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago

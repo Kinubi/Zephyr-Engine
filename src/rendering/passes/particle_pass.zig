@@ -109,16 +109,16 @@ pub const ParticlePass = struct {
         };
 
         self.particle_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
-        const entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
-        self.cached_pipeline_handle = entry.vulkan_pipeline;
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
+        self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
         // Bind global UBO to all frames
-        try self.setupResources();
+        try self.updateDescriptors();
 
         log(.INFO, "particle_pass", "Setup complete", .{});
     }
 
-    fn setupResources(self: *ParticlePass) !void {
+    fn updateDescriptors(self: *ParticlePass) !void {
         // Bind global UBO for all frames
         for (0..@import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const ubo_resource = Resource{
@@ -156,7 +156,7 @@ pub const ParticlePass = struct {
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
             // Rebind resources after hot reload
-            try self.setupResources();
+            try self.updateDescriptors();
 
             pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
         }
