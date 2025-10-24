@@ -387,7 +387,7 @@ pub const Scene = struct {
     }
 
     /// Toggle path tracing on/off (switches between path tracing and raster)
-    pub fn setPathTracingEnabled(self: *Scene, enabled: bool) void {
+    pub fn setPathTracingEnabled(self: *Scene, enabled: bool) !void {
         // Update render graph pass states
         if (self.render_graph) |*graph| {
             // First, set the path tracing pass's internal flag
@@ -403,6 +403,7 @@ pub const Scene = struct {
                 graph.disablePass("particle_pass");
                 graph.disablePass("light_volume_pass");
                 graph.enablePass("path_tracing_pass");
+                try graph.recompile(); // Recompile after all state changes
                 log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s}", .{self.name});
             } else {
                 // Raster mode: enable raster passes, disable PT
@@ -410,6 +411,7 @@ pub const Scene = struct {
                 graph.enablePass("particle_pass");
                 graph.enablePass("light_volume_pass");
                 graph.disablePass("path_tracing_pass");
+                try graph.recompile(); // Recompile after all state changes
                 log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s}", .{self.name});
             }
         } else {
@@ -519,7 +521,7 @@ pub const Scene = struct {
         try self.render_graph.?.compile();
 
         // Initialize pass states: start with raster mode (path tracing disabled)
-        self.setPathTracingEnabled(false);
+        try self.setPathTracingEnabled(false);
 
         log(.INFO, "scene_v2", "RenderGraph initialized for scene: {s}", .{self.name});
     }
@@ -527,9 +529,9 @@ pub const Scene = struct {
     /// Render the scene using the RenderGraph
     pub fn render(self: *Scene, frame_info: FrameInfo) !void {
         if (self.render_graph) |*graph| {
-            // Execute only graphics passes (compute passes already executed in update())
+            // Execute all passes (compute and graphics)
             // Performance monitoring is handled by the RenderGraph
-            try graph.executeGraphicsPasses(frame_info);
+            try graph.execute(frame_info);
         } else {
             log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
         }
@@ -553,12 +555,6 @@ pub const Scene = struct {
         // Update all render passes through the render graph
         if (self.render_graph) |*graph| {
             try graph.update(&frame_info);
-        }
-
-        // Execute compute passes (GPU particle simulation)
-        // This must happen between beginCompute/endCompute in app.zig
-        if (self.render_graph) |*graph| {
-            try graph.executeComputePasses(frame_info);
         }
 
         // Run ECS systems (transforms, physics, etc.)

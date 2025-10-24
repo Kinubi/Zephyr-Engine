@@ -201,7 +201,9 @@ pub const ParticleComputePass = struct {
         pass.* = ParticleComputePass{
             .base = RenderPass{
                 .name = "particle_compute_pass",
+                .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,

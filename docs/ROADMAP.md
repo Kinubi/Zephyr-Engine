@@ -28,9 +28,13 @@
 #### Rendering Pipeline
 - ✅ UnifiedPipelineSystem (shader reflection, automatic descriptors)
 - ✅ Pipeline caching (~66% faster startup)
-- ✅ RenderGraph architecture
+- ✅ RenderGraph architecture with DAG compilation
+- ✅ Topological sorting using Kahn's algorithm
+- ✅ Dynamic pass enable/disable with automatic DAG recompilation
+- ✅ Cycle detection for dependency validation
 - ✅ Dynamic rendering (Vulkan 1.3)
 - ✅ Shader hot-reload integration
+- ✅ Separate performance tracking for update and execute phases
 
 #### Thread Pool
 - ✅ Multi-subsystem work-stealing pool

@@ -34,9 +34,6 @@ const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
 const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const ResourceBinder = @import("rendering/resource_binder.zig").ResourceBinder;
 
-// System imports
-const ComputeShaderSystem = @import("systems/compute_shader_system.zig").ComputeShaderSystem;
-
 const PARTICLE_MAX: u32 = 1024;
 
 // Utility imports
@@ -81,8 +78,8 @@ pub const App = struct {
     var current_frame: u32 = 0;
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
+    var compute_bufs: []vk.CommandBuffer = undefined;
 
-    var compute_shader_system: ComputeShaderSystem = undefined;
     var shader_manager: ShaderManager = undefined;
 
     // Unified pipeline system
@@ -398,6 +395,11 @@ pub const App = struct {
             self.allocator,
         );
 
+        compute_bufs = try self.gc.createCommandBuffers(
+            self.allocator,
+        );
+        swapchain.compute = true;
+
         camera_controller = KeyboardMovementController.init();
 
         camera = Camera{ .fov = 75.0, .window = self.window };
@@ -456,11 +458,6 @@ pub const App = struct {
         // );
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
-
-        // --- Compute shader system initialization ---
-        compute_shader_system = try ComputeShaderSystem.init(&self.gc, &swapchain, self.allocator);
-
-        log(.INFO, "ComputeSystem", "Compute system fully initialized", .{});
 
         // ==================== OLD GENERIC RENDERER (DISABLED FOR RENDER GRAPH) ====================
         // Initialize Generic Forward Renderer (rasterization only)
@@ -606,7 +603,7 @@ pub const App = struct {
         }
 
         const cmdbuf = cmdbufs[current_frame];
-        const computebuf = compute_shader_system.compute_bufs[current_frame];
+        const computebuf = compute_bufs[current_frame];
         frame_info.command_buffer = cmdbuf;
         frame_info.compute_buffer = computebuf;
         frame_info.dt = @floatCast(dt);
@@ -629,7 +626,7 @@ pub const App = struct {
             if (scene_v2_enabled and scene_v2.render_graph != null) {
                 // Check current path tracing state via the render graph
                 const pt_enabled = if (scene_v2.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
-                scene_v2.setPathTracingEnabled(!pt_enabled);
+                try scene_v2.setPathTracingEnabled(!pt_enabled);
                 last_toggle_time = toggle_time;
                 log(.INFO, "app", "Path tracing toggled: {}", .{!pt_enabled});
             }
@@ -649,7 +646,8 @@ pub const App = struct {
 
         //log(.TRACE, "app", "Frame start", .{});
 
-        compute_shader_system.beginCompute(frame_info);
+        // Begin frame - starts both graphics and compute command buffers
+        try swapchain.beginFrame(frame_info);
 
         if (performance_monitor) |pm| {
             try pm.resetQueriesForFrame(frame_info.compute_buffer);
@@ -663,9 +661,6 @@ pub const App = struct {
         if (performance_monitor) |pm| {
             try pm.endPass("scene_update", current_frame, null);
         }
-
-        compute_shader_system.endCompute(frame_info);
-        try swapchain.beginFrame(frame_info);
 
         if (performance_monitor) |pm| {
             try pm.beginPass("ubo_update", current_frame, null); // CPU-only
@@ -760,11 +755,12 @@ pub const App = struct {
 
         global_ubo_set.deinit();
 
-        // Cleanup generic renderer
+        // Clean up generic renderer
         // forward_renderer.deinit();  // OLD: Disabled for RenderGraph
         // rt_render_pass.deinit();    // OLD: Disabled for RenderGraph
 
         self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
+        self.gc.destroyCommandBuffers(compute_bufs, self.allocator);
 
         // Clean up unified systems (forward_renderer already deinit'd particle renderer)
         resource_binder.deinit();

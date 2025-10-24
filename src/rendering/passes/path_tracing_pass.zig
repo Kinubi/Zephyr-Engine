@@ -167,7 +167,9 @@ pub const PathTracingPass = struct {
         pass.* = PathTracingPass{
             .base = RenderPass{
                 .name = "path_tracing_pass",
+                .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,

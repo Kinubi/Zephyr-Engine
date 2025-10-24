@@ -94,7 +94,9 @@ pub const LightVolumePass = struct {
         pass.* = LightVolumePass{
             .base = RenderPass{
                 .name = "light_volume_pass",
+                .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,

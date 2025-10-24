@@ -124,7 +124,6 @@ pub const ResourceRegistry = struct {
             resource.memory = memory;
             resource.width = width;
             resource.height = height;
-            log(.DEBUG, "resource_registry", "Updated resource image: {s} ({}x{})", .{ resource.name, width, height });
         } else {
             return error.ResourceNotFound;
         }
@@ -151,6 +150,9 @@ pub const RenderPass = struct {
     name: []const u8,
     enabled: bool = true,
     vtable: *const RenderPassVTable,
+
+    // Dependencies: names of passes this pass depends on (must execute after)
+    dependencies: std.ArrayList([]const u8),
 
     /// Call setup through vtable
     pub fn setup(self: *RenderPass, graph: *RenderGraph) !void {
@@ -183,8 +185,11 @@ pub const RenderGraph = struct {
     allocator: Allocator,
     graphics_context: *GraphicsContext,
 
-    // Passes in execution order (after compilation)
+    // All passes (including disabled)
     passes: std.ArrayList(*RenderPass),
+
+    // Compiled execution order (only enabled passes, topologically sorted)
+    execution_order: std.ArrayList(*RenderPass),
 
     // Resource registry (render targets, depth buffers, etc)
     resources: ResourceRegistry,
@@ -198,6 +203,7 @@ pub const RenderGraph = struct {
             .allocator = allocator,
             .graphics_context = graphics_context,
             .passes = std.ArrayList(*RenderPass){},
+            .execution_order = std.ArrayList(*RenderPass){},
             .resources = ResourceRegistry.init(allocator),
             .compiled = false,
         };
@@ -212,6 +218,7 @@ pub const RenderGraph = struct {
         }
 
         self.passes.deinit(self.allocator);
+        self.execution_order.deinit(self.allocator);
         self.resources.deinit();
     }
 
@@ -231,11 +238,106 @@ pub const RenderGraph = struct {
             try pass.setup(self);
         }
 
-        // TODO: Topological sort based on resource dependencies
-        // For now: execute in order added (GeometryPass -> LightingPass)
+        // Build execution order using topological sort (only enabled passes)
+        try self.buildExecutionOrder();
 
         self.compiled = true;
-        log(.INFO, "render_graph", "Render graph compiled successfully", .{});
+        log(.INFO, "render_graph", "Render graph compiled successfully ({} enabled passes)", .{self.execution_order.items.len});
+    }
+
+    /// Build execution order using topological sort (Kahn's algorithm)
+    /// Only includes enabled passes in the execution order
+    fn buildExecutionOrder(self: *RenderGraph) !void {
+        self.execution_order.clearRetainingCapacity();
+
+        // Filter to only enabled passes
+        var enabled_passes = std.ArrayList(*RenderPass){};
+        defer enabled_passes.deinit(self.allocator);
+
+        for (self.passes.items) |pass| {
+            if (pass.enabled) {
+                try enabled_passes.append(self.allocator, pass);
+            }
+        }
+
+        if (enabled_passes.items.len == 0) {
+            log(.WARN, "render_graph", "No enabled passes in graph", .{});
+            return;
+        }
+
+        // Build dependency graph for enabled passes only
+        // Count incoming edges for each pass
+        var in_degree = std.StringHashMap(usize).init(self.allocator);
+        defer in_degree.deinit();
+
+        // Initialize in-degree for all enabled passes
+        for (enabled_passes.items) |pass| {
+            try in_degree.put(pass.name, 0);
+        }
+
+        // Count dependencies (only from enabled passes to enabled passes)
+        for (enabled_passes.items) |pass| {
+            for (pass.dependencies.items) |dep_name| {
+                // Only count if dependency is also enabled
+                if (self.getPass(dep_name)) |dep_pass| {
+                    if (dep_pass.enabled) {
+                        const current = in_degree.get(pass.name) orelse 0;
+                        try in_degree.put(pass.name, current + 1);
+                    }
+                }
+            }
+        }
+
+        // Queue for passes with no dependencies
+        var queue = std.ArrayList(*RenderPass){};
+        defer queue.deinit(self.allocator);
+
+        // Add all passes with in-degree 0
+        for (enabled_passes.items) |pass| {
+            const degree = in_degree.get(pass.name) orelse 0;
+            if (degree == 0) {
+                try queue.append(self.allocator, pass);
+            }
+        }
+
+        // Process queue
+        while (queue.items.len > 0) {
+            const current = queue.orderedRemove(0);
+            try self.execution_order.append(self.allocator, current);
+
+            // For each enabled pass that depends on current
+            for (enabled_passes.items) |pass| {
+                if (!pass.enabled) continue;
+
+                // Check if this pass depends on current
+                var depends_on_current = false;
+                for (pass.dependencies.items) |dep_name| {
+                    if (std.mem.eql(u8, dep_name, current.name)) {
+                        depends_on_current = true;
+                        break;
+                    }
+                }
+
+                if (depends_on_current) {
+                    const degree = in_degree.get(pass.name) orelse 0;
+                    if (degree > 0) {
+                        const new_degree = degree - 1;
+                        try in_degree.put(pass.name, new_degree);
+                        if (new_degree == 0) {
+                            try queue.append(self.allocator, pass);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for cycles
+        if (self.execution_order.items.len != enabled_passes.items.len) {
+            log(.ERROR, "render_graph", "Cycle detected in render graph dependencies!", .{});
+            return error.CyclicDependency;
+        }
+
+        log(.INFO, "render_graph", "Execution order built: {} passes", .{self.execution_order.items.len});
     }
 
     /// Update all enabled passes (call each frame before execute)
@@ -244,19 +346,19 @@ pub const RenderGraph = struct {
             return error.GraphNotCompiled;
         }
 
-        for (self.passes.items) |pass| {
-            if (!pass.enabled) {
-                continue;
-            }
+        for (self.execution_order.items) |pass| {
+            // Create update pass name with suffix
+            var name_buf: [64]u8 = undefined;
+            const update_name = std.fmt.bufPrint(&name_buf, "{s}_update", .{pass.name}) catch pass.name;
 
             if (frame_info.performance_monitor) |pm| {
-                try pm.beginPass(pass.name, frame_info.current_frame, null);
+                try pm.beginPass(update_name, frame_info.current_frame, null);
             }
 
             try pass.update(frame_info);
 
             if (frame_info.performance_monitor) |pm| {
-                try pm.endPass(pass.name, frame_info.current_frame, null);
+                try pm.endPass(update_name, frame_info.current_frame, null);
             }
         }
     }
@@ -267,82 +369,52 @@ pub const RenderGraph = struct {
             return error.GraphNotCompiled;
         }
 
-        for (self.passes.items) |pass| {
-            if (!pass.enabled) {
-                log(.TRACE, "render_graph", "Skipping disabled pass: {s}", .{pass.name});
-                continue;
-            }
-
-            try pass.execute(frame_info);
-        }
-    }
-
-    /// Execute only compute passes (should be called during compute command recording)
-    pub fn executeComputePasses(self: *RenderGraph, frame_info: FrameInfo) !void {
-        if (!self.compiled) {
-            return error.GraphNotCompiled;
-        }
-
-        for (self.passes.items) |pass| {
-            if (!pass.enabled) continue;
-            if (!pass.isComputePass()) continue; // Only execute compute passes
-
+        for (self.execution_order.items) |pass| {
             if (frame_info.performance_monitor) |pm| {
-                try pm.beginPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+                try pm.beginPass(pass.name, frame_info.current_frame, null);
             }
-
             try pass.execute(frame_info);
-
             if (frame_info.performance_monitor) |pm| {
-                try pm.endPass(pass.name, frame_info.current_frame, frame_info.compute_buffer);
+                try pm.endPass(pass.name, frame_info.current_frame, null);
             }
         }
     }
 
-    /// Execute only graphics passes (should be called during graphics command recording)
-    pub fn executeGraphicsPasses(self: *RenderGraph, frame_info: FrameInfo) !void {
-        if (!self.compiled) {
-            return error.GraphNotCompiled;
-        }
-
-        for (self.passes.items) |pass| {
-            if (!pass.enabled) continue;
-            if (pass.isComputePass()) continue; // Skip compute passes
-
-            if (frame_info.performance_monitor) |pm| {
-                try pm.beginPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
-            }
-
-            try pass.execute(frame_info);
-
-            if (frame_info.performance_monitor) |pm| {
-                try pm.endPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
-            }
-        }
-    }
-
-    /// Enable a pass by name
+    /// Enable a pass by name (doesn't recompile - call recompile() after all state changes)
     pub fn enablePass(self: *RenderGraph, name: []const u8) void {
         for (self.passes.items) |pass| {
             if (std.mem.eql(u8, pass.name, name)) {
-                pass.enabled = true;
-                log(.INFO, "render_graph", "Enabled pass: {s}", .{name});
+                if (!pass.enabled) {
+                    pass.enabled = true;
+                    self.compiled = false; // Mark as needing recompilation
+                }
                 return;
             }
         }
         log(.WARN, "render_graph", "Pass not found: {s}", .{name});
     }
 
-    /// Disable a pass by name
+    /// Disable a pass by name (doesn't recompile - call recompile() after all state changes)
     pub fn disablePass(self: *RenderGraph, name: []const u8) void {
         for (self.passes.items) |pass| {
             if (std.mem.eql(u8, pass.name, name)) {
-                pass.enabled = false;
-                log(.INFO, "render_graph", "Disabled pass: {s}", .{name});
+                if (pass.enabled) {
+                    pass.enabled = false;
+                    self.compiled = false; // Mark as needing recompilation
+                }
                 return;
             }
         }
         log(.WARN, "render_graph", "Pass not found: {s}", .{name});
+    }
+
+    /// Recompile the execution order (call after changing pass enabled states)
+    pub fn recompile(self: *RenderGraph) !void {
+        if (!self.compiled) {
+            log(.INFO, "render_graph", "Recompiling execution order", .{});
+            try self.buildExecutionOrder();
+            self.compiled = true;
+        }
     }
 
     /// Get a pass by name

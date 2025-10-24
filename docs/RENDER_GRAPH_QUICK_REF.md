@@ -1,5 +1,8 @@
 # RenderGraph Quick Reference
 
+**Updated**: October 24, 2025  
+**Features**: DAG compilation with topological sorting
+
 ## Creating a RenderGraph
 
 ```zig
@@ -24,22 +27,34 @@ try render_graph.addPass(&path_tracing_pass.base);
 
 ```zig
 // Compile once after all passes added
+// - Calls setup() on all passes
+// - Builds DAG from dependencies
+// - Topologically sorts enabled passes
 try render_graph.compile();
 
-// Execute each frame
+// Execute each frame (uses compiled execution order)
 try render_graph.execute(frame_info);
 ```
 
-## Pass Control
+## Pass Control (with DAG Recompilation)
 
 ```zig
 // Enable/disable passes at runtime
-render_graph.enablePass("PathTracingPass");
-render_graph.disablePass("GeometryPass");
+// Note: These mark the graph as needing recompilation but don't rebuild yet
+render_graph.enablePass("path_tracing_pass");
+render_graph.disablePass("geometry_pass");
+render_graph.disablePass("particle_pass");
 
-// Get pass by name
-if (render_graph.getPass("MyPass")) |pass| {
-    pass.enabled = false;
+// Recompile DAG after all state changes (efficient - single rebuild)
+try render_graph.recompile();
+
+// Example: Toggle between raster and path tracing
+if (enable_path_tracing) {
+    graph.disablePass("geometry_pass");
+    graph.disablePass("particle_pass");
+    graph.disablePass("light_volume_pass");
+    graph.enablePass("path_tracing_pass");
+    try graph.recompile(); // Rebuild execution order once
 }
 ```
 
@@ -58,6 +73,7 @@ if (render_graph.getPass("MyPass")) |pass| {
 ```zig
 pub const MyPass = struct {
     base: RenderPass,
+    allocator: Allocator,
     // ... your fields
     
     const vtable = RenderPassVTable{
@@ -71,17 +87,24 @@ pub const MyPass = struct {
         const pass = try allocator.create(MyPass);
         pass.* = .{
             .base = .{
-                .name = "MyPass",
+                .name = "my_pass",
                 .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){}, // Initialize empty
             },
+            .allocator = allocator,
         };
         return pass;
     }
     
     fn setup(base: *RenderPass, graph: *RenderGraph) !void {
         const self = @fieldParentPtr(MyPass, "base", base);
-        // Register resources, declare dependencies
+        
+        // Optional: Declare dependencies on other passes
+        // try base.dependencies.append("geometry_pass");
+        // try base.dependencies.append("particle_compute_pass");
+        
+        // Register resources, allocate buffers, etc.
     }
     
     fn update(base: *RenderPass, delta_time: f32) !void {

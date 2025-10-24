@@ -475,20 +475,40 @@ pub const Swapchain = struct {
 
         try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[frame_info.current_frame]));
 
+        // Begin graphics command buffer
         try self.gc.vkd.resetCommandBuffer(frame_info.command_buffer, .{});
-
         const begin_info = vk.CommandBufferBeginInfo{};
-
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
+
+        // Also begin compute buffer (if compute is enabled)
+        if (self.compute) {
+            try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
+            try self.gc.vkd.resetCommandBuffer(frame_info.compute_buffer, .{});
+            const begin_info_compute = vk.CommandBufferBeginInfo{};
+            try self.gc.vkd.beginCommandBuffer(frame_info.compute_buffer, &begin_info_compute);
+        }
     }
 
     pub fn endFrame(self: *Swapchain, frame_info: FrameInfo, current_frame: *u32) !void {
+        // End and submit compute buffer first (if compute is enabled)
+        if (self.compute) {
+            self.gc.vkd.endCommandBuffer(frame_info.compute_buffer) catch |err| {
+                log(.ERROR, "swapchain", "Error ending compute command buffer: {any}", .{err});
+            };
+            self.submitCompute(frame_info.compute_buffer, frame_info.current_frame) catch |err| {
+                log(.ERROR, "swapchain", "Error submitting compute command buffer: {any}", .{err});
+            };
+        }
+
         // Execute all pending secondary command buffers from worker threads
         try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
 
+        // End graphics buffer
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             log(.ERROR, "swapchain", "Error ending command buffer: {any}", .{err});
         };
+
+        // Present (submits graphics buffer with semaphore wait on compute)
         self.present(frame_info.command_buffer, current_frame.*, frame_info.extent) catch |err| {
             log(.ERROR, "swapchain", "Error presenting frame: {any}", .{err});
         };

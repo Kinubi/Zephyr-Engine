@@ -107,27 +107,40 @@ pub const Resource = struct {
 
 ## DAG Compilation
 
-The RenderGraph automatically builds a Directed Acyclic Graph (DAG) from pass dependencies and determines optimal execution order.
+The RenderGraph automatically builds a Directed Acyclic Graph (DAG) from pass dependencies and determines optimal execution order using topological sorting.
 
 ### Dependency Declaration
 
-Passes declare dependencies during `setup()`:
+**Status**: ✅ **Implemented** (October 24, 2025)
+
+Passes declare dependencies in their definition:
 
 ```zig
-// In pass setup()
-fn setup(base: *RenderPass, graph: *RenderGraph) !void {
-    const self = @fieldParentPtr(MyPass, "base", base);
-    
-    // Declare resource dependencies
-    // This pass READS from color_buffer (written by previous pass)
-    try graph.declareDependency(self.base.name, "GeometryPass", "color_buffer");
-    
-    // This pass WRITES to output_texture
-    try graph.declareOutput(self.base.name, "output_texture");
-}
+pub const RenderPass = struct {
+    name: []const u8,
+    enabled: bool = true,
+    vtable: *const RenderPassVTable,
+    dependencies: std.ArrayList([]const u8), // Names of passes this depends on
+};
+
+// Example: Particle pass depends on particle compute pass
+const particle_pass = ParticlePass{
+    .base = RenderPass{
+        .name = "particle_pass",
+        .enabled = true,
+        .vtable = &vtable,
+        .dependencies = std.ArrayList([]const u8){}, // Initialized empty, can append dependencies
+    },
+    // ... other fields
+};
+
+// To add a dependency (if needed):
+try particle_pass.base.dependencies.append(allocator, "particle_compute_pass");
 ```
 
 ### Compilation Process
+
+**Status**: ✅ **Implemented with Kahn's Algorithm** (October 24, 2025)
 
 ```
 1. Add Passes
@@ -135,40 +148,80 @@ fn setup(base: *RenderPass, graph: *RenderGraph) !void {
 
 2. compile()
    ├─> Call setup() on all passes
-   │   └─> Passes declare resource dependencies
+   │   └─> Passes register resources
    │
-   ├─> Build dependency graph
-   │   ├─> Node per pass
-   │   └─> Edge = data dependency
-   │
-   ├─> Topological sort
-   │   └─> Determines execution order
-   │
-   ├─> Validate DAG
-   │   ├─> Check for cycles
-   │   ├─> Check for missing dependencies
-   │   └─> Verify resource compatibility
+   ├─> Build execution order (buildExecutionOrder)
+   │   ├─> Filter to enabled passes only
+   │   ├─> Count in-degrees (dependencies) for each pass
+   │   ├─> Initialize queue with zero-dependency passes
+   │   │
+   │   ├─> Topological Sort (Kahn's Algorithm):
+   │   │   ├─> Dequeue pass with no dependencies
+   │   │   ├─> Add to execution order
+   │   │   ├─> Decrement in-degree of dependent passes
+   │   │   └─> Repeat until queue empty
+   │   │
+   │   └─> Validate DAG (detect cycles)
    │
    └─> Set compiled = true
 ```
 
-### Current Implementation Status
+### Implementation Details
 
-**Current**: Simple sequential execution (order passes are added)
+**Execution Order**:
 ```zig
-// Execute passes in order added
-for (self.passes.items) |pass| {
-    if (pass.enabled) {
-        try pass.execute(frame_info);
-    }
-}
+pub const RenderGraph = struct {
+    // All passes (including disabled)
+    passes: std.ArrayList(*RenderPass),
+    
+    // Compiled execution order (only enabled passes, topologically sorted)
+    execution_order: std.ArrayList(*RenderPass),
+    
+    compiled: bool = false,
+};
 ```
 
-**Planned**: Dependency-based execution order
+**Key Features**:
+- ✅ **Topological Sort**: Uses Kahn's algorithm for efficient O(V+E) complexity
+- ✅ **Cycle Detection**: Returns `error.CyclicDependency` if circular dependencies detected
+- ✅ **Dynamic Recompilation**: DAG rebuilds when passes are enabled/disabled
+- ✅ **Enabled-Only Execution**: Only enabled passes included in execution order
+
+**Enabling/Disabling Passes**:
 ```zig
+// Change pass states (marks as needing recompilation)
+graph.disablePass("geometry_pass");
+graph.disablePass("particle_pass");
+graph.enablePass("path_tracing_pass");
+
+// Recompile DAG after all state changes (efficient - single rebuild)
+try graph.recompile();
+
+// Execute with new order
+try graph.execute(frame_info);
+```
+
+### Current Implementation
+
+**✅ Implemented**: Dependency-based execution order with topological sort
+
+```zig
+// buildExecutionOrder() - Kahn's Algorithm
+fn buildExecutionOrder(self: *RenderGraph) !void {
+    // 1. Filter enabled passes
+    // 2. Count in-degrees (dependencies)
+    // 3. Queue passes with in-degree 0
+    // 4. Process queue:
+    //    - Dequeue pass
+    //    - Add to execution_order
+    //    - Decrement dependents' in-degree
+    //    - Enqueue if in-degree reaches 0
+    // 5. Check for cycles (execution_order.len != enabled_passes.len)
+}
+
 // Execute passes in topologically sorted order
-for (self.sorted_passes.items) |pass| {
-    if (pass.enabled) {
+pub fn execute(self: *RenderGraph, frame_info: FrameInfo) !void {
+    for (self.execution_order.items) |pass| {
         try pass.execute(frame_info);
     }
 }
@@ -177,27 +230,36 @@ for (self.sorted_passes.items) |pass| {
 ### Dependency Examples
 
 ```
-GeometryPass
+ParticleComputePass (no dependencies)
+  └─> writes: particle_buffer
+
+GeometryPass (no dependencies)
   └─> writes: color_buffer, depth_buffer
 
-LightVolumePass
+ParticlePass (depends on ParticleComputePass)
+  ├─> reads: particle_buffer, depth_buffer
+  └─> writes: color_buffer (blend)
+
+LightVolumePass (depends on GeometryPass)
   ├─> reads: depth_buffer
   └─> writes: color_buffer (blend)
 
-PathTracingPass
-  └─> writes: output_texture (alternative to GeometryPass)
-
-ParticleComputePass
-  └─> writes: particle_buffer
-
-ParticlePass
-  ├─> reads: particle_buffer, depth_buffer
-  └─> writes: color_buffer (blend)
+PathTracingPass (alternative branch, no dependencies)
+  └─> writes: output_texture
 ```
+
+**Execution Order** (rasterization mode):
+1. ParticleComputePass, GeometryPass (parallel-capable, no dependencies)
+2. ParticlePass, LightVolumePass (after their dependencies)
+
+**Execution Order** (path tracing mode):
+1. PathTracingPass (only enabled pass)
 
 ### Resource Aliasing
 
-Future optimization: Reuse memory for transient resources
+**Status**: 🔄 **Planned** - Future optimization
+
+Reuse memory for transient resources:
 
 ```zig
 // Example: depth_buffer only needed during geometry + lighting
@@ -205,7 +267,9 @@ Future optimization: Reuse memory for transient resources
 try graph.aliasResource("depth_buffer", "temporary_buffer");
 ```
 
-### Parallel Execution (Future)
+### Parallel Execution
+
+**Status**: 🔄 **Future Enhancement**
 
 DAG enables parallel pass execution on independent branches:
 
@@ -222,6 +286,8 @@ ShadowPass    ParticleComputePass
 ```
 
 **Benefit**: ShadowPass and ParticleComputePass can execute in parallel (no data dependencies)
+
+**Note**: Current implementation provides the DAG foundation. Parallel execution will be added in a future update using the existing dependency information.
 
 ## Render Passes
 

@@ -66,7 +66,9 @@ pub const ParticlePass = struct {
         pass.* = ParticlePass{
             .base = RenderPass{
                 .name = "particle_pass",
+                .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,

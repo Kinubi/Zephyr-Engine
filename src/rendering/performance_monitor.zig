@@ -35,13 +35,18 @@ pub const PerformanceMonitor = struct {
     queries_reset_for_frame: bool = false, // Track if queries have been reset this frame
 
     pub const PassTiming = struct {
-        name: []const u8,
+        name_buf: [64]u8 = [_]u8{0} ** 64, // Fixed buffer for pass name, zero-initialized
+        name_len: usize = 0, // Actual length of the name
         cpu_start_ns: i128 = 0,
         cpu_end_ns: i128 = 0,
         gpu_query_start: u32 = 0, // Query index
         gpu_query_end: u32 = 0, // Query index
         gpu_start_ticks: u64 = 0, // Actual GPU timestamp value
         gpu_end_ticks: u64 = 0, // Actual GPU timestamp value
+
+        pub fn getName(self: *const PassTiming) []const u8 {
+            return self.name_buf[0..self.name_len];
+        }
 
         pub fn getCpuTimeMs(self: PassTiming) f32 {
             const duration_ns = self.cpu_end_ns - self.cpu_start_ns;
@@ -64,7 +69,7 @@ pub const PerformanceMonitor = struct {
         frame_gpu_time_ns: u64 = 0,
         query_base_offset: u32 = 0, // The first_query offset used for this frame's queries
         pass_count: usize = 0,
-        passes: [MAX_PASSES]PassTiming = [_]PassTiming{.{ .name = "", .cpu_start_ns = 0, .cpu_end_ns = 0, .gpu_query_start = 0, .gpu_query_end = 0, .gpu_start_ticks = 0, .gpu_end_ticks = 0 }} ** MAX_PASSES,
+        passes: [MAX_PASSES]PassTiming = [_]PassTiming{.{}} ** MAX_PASSES,
 
         pub fn getFrameCpuTimeMs(self: FrameTiming) f32 {
             const duration_ns = self.frame_cpu_end - self.frame_cpu_start;
@@ -212,12 +217,18 @@ pub const PerformanceMonitor = struct {
             self.next_query_idx += 1;
         }
 
-        current.passes[pass_idx] = PassTiming{
-            .name = pass_name,
+        // Copy the pass name into the fixed buffer
+        var pass_timing = PassTiming{
             .cpu_start_ns = std.time.nanoTimestamp(),
             .gpu_query_start = gpu_start_query,
             .gpu_query_end = 0,
         };
+
+        const copy_len = @min(pass_name.len, pass_timing.name_buf.len);
+        @memcpy(pass_timing.name_buf[0..copy_len], pass_name[0..copy_len]);
+        pass_timing.name_len = copy_len;
+
+        current.passes[pass_idx] = pass_timing;
 
         // Increment pass count immediately so nested passes work correctly
         current.pass_count += 1;
@@ -234,7 +245,7 @@ pub const PerformanceMonitor = struct {
         var i: usize = current.pass_count;
         while (i > 0) {
             i -= 1;
-            if (std.mem.eql(u8, current.passes[i].name, pass_name)) {
+            if (std.mem.eql(u8, current.passes[i].getName(), pass_name)) {
                 pass_idx = i;
                 break;
             }
@@ -401,7 +412,7 @@ pub const PerformanceMonitor = struct {
             log(.INFO, "perf", "Pass breakdown:", .{});
             for (stats.pass_timings) |pass| {
                 const gpu_ms = pass.getGpuTimeMs(stats.timestamp_period);
-                log(.INFO, "perf", "  {s}: CPU {d:.2}ms | GPU {d:.2}ms", .{ pass.name, pass.getCpuTimeMs(), gpu_ms });
+                log(.INFO, "perf", "  {s}: CPU {d:.2}ms | GPU {d:.2}ms", .{ pass.getName(), pass.getCpuTimeMs(), gpu_ms });
             }
         }
     }

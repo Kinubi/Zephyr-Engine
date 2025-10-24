@@ -78,6 +78,7 @@ pub const GeometryPass = struct {
                 .name = "geometry_pass",
                 .enabled = true,
                 .vtable = &vtable,
+                .dependencies = std.ArrayList([]const u8){},
             },
             .allocator = allocator,
             .graphics_context = graphics_context,

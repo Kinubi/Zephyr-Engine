@@ -107,7 +107,7 @@ pub const UIRenderer = struct {
                 var cpu_sum: f32 = 0.0;
                 var gpu_sum: f32 = 0.0;
                 for (perf.pass_timings) |pass_timing| {
-                    if (pass_timing.name.len > 0) {
+                    if (pass_timing.name_len > 0) {
                         cpu_sum += pass_timing.getCpuTimeMs();
                         gpu_sum += pass_timing.getGpuTimeMs(perf.timestamp_period);
                     }
@@ -116,10 +116,11 @@ pub const UIRenderer = struct {
                 c.ImGui_Text("Pass breakdown:");
                 c.ImGui_Text("  CPU sum: %.2f ms | GPU sum: %.2f ms", cpu_sum, gpu_sum);
                 for (perf.pass_timings) |pass_timing| {
-                    if (pass_timing.name.len == 0) continue;
+                    if (pass_timing.name_len == 0) continue;
                     const cpu_ms = pass_timing.getCpuTimeMs();
                     const gpu_ms = pass_timing.getGpuTimeMs(perf.timestamp_period);
-                    c.ImGui_Text("  %s: CPU %.2f ms | GPU %.2f ms", pass_timing.name.ptr, cpu_ms, gpu_ms);
+                    const name = pass_timing.getName();
+                    c.ImGui_Text("  %s: CPU %.2f ms | GPU %.2f ms", name.ptr, cpu_ms, gpu_ms);
                 }
 
                 const cpu_overhead = perf.cpu_time_ms - cpu_sum;
