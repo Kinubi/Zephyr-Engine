@@ -54,9 +54,19 @@ ZulkanZengine features a modern architecture consisting of three main pillars:
 - ✅ **Texture Management**: Descriptor set updates and pooling
 - ✅ **Scheduled Loading**: Frame-based asset streaming
 
+### Layer & Event System
+- ✅ **Layer Architecture**: Modular execution (PerformanceLayer, RenderLayer, InputLayer, SceneLayer, UILayer)
+- ✅ **Event Bus**: Queue-based event dispatching with category filtering
+- ✅ **Event-Driven Input**: GLFW callbacks generate events processed by layers
+- ✅ **Runtime Toggles**: F1 (UI), F2 (Performance Graphs), T (Path Tracing)
+- ✅ **Per-Layer Profiling**: Automatic CPU time tracking for each layer phase
+- ✅ **Hot Toggles**: Enable/disable layers at runtime without recompiling
+
 ### Controls
 - ✅ **Camera Controller**: WASD movement, arrow key rotation
 - ✅ **Path Tracing Toggle**: 'T' key switches RT/raster modes
+- ✅ **UI Toggle**: 'F1' key shows/hides UI
+- ✅ **Performance Graphs Toggle**: 'F2' key shows/hides frame time graphs
 - ✅ **Smooth Movement**: Delta-time based controls
 
 ## Removed/Deprecated
