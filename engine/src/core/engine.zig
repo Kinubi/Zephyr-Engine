@@ -60,8 +60,9 @@ pub const Engine = struct {
     };
 
     /// Initialize the engine with configuration
-    pub fn init(allocator: std.mem.Allocator, config: Config) !Engine {
-        var engine: Engine = undefined;
+    pub fn init(allocator: std.mem.Allocator, config: Config) !*Engine {
+        const engine = try allocator.create(Engine);
+        errdefer allocator.destroy(engine);
         engine.allocator = allocator;
 
         // 1. Create window
@@ -121,7 +122,7 @@ pub const Engine = struct {
         errdefer engine.layer_stack.deinit();
 
         // 8. Create and add layers in order
-        // PerformanceLayer first (if enabled)
+        // PerformanceLayer first (if enabled) - needs to track full frame timing
         if (config.enable_performance_monitoring) {
             engine.performance_layer = PerformanceLayer.init(engine.performance_monitor.?, &engine.swapchain, &engine.window);
             try engine.layer_stack.pushLayer(&engine.performance_layer.?.base);
@@ -130,8 +131,6 @@ pub const Engine = struct {
         // RenderLayer (REQUIRED - handles swapchain begin/end)
         engine.render_layer = RenderLayer.init(&engine.swapchain);
         try engine.layer_stack.pushLayer(&engine.render_layer.base);
-
-        // 9. Optional: Asset manager
         // Note: Asset manager requires additional initialization that may be app-specific
         // For now, leave it null and let the application initialize it if needed
         engine.asset_manager = null;
@@ -187,6 +186,10 @@ pub const Engine = struct {
 
         // Window (last)
         self.window.deinit();
+
+        // Finally, destroy the engine itself
+        const allocator = self.allocator;
+        allocator.destroy(self);
     }
 
     /// Check if engine should continue running
@@ -209,6 +212,7 @@ pub const Engine = struct {
         const current_time = c.glfwGetTime();
         const dt = current_time - self.last_frame_time;
         self.frame_info.dt = @floatCast(dt);
+        self.last_frame_time = current_time;
 
         // 4. Set up command buffers for this frame
         self.frame_info.command_buffer = self.command_buffers[self.frame_info.current_frame];
@@ -222,12 +226,6 @@ pub const Engine = struct {
             .width = @as(u32, @intCast(width)),
             .height = @as(u32, @intCast(height)),
         };
-
-        // 5. Update performance monitor
-        if (self.performance_monitor) |pm| {
-            try pm.beginFrame(self.frame_info.current_frame);
-            self.frame_info.performance_monitor = pm;
-        }
 
         // 6. Begin all layers (RenderLayer will call swapchain.beginFrame)
         try self.layer_stack.begin(&self.frame_info);
@@ -252,14 +250,6 @@ pub const Engine = struct {
     pub fn endFrame(self: *Engine, frame_info: *FrameInfo) !void {
         // 1. End all layers (RenderLayer will submit and present)
         try self.layer_stack.end(frame_info);
-
-        // 2. Update performance stats
-        if (self.performance_monitor) |pm| {
-            try pm.endFrame(frame_info.current_frame);
-        }
-
-        // 3. Update last frame time for delta calculation
-        self.last_frame_time = c.glfwGetTime();
     }
 
     /// Get the layer stack for adding custom layers

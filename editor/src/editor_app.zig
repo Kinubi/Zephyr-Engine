@@ -72,9 +72,8 @@ const c = @cImport({
 });
 
 pub const App = struct {
-    window: Window = undefined,
-
-    gc: GraphicsContext = undefined,
+    // Core engine instance - manages window, graphics, swapchain, base layers
+    engine: *zulkan.Engine = undefined,
     allocator: std.mem.Allocator = undefined,
 
     // Initialize to true so descriptors are updated on first frames
@@ -83,29 +82,21 @@ pub const App = struct {
 
     // Module-level variables (static state shared across App instances)
 
-    var swapchain: Swapchain = undefined;
-    var cmdbufs: []vk.CommandBuffer = undefined;
-    var compute_bufs: []vk.CommandBuffer = undefined;
-
     var shader_manager: ShaderManager = undefined;
 
     // Unified pipeline system
     var unified_pipeline_system: UnifiedPipelineSystem = undefined;
     var resource_binder: ResourceBinder = undefined;
 
-    var last_frame_time: f64 = undefined;
     var camera: Camera = undefined;
     var camera_controller: KeyboardMovementController = undefined;
     var global_UBO_buffers: ?[]Buffer = undefined;
-    var frame_info: FrameInfo = FrameInfo{};
 
-    var frame_index: u32 = 0;
     var frame_counter: u64 = 0; // Global frame counter for scheduling
     var thread_pool: *ThreadPool = undefined;
     var asset_manager: *AssetManager = undefined;
     var file_watcher: *FileWatcher = undefined;
 
-    var performance_monitor: ?*PerformanceMonitor = null;
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
     // Scheduled asset loading system
@@ -138,38 +129,49 @@ pub const App = struct {
     var imgui_context: ImGuiContext = undefined;
     var ui_renderer: UIRenderer = undefined;
 
-    // Layer system
-    var layer_stack: LayerStack = undefined;
-    var event_bus: EventBus = undefined;
-    var render_layer: RenderLayer = undefined;
-    var performance_layer: PerformanceLayer = undefined;
+    // Editor-specific layers
     var input_layer: InputLayer = undefined;
     var scene_layer: SceneLayer = undefined;
     var ui_layer: UILayer = undefined;
 
     pub fn init(self: *App) !void {
-        log(.INFO, "app", "Initializing ZulkanZengine...", .{});
-        self.window = try Window.init(.{ .width = 1280, .height = 720 });
+        log(.INFO, "app", "Initializing ZulkanZengine Editor...", .{});
 
         self.allocator = std.heap.page_allocator;
 
         // Initialize scheduled assets system
         scheduled_assets = std.ArrayList(ScheduledAsset){};
 
-        self.gc = try GraphicsContext.init(self.allocator, self.window.window_props.title, @ptrCast(self.window.window.?));
-        log(.INFO, "app", "Using device: {s}", .{self.gc.deviceName()});
-        swapchain = try Swapchain.init(&self.gc, self.allocator, .{ .width = self.window.window_props.width, .height = self.window.window_props.height });
+        // ==================== Initialize Engine ====================
+        // Engine handles: window, graphics context, swapchain, command buffers, base layers
+        log(.INFO, "app", "Initializing engine core systems...", .{});
+        self.engine = try zulkan.Engine.init(self.allocator, .{
+            .window = .{
+                .width = 1280,
+                .height = 720,
+                .title = "ZulkanEditor",
+            },
+            .enable_validation = false,
+            .enable_performance_monitoring = true,
+        });
+        errdefer self.engine.deinit();
 
-        try self.gc.createCommandPool();
+        log(.INFO, "app", "Engine initialized - Using device: {s}", .{self.engine.getGraphicsContext().deviceName()});
 
+        // Get convenient references to engine systems
+        const gc = self.engine.getGraphicsContext();
+        const swapchain = self.engine.getSwapchain();
+        const window = self.engine.getWindow();
+        const performance_monitor = self.engine.performance_monitor;
+
+        // ==================== Initialize Thread Pool ====================
         // Initialize Thread Pool with dynamic scaling
         thread_pool = try self.allocator.create(ThreadPool);
         thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
         // TODO: Restore thread exit hook once GraphicsContext.workerThreadExitHook is available
-        // thread_pool.setThreadExitHook(GraphicsContext.workerThreadExitHook, @ptrCast(&self.gc));
+        // thread_pool.setThreadExitHook(GraphicsContext.workerThreadExitHook, @ptrCast(gc));
 
         // Register subsystems with thread pool
-
         try thread_pool.registerSubsystem(.{
             .name = "hot_reload",
             .min_workers = 1,
@@ -211,10 +213,10 @@ pub const App = struct {
         });
 
         // Start the thread pool with initial workers
-        try thread_pool.start(8); // Start with 4 workers
+        try thread_pool.start(8); // Start with 8 workers
 
-        // Initialize new coherent ECS system
-        log(.INFO, "app", "Initializing new ECS system with ThreadPool support...", .{});
+        // ==================== Initialize ECS System ====================
+        log(.INFO, "app", "Initializing ECS system with ThreadPool support...", .{});
         new_ecs_world = new_ecs.World.init(self.allocator, thread_pool);
         errdefer new_ecs_world.deinit();
 
@@ -231,10 +233,10 @@ pub const App = struct {
         log(.INFO, "app", "Initialized ECS systems: TransformSystem", .{});
 
         new_ecs_enabled = true;
-        log(.INFO, "app", "New ECS system initialized with {} particles", .{PARTICLE_MAX});
+        log(.INFO, "app", "ECS system initialized with {} particles", .{PARTICLE_MAX});
 
-        // Initialize Asset Manager on heap for stable pointer address
-        asset_manager = try AssetManager.init(self.allocator, &self.gc, thread_pool);
+        // ==================== Initialize Asset Manager ====================
+        asset_manager = try AssetManager.init(self.allocator, gc, thread_pool);
 
         // Create application-owned FileWatcher and hand it to hot-reload systems
         file_watcher = try self.allocator.create(FileWatcher);
@@ -248,8 +250,8 @@ pub const App = struct {
         try shader_manager.start();
         log(.INFO, "app", "Shader hot reload system initialized", .{});
 
-        // Initialize Unified Pipeline System
-        unified_pipeline_system = try UnifiedPipelineSystem.init(self.allocator, &self.gc, &shader_manager);
+        // ==================== Initialize Unified Pipeline System ====================
+        unified_pipeline_system = try UnifiedPipelineSystem.init(self.allocator, gc, &shader_manager);
         resource_binder = ResourceBinder.init(self.allocator, &unified_pipeline_system);
 
         // Connect pipeline system to shader manager for hot reload
@@ -365,14 +367,14 @@ pub const App = struct {
         // Get window dimensions for path tracing pass
         var window_width: c_int = 0;
         var window_height: c_int = 0;
-        c.glfwGetWindowSize(@ptrCast(self.window.window.?), &window_width, &window_height);
+        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
 
         // --- Use new GlobalUboSet abstraction ---
         global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(&self.gc, self.allocator);
+        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator);
 
         try scene_v2.initRenderGraph(
-            &self.gc,
+            gc,
             &unified_pipeline_system,
             swapchain.surface_format.format,
             try swapchain.depthFormat(),
@@ -386,97 +388,51 @@ pub const App = struct {
         // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
         try scene_v2.addParticleEmitter(
             vase2.entity_id,
-            50.0, // emission_rate: 20 particles per second (increased for better visibility)
-            2.5, // particle_lifetime: 2.5 seconds (slightly longer)
+            50.0, // emission_rate: 50 particles per second
+            2.5, // particle_lifetime: 2.5 seconds
         );
         log(.INFO, "app", "Scene v2: Added particle emitter to vase 2", .{});
 
         // ==================== End Scene v2 Setup ====================
 
-        cmdbufs = try self.gc.createCommandBuffers(
-            self.allocator,
-        );
-
-        compute_bufs = try self.gc.createCommandBuffers(
-            self.allocator,
-        );
-        swapchain.compute = true;
-
+        // ==================== Initialize Camera ====================
         camera_controller = KeyboardMovementController.init();
 
-        camera = Camera{ .fov = 75.0, .window = self.window };
+        camera = Camera{ .fov = 75.0, .window = window.* };
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
-        log(.INFO, "app", "ECS renderer initialized", .{});
+        log(.INFO, "app", "Camera initialized", .{});
 
-        log(.INFO, "app", "Initialization complete", .{});
-
-        log(.INFO, "app", "Unified particle renderer initialized", .{});
-
-        log(.INFO, "app", "Render pass manager system initialized (GenericRenderer disabled)", .{});
-
-        var init_frame_info = frame_info;
-        init_frame_info.command_buffer = cmdbufs[frame_info.current_frame];
-        init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
-        init_frame_info.camera = &camera;
-        // try forward_renderer.update(&init_frame_info);  // OLD: Disabled for RenderGraph
-        // try rt_render_pass.update(&init_frame_info);    // OLD: Disabled for RenderGraph
-
-        last_frame_time = c.glfwGetTime();
-        frame_info.camera = &camera;
-        frame_info.performance_monitor = null; // Will be set after initialization
-
-        // Initialize ImGui
+        // ==================== Initialize ImGui ====================
         log(.INFO, "app", "Initializing ImGui...", .{});
-        imgui_context = try ImGuiContext.init(self.allocator, &self.gc, @ptrCast(self.window.window.?), &swapchain, &unified_pipeline_system);
+        imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, &unified_pipeline_system);
         ui_renderer = UIRenderer.init();
         log(.INFO, "app", "ImGui initialized", .{});
 
-        // Initialize Performance Monitor
-        log(.INFO, "app", "Initializing Performance Monitor...", .{});
-        performance_monitor = try self.allocator.create(PerformanceMonitor);
-        performance_monitor.?.* = try PerformanceMonitor.init(self.allocator, &self.gc);
-        frame_info.performance_monitor = performance_monitor;
-        last_performance_report = c.glfwGetTime();
-        log(.INFO, "app", "Performance Monitor initialized", .{});
-
         // Connect performance monitor to scene
-        if (scene_v2_enabled) {
+        if (scene_v2_enabled and performance_monitor != null) {
             scene_v2.setPerformanceMonitor(performance_monitor);
         }
 
-        // Initialize Layer System
-        log(.INFO, "app", "Initializing Layer System...", .{});
-        layer_stack = LayerStack.init(self.allocator);
-        event_bus = EventBus.init(self.allocator);
-
-        // Wire up window callbacks to event bus
-        self.window.setEventBus(&event_bus);
-
-        // Create performance layer (should be first to track all frame timing)
-        performance_layer = PerformanceLayer.init(performance_monitor.?, &swapchain, &self.window);
-        try layer_stack.pushLayer(&performance_layer.base);
-
-        // Create render layer
-        render_layer = RenderLayer.init(&swapchain);
-        try layer_stack.pushLayer(&render_layer.base);
+        // ==================== Add Editor-Specific Layers ====================
+        log(.INFO, "app", "Adding editor-specific layers...", .{});
 
         // Create input layer (handles camera movement and input)
-        input_layer = InputLayer.init(&self.window, &camera, &camera_controller, &scene_v2);
-        try layer_stack.pushLayer(&input_layer.base);
+        input_layer = InputLayer.init(window, &camera, &camera_controller, &scene_v2);
+        try self.engine.getLayerStack().pushLayer(&input_layer.base);
 
         // Create scene layer (updates scene, ECS systems, UBO)
         scene_layer = SceneLayer.init(&camera, &scene_v2, global_ubo_set, &transform_system, &new_ecs_world, performance_monitor);
-        try layer_stack.pushLayer(&scene_layer.base);
+        try self.engine.getLayerStack().pushLayer(&scene_layer.base);
 
         // Create UI layer (renders ImGui overlay)
-        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, &swapchain, &scene_v2, &camera_controller);
-        try layer_stack.pushOverlay(&ui_layer.base); // UI is an overlay (always on top)
+        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, swapchain, &scene_v2, &camera_controller);
+        try self.engine.getLayerStack().pushOverlay(&ui_layer.base); // UI is an overlay (always on top)
 
-        log(.INFO, "app", "Layer System initialized with {} layers", .{layer_stack.count()});
+        log(.INFO, "app", "Editor layers added - Total layers: {}", .{self.engine.getLayerStack().count()});
 
-        // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
+        log(.INFO, "app", "Editor initialization complete!", .{});
     }
 
     pub fn update(self: *App) !bool {
@@ -497,7 +453,6 @@ pub const App = struct {
 
                 var loaded_object = try scene_v2.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
                 try loaded_object.setPosition(scheduled_asset.position);
-
                 try loaded_object.setScale(scheduled_asset.scale);
 
                 log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
@@ -505,71 +460,31 @@ pub const App = struct {
                 scheduled_asset.loaded = true;
                 try scene_v2.addParticleEmitter(
                     loaded_object.entity_id,
-                    50.0, // emission_rate: 20 particles per second (increased for better visibility)
-                    2.5, // particle_lifetime: 2.5 seconds (slightly longer)
+                    50.0, // emission_rate: 50 particles per second
+                    2.5, // particle_lifetime: 2.5 seconds
                 );
             }
         }
 
-        const current_time = c.glfwGetTime();
+        // ==================== USE ENGINE FRAME LOOP ====================
+        // Begin frame through engine
+        const frame_info = try self.engine.beginFrame();
 
-        const dt = current_time - last_frame_time;
+        // Update engine systems
+        try self.engine.update(frame_info);
 
-        // ==================== PREPARE FRAME ====================
-        // Set up frame_info with command buffers, timing, and window state
-        frame_info.command_buffer = cmdbufs[frame_info.current_frame];
-        frame_info.compute_buffer = compute_bufs[frame_info.current_frame];
-        frame_info.dt = @floatCast(dt);
+        // Render frame
+        try self.engine.render(frame_info);
 
-        var width: c_int = 0;
-        var height: c_int = 0;
-        c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
-        frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
+        // End frame
+        try self.engine.endFrame(frame_info);
 
-        // ==================== BEGIN FRAME (via Layer System) ====================
-        // PerformanceLayer.begin() -> calls performance_monitor.beginFrame()
-        // RenderLayer.begin() -> calls swapchain.beginFrame() and populates frame_info images
-        try layer_stack.begin(&frame_info);
-
-        // ==================== PROCESS EVENTS ====================
-        // Dispatch all queued events to layers
-        event_bus.processEvents(&layer_stack);
-
-        // ==================== UPDATE LAYERS ====================
-        // PerformanceLayer.update() -> resets queries and writes frame start timestamp
-        // InputLayer.update() -> processes input, camera movement
-        // SceneLayer.update() -> updates transforms, scene, UBO
-        try layer_stack.update(&frame_info);
-
-        // ==================== RENDER LAYERS ====================
-        // SceneLayer.render() -> renders the scene
-        // UILayer.render() -> renders ImGui overlay
-        try layer_stack.render(&frame_info);
-
-        // ==================== END FRAME ====================
-        // End all layers (cleanup, etc.)
-        try layer_stack.end(&frame_info);
-
-        last_frame_time = current_time;
-
-        return self.window.isRunning();
+        return self.engine.isRunning();
     }
 
     pub fn deinit(self: *App) void {
-        _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
-
-        swapchain.waitForAllFences() catch unreachable;
-
-        // Clean up Layer System
-        layer_stack.deinit();
-        event_bus.deinit();
-        log(.INFO, "app", "Layer System cleaned up", .{});
-
-        // Clean up Performance Monitor
-        if (performance_monitor) |pm| {
-            pm.deinit();
-            self.allocator.destroy(pm);
-        }
+        _ = self.engine.getGraphicsContext().vkd.deviceWaitIdle(self.engine.getGraphicsContext().dev) catch {}; // Ensure all GPU work is finished
+        self.engine.getSwapchain().waitForAllFences() catch unreachable;
 
         // Clean up UI
         ui_renderer.deinit();
@@ -580,14 +495,7 @@ pub const App = struct {
 
         global_ubo_set.deinit();
 
-        // Clean up generic renderer
-        // forward_renderer.deinit();  // OLD: Disabled for RenderGraph
-        // rt_render_pass.deinit();    // OLD: Disabled for RenderGraph
-
-        self.gc.destroyCommandBuffers(cmdbufs, self.allocator);
-        self.gc.destroyCommandBuffers(compute_bufs, self.allocator);
-
-        // Clean up unified systems (forward_renderer already deinit'd particle renderer)
+        // Clean up unified systems
         resource_binder.deinit();
         unified_pipeline_system.deinit();
 
@@ -601,23 +509,23 @@ pub const App = struct {
         asset_manager.deinit();
         file_watcher.deinit();
 
-        // Clean up new ECS system
+        // Clean up ECS system
         if (new_ecs_enabled) {
             new_ecs_world.deinit();
-            log(.INFO, "app", "New ECS system cleaned up", .{});
+            log(.INFO, "app", "ECS system cleaned up", .{});
         }
 
-        // Shutdown thread pool last to prevent threading conflicts
+        // Shutdown thread pool
         thread_pool.deinit();
         self.allocator.destroy(thread_pool);
         log(.INFO, "app", "Thread pool shut down", .{});
-        swapchain.deinit();
-        self.gc.deinit();
+
+        // Clean up engine (window, graphics context, swapchain, layers)
+        self.engine.deinit();
+        log(.INFO, "app", "Engine shut down", .{});
 
         // Clean up zstbi global state
         // TODO: Restore once Texture.deinitZstbi() is available
         // Texture.deinitZstbi();
-
-        self.window.deinit();
     }
 };

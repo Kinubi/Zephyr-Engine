@@ -1,9 +1,9 @@
 # ZulkanZengine Development Roadmap
 
-**Last Updated**: October 24, 2025  
-**Branch**: features/threaded-rendering
+**Last Updated**: October 25, 2025  
+**Branch**: feature/editor-base
 
-## Current Status: Phase 3 - Performance Optimization
+## Current Status: Phase 3 - Engine/Editor Architecture
 
 ### ✅ Phase 1: Core Foundation (COMPLETE)
 
@@ -70,11 +70,61 @@
 
 ---
 
-### 🔄 Phase 3: Performance Optimization (IN PROGRESS)
+### ✅ Phase 3: Engine/Editor Architecture (COMPLETE)
 
-**Status**: 🟡 **Active Development** - October 24, 2025
+**Status**: 🟢 **Complete** - October 25, 2025
 
-#### Render Pass Optimizations ✅ COMPLETE
+#### Engine/Editor Separation ✅ COMPLETE
+- ✅ **Project Structure**: Separated into `engine/` and `editor/` directories
+  - Engine compiled as Zig module (`zulkan`)
+  - Editor imports engine via `@import("zulkan")`
+  - Clean architectural boundary enforced by build system
+
+- ✅ **Engine Core API** (`engine/src/core/engine.zig`):
+  - `Engine.init(allocator, config)` - Initialize all core systems
+  - `Engine.deinit()` - Clean shutdown with proper cleanup order
+  - `beginFrame()` - Process events, calculate dt, setup frame_info
+  - `update()` - Update all layers
+  - `render()` - Render all layers
+  - `endFrame()` - Present and finalize frame
+  - System accessors: getLayerStack(), getEventBus(), getWindow(), etc.
+
+- ✅ **Public API Exports** (`engine/src/zulkan.zig`):
+  - Core: Engine, Layer, LayerStack, Event, EventBus, Window
+  - Graphics: GraphicsContext, Swapchain, Buffer, Shader, Texture
+  - Rendering: Camera, FrameInfo, PerformanceMonitor, UnifiedPipelineSystem
+  - ECS: ecs module, World, Entity, EntityRegistry
+  - Scene: Scene, GameObject
+  - Assets: AssetManager, Material, ShaderManager
+  - Threading: ThreadPool
+  - Math and utilities
+
+- ✅ **Editor Integration**:
+  - Editor uses Engine API exclusively (no direct system access)
+  - Editor-specific layers: InputLayer, UILayer, ViewportLayer
+  - ImGui integration in editor
+  - Keyboard movement controller in editor
+
+- ✅ **Frame Loop Fixes**:
+  - Delta time calculation fixed (was measuring too small intervals)
+  - Proper timing: dt = time from start of previous frame to start of current frame
+  - Clean separation of begin/update/render/end phases
+
+- ✅ **Examples**:
+  - Simple engine example demonstrating standalone usage
+  - Editor as complex example of Engine API usage
+
+**Design Documents**:
+- `ENGINE_EDITOR_SEPARATION.md` - Architecture and API design
+- `PHASE_2_ENGINE_API.md` - Implementation details and TODOs
+
+---
+
+### 🔄 Phase 4: Performance Optimization (PLANNED)
+
+**Status**: ⚪ **Ready to Start**
+
+#### Render Pass Optimizations
 - ✅ **LightVolumePass**: Instanced rendering (N draw calls → 1 draw call)
   - SSBO-based light data (128 light capacity)
   - Billboard rendering with gl_InstanceIndex
@@ -92,22 +142,22 @@
   - Skips barriers and buffer copy when no particles active
   - Zero GPU work for empty particle systems
 
-#### Threaded Rendering 🚧 IN DESIGN
+#### Threaded Rendering 🚧 READY TO START
 
 **Design Document**: `THREADED_RENDERING_DESIGN.md`
 
-**Phase 3.1: Parallel ECS Extraction** ⏳ Not Started
+**Phase 4.1: Parallel ECS Extraction** ⏳ Not Started
 - Parallel queries for Transform + MeshRenderer
 - Chunk-based work distribution
 - Lock-free result collection
 - Target: 3x speedup on 8-core CPU
 
-**Phase 3.2: Cache Building** ⏳ Not Started
+**Phase 4.2: Cache Building** ⏳ Not Started
 - Parallel cache construction (pipeline layout, vertex buffers)
 - Frustum culling during cache build
 - Target: 2x speedup for cache operations
 
-**Phase 3.3: Secondary Command Buffers** ⏳ Optional
+**Phase 4.3: Secondary Command Buffers** ⏳ Optional
 - ⚠️ Infrastructure ready in GraphicsContext (thread pools, command pools)
 - ⚠️ Needs enhancement for dynamic rendering inheritance
 - Decision gate: Only if >500 draw calls per frame
@@ -115,12 +165,60 @@
 
 **Performance Projections**:
 - Current: 60 FPS (16.7ms/frame)
-- After Phase 3.1+3.2: 74 FPS (13.5ms)
-- After Phase 3.3: 87 FPS (11.5ms) [if applicable]
+- After Phase 4.1+4.2: 74 FPS (13.5ms)
+- After Phase 4.3: 87 FPS (11.5ms) [if applicable]
 
 ---
 
-### 📋 Phase 4: Advanced Features (PLANNED)
+### 📋 Phase 5: Editor Features (IN PROGRESS)
+
+**Status**: 🟡 **Partially Complete** - October 25, 2025
+
+#### Editor UI Panels
+- [x] **Viewport Panel** - Transparent dockspace viewport for 3D scene
+- [x] **Hierarchy Panel** - Scene tree view (entity list with selection)
+- [x] **Inspector Panel** - Basic entity property editor
+- [x] **Stats Window** - FPS, frame time, entity count, path tracing status
+- [x] **Camera Window** - Camera position and rotation display
+- [x] **Performance Graphs** - GPU/CPU timing breakdown by pass
+- [ ] **Asset Browser Panel** - Asset import and management UI ⬅️ CURRENT
+- [ ] **Console Panel** - Logging and debugging output with filters
+- [ ] **Material Editor** - Visual material creation and editing
+
+#### Editor Tools
+- [x] **Camera Controller** - Keyboard movement (WASD) and rotation (arrows)
+- [ ] **Transform Gizmos** - Visual move, rotate, scale tools
+- [ ] **Entity Selection** - Mouse picking in viewport
+- [ ] **Asset Importer** - Drag-and-drop asset import
+- [ ] **Scene Serialization** - Save/load scenes to disk
+- [ ] **Lighting Tools** - Visual light placement and editing
+- [ ] **Grid and Snapping** - Visual alignment aids
+
+#### Editor Infrastructure
+- [x] **ImGui Integration** - Full ImGui rendering pipeline
+- [x] **UI Layer** - Handles ImGui frame lifecycle
+- [x] **Dockspace** - ImGui docking layout support
+- [ ] **Undo/Redo System** - Command pattern for editor actions
+- [ ] **Selection System** - Multi-entity selection with outlines
+- [ ] **Play Mode** - Runtime testing in editor
+- [ ] **Editor Camera** - Separate from game camera
+
+**Current Capabilities:**
+- Visual scene viewport with transparent overlay
+- Entity hierarchy with expandable tree
+- Real-time performance monitoring
+- Camera position/rotation tracking
+- Path tracing toggle and status display
+
+**Next Steps:**
+1. Create asset browser panel with file system integration
+2. Add asset previews and icons
+3. Implement entity selection via mouse picking
+4. Add transform gizmos for visual manipulation
+
+---
+
+### 📋 Phase 6: Advanced Features (PLANNED)
 
 **Status**: ⚪ **Not Started**
 
@@ -157,6 +255,15 @@
 ---
 
 ## Recent Milestones
+
+### October 25, 2025
+- ✅ **Engine/Editor Separation Complete** (Phase 3)
+  - Engine module structure with clean public API
+  - Engine struct with full lifecycle management
+  - Editor fully refactored to use Engine API
+  - Delta time calculation fixed
+  - Simple engine example created
+  - Documentation: ENGINE_EDITOR_SEPARATION.md, PHASE_2_ENGINE_API.md
 
 ### October 24, 2025
 - ✅ Render pass optimizations (5 high-impact improvements)

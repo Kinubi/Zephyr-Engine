@@ -17,7 +17,7 @@ pub fn main() !void {
     std.debug.print("Validation warnings about image layouts are expected.\n\n", .{});
 
     // Initialize engine with configuration
-    var engine = try zulkan.Engine.init(allocator, .{
+    const engine = try zulkan.Engine.init(allocator, .{
         .window = .{
             .width = 800,
             .height = 600,
@@ -51,9 +51,7 @@ pub fn main() !void {
         try engine.render(frame_info);
         try engine.endFrame(frame_info);
 
-        if (frame_count % 15 == 0) {
-            std.debug.print("Frame {}: dt={d:.3}ms\n", .{ frame_count, frame_info.dt * 1000.0 });
-        }
+        std.debug.print("Frame {}: dt={d:.3}ms\n", .{ frame_info.current_frame, frame_info.dt * 1000.0 });
     }
 
     const end_time = std.time.milliTimestamp();

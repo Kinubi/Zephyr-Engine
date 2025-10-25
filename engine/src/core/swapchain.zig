@@ -169,7 +169,7 @@ pub const Swapchain = struct {
         for (self.render_finished) |semaphore| {
             self.gc.vkd.destroySemaphore(self.gc.dev, semaphore, null);
         }
-        
+
         // Free allocated memory
         self.allocator.free(self.image_acquired);
         self.allocator.free(self.render_finished);
@@ -534,20 +534,20 @@ pub const Swapchain = struct {
         // Ensure swapchain image is in the correct layout for presentation
         // This is important when no render pass has been executed or when layers
         // don't explicitly manage the layout
-        const current_image = self.swap_images[self.image_index].image;
-        self.gc.transitionImageLayout(
-            frame_info.command_buffer,
-            current_image,
-            .undefined, // Old layout - conservative assumption
-            .present_src_khr, // Required for presentation
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // const current_image = self.swap_images[self.image_index].image;
+        // self.gc.transitionImageLayout(
+        //     frame_info.command_buffer,
+        //     current_image,
+        //     .undefined, // Old layout - conservative assumption
+        //     .present_src_khr, // Required for presentation
+        //     .{
+        //         .aspect_mask = .{ .color_bit = true },
+        //         .base_mip_level = 0,
+        //         .level_count = 1,
+        //         .base_array_layer = 0,
+        //         .layer_count = 1,
+        //     },
+        // );
 
         // End graphics buffer
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {

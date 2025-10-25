@@ -10,17 +10,20 @@ ZulkanZengine is structured as a **modular engine library** with a separate edit
 ┌─────────────────────────────────────────┐
 │     ZulkanEditor (Executable)           │
 │  - Editor UI (ImGui)                    │
-│  - Scene Editing Tools                  │
+│  - Viewport/Hierarchy/Inspector         │
 │  - Asset Browser                        │
-│  - Inspector Panels                     │
+│  - Scene Editing Tools                  │
 └──────────────┬──────────────────────────┘
                │ imports zulkan
                ▼
 ┌─────────────────────────────────────────┐
 │     ZulkanEngine (Library Module)       │
+│  - Engine API (init/frame loop)         │
 │  - Core Systems (Window, Graphics)      │
+│  - Layer System (Pluggable)             │
+│  - Event System (Input, Window)         │
 │  - ECS (Entity Component System)        │
-│  - Rendering (Path Tracing, Deferred)   │
+│  - Rendering (Path Tracing, Raster)     │
 │  - Assets (Async Loading, Hot Reload)   │
 │  - Scene Management                     │
 │  - Threading (Worker Pool)              │
@@ -31,11 +34,50 @@ ZulkanZengine is structured as a **modular engine library** with a separate edit
 - ✅ Clean API boundary via `@import("zulkan")`
 - ✅ Engine can be used in games, tools, or standalone
 - ✅ Faster iteration (editor changes don't rebuild engine)
+- ✅ Simple initialization: `Engine.init(allocator, config)`
+- ✅ Frame loop abstraction: `beginFrame/update/render/endFrame`
 - ✅ Library distribution as Zig module
+
+### Project Structure
+
+```
+ZulkanZengine/
+├── engine/                 # Engine Library (Module)
+│   └── src/
+│       ├── zulkan.zig      # Public API export
+│       ├── ecs.zig         # ECS module export
+│       ├── core/           # Engine core (Engine, Window, Graphics, Events, Layers)
+│       ├── rendering/      # Rendering systems
+│       ├── ecs/            # Entity Component System
+│       ├── scene/          # Scene management
+│       ├── assets/         # Asset management
+│       ├── layers/         # Built-in layers
+│       ├── systems/        # Game systems
+│       ├── threading/      # Thread pool
+│       └── utils/          # Utilities
+│
+├── editor/                 # Editor Application
+│   └── src/
+│       ├── main.zig        # Editor entry point
+│       ├── editor_app.zig  # Editor application (uses zulkan)
+│       ├── layers/         # Editor layers (UI, Input)
+│       ├── ui/             # ImGui integration
+│       └── keyboard_movement_controller.zig
+│
+├── examples/               # Example programs using the engine
+│   ├── simple_engine_example.zig
+│   └── ...
+│
+└── docs/                   # Documentation
+    ├── ENGINE_API.md       # Engine API reference
+    ├── ECS_SYSTEM.md       # ECS documentation
+    ├── ENGINE_EDITOR_SEPARATION.md
+    └── ...
+```
 
 ## Architecture Overview
 
-ZulkanZengine features a modern architecture consisting of three main pillars:
+ZulkanZengine features a modern architecture consisting of these main pillars:
 
 ### 🧩 **Entity Component System (ECS)** ✅ IMPLEMENTED
 - **Data-Oriented Design**: Components stored in packed arrays for optimal cache performance

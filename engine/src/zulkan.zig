@@ -1,7 +1,17 @@
 // ZulkanEngine - Main module export
 // This is what users import: @import("zulkan")
 
-// ========== Core Engine API ==========
+// ZulkanEngine Public API
+// This is the main entry point for using the engine
+
+const std = @import("std");
+
+// ===== Constants =====
+/// Maximum number of frames that can be in-flight simultaneously
+/// This affects command buffer allocation and synchronization
+pub const MAX_FRAMES_IN_FLIGHT: u32 = 3;
+
+// ===== Core Engine =====
 pub const Engine = @import("core/engine.zig").Engine;
 pub const EngineConfig = Engine.Config;
 
