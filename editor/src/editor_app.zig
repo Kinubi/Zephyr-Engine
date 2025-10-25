@@ -245,8 +245,8 @@ pub const App = struct {
 
         // Initialize Shader Manager for hot reload and compilation
         shader_manager = try ShaderManager.init(self.allocator, thread_pool, file_watcher);
-        try shader_manager.addShaderDirectory("shaders");
-        // Don't watch shaders/cached - we don't want to recompile cache files
+        try shader_manager.addShaderDirectory("assets/shaders");
+        // Don't watch assets/shaders/cached - we don't want to recompile cache files
         try shader_manager.start();
         log(.INFO, "app", "Shader hot reload system initialized", .{});
 
@@ -267,8 +267,8 @@ pub const App = struct {
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
             .frame = 50000,
-            .model_path = "models/flat_vase.obj",
-            .texture_path = "textures/granitesmooth1-albedo.png",
+            .model_path = "assets/models/flat_vase.obj",
+            .texture_path = "assets/textures/granitesmooth1-albedo.png",
             .position = Math.Vec3.init(-1.4, -0.5, 0.5),
             .rotation = Math.Vec3.init(0, 0, 0),
             .scale = Math.Vec3.init(0.5, 0.5, 0.5),
@@ -284,37 +284,37 @@ pub const App = struct {
         const box_offset_z: f32 = 3.0; // Push box away from camera
 
         // Floor (white)
-        const floor = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
+        const floor = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
         try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
-        const ceiling = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
+        const ceiling = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
         try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
         // Back wall (white)
-        const back_wall = try scene_v2.spawnProp("models/cube.obj", "textures/missing.png");
+        const back_wall = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
         try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
         // Left wall (red) - using error.png for red color
-        const left_wall = try scene_v2.spawnProp("models/cube.obj", "textures/error.png");
+        const left_wall = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/error.png");
         try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
-        const right_wall = try scene_v2.spawnProp("models/cube.obj", "textures/default.png");
+        const right_wall = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/default.png");
         try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
         // Second vase (right side) - flat vase
-        const vase2 = try scene_v2.spawnProp("models/flat_vase.obj", "textures/granitesmooth1-albedo.png");
+        const vase2 = try scene_v2.spawnProp("assets/models/flat_vase.obj", "assets/textures/granitesmooth1-albedo.png");
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
@@ -407,7 +407,7 @@ pub const App = struct {
         // ==================== Initialize ImGui ====================
         log(.INFO, "app", "Initializing ImGui...", .{});
         imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, &unified_pipeline_system);
-        ui_renderer = UIRenderer.init();
+        ui_renderer = UIRenderer.init(self.allocator);
         log(.INFO, "app", "ImGui initialized", .{});
 
         // Connect performance monitor to scene

@@ -234,8 +234,18 @@ pub const RenderGraph = struct {
         log(.INFO, "render_graph", "Compiling render graph with {} passes", .{self.passes.items.len});
 
         // Call setup on all passes to register resources
-        for (self.passes.items) |pass| {
-            try pass.setup(self);
+        // Handle setup errors gracefully - disable pass if setup fails
+        var i: usize = 0;
+        while (i < self.passes.items.len) {
+            const pass = self.passes.items[i];
+            pass.setup(self) catch |err| {
+                log(.WARN, "render_graph", "Pass '{}' setup failed: {}. Disabling pass.", .{ pass.name, err });
+                pass.enabled = false;
+                // Don't increment i, continue to next pass
+                i += 1;
+                continue;
+            };
+            i += 1;
         }
 
         // Build execution order using topological sort (only enabled passes)

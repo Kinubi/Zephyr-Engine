@@ -241,7 +241,7 @@ pub const ShaderCache = struct {
 
     fn generateCachePath(self: *ShaderCache, source_path: []const u8) ![]const u8 {
         // Convert source path to cache filename
-        // e.g., "shaders/simple.vert" -> "shaders/cached/simple.vert.spv"
+        // e.g., "assets/shaders/simple.vert" -> "assets/shaders/cached/simple.vert.spv"
 
         const basename = std.fs.path.basename(source_path);
         const cache_filename = try std.fmt.allocPrint(self.allocator, "{s}.spv", .{basename});

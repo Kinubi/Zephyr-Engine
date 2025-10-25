@@ -185,8 +185,8 @@ pub const ImGuiVulkanBackend = struct {
         // Register ImGui pipeline with UnifiedPipelineSystem
         self.pipeline_id = try self.pipeline_system.createPipeline(.{
             .name = "imgui",
-            .vertex_shader = "shaders/imgui.vert",
-            .fragment_shader = "shaders/imgui.frag",
+            .vertex_shader = "assets/shaders/imgui.vert",
+            .fragment_shader = "assets/shaders/imgui.frag",
             .vertex_input_bindings = &bindings,
             .vertex_input_attributes = &attributes,
             .push_constant_ranges = &push_constants,

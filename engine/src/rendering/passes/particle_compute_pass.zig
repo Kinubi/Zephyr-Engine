@@ -241,7 +241,7 @@ pub const ParticleComputePass = struct {
         // Create compute pipeline for particle simulation
         const pipeline_config = PipelineConfig{
             .name = "particle_compute",
-            .compute_shader = "shaders/particles.comp",
+            .compute_shader = "assets/shaders/particles.comp",
             .render_pass = .null_handle, // Compute pipelines don't use render passes
         };
 

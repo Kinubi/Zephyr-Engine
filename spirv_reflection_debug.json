@@ -6,40 +6,245 @@
         }
     ],
     "types" : {
-        "_11" : {
-            "name" : "_11",
+        "_9" : {
+            "name" : "Material",
             "members" : [
                 {
-                    "name" : "Color",
+                    "name" : "albedoTextureIndex",
+                    "type" : "uint"
+                },
+                {
+                    "name" : "roughness",
+                    "type" : "float"
+                },
+                {
+                    "name" : "metallic",
+                    "type" : "float"
+                },
+                {
+                    "name" : "emissive",
+                    "type" : "float"
+                },
+                {
+                    "name" : "emissive_color",
+                    "type" : "vec4"
+                }
+            ]
+        },
+        "_12" : {
+            "name" : "Material",
+            "members" : [
+                {
+                    "name" : "albedoTextureIndex",
+                    "type" : "uint",
+                    "offset" : 0
+                },
+                {
+                    "name" : "roughness",
+                    "type" : "float",
+                    "offset" : 4
+                },
+                {
+                    "name" : "metallic",
+                    "type" : "float",
+                    "offset" : 8
+                },
+                {
+                    "name" : "emissive",
+                    "type" : "float",
+                    "offset" : 12
+                },
+                {
+                    "name" : "emissive_color",
+                    "type" : "vec4",
+                    "offset" : 16
+                }
+            ]
+        },
+        "_14" : {
+            "name" : "MaterialBuffer",
+            "members" : [
+                {
+                    "name" : "materials",
+                    "type" : "_12",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 32
+                }
+            ]
+        },
+        "_63" : {
+            "name" : "PointLight",
+            "members" : [
+                {
+                    "name" : "position",
+                    "type" : "vec4",
+                    "offset" : 0
+                },
+                {
+                    "name" : "color",
+                    "type" : "vec4",
+                    "offset" : 16
+                }
+            ]
+        },
+        "_66" : {
+            "name" : "GlobalUbo",
+            "members" : [
+                {
+                    "name" : "projection",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "view",
+                    "type" : "mat4",
+                    "offset" : 64,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "ambientColor",
+                    "type" : "vec4",
+                    "offset" : 128
+                },
+                {
+                    "name" : "pointLights",
+                    "type" : "_63",
+                    "array" : [
+                        16
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 144,
+                    "array_stride" : 32
+                },
+                {
+                    "name" : "numPointLights",
+                    "type" : "int",
+                    "offset" : 656
+                },
+                {
+                    "name" : "dt",
+                    "type" : "float",
+                    "offset" : 660
+                }
+            ]
+        },
+        "_96" : {
+            "name" : "PointLight",
+            "members" : [
+                {
+                    "name" : "position",
                     "type" : "vec4"
                 },
                 {
-                    "name" : "UV",
-                    "type" : "vec2"
+                    "name" : "color",
+                    "type" : "vec4"
+                }
+            ]
+        },
+        "_176" : {
+            "name" : "Push",
+            "members" : [
+                {
+                    "name" : "transform",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "normalMatrix",
+                    "type" : "mat4",
+                    "offset" : 64,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "materialIndex",
+                    "type" : "uint",
+                    "offset" : 128
                 }
             ]
         }
     },
     "inputs" : [
         {
-            "type" : "_11",
-            "name" : "In",
-            "location" : 0
+            "type" : "uint",
+            "name" : "materialIndex",
+            "location" : 5
+        },
+        {
+            "type" : "vec2",
+            "name" : "uv",
+            "location" : 2
+        },
+        {
+            "type" : "vec3",
+            "name" : "normal",
+            "location" : 3
+        },
+        {
+            "type" : "vec3",
+            "name" : "positionWorld",
+            "location" : 4
+        },
+        {
+            "type" : "vec3",
+            "name" : "color",
+            "location" : 1
         }
     ],
     "outputs" : [
         {
             "type" : "vec4",
-            "name" : "fColor",
+            "name" : "outColor",
             "location" : 0
         }
     ],
     "textures" : [
         {
             "type" : "sampler2D",
-            "name" : "sTexture",
+            "name" : "textures",
+            "array" : [
+                0
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "set" : 1,
+            "binding" : 1
+        }
+    ],
+    "ssbos" : [
+        {
+            "type" : "_14",
+            "name" : "MaterialBuffer",
+            "readonly" : true,
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 0
+        }
+    ],
+    "ubos" : [
+        {
+            "type" : "_66",
+            "name" : "GlobalUbo",
+            "block_size" : 664,
             "set" : 0,
             "binding" : 0
+        }
+    ],
+    "push_constants" : [
+        {
+            "type" : "_176",
+            "name" : "push",
+            "push_constant" : true
         }
     ]
 }

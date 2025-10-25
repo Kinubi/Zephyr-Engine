@@ -205,9 +205,9 @@ pub const PathTracingPass = struct {
         // Create path tracing pipeline
         const pipeline_config = PipelineConfig{
             .name = "path_tracing",
-            .raygen_shader = "shaders/RayTracingTriangle.rgen.hlsl",
-            .miss_shader = "shaders/RayTracingTriangle.rmiss.hlsl",
-            .closest_hit_shader = "shaders/RayTracingTriangle.rchit.hlsl",
+            .raygen_shader = "assets/shaders/RayTracingTriangle.rgen.hlsl",
+            .miss_shader = "assets/shaders/RayTracingTriangle.rmiss.hlsl",
+            .closest_hit_shader = "assets/shaders/RayTracingTriangle.rchit.hlsl",
             .render_pass = vk.RenderPass.null_handle,
         };
 

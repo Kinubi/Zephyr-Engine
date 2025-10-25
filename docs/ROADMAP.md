@@ -181,8 +181,8 @@
 - [x] **Stats Window** - FPS, frame time, entity count, path tracing status
 - [x] **Camera Window** - Camera position and rotation display
 - [x] **Performance Graphs** - GPU/CPU timing breakdown by pass
-- [ ] **Asset Browser Panel** - Asset import and management UI ⬅️ CURRENT
-- [ ] **Console Panel** - Logging and debugging output with filters
+- [x] **Asset Browser Panel** - File system navigation with icons ✅ COMPLETE
+- [ ] **Console Panel** - Logging and debugging output with filters ⬅️ NEXT
 - [ ] **Material Editor** - Visual material creation and editing
 
 #### Editor Tools
@@ -209,12 +209,13 @@
 - Real-time performance monitoring
 - Camera position/rotation tracking
 - Path tracing toggle and status display
+- **Asset browser with file navigation and icons**
 
 **Next Steps:**
-1. Create asset browser panel with file system integration
-2. Add asset previews and icons
-3. Implement entity selection via mouse picking
-4. Add transform gizmos for visual manipulation
+1. Implement entity selection via mouse picking
+2. Add visual feedback for selected entities
+3. Create transform gizmos for manipulation
+4. Add console panel for logging output
 
 ---
 

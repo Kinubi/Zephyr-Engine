@@ -86,17 +86,17 @@ pub const FallbackAssets = struct {
         var fallbacks = FallbackAssets{};
 
         // Try to load each fallback texture, but don't fail if missing
-        fallbacks.missing_texture = asset_manager.loadTextureSync("textures/missing.png") catch |err| blk: {
+        fallbacks.missing_texture = asset_manager.loadTextureSync("assets/textures/missing.png") catch |err| blk: {
             log(.WARN, "asset_manager", "Could not load missing.png fallback: {}", .{err});
             break :blk null;
         };
 
-        fallbacks.loading_texture = asset_manager.loadTextureSync("textures/loading.png") catch |err| blk: {
+        fallbacks.loading_texture = asset_manager.loadTextureSync("assets/textures/loading.png") catch |err| blk: {
             log(.WARN, "asset_manager", "Could not load loading.png fallback: {}", .{err});
             break :blk null;
         };
 
-        fallbacks.failed_texture = asset_manager.loadTextureSync("textures/error.png") catch |err| blk: {
+        fallbacks.failed_texture = asset_manager.loadTextureSync("assets/textures/error.png") catch |err| blk: {
             log(.WARN, "asset_manager", "Could not load error.png fallback: {}", .{err});
             break :blk null;
         };

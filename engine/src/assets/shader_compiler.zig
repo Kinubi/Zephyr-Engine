@@ -635,7 +635,7 @@ pub const ShaderCompiler = struct {
     fn compileHlsl(self: *ShaderCompiler, source: ShaderSource, options: CompilationOptions) ![]const u32 {
         const file_path = source.file_path orelse return error.HlslFilePathRequired;
 
-        const cache_dir = "shaders/cached";
+        const cache_dir = "assets/shaders/cached";
         std.fs.cwd().makePath(cache_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,

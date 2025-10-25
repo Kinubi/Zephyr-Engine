@@ -445,19 +445,24 @@ pub const Scene = struct {
         // Create and add ParticleComputePass FIRST (runs on compute queue)
         const max_emitters = 16;
         const particles_per_emitter = 200;
-        const particle_compute_pass = try ParticleComputePass.create(
+        const particle_compute_pass = ParticleComputePass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
             self.ecs_world,
             particles_per_emitter * max_emitters, // 200 particles per emitter * 16 emitters = 3200 total
             max_emitters,
-        );
+        ) catch |err| blk: {
+            log(.WARN, "scene_v2", "Failed to create ParticleComputePass: {}. Particles disabled.", .{err});
+            break :blk null;
+        };
 
-        try self.render_graph.?.addPass(&particle_compute_pass.base);
+        if (particle_compute_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+        }
 
         // Create and add GeometryPass
-        const geometry_pass = try GeometryPass.create(
+        const geometry_pass = GeometryPass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
@@ -467,12 +472,17 @@ pub const Scene = struct {
             swapchain_format,
             swapchain_depth_format,
             &self.render_system,
-        );
+        ) catch |err| blk: {
+            log(.WARN, "scene_v2", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
+            break :blk null;
+        };
 
-        try self.render_graph.?.addPass(&geometry_pass.base);
+        if (geometry_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+        }
 
         // Create PathTracingPass (alternative to raster rendering)
-        const path_tracing_pass = try PathTracingPass.create(
+        const path_tracing_pass = PathTracingPass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
@@ -484,13 +494,18 @@ pub const Scene = struct {
             swapchain_format,
             width,
             height,
-        );
+        ) catch |err| blk: {
+            log(.WARN, "scene_v2", "Failed to create PathTracingPass: {}. Path tracing disabled.", .{err});
+            break :blk null;
+        };
 
         // NOTE: Path tracing pass starts disabled (enable via setPathTracingEnabled())
-        try self.render_graph.?.addPass(&path_tracing_pass.base);
+        if (path_tracing_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+        }
 
         // Create and add LightVolumePass (renders after geometry)
-        const light_volume_pass = try LightVolumePass.create(
+        const light_volume_pass = LightVolumePass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
@@ -498,12 +513,17 @@ pub const Scene = struct {
             global_ubo_set,
             swapchain_format,
             swapchain_depth_format,
-        );
+        ) catch |err| blk: {
+            log(.WARN, "scene_v2", "Failed to create LightVolumePass: {}. Point light rendering disabled.", .{err});
+            break :blk null;
+        };
 
-        try self.render_graph.?.addPass(&light_volume_pass.base);
+        if (light_volume_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+        }
 
         // Create and add ParticlePass (renders particles with alpha blending)
-        const particle_pass = try ParticlePass.create(
+        const particle_pass = ParticlePass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
@@ -511,12 +531,18 @@ pub const Scene = struct {
             swapchain_format,
             swapchain_depth_format,
             10000, // Max 10,000 particles
-        );
+        ) catch |err| blk: {
+            log(.WARN, "scene_v2", "Failed to create ParticlePass: {}. Particle rendering disabled.", .{err});
+            break :blk null;
+        };
 
-        // Link render pass to compute pass
-        particle_pass.setComputePass(particle_compute_pass);
-
-        try self.render_graph.?.addPass(&particle_pass.base);
+        if (particle_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+            // Link render pass to compute pass if both exist
+            if (particle_compute_pass) |compute_pass| {
+                pass.setComputePass(compute_pass);
+            }
+        }
 
         // Compile the graph (setup passes, validate dependencies)
         try self.render_graph.?.compile();

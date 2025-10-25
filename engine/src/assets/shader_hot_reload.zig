@@ -157,7 +157,9 @@ pub const ShaderWatcher = struct {
     /// This follows the same pattern as hot_reload_manager.onFileChanged.
     pub fn onFileChanged(self: *ShaderWatcher, file_path: []const u8) void {
         // Skip cached outputs - only rebuild from source shaders
-        if (std.mem.indexOf(u8, file_path, "shaders/cached") != null) {
+        if (std.mem.indexOf(u8, file_path, "assets/shaders/cached") != null or
+            std.mem.indexOf(u8, file_path, "shaders/cached") != null)
+        {
             log(.DEBUG, "shader_hot_reload", "Ignoring cached shader artifact {s}", .{file_path});
             return;
         }

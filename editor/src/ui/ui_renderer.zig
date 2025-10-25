@@ -7,27 +7,43 @@ const c = @cImport({
 
 const PerformanceMonitor = zulkan.PerformanceMonitor;
 const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
+const AssetBrowserPanel = @import("asset_browser_panel.zig").AssetBrowserPanel;
 const Scene = zulkan.Scene;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic
 pub const UIRenderer = struct {
+    allocator: std.mem.Allocator,
     show_demo_window: bool = false, // Disabled by default - very expensive!
     show_stats_window: bool = true,
     show_camera_window: bool = true,
     show_performance_graphs: bool = true,
+    show_asset_browser: bool = true,
 
     // Scene hierarchy panel
     hierarchy_panel: SceneHierarchyPanel,
 
-    pub fn init() UIRenderer {
-        return .{
+    // Asset browser panel
+    asset_browser_panel: AssetBrowserPanel,
+
+    pub fn init(allocator: std.mem.Allocator) UIRenderer {
+        var renderer = UIRenderer{
+            .allocator = allocator,
             .hierarchy_panel = SceneHierarchyPanel.init(),
+            .asset_browser_panel = AssetBrowserPanel.init(allocator),
         };
+
+        // Initialize asset browser by loading initial directory
+        renderer.asset_browser_panel.refreshDirectory() catch |err| {
+            std.debug.print("Failed to initialize asset browser: {}\n", .{err});
+        };
+
+        return renderer;
     }
 
     pub fn deinit(self: *UIRenderer) void {
         self.hierarchy_panel.deinit();
+        self.asset_browser_panel.deinit();
     }
 
     /// Render all UI windows
@@ -77,6 +93,10 @@ pub const UIRenderer = struct {
 
         if (self.show_performance_graphs) {
             self.renderPerformanceGraphs(stats);
+        }
+
+        if (self.show_asset_browser) {
+            self.asset_browser_panel.render();
         }
 
         // Render scene hierarchy if scene is provided
