@@ -56,6 +56,9 @@ const PerformanceMonitor = @import("rendering/performance_monitor.zig").Performa
 // Layer system
 const Layer = @import("core/layer.zig").Layer;
 const LayerStack = @import("core/layer_stack.zig").LayerStack;
+const EventBus = @import("core/event_bus.zig").EventBus;
+const Event = @import("core/event.zig").Event;
+const EventData = @import("core/event.zig").EventData;
 const RenderLayer = @import("layers/render_layer.zig").RenderLayer;
 const PerformanceLayer = @import("layers/performance_layer.zig").PerformanceLayer;
 const InputLayer = @import("layers/input_layer.zig").InputLayer;
@@ -137,6 +140,7 @@ pub const App = struct {
 
     // Layer system
     var layer_stack: LayerStack = undefined;
+    var event_bus: EventBus = undefined;
     var render_layer: RenderLayer = undefined;
     var performance_layer: PerformanceLayer = undefined;
     var input_layer: InputLayer = undefined;
@@ -444,6 +448,10 @@ pub const App = struct {
         // Initialize Layer System
         log(.INFO, "app", "Initializing Layer System...", .{});
         layer_stack = LayerStack.init(self.allocator);
+        event_bus = EventBus.init(self.allocator);
+        
+        // Wire up window callbacks to event bus
+        self.window.setEventBus(&event_bus);
 
         // Create performance layer (should be first to track all frame timing)
         performance_layer = PerformanceLayer.init(performance_monitor.?, &swapchain, &self.window);
@@ -522,6 +530,10 @@ pub const App = struct {
         // RenderLayer.begin() -> calls swapchain.beginFrame() and populates frame_info images
         try layer_stack.begin(&frame_info);
 
+        // ==================== PROCESS EVENTS ====================
+        // Dispatch all queued events to layers
+        event_bus.processEvents(&layer_stack);
+
         // ==================== UPDATE LAYERS ====================
         // PerformanceLayer.update() -> resets queries and writes frame start timestamp
         // InputLayer.update() -> processes input, camera movement
@@ -549,6 +561,7 @@ pub const App = struct {
 
         // Clean up Layer System
         layer_stack.deinit();
+        event_bus.deinit();
         log(.INFO, "app", "Layer System cleaned up", .{});
 
         // Clean up Performance Monitor

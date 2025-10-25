@@ -8,6 +8,30 @@ pub const Layer = struct {
     name: []const u8,
     enabled: bool = true,
     vtable: *const VTable,
+    
+    // Performance tracking (in nanoseconds)
+    timing: LayerTiming = .{},
+
+    pub const LayerTiming = struct {
+        begin_time_ns: u64 = 0,
+        update_time_ns: u64 = 0,
+        render_time_ns: u64 = 0,
+        end_time_ns: u64 = 0,
+        event_time_ns: u64 = 0,
+        
+        pub fn getTotalMs(self: LayerTiming) f32 {
+            const total_ns = self.begin_time_ns + self.update_time_ns + self.render_time_ns + self.end_time_ns + self.event_time_ns;
+            return @as(f32, @floatFromInt(total_ns)) / 1_000_000.0;
+        }
+        
+        pub fn reset(self: *LayerTiming) void {
+            self.begin_time_ns = 0;
+            self.update_time_ns = 0;
+            self.render_time_ns = 0;
+            self.end_time_ns = 0;
+            self.event_time_ns = 0;
+        }
+    };
 
     /// Virtual function table for polymorphic behavior
     pub const VTable = struct {
@@ -47,30 +71,45 @@ pub const Layer = struct {
     /// Begin frame for this layer
     pub fn begin(self: *Layer, frame_info: *const FrameInfo) !void {
         if (!self.enabled) return;
-        return self.vtable.begin(self, frame_info);
+        const start_time = std.time.nanoTimestamp();
+        try self.vtable.begin(self, frame_info);
+        const end_time = std.time.nanoTimestamp();
+        self.timing.begin_time_ns = @intCast(end_time - start_time);
     }
 
     /// Update layer with frame context
     pub fn update(self: *Layer, frame_info: *const FrameInfo) !void {
         if (!self.enabled) return;
-        return self.vtable.update(self, frame_info);
+        const start_time = std.time.nanoTimestamp();
+        try self.vtable.update(self, frame_info);
+        const end_time = std.time.nanoTimestamp();
+        self.timing.update_time_ns = @intCast(end_time - start_time);
     }
 
     /// Render layer
     pub fn render(self: *Layer, frame_info: *const FrameInfo) !void {
         if (!self.enabled) return;
-        return self.vtable.render(self, frame_info);
+        const start_time = std.time.nanoTimestamp();
+        try self.vtable.render(self, frame_info);
+        const end_time = std.time.nanoTimestamp();
+        self.timing.render_time_ns = @intCast(end_time - start_time);
     }
 
     /// End frame for this layer
     pub fn end(self: *Layer, frame_info: *FrameInfo) !void {
         if (!self.enabled) return;
-        return self.vtable.end(self, frame_info);
+        const start_time = std.time.nanoTimestamp();
+        try self.vtable.end(self, frame_info);
+        const end_time = std.time.nanoTimestamp();
+        self.timing.end_time_ns = @intCast(end_time - start_time);
     }
 
     /// Handle event
     pub fn handleEvent(self: *Layer, event: *Event) void {
         if (!self.enabled) return;
-        return self.vtable.event(self, event);
+        const start_time = std.time.nanoTimestamp();
+        self.vtable.event(self, event);
+        const end_time = std.time.nanoTimestamp();
+        self.timing.event_time_ns += @intCast(end_time - start_time);
     }
 };

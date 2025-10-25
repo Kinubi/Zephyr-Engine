@@ -103,15 +103,36 @@ pub const InputLayer = struct {
 
     fn event(base: *Layer, evt: *Event) void {
         const self: *InputLayer = @fieldParentPtr("base", base);
-        _ = self;
 
         switch (evt.event_type) {
             .KeyPressed => {
-                // Handle key press events
-                // For now, let specific handlers deal with keys
+                const key_data = evt.data.KeyPressed;
+                const GLFW_KEY_T = 84;
+                
+                // Toggle path tracing with 'T' key (with debouncing)
+                if (key_data.key == GLFW_KEY_T) {
+                    const toggle_time = c.glfwGetTime();
+                    if ((toggle_time - self.last_toggle_time) > TOGGLE_COOLDOWN) {
+                        if (self.scene.render_graph != null) {
+                            const pt_enabled = if (self.scene.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                            self.scene.setPathTracingEnabled(!pt_enabled) catch {};
+                            self.last_toggle_time = toggle_time;
+                            log(.INFO, "InputLayer", "Path tracing toggled via event: {}", .{!pt_enabled});
+                            evt.markHandled();
+                        }
+                    }
+                }
+                
+                // F1 to toggle UI (will be handled by UILayer)
+                // F2 to toggle performance graphs (will be handled by UILayer)
+                // These are just examples - layers can handle their own toggle keys
             },
             .MouseMoved => {
-                // Handle mouse movement
+                // Mouse movement is handled by camera controller in update()
+            },
+            .WindowResize => {
+                // Window resize handling
+                log(.INFO, "InputLayer", "Window resized to {}x{}", .{evt.data.WindowResize.width, evt.data.WindowResize.height});
             },
             else => {},
         }

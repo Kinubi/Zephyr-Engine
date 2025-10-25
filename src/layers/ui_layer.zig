@@ -171,8 +171,14 @@ pub const UILayer = struct {
         switch (evt.event_type) {
             .KeyPressed => {
                 const GLFW_KEY_F1 = 290;
+                const GLFW_KEY_F2 = 291;
+                
                 if (evt.data.KeyPressed.key == GLFW_KEY_F1) {
                     self.show_ui = !self.show_ui;
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == GLFW_KEY_F2) {
+                    // Toggle performance graphs
+                    self.ui_renderer.show_performance_graphs = !self.ui_renderer.show_performance_graphs;
                     evt.markHandled();
                 }
             },
