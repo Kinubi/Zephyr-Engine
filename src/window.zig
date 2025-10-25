@@ -26,7 +26,7 @@ pub const Window = struct {
     fn errorCallback(error_code: c_int, description: [*c]const u8) callconv(.c) void {
         std.log.err("glfw: {}: {s}\n", .{ error_code, description });
     }
-    
+
     // GLFW Callbacks for event generation
     fn keyCallback(window: ?*c.GLFWwindow, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.c) void {
         const self = getUserPointer(window);
@@ -40,7 +40,7 @@ pub const Window = struct {
             }
         }
     }
-    
+
     fn mouseButtonCallback(window: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
         const self = getUserPointer(window);
         if (self.event_bus) |bus| {
@@ -53,7 +53,7 @@ pub const Window = struct {
             }
         }
     }
-    
+
     fn cursorPosCallback(window: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.c) void {
         const self = getUserPointer(window);
         if (self.event_bus) |bus| {
@@ -62,7 +62,7 @@ pub const Window = struct {
             bus.queueEvent(event) catch {};
         }
     }
-    
+
     fn scrollCallback(window: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.c) void {
         const self = getUserPointer(window);
         if (self.event_bus) |bus| {
@@ -70,7 +70,7 @@ pub const Window = struct {
             bus.queueEvent(event) catch {};
         }
     }
-    
+
     fn windowSizeCallback(window: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.c) void {
         const self = getUserPointer(window);
         if (self.event_bus) |bus| {
@@ -78,7 +78,7 @@ pub const Window = struct {
             bus.queueEvent(event) catch {};
         }
     }
-    
+
     fn getUserPointer(window: ?*c.GLFWwindow) *Window {
         return @ptrCast(@alignCast(c.glfwGetWindowUserPointer(window)));
     }
@@ -135,15 +135,15 @@ pub const Window = struct {
             c.glfwSetWindowTitle(win, title);
         }
     }
-    
+
     /// Set event bus and register GLFW callbacks for event-driven input
     pub fn setEventBus(self: *Window, event_bus: *EventBus) void {
         self.event_bus = event_bus;
-        
+
         if (self.window) |win| {
             // Set window user pointer to this Window instance
             c.glfwSetWindowUserPointer(win, self);
-            
+
             // Register GLFW callbacks
             _ = c.glfwSetKeyCallback(win, keyCallback);
             _ = c.glfwSetMouseButtonCallback(win, mouseButtonCallback);

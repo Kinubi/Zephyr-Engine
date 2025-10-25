@@ -449,7 +449,7 @@ pub const App = struct {
         log(.INFO, "app", "Initializing Layer System...", .{});
         layer_stack = LayerStack.init(self.allocator);
         event_bus = EventBus.init(self.allocator);
-        
+
         // Wire up window callbacks to event bus
         self.window.setEventBus(&event_bus);
 

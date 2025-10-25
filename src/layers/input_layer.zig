@@ -108,7 +108,7 @@ pub const InputLayer = struct {
             .KeyPressed => {
                 const key_data = evt.data.KeyPressed;
                 const GLFW_KEY_T = 84;
-                
+
                 // Toggle path tracing with 'T' key (with debouncing)
                 if (key_data.key == GLFW_KEY_T) {
                     const toggle_time = c.glfwGetTime();
@@ -122,7 +122,7 @@ pub const InputLayer = struct {
                         }
                     }
                 }
-                
+
                 // F1 to toggle UI (will be handled by UILayer)
                 // F2 to toggle performance graphs (will be handled by UILayer)
                 // These are just examples - layers can handle their own toggle keys
@@ -132,7 +132,7 @@ pub const InputLayer = struct {
             },
             .WindowResize => {
                 // Window resize handling
-                log(.INFO, "InputLayer", "Window resized to {}x{}", .{evt.data.WindowResize.width, evt.data.WindowResize.height});
+                log(.INFO, "InputLayer", "Window resized to {}x{}", .{ evt.data.WindowResize.width, evt.data.WindowResize.height });
             },
             else => {},
         }

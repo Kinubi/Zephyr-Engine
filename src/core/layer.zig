@@ -8,7 +8,7 @@ pub const Layer = struct {
     name: []const u8,
     enabled: bool = true,
     vtable: *const VTable,
-    
+
     // Performance tracking (in nanoseconds)
     timing: LayerTiming = .{},
 
@@ -18,12 +18,12 @@ pub const Layer = struct {
         render_time_ns: u64 = 0,
         end_time_ns: u64 = 0,
         event_time_ns: u64 = 0,
-        
+
         pub fn getTotalMs(self: LayerTiming) f32 {
             const total_ns = self.begin_time_ns + self.update_time_ns + self.render_time_ns + self.end_time_ns + self.event_time_ns;
             return @as(f32, @floatFromInt(total_ns)) / 1_000_000.0;
         }
-        
+
         pub fn reset(self: *LayerTiming) void {
             self.begin_time_ns = 0;
             self.update_time_ns = 0;

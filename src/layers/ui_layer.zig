@@ -172,7 +172,7 @@ pub const UILayer = struct {
             .KeyPressed => {
                 const GLFW_KEY_F1 = 290;
                 const GLFW_KEY_F2 = 291;
-                
+
                 if (evt.data.KeyPressed.key == GLFW_KEY_F1) {
                     self.show_ui = !self.show_ui;
                     evt.markHandled();
