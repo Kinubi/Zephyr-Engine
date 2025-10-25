@@ -120,7 +120,30 @@ pub const LightVolumePass = struct {
         .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
+        .checkValidity = checkValidityImpl,
     };
+
+    fn checkValidityImpl(base: *RenderPass) bool {
+        const self: *LightVolumePass = @fieldParentPtr("base", base);
+
+        // Check if pipeline now exists (hot-reload succeeded)
+        if (!self.pipeline_system.pipelines.contains(self.light_volume_pipeline)) {
+            return false;
+        }
+
+        // Pipeline exists! Complete the setup that was skipped during initial failure
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.light_volume_pipeline) orelse return false;
+        self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+
+        // Bind global UBO to all frames
+        self.updateDescriptors() catch |err| {
+            log(.WARN, "light_volume_pass", "Failed to update descriptors during recovery: {}", .{err});
+            return false;
+        };
+
+        log(.INFO, "light_volume_pass", "Recovery setup complete", .{});
+        return true;
+    }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         _ = base;
@@ -165,7 +188,14 @@ pub const LightVolumePass = struct {
             },
         };
 
-        self.light_volume_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
+        const result = try self.pipeline_system.createPipeline(pipeline_config);
+        self.light_volume_pipeline = result.id;
+
+        if (!result.success) {
+            log(.WARN, "light_volume_pass", "Pipeline creation failed. Pass will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
+
         const pipeline_entry = self.pipeline_system.pipelines.get(self.light_volume_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 

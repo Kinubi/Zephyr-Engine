@@ -95,7 +95,30 @@ pub const LightingPass = struct {
         .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
+        .checkValidity = checkValidityImpl,
     };
+
+    fn checkValidityImpl(base: *RenderPass) bool {
+        const self: *LightingPass = @fieldParentPtr("base", base);
+
+        // Check if pipeline now exists (hot-reload succeeded)
+        if (!self.pipeline_system.pipelines.contains(self.pipeline)) {
+            return false;
+        }
+
+        // Pipeline exists! Complete the setup that was skipped during initial failure
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.pipeline) orelse return false;
+        self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+
+        // Create light buffers
+        self.createLightBuffers() catch |err| {
+            log(.WARN, "lighting_pass", "Failed to create light buffers during recovery: {}", .{err});
+            return false;
+        };
+
+        log(.INFO, "lighting_pass", "Recovery setup complete", .{});
+        return true;
+    }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         _ = base;
@@ -130,7 +153,10 @@ pub const LightingPass = struct {
             .dynamic_rendering_depth_format = null, // No depth test for fullscreen
         };
 
-        self.lighting_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
+        self.lighting_pipeline = self.pipeline_system.createPipeline(pipeline_config) catch |err| {
+            log(.WARN, "lighting_pass", "Failed to create pipeline (shaders may be missing): {}", .{err});
+            return err;
+        };
         const pipeline_entry = self.pipeline_system.pipelines.get(self.lighting_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 

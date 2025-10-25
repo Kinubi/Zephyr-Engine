@@ -43,6 +43,7 @@ pub const UnifiedPipelineSystem = struct {
 
     // Pipeline and descriptor management
     pipelines: std.HashMap(PipelineId, Pipeline, PipelineIdContext, std.hash_map.default_max_load_percentage),
+    pending_pipeline_configs: std.HashMap(PipelineId, PipelineConfig, PipelineIdContext, std.hash_map.default_max_load_percentage), // Configs for pipelines that failed to create
     descriptor_pools: std.HashMap(u32, *DescriptorPool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
 
     // Resource binding state
@@ -106,6 +107,7 @@ pub const UnifiedPipelineSystem = struct {
             .graphics_context = graphics_context,
             .shader_manager = shader_manager,
             .pipelines = std.HashMap(PipelineId, Pipeline, PipelineIdContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .pending_pipeline_configs = std.HashMap(PipelineId, PipelineConfig, PipelineIdContext, std.hash_map.default_max_load_percentage).init(allocator),
             .descriptor_pools = std.HashMap(u32, *DescriptorPool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
             .bound_resources = std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .shader_to_pipelines = std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
@@ -162,6 +164,14 @@ pub const UnifiedPipelineSystem = struct {
         }
         self.shader_to_pipelines.deinit();
 
+        // Clean up pending pipeline configs and their cloned data
+        var pending_iter = self.pending_pipeline_configs.valueIterator();
+        while (pending_iter.next()) |config| {
+            var config_mut = config.*;
+            config_mut.deinitClone(self.allocator);
+        }
+        self.pending_pipeline_configs.deinit();
+
         var overrides_iter = self.binding_overrides.valueIterator();
         while (overrides_iter.next()) |override_map| {
             override_map.deinit();
@@ -173,7 +183,7 @@ pub const UnifiedPipelineSystem = struct {
     pub fn createPipeline(
         self: *UnifiedPipelineSystem,
         config: PipelineConfig,
-    ) !PipelineId {
+    ) !PipelineCreationResult {
         // Generate pipeline ID
         const generated_pipeline_id = PipelineId{
             .name = try self.allocator.dupe(u8, config.name),
@@ -188,7 +198,73 @@ pub const UnifiedPipelineSystem = struct {
         self: *UnifiedPipelineSystem,
         config: PipelineConfig,
         pipeline_id: PipelineId,
-    ) !PipelineId {
+    ) !PipelineCreationResult {
+        // Clone config with deep copies of slices before storing
+        var cloned_config = try config.clone(self.allocator);
+        errdefer cloned_config.deinitClone(self.allocator);
+
+        // Store cloned config in pending map so we can retry on hot-reload if creation fails
+        try self.pending_pipeline_configs.put(pipeline_id, cloned_config);
+
+        // Register shader dependencies FIRST, even before attempting creation
+        // This ensures hot-reload can trigger rebuild attempts even if initial creation fails
+        try self.registerShaderDependency(config.compute_shader, pipeline_id);
+        try self.registerShaderDependency(config.vertex_shader, pipeline_id);
+        try self.registerShaderDependency(config.fragment_shader, pipeline_id);
+        try self.registerShaderDependency(config.raygen_shader, pipeline_id);
+        try self.registerShaderDependency(config.miss_shader, pipeline_id);
+        try self.registerShaderDependency(config.closest_hit_shader, pipeline_id);
+        try self.registerShaderDependency(config.any_hit_shader, pipeline_id);
+        try self.registerShaderDependency(config.intersection_shader, pipeline_id);
+
+        // Try to create the pipeline - if this fails, config stays in pending for retry
+        self.createPipelineInternal(config, pipeline_id) catch |err| {
+            log(.WARN, "unified_pipeline", "Pipeline creation failed for '{s}': {}. Will retry on hot-reload.", .{ pipeline_id.name, err });
+
+            // Register all shader files with the hot-reload system, even if they're missing
+            // This ensures the file watcher can detect when they're restored
+            if (config.compute_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.vertex_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.fragment_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.raygen_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.miss_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.closest_hit_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.any_hit_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+            if (config.intersection_shader) |path| {
+                self.shader_manager.registerMissingShader(path) catch {};
+            }
+
+            return PipelineCreationResult{ .id = pipeline_id, .success = false };
+        };
+
+        // Success! Remove from pending and clean up cloned config
+        if (self.pending_pipeline_configs.fetchRemove(pipeline_id)) |entry| {
+            var config_to_free = entry.value;
+            config_to_free.deinitClone(self.allocator);
+        }
+        return PipelineCreationResult{ .id = pipeline_id, .success = true };
+    }
+
+    /// Internal pipeline creation - extracted from createPipelineWithId
+    fn createPipelineInternal(
+        self: *UnifiedPipelineSystem,
+        config: PipelineConfig,
+        pipeline_id: PipelineId,
+    ) !void {
         // Load shaders and collect for pipeline building
         var shaders = std.ArrayList(*Shader){};
         var shaders_transferred = false;
@@ -530,17 +606,8 @@ pub const UnifiedPipelineSystem = struct {
         pipeline_inserted = true;
         descriptor_layouts_owned = true;
 
-        // Track shader dependencies for hot-reload
-        try self.registerShaderDependency(config.compute_shader, pipeline_id);
-        try self.registerShaderDependency(config.vertex_shader, pipeline_id);
-        try self.registerShaderDependency(config.fragment_shader, pipeline_id);
-        try self.registerShaderDependency(config.raygen_shader, pipeline_id);
-        try self.registerShaderDependency(config.miss_shader, pipeline_id);
-        try self.registerShaderDependency(config.closest_hit_shader, pipeline_id);
-        try self.registerShaderDependency(config.any_hit_shader, pipeline_id);
-        try self.registerShaderDependency(config.intersection_shader, pipeline_id);
-
-        return pipeline_id;
+        // Shader dependencies already registered at the start of createPipelineWithId
+        // Config will be removed from pending by createPipelineWithId on success
     }
 
     /// Bind a pipeline for rendering
@@ -954,7 +1021,10 @@ pub const UnifiedPipelineSystem = struct {
         defer self.rebuilding_pipelines = false;
 
         // Find all pipelines that use this shader
-        const affected_pipelines = self.shader_to_pipelines.get(shader_path) orelse return;
+        const affected_pipelines = self.shader_to_pipelines.get(shader_path) orelse {
+            log(.WARN, "unified_pipeline", "No pipelines found for shader: {s}", .{shader_path});
+            return;
+        };
 
         log(
             .INFO,
@@ -979,41 +1049,62 @@ pub const UnifiedPipelineSystem = struct {
         self.hot_reload_in_progress = true;
         defer self.hot_reload_in_progress = false;
 
-        // Get the existing pipeline to extract its config
-        const old_pipeline = self.pipelines.get(pipeline_id) orelse return error.PipelineNotFound;
-        const config = old_pipeline.config;
+        // Check if pipeline exists or if it's pending (failed initial creation)
+        const old_pipeline_opt = self.pipelines.get(pipeline_id);
+        const pending_config_opt = self.pending_pipeline_configs.get(pipeline_id);
 
-        // Clear dirty flags for all resources of this pipeline to prevent descriptor updates on old sets
-        var resource_iter = self.bound_resources.iterator();
-        var cleared_count: u32 = 0;
-        while (resource_iter.next()) |entry| {
-            const key = entry.key_ptr.*;
-            if (std.mem.eql(u8, key.pipeline_id.name, pipeline_id.name)) {
-                // Clear dirty flag to prevent updateDescriptorSets from trying to update old descriptor sets
-                if (entry.value_ptr.dirty) {
-                    entry.value_ptr.dirty = false;
-                    cleared_count += 1;
+        if (old_pipeline_opt) |old_pipeline| {
+            // Pipeline exists - this is a rebuild
+            const config = old_pipeline.config;
+
+            // Clear dirty flags for all resources of this pipeline to prevent descriptor updates on old sets
+            var resource_iter = self.bound_resources.iterator();
+            var cleared_count: u32 = 0;
+            while (resource_iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (std.mem.eql(u8, key.pipeline_id.name, pipeline_id.name)) {
+                    if (entry.value_ptr.dirty) {
+                        entry.value_ptr.dirty = false;
+                        cleared_count += 1;
+                    }
                 }
             }
+
+            const old_pipeline_to_destroy = self.pipelines.get(pipeline_id).?;
+
+            // Remove shader dependencies for the old pipeline before creating new one
+            try self.unregisterPipelineDependencies(pipeline_id);
+
+            // Create the new pipeline - this will atomically replace the old one in the hashmap
+            const result = try self.createPipelineWithId(config, pipeline_id);
+
+            if (result.success) {
+                // Schedule the old pipeline for destruction after a few frames
+                const frames_to_wait: u32 = MAX_FRAMES_IN_FLIGHT + 1;
+                try self.deferred_destroys.append(self.allocator, DeferredPipeline{
+                    .pipeline = old_pipeline_to_destroy,
+                    .frames_to_wait = frames_to_wait,
+                });
+                log(.INFO, "unified_pipeline", "Pipeline rebuilt: {s}", .{pipeline_id.name});
+            } else {
+                log(.WARN, "unified_pipeline", "Pipeline rebuild failed: {s}", .{pipeline_id.name});
+            }
+        } else if (pending_config_opt) |config| {
+            // Pipeline doesn't exist yet - initial creation failed, retry now
+            log(.INFO, "unified_pipeline", "Retrying pipeline creation: {s} (shader now available)", .{pipeline_id.name});
+
+            const result = try self.createPipelineWithId(config, pipeline_id);
+
+            if (result.success) {
+                log(.INFO, "unified_pipeline", "Pipeline creation succeeded on retry: {s}", .{pipeline_id.name});
+            } else {
+                log(.WARN, "unified_pipeline", "Pipeline creation still failing: {s}", .{pipeline_id.name});
+            }
+        } else {
+            // Neither exists - something went wrong
+            log(.ERROR, "unified_pipeline", "Cannot rebuild pipeline {s}: not found in pipelines or pending configs", .{pipeline_id.name});
+            return error.PipelineNotFound;
         }
-
-        // Get reference to the old pipeline before we replace it
-        const old_pipeline_to_destroy = self.pipelines.get(pipeline_id).?;
-
-        // Remove shader dependencies for the old pipeline before creating new one
-        try self.unregisterPipelineDependencies(pipeline_id);
-
-        // Create the new pipeline - this will atomically replace the old one in the hashmap
-        const new_pipeline_id = try self.createPipelineWithId(config, pipeline_id);
-        _ = new_pipeline_id; // Should be the same as input
-
-        // Schedule the old pipeline for destruction after a few frames
-        // This ensures any in-flight command buffers finish using it
-        const frames_to_wait: u32 = MAX_FRAMES_IN_FLIGHT + 1; // Wait for all frames in flight plus one more
-        try self.deferred_destroys.append(self.allocator, DeferredPipeline{
-            .pipeline = old_pipeline_to_destroy,
-            .frames_to_wait = frames_to_wait,
-        });
     }
 
     // Rebuild job allocated by shader hot reload system
@@ -1038,16 +1129,12 @@ pub const UnifiedPipelineSystem = struct {
         const shader_manager = sys.shader_manager;
         const allocator = sys.allocator;
 
-        defer {
-            // Job is freed but compiled_shader ownership is transferred to shader_manager
-            allocator.destroy(job);
-        }
-
         // Update shader_manager with the compiled shader (transfers ownership)
         shader_manager.onShaderCompiledFromHotReload(file_path, compiled_shader) catch |err| {
             std.log.err("[unified_pipeline] Failed to update shader_manager for {s}: {}", .{ file_path, err });
             // Clean up on error
             compiled_shader.deinit(allocator);
+            allocator.destroy(job);
             return;
         };
 
@@ -1059,8 +1146,12 @@ pub const UnifiedPipelineSystem = struct {
         // Find all pipelines that use this shader and rebuild them
         sys.handleShaderReload(file_path) catch |err| {
             std.log.err("[unified_pipeline] Failed to handle shader reload for pipelines: {}", .{err});
+            allocator.destroy(job);
             return;
         };
+
+        // Job is freed after all uses of file_path are complete
+        allocator.destroy(job);
     }
 
     /// Process deferred pipeline destructions - call this each frame
@@ -1691,6 +1782,43 @@ pub const PipelineConfig = struct {
     // Dynamic rendering formats (used when render_pass is .null_handle)
     dynamic_rendering_color_formats: ?[]const vk.Format = null,
     dynamic_rendering_depth_format: ?vk.Format = null,
+
+    /// Clone the config with deep copies of all slices
+    pub fn clone(self: PipelineConfig, allocator: std.mem.Allocator) !PipelineConfig {
+        var cloned = self;
+
+        // Deep copy slice fields
+        if (self.vertex_input_bindings) |bindings| {
+            cloned.vertex_input_bindings = try allocator.dupe(VertexInputBinding, bindings);
+        }
+        if (self.vertex_input_attributes) |attributes| {
+            cloned.vertex_input_attributes = try allocator.dupe(VertexInputAttribute, attributes);
+        }
+        if (self.push_constant_ranges) |ranges| {
+            cloned.push_constant_ranges = try allocator.dupe(vk.PushConstantRange, ranges);
+        }
+        if (self.dynamic_rendering_color_formats) |formats| {
+            cloned.dynamic_rendering_color_formats = try allocator.dupe(vk.Format, formats);
+        }
+
+        return cloned;
+    }
+
+    /// Free cloned resources
+    pub fn deinitClone(self: *PipelineConfig, allocator: std.mem.Allocator) void {
+        if (self.vertex_input_bindings) |bindings| {
+            allocator.free(bindings);
+        }
+        if (self.vertex_input_attributes) |attributes| {
+            allocator.free(attributes);
+        }
+        if (self.push_constant_ranges) |ranges| {
+            allocator.free(ranges);
+        }
+        if (self.dynamic_rendering_color_formats) |formats| {
+            allocator.free(formats);
+        }
+    }
 };
 
 /// Unified pipeline representation
@@ -1753,6 +1881,12 @@ const Pipeline = struct {
 pub const PipelineId = struct {
     name: []const u8,
     hash: u64,
+};
+
+/// Result of pipeline creation attempt
+pub const PipelineCreationResult = struct {
+    id: PipelineId,
+    success: bool, // false if shader loading/compilation failed
 };
 
 /// Shader module representation

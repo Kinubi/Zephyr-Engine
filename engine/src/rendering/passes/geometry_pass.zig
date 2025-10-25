@@ -101,7 +101,29 @@ pub const GeometryPass = struct {
         .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
+        .checkValidity = checkValidityImpl,
     };
+
+    fn checkValidityImpl(base: *RenderPass) bool {
+        const self: *GeometryPass = @fieldParentPtr("base", base);
+
+        // Check if pipeline now exists (hot-reload succeeded)
+        if (!self.pipeline_system.pipelines.contains(self.geometry_pipeline)) {
+            return false;
+        }
+
+        // Pipeline exists! Complete the setup that was skipped during initial failure
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return false;
+        self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+        self.cached_pipeline_layout = self.pipeline_system.getPipelineLayout(self.geometry_pipeline) catch return false;
+
+        // Mark resources as needing setup
+        self.resources_need_setup = true;
+        self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
+
+        log(.INFO, "geometry_pass", "Recovery setup complete", .{});
+        return true;
+    }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
         const self: *GeometryPass = @fieldParentPtr("base", base);
@@ -143,7 +165,14 @@ pub const GeometryPass = struct {
             .dynamic_rendering_depth_format = self.swapchain_depth_format,
         };
 
-        self.geometry_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
+        const result = try self.pipeline_system.createPipeline(pipeline_config);
+        self.geometry_pipeline = result.id;
+
+        if (!result.success) {
+            log(.WARN, "geometry_pass", "Pipeline creation failed. Pass will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
+
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
         self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);

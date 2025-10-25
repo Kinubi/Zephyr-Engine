@@ -183,7 +183,7 @@ pub const ImGuiVulkanBackend = struct {
         };
 
         // Register ImGui pipeline with UnifiedPipelineSystem
-        self.pipeline_id = try self.pipeline_system.createPipeline(.{
+        const result = try self.pipeline_system.createPipeline(.{
             .name = "imgui",
             .vertex_shader = "assets/shaders/imgui.vert",
             .fragment_shader = "assets/shaders/imgui.frag",
@@ -216,6 +216,13 @@ pub const ImGuiVulkanBackend = struct {
                 .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
             },
         });
+
+        self.pipeline_id = result.id;
+
+        if (!result.success) {
+            std.log.warn("ImGui pipeline creation failed. ImGui rendering will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
 
         // Cache the pipeline handle
         if (self.pipeline_id) |pid| {

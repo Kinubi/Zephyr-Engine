@@ -196,7 +196,35 @@ pub const PathTracingPass = struct {
         .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
+        .checkValidity = checkValidityImpl,
     };
+
+    fn checkValidityImpl(base: *RenderPass) bool {
+        const self: *PathTracingPass = @fieldParentPtr("base", base);
+
+        // Check if pipeline now exists (hot-reload succeeded)
+        if (!self.pipeline_system.pipelines.contains(self.path_tracing_pipeline)) {
+            return false;
+        }
+
+        // Pipeline exists! Complete the setup that was skipped during initial failure
+        const entry = self.pipeline_system.pipelines.get(self.path_tracing_pipeline) orelse return false;
+        self.cached_pipeline_handle = entry.vulkan_pipeline;
+
+        // Update shader binding table
+        self.rt_system.updateShaderBindingTable(entry.vulkan_pipeline) catch |err| {
+            log(.WARN, "path_tracing_pass", "Failed to update SBT during recovery: {}", .{err});
+            return false;
+        };
+
+        self.updateDescriptors() catch |err| {
+            log(.WARN, "path_tracing_pass", "Failed to update descriptors during recovery: {}", .{err});
+            return false;
+        };
+
+        log(.INFO, "path_tracing_pass", "Recovery setup complete", .{});
+        return true;
+    }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
@@ -211,7 +239,14 @@ pub const PathTracingPass = struct {
             .render_pass = vk.RenderPass.null_handle,
         };
 
-        self.path_tracing_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
+        const result = try self.pipeline_system.createPipeline(pipeline_config);
+        self.path_tracing_pipeline = result.id;
+
+        if (!result.success) {
+            log(.WARN, "path_tracing_pass", "Pipeline creation failed. Pass will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
+
         const entry = self.pipeline_system.pipelines.get(self.path_tracing_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = entry.vulkan_pipeline;
 

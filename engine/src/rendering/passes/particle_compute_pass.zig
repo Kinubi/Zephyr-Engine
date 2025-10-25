@@ -226,7 +226,30 @@ pub const ParticleComputePass = struct {
         .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
+        .checkValidity = checkValidityImpl,
     };
+
+    fn checkValidityImpl(base: *RenderPass) bool {
+        const self: *ParticleComputePass = @fieldParentPtr("base", base);
+
+        // Check if pipeline now exists (hot-reload succeeded)
+        if (!self.pipeline_system.pipelines.contains(self.compute_pipeline)) {
+            return false;
+        }
+
+        // Pipeline exists! Complete the setup that was skipped during initial failure
+        const entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return false;
+        self.cached_pipeline_handle = entry.vulkan_pipeline;
+
+        // Bind all resources and update descriptor sets
+        self.updateDescriptors() catch |err| {
+            log(.WARN, "particle_compute_pass", "Failed to update descriptors during recovery: {}", .{err});
+            return false;
+        };
+
+        log(.INFO, "particle_compute_pass", "Recovery setup complete", .{});
+        return true;
+    }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         _ = base;
@@ -245,7 +268,14 @@ pub const ParticleComputePass = struct {
             .render_pass = .null_handle, // Compute pipelines don't use render passes
         };
 
-        self.compute_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
+        const result = try self.pipeline_system.createPipeline(pipeline_config);
+        self.compute_pipeline = result.id;
+
+        if (!result.success) {
+            log(.WARN, "particle_compute_pass", "Pipeline creation failed. Pass will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
+
         const entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = entry.vulkan_pipeline;
 

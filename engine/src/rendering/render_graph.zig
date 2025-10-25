@@ -143,12 +143,18 @@ pub const RenderPassVTable = struct {
 
     /// Cleanup resources
     teardown: *const fn (pass: *RenderPass) void,
+
+    /// Check if pass has become valid (for recovery after initial setup failure)
+    /// Called each frame for passes where setup_succeeded == false
+    checkValidity: *const fn (pass: *RenderPass) bool,
 };
 
 /// Base interface for render passes
 pub const RenderPass = struct {
     name: []const u8,
     enabled: bool = true,
+    setup_succeeded: bool = false, // Track if setup completed successfully
+    just_recovered: bool = false, // Track if this pass just recovered (to auto-enable it)
     vtable: *const RenderPassVTable,
 
     // Dependencies: names of passes this pass depends on (must execute after)
@@ -172,6 +178,11 @@ pub const RenderPass = struct {
     /// Call teardown through vtable
     pub fn teardown(self: *RenderPass) void {
         self.vtable.teardown(self);
+    }
+
+    /// Check if pass has become valid (recovery detection)
+    pub fn checkValidity(self: *RenderPass) bool {
+        return self.vtable.checkValidity(self);
     }
 
     /// Check if this is a compute pass by name convention
@@ -238,13 +249,16 @@ pub const RenderGraph = struct {
         var i: usize = 0;
         while (i < self.passes.items.len) {
             const pass = self.passes.items[i];
+            log(.INFO, "render_graph", "Setting up pass: {s}", .{pass.name});
             pass.setup(self) catch |err| {
-                log(.WARN, "render_graph", "Pass '{}' setup failed: {}. Disabling pass.", .{ pass.name, err });
+                log(.WARN, "render_graph", "Pass {s} setup failed with error: {}. Disabling pass.", .{ pass.name, err });
                 pass.enabled = false;
-                // Don't increment i, continue to next pass
+                pass.setup_succeeded = false;
                 i += 1;
                 continue;
             };
+            pass.setup_succeeded = true;
+            log(.INFO, "render_graph", "Pass {s} setup complete", .{pass.name});
             i += 1;
         }
 
@@ -264,9 +278,15 @@ pub const RenderGraph = struct {
         var enabled_passes = std.ArrayList(*RenderPass){};
         defer enabled_passes.deinit(self.allocator);
 
+        log(.INFO, "render_graph", "Building execution order from {} total passes", .{self.passes.items.len});
         for (self.passes.items) |pass| {
-            if (pass.enabled) {
+            if (pass.enabled and pass.setup_succeeded) {
+                log(.INFO, "render_graph", "  Including enabled pass: {s}", .{pass.name});
                 try enabled_passes.append(self.allocator, pass);
+            } else if (!pass.setup_succeeded) {
+                log(.INFO, "render_graph", "  Skipping pass (setup failed): {s}", .{pass.name});
+            } else {
+                log(.INFO, "render_graph", "  Skipping disabled pass: {s}", .{pass.name});
             }
         }
 
@@ -356,6 +376,20 @@ pub const RenderGraph = struct {
             return error.GraphNotCompiled;
         }
 
+        // Check if any previously failed passes have recovered
+        for (self.passes.items) |pass| {
+            if (!pass.setup_succeeded) {
+                if (pass.checkValidity()) {
+                    log(.INFO, "render_graph", "Pass {s} recovered successfully", .{pass.name});
+                    pass.setup_succeeded = true;
+                    pass.just_recovered = true; // Mark for auto-enabling after recompilation
+                    // Note: Don't set enabled = true here! The pass will be enabled
+                    // after recompilation. Just mark for recompilation.
+                    self.compiled = false; // Mark for recompilation at end of render
+                }
+            }
+        }
+
         for (self.execution_order.items) |pass| {
             // Create update pass name with suffix
             var name_buf: [64]u8 = undefined;
@@ -375,9 +409,7 @@ pub const RenderGraph = struct {
 
     /// Execute all enabled passes
     pub fn execute(self: *RenderGraph, frame_info: FrameInfo) !void {
-        if (!self.compiled) {
-            return error.GraphNotCompiled;
-        }
+        // If graph needs recompilation (e.g., after pass recovery), do it before execution
 
         for (self.execution_order.items) |pass| {
             if (frame_info.performance_monitor) |pm| {
@@ -388,12 +420,31 @@ pub const RenderGraph = struct {
                 try pm.endPass(pass.name, frame_info.current_frame, frame_info.command_buffer);
             }
         }
+
+        if (!self.compiled) {
+            // Enable only passes that just recovered (not all disabled passes)
+            for (self.passes.items) |pass| {
+                if (pass.just_recovered) {
+                    log(.INFO, "render_graph", "Enabling recovered pass: {s}", .{pass.name});
+                    pass.enabled = true;
+                    pass.just_recovered = false; // Clear flag after enabling
+                }
+            }
+
+            try self.buildExecutionOrder();
+            self.compiled = true;
+        }
     }
 
     /// Enable a pass by name (doesn't recompile - call recompile() after all state changes)
+    /// Only enables if setup previously succeeded
     pub fn enablePass(self: *RenderGraph, name: []const u8) void {
         for (self.passes.items) |pass| {
             if (std.mem.eql(u8, pass.name, name)) {
+                if (!pass.setup_succeeded) {
+                    log(.WARN, "render_graph", "Cannot enable pass {s} - setup failed", .{name});
+                    return;
+                }
                 if (!pass.enabled) {
                     pass.enabled = true;
                     self.compiled = false; // Mark as needing recompilation
@@ -422,6 +473,34 @@ pub const RenderGraph = struct {
     pub fn recompile(self: *RenderGraph) !void {
         if (!self.compiled) {
             log(.INFO, "render_graph", "Recompiling execution order", .{});
+            try self.buildExecutionOrder();
+            self.compiled = true;
+        }
+    }
+
+    /// Retry setup for passes that previously failed
+    /// Useful after shader hot-reload or asset changes
+    pub fn retryFailedPasses(self: *RenderGraph) !void {
+        log(.INFO, "render_graph", "Retrying setup for failed passes", .{});
+
+        var any_recovered = false;
+        for (self.passes.items) |pass| {
+            if (!pass.setup_succeeded) {
+                log(.INFO, "render_graph", "Retrying setup for: {s}", .{pass.name});
+                pass.setup(self) catch |err| {
+                    log(.WARN, "render_graph", "Pass {s} setup still fails: {}", .{ pass.name, err });
+                    continue;
+                };
+                // Setup succeeded this time!
+                pass.setup_succeeded = true;
+                pass.enabled = true;
+                any_recovered = true;
+                log(.INFO, "render_graph", "Pass {s} setup now succeeded!", .{pass.name});
+            }
+        }
+
+        if (any_recovered) {
+            // Rebuild execution order to include recovered passes
             try self.buildExecutionOrder();
             self.compiled = true;
         }

@@ -142,6 +142,7 @@ pub const Engine = struct {
             .compute_buffer = undefined, // Will be set in beginFrame
             .camera = undefined,
             .dt = 0.0,
+            .performance_monitor = engine.performance_monitor,
         };
         engine.last_frame_time = c.glfwGetTime();
 

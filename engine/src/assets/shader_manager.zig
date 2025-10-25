@@ -92,6 +92,10 @@ pub const ShaderManager = struct {
         try self.hot_reload.addWatchDirectory(directory);
     }
 
+    pub fn registerMissingShader(self: *ShaderManager, file_path: []const u8) !void {
+        try self.hot_reload.addMissingShaderFile(file_path);
+    }
+
     pub fn loadShader(self: *ShaderManager, file_path: []const u8, options: ShaderCompiler.CompilationOptions) !*LoadedShader {
         const path_key = try self.allocator.dupe(u8, file_path);
 

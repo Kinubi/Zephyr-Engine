@@ -152,6 +152,24 @@ pub const ShaderWatcher = struct {
         }
     }
 
+    /// Add a shader to the watch list even if the file doesn't exist yet.
+    /// This allows hot-reload to detect when missing shaders are restored.
+    pub fn addMissingShaderFile(self: *ShaderWatcher, file_path: []const u8) !void {
+        // Check if already being watched
+        if (self.watched_shaders.contains(file_path)) {
+            return;
+        }
+
+        const file_info = ShaderFileInfo{
+            .path = try self.allocator.dupe(u8, file_path),
+            .last_modified = 0, // Will be updated when file is found
+            .size = 0,
+            .compilation_in_progress = false,
+        };
+
+        try self.watched_shaders.put(file_info.path, file_info);
+    }
+
     /// Handle a file-change event delivered from the FileWatcher inside the ThreadPool.
     /// Compiles the shader immediately and signals the pipeline to rebuild when finished.
     /// This follows the same pattern as hot_reload_manager.onFileChanged.
@@ -166,16 +184,52 @@ pub const ShaderWatcher = struct {
 
         const base_name = std.fs.path.basename(file_path);
 
-        // Handle directory-level events by rescanning for new shader files
+        // Handle directory-level events by checking all shader files in the directory
         if (!isShaderFile(base_name)) {
-            // If the path refers to a directory, rescan it to pick up new shaders
+            // If the path refers to a directory, check all shader files for changes
             const dir_path = file_path;
             if (std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch null) |dir_val| {
                 var dir = dir_val;
                 defer dir.close();
-                self.scanDirectory(dir_path) catch |err| {
-                    std.log.warn("[hot_reload] Failed to rescan shader directory {s}: {}", .{ dir_path, err });
-                };
+
+                var iterator = dir.iterate();
+
+                while (iterator.next() catch null) |entry| {
+                    if (entry.kind == .file and isShaderFile(entry.name)) {
+                        const full_path = std.fs.path.join(self.allocator, &.{ dir_path, entry.name }) catch continue;
+                        defer self.allocator.free(full_path);
+
+                        // Check if this shader file has changed or is new
+                        const stat = std.fs.cwd().statFile(full_path) catch continue;
+
+                        // Look for the shader in watched_shaders - need to find by comparing paths
+                        var found_shader_path: ?[]const u8 = null;
+                        var shader_iter = self.watched_shaders.iterator();
+                        while (shader_iter.next()) |shader_entry| {
+                            if (std.mem.eql(u8, shader_entry.key_ptr.*, full_path)) {
+                                found_shader_path = shader_entry.key_ptr.*;
+                                break;
+                            }
+                        }
+
+                        if (found_shader_path) |watched_path| {
+                            // File is already watched - check if it changed
+                            const fi = self.watched_shaders.getPtr(watched_path).?;
+                            if (stat.mtime > fi.last_modified or stat.size != fi.size) {
+                                // Update metadata
+                                fi.last_modified = stat.mtime;
+                                fi.size = stat.size;
+                                // Trigger recompilation using the stable path from watched_shaders
+                                self.onFileChanged(watched_path);
+                            }
+                        } else {
+                            // New shader file - add it
+                            self.addShaderFile(full_path) catch |err| {
+                                std.log.warn("[hot_reload] Failed to add new shader file {s}: {}", .{ full_path, err });
+                            };
+                        }
+                    }
+                }
             }
             return;
         }

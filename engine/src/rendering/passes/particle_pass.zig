@@ -90,7 +90,30 @@ pub const ParticlePass = struct {
         .update = updateImpl,
         .execute = executeImpl,
         .teardown = teardownImpl,
+        .checkValidity = checkValidityImpl,
     };
+
+    fn checkValidityImpl(base: *RenderPass) bool {
+        const self: *ParticlePass = @fieldParentPtr("base", base);
+
+        // Check if pipeline now exists (hot-reload succeeded)
+        if (!self.pipeline_system.pipelines.contains(self.particle_pipeline)) {
+            return false;
+        }
+
+        // Pipeline exists! Complete the setup that was skipped during initial failure
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return false;
+        self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+
+        // Bind global UBO to all frames
+        self.updateDescriptors() catch |err| {
+            log(.WARN, "particle_pass", "Failed to update descriptors during recovery: {}", .{err});
+            return false;
+        };
+
+        log(.INFO, "particle_pass", "Recovery setup complete", .{});
+        return true;
+    }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         _ = base;
@@ -117,7 +140,15 @@ pub const ParticlePass = struct {
             .dynamic_rendering_depth_format = self.swapchain_depth_format,
         };
 
-        self.particle_pipeline = try self.pipeline_system.createPipeline(pipeline_config);
+        const result = try self.pipeline_system.createPipeline(pipeline_config);
+        self.particle_pipeline = result.id;
+
+        if (!result.success) {
+            // Pipeline creation failed - return error so RenderGraph disables the pass
+            log(.WARN, "particle_pass", "Pipeline creation failed. Pass will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
+
         const pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
@@ -126,7 +157,6 @@ pub const ParticlePass = struct {
 
         log(.INFO, "particle_pass", "Setup complete", .{});
     }
-
     fn updateDescriptors(self: *ParticlePass) !void {
         // Bind global UBO for all frames
         for (0..@import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT) |frame_idx| {
@@ -155,8 +185,13 @@ pub const ParticlePass = struct {
         const command_buffer = frame_info.command_buffer;
         const frame_index = frame_info.current_frame;
 
-        // Check for pipeline reload
-        var pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
+        // Check if pipeline exists (might have been created by hot-reload after initial failure)
+        var pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse {
+            // Pipeline doesn't exist - skip rendering
+            return;
+        };
+
+        // Check for pipeline reload (includes first-time creation after initial failure)
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
 
         if (pipeline_rebuilt) {
