@@ -93,6 +93,37 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Run the editor");
     run_step.dependOn(&run_cmd.step);
 
+    // ========== EXAMPLES ==========
+    // Engine API test example
+    const example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/engine_api_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const example_api_test = b.addExecutable(.{
+        .name = "engine_api_test",
+        .root_module = example_mod,
+    });
+    example_api_test.root_module.addImport("zulkan", engine_mod);
+    example_api_test.root_module.addImport("vulkan", vulkan_zig);
+
+    // Link system libraries (same as editor)
+    example_api_test.linkSystemLibrary("glfw");
+    example_api_test.linkSystemLibrary("x11");
+    example_api_test.linkSystemLibrary("shaderc");
+    example_api_test.linkSystemLibrary("pthread");
+    example_api_test.linkLibC();
+    addSpirvCross(b, example_api_test);
+
+    b.installArtifact(example_api_test);
+
+    const run_example = b.addRunArtifact(example_api_test);
+    run_example.step.dependOn(b.getInstallStep());
+
+    const run_example_step = b.step("run-example", "Run the engine API test example");
+    run_example_step.dependOn(&run_example.step);
+
     // ========== TESTS ==========
     const editor_test_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),

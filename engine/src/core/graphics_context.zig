@@ -106,6 +106,7 @@ pub const GraphicsContext = struct {
         }
         // Convert [*c][*c]const u8 to []const [*:0]const u8 safely
         var glfw_exts = try allocator.alloc([*:0]const u8, glfw_ext_count);
+        defer allocator.free(glfw_exts);
         for (0..glfw_ext_count) |i| {
             glfw_exts[i] = glfw_exts_ptr[i];
         }
@@ -212,12 +213,20 @@ pub const GraphicsContext = struct {
         self.command_pool_mutex.unlock();
 
         log(.INFO, "graphics_context", "Cleaning up pending secondary command buffers", .{});
-        for (pending_secondary_buffers.items) |*secondary_buf| {
-            secondary_buf.deinit(self);
+        if (secondary_buffers_initialized) {
+            log(.INFO, "graphics_context", "Cleaning {} pending buffers", .{pending_secondary_buffers.items.len});
+            for (pending_secondary_buffers.items) |*secondary_buf| {
+                secondary_buf.deinit(self);
+            }
+            pending_secondary_buffers.deinit(self.allocator);
         }
 
-        for (submitted_secondary_buffers.items) |*secondary_buf| {
-            secondary_buf.deinit(self);
+        if (submitted_buffers_initialized) {
+            log(.INFO, "graphics_context", "Cleaning {} submitted buffers", .{submitted_secondary_buffers.items.len});
+            for (submitted_secondary_buffers.items) |*secondary_buf| {
+                secondary_buf.deinit(self);
+            }
+            submitted_secondary_buffers.deinit(self.allocator);
         }
 
         self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
@@ -553,7 +562,7 @@ pub const GraphicsContext = struct {
         pool: vk.CommandPool,
         command_buffer: vk.CommandBuffer,
         is_recording: bool = false,
-        pending_resources: std.ArrayList(PendingResource),
+        pending_resources: ?std.ArrayList(PendingResource),
         allocator: std.mem.Allocator,
 
         pub fn init(allocator: std.mem.Allocator, pool: vk.CommandPool, command_buffer: vk.CommandBuffer) SecondaryCommandBuffer {
@@ -561,21 +570,26 @@ pub const GraphicsContext = struct {
                 .pool = pool,
                 .command_buffer = command_buffer,
                 .is_recording = true,
-                .pending_resources = std.ArrayList(PendingResource){},
+                .pending_resources = null,
                 .allocator = allocator,
             };
         }
 
         pub fn addPendingResource(self: *SecondaryCommandBuffer, buffer: vk.Buffer, memory: vk.DeviceMemory) !void {
-            try self.pending_resources.append(self.allocator, PendingResource{ .buffer = buffer, .memory = memory });
+            if (self.pending_resources == null) {
+                self.pending_resources = std.ArrayList(PendingResource){};
+            }
+            try self.pending_resources.?.append(self.allocator, PendingResource{ .buffer = buffer, .memory = memory });
         }
 
         pub fn deinit(self: *SecondaryCommandBuffer, gc: *GraphicsContext) void {
-            // Clean up all pending resources
-            for (self.pending_resources.items) |resource| {
-                resource.cleanup(gc);
+            // Clean up all pending resources if any exist
+            if (self.pending_resources) |*resources| {
+                for (resources.items) |resource| {
+                    resource.cleanup(gc);
+                }
+                resources.deinit(self.allocator);
             }
-            self.pending_resources.deinit(self.allocator);
             {
                 gc.command_pool_mutex.lock();
                 defer gc.command_pool_mutex.unlock();

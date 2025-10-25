@@ -161,22 +161,12 @@ pub const Swapchain = struct {
         var i: usize = 0;
         while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
             self.gc.vkd.destroySemaphore(self.gc.dev, self.image_acquired[i], null);
+            self.gc.vkd.destroySemaphore(self.gc.dev, self.render_finished[i], null);
             self.gc.vkd.destroyFence(self.gc.dev, self.frame_fence[i], null);
             // Compute sync
             self.gc.vkd.destroySemaphore(self.gc.dev, self.compute_finished[i], null);
             self.gc.vkd.destroyFence(self.gc.dev, self.compute_fence[i], null);
         }
-        for (self.render_finished) |semaphore| {
-            self.gc.vkd.destroySemaphore(self.gc.dev, semaphore, null);
-        }
-        
-        // Free allocated memory
-        self.allocator.free(self.image_acquired);
-        self.allocator.free(self.render_finished);
-        self.allocator.free(self.frame_fence);
-        self.allocator.free(self.compute_finished);
-        self.allocator.free(self.compute_fence);
-        self.allocator.free(self.swap_images);
     }
 
     pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D) !void {
@@ -530,24 +520,6 @@ pub const Swapchain = struct {
 
         // Execute all pending secondary command buffers from worker threads
         try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
-
-        // Ensure swapchain image is in the correct layout for presentation
-        // This is important when no render pass has been executed or when layers
-        // don't explicitly manage the layout
-        const current_image = self.swap_images[self.image_index].image;
-        self.gc.transitionImageLayout(
-            frame_info.command_buffer,
-            current_image,
-            .undefined, // Old layout - conservative assumption
-            .present_src_khr, // Required for presentation
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
 
         // End graphics buffer
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {

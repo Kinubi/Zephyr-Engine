@@ -562,27 +562,55 @@ touch engine/src/core/engine.zig
 
 ## Implementation Phases
 
-### Phase 1: Foundation ✅
+### Phase 1: Foundation ✅ **COMPLETE**
 **Goal:** File structure and build system
 
-- [ ] Create directory structure
-- [ ] Move files to engine/editor
-- [ ] Update build.zig
-- [ ] Fix all import paths
-- [ ] Verify compilation
+- [x] Create directory structure
+- [x] Move files to engine/editor
+- [x] Update build.zig
+- [x] Fix all import paths
+- [x] Verify compilation
 
-**Success Criteria:** Project compiles with new structure
+**Success Criteria:** Project compiles with new structure  
+**Status:** ✅ **COMPLETE** - Application builds and runs successfully!  
+**Completed:** October 25, 2025
 
-### Phase 2: Engine API 🔄
-**Goal:** Define clean engine interface
+### Phase 2: Engine API 🔄 **CURRENT**
+**Goal:** Define clean engine interface and implement Engine struct
 
-- [ ] Create Engine struct
-- [ ] Create zulkan.zig module
-- [ ] Implement init/deinit
-- [ ] Implement frame loop methods
-- [ ] Add system accessors
+**Current Status:** Engine struct exists as stub, zulkan.zig exports created
 
-**Success Criteria:** Editor can use Engine API
+**Remaining Tasks:**
+- [ ] Implement Engine.init() - Initialize all core systems
+  - [ ] Create window with config
+  - [ ] Initialize GraphicsContext
+  - [ ] Setup Swapchain
+  - [ ] Create EventBus and LayerStack
+  - [ ] Optional: AssetManager, PerformanceMonitor
+  
+- [ ] Implement frame loop methods:
+  - [ ] beginFrame() - Process events, begin layers, prepare frame
+  - [ ] update() - Update layers and game logic
+  - [ ] render() - Execute render graph
+  - [ ] endFrame() - End layers, present frame
+  
+- [ ] Add system accessors (already stubbed):
+  - [x] getLayerStack() - For adding custom layers
+  - [x] getEventBus() - For queuing events
+  - [x] getWindow() - For window operations
+  - [x] getAssetManager() - For asset loading
+  - [x] getGraphicsContext() - For graphics operations
+  - [x] getSwapchain() - For swapchain management
+  
+- [ ] Clean up TODOs from Phase 1:
+  - [ ] Restore GraphicsContext.workerThreadExitHook
+  - [ ] Restore Texture.deinitZstbi()
+  - [ ] Fix InputLayer and UILayer dependencies (copied to editor for now)
+  - [ ] Verify EventData access pattern
+  - [ ] Check GlobalUbo access from FrameInfo
+  - [ ] Add MAX_FRAMES_IN_FLIGHT to engine config
+
+**Success Criteria:** Editor can use Engine API instead of direct system access
 
 ### Phase 3: Editor Separation 🔄
 **Goal:** Make editor use engine library
@@ -604,6 +632,72 @@ touch engine/src/core/engine.zig
 - [ ] Add examples
 
 **Success Criteria:** Others can use the engine
+
+---
+
+## Current Architecture Status
+
+### ✅ Completed (Phase 1)
+
+**Directory Structure:**
+```
+ZulkanZengine/
+├─ engine/src/          # Engine library source
+│  ├─ zulkan.zig        # Public API module export
+│  ├─ ecs.zig           # ECS module export
+│  ├─ core/             # Core systems (Window, Graphics, Events, Layers)
+│  ├─ rendering/        # Rendering systems
+│  ├─ ecs/              # Entity Component System
+│  ├─ scene/            # Scene management
+│  ├─ assets/           # Asset management
+│  ├─ layers/           # Engine-provided layers
+│  ├─ systems/          # Game systems
+│  ├─ threading/        # Thread pool
+│  └─ utils/            # Utilities
+│
+├─ editor/src/          # Editor application source
+│  ├─ main.zig          # Editor entry point
+│  ├─ editor_app.zig    # Editor application (uses zulkan module)
+│  ├─ layers/           # Editor-specific layers (InputLayer, UILayer)
+│  ├─ ui/               # ImGui UI code
+│  └─ keyboard_movement_controller.zig
+│
+└─ build.zig            # Module-based build system
+```
+
+**Build System:**
+- Engine compiled as Zig module (`zulkan`)
+- Editor imports engine via `@import("zulkan")`
+- All engine types accessible through clean API
+- Editor successfully builds and runs
+
+**Public API Exports (zulkan.zig):**
+- Core: Engine, Layer, LayerStack, Event, EventBus, Window, WindowProps
+- Graphics: GraphicsContext, Swapchain, Buffer, Shader, Texture, Descriptors
+- Rendering: Camera, FrameInfo, PerformanceMonitor, UnifiedPipelineSystem, ResourceBinder, Mesh, PipelineBuilder
+- ECS: ecs module, World, Entity, EntityRegistry
+- Scene: Scene, GameObject
+- Assets: AssetManager, Material, ShaderManager
+- Layers: PerformanceLayer, RenderLayer, SceneLayer
+- Threading: ThreadPool
+- Utils: math, log, DynamicRenderingHelper, FileWatcher
+
+**Known Issues / TODOs:**
+1. **InputLayer & UILayer** - Temporarily in editor/ due to editor-specific dependencies (KeyboardMovementController, ImGuiContext)
+2. **Engine struct** - Exists but not yet implemented (init/deinit are stubs)
+3. **Missing methods:**
+   - GraphicsContext.workerThreadExitHook (commented out)
+   - Texture.deinitZstbi() (commented out)
+4. **Editor still uses direct system construction** - Not yet using Engine.init()
+
+### 🔄 In Progress (Phase 2)
+
+**Next Steps:**
+1. Implement Engine.init() to centralize system initialization
+2. Implement Engine frame loop methods (beginFrame/update/render/endFrame)
+3. Refactor editor_app.zig to use Engine API
+4. Resolve InputLayer/UILayer architecture (make generic or keep in editor)
+5. Add missing utility functions to engine
 
 ---
 

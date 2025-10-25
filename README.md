@@ -2,6 +2,37 @@
 
 A modern, high-performance game engine built in Zig with Vulkan, featuring an Entity Component System (ECS), path tracing, and advanced asset management.
 
+## 🏗️ Architecture
+
+ZulkanZengine is structured as a **modular engine library** with a separate editor application:
+
+```
+┌─────────────────────────────────────────┐
+│     ZulkanEditor (Executable)           │
+│  - Editor UI (ImGui)                    │
+│  - Scene Editing Tools                  │
+│  - Asset Browser                        │
+│  - Inspector Panels                     │
+└──────────────┬──────────────────────────┘
+               │ imports zulkan
+               ▼
+┌─────────────────────────────────────────┐
+│     ZulkanEngine (Library Module)       │
+│  - Core Systems (Window, Graphics)      │
+│  - ECS (Entity Component System)        │
+│  - Rendering (Path Tracing, Deferred)   │
+│  - Assets (Async Loading, Hot Reload)   │
+│  - Scene Management                     │
+│  - Threading (Worker Pool)              │
+└─────────────────────────────────────────┘
+```
+
+**Key Benefits:**
+- ✅ Clean API boundary via `@import("zulkan")`
+- ✅ Engine can be used in games, tools, or standalone
+- ✅ Faster iteration (editor changes don't rebuild engine)
+- ✅ Library distribution as Zig module
+
 ## Architecture Overview
 
 ZulkanZengine features a modern architecture consisting of three main pillars:
@@ -82,6 +113,30 @@ ZulkanZengine features a modern architecture consisting of three main pillars:
 1. **Install the Vulkan SDK**: Download from https://vulkan.lunarg.com/sdk/home
 2. **Zig 0.15.1+**: Ensure you have the latest Zig version
 3. **Git**: For cloning the repository
+4. **System Libraries**: GLFW, X11, shaderc
+
+### Project Structure
+
+```
+ZulkanZengine/
+├─ engine/src/          # Engine library (Zig module)
+│  ├─ zulkan.zig        # Public API exports
+│  ├─ core/             # Core systems
+│  ├─ rendering/        # Rendering pipeline
+│  ├─ ecs/              # Entity Component System
+│  ├─ scene/            # Scene management
+│  ├─ assets/           # Asset management
+│  ├─ layers/           # Engine layers
+│  └─ ...
+├─ editor/src/          # Editor application
+│  ├─ main.zig          # Editor entry point
+│  ├─ editor_app.zig    # Application logic
+│  ├─ ui/               # ImGui interface
+│  └─ layers/           # Editor layers
+├─ docs/                # Documentation
+├─ shaders/             # GLSL/HLSL shaders
+└─ build.zig            # Build configuration
+```
 
 ### Setup
 

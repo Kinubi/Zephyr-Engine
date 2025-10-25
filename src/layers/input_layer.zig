@@ -3,10 +3,9 @@ const Layer = @import("../core/layer.zig").Layer;
 const Event = @import("../core/event.zig").Event;
 const EventType = @import("../core/event.zig").EventType;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
-const Window = @import("../core/window.zig").Window;
+const Window = @import("../window.zig").Window;
 const Camera = @import("../rendering/camera.zig").Camera;
-// TODO: KeyboardMovementController should be provided by the application, not hardcoded
-// const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
+const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
 const SceneV2 = @import("../scene/scene_v2.zig").Scene;
 const log = @import("../utils/log.zig").log;
 const c = @cImport({
