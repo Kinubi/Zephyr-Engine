@@ -53,6 +53,18 @@ const RenderStats = @import("ui/ui_renderer.zig").RenderStats;
 // Performance monitoring
 const PerformanceMonitor = @import("rendering/performance_monitor.zig").PerformanceMonitor;
 
+// Layer system
+const Layer = @import("core/layer.zig").Layer;
+const LayerStack = @import("core/layer_stack.zig").LayerStack;
+const EventBus = @import("core/event_bus.zig").EventBus;
+const Event = @import("core/event.zig").Event;
+const EventData = @import("core/event.zig").EventData;
+const RenderLayer = @import("layers/render_layer.zig").RenderLayer;
+const PerformanceLayer = @import("layers/performance_layer.zig").PerformanceLayer;
+const InputLayer = @import("layers/input_layer.zig").InputLayer;
+const SceneLayer = @import("layers/scene_layer.zig").SceneLayer;
+const UILayer = @import("layers/ui_layer.zig").UILayer;
+
 // Vulkan bindings and external C libraries
 const vk = @import("vulkan");
 const c = @cImport({
@@ -69,13 +81,8 @@ pub const App = struct {
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
     as_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
 
-    // FPS tracking variables (instance variables)
-    fps_frame_count: u32 = 0,
-    fps_last_time: f64 = 0.0,
-    current_fps: f32 = 0.0,
-
     // Module-level variables (static state shared across App instances)
-    var current_frame: u32 = 0;
+
     var swapchain: Swapchain = undefined;
     var cmdbufs: []vk.CommandBuffer = undefined;
     var compute_bufs: []vk.CommandBuffer = undefined;
@@ -127,13 +134,18 @@ pub const App = struct {
     var scene_v2: SceneV2 = undefined;
     var scene_v2_enabled: bool = true; // Always enabled now
 
-    // Path tracing toggle state
-    var last_toggle_time: f64 = 0.0;
-    const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
-
     // UI system
     var imgui_context: ImGuiContext = undefined;
     var ui_renderer: UIRenderer = undefined;
+
+    // Layer system
+    var layer_stack: LayerStack = undefined;
+    var event_bus: EventBus = undefined;
+    var render_layer: RenderLayer = undefined;
+    var performance_layer: PerformanceLayer = undefined;
+    var input_layer: InputLayer = undefined;
+    var scene_layer: SceneLayer = undefined;
+    var ui_layer: UILayer = undefined;
 
     pub fn init(self: *App) !void {
         log(.INFO, "app", "Initializing ZulkanZengine...", .{});
@@ -298,12 +310,6 @@ pub const App = struct {
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
-        // // First vase (left side) - smooth vase
-        // const vase1 = try scene_v2.spawnProp("models/smooth_vase.obj", "textures/granitesmooth1-albedo.png");
-        // try vase1.setPosition(Math.Vec3.init(-1.2, -half_size + 0.05, 0.5));
-        // try vase1.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
-        // log(.INFO, "app", "Scene v2: Added vase 1 (smooth)", .{});
-
         // Second vase (right side) - flat vase
         const vase2 = try scene_v2.spawnProp("models/flat_vase.obj", "textures/granitesmooth1-albedo.png");
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
@@ -386,19 +392,6 @@ pub const App = struct {
 
         // ==================== End Scene v2 Setup ====================
 
-        // log(.DEBUG, "scene", "Adding point light objects", .{});
-        // const object3 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.2, 0.5, 1.0), .intensity = 1.0 });
-        // object3.transform.translate(Math.Vec3.init(0.5, 0.5, 0.5));
-        // object3.transform.scale(Math.Vec3.init(0.5, 0.5, 0.5));
-
-        // const object4 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
-        // object4.transform.translate(Math.Vec3.init(0, -1, 0.5));
-        // object4.transform.scale(Math.Vec3.init(0.05, 0, 0));
-
-        // const object6 = try scene.addObject(null, .{ .color = Math.Vec3.init(0.5, 0.2, 0.2), .intensity = 1.0 });
-        // object6.transform.translate(Math.Vec3.init(0, -1, 0.5));
-        // object6.transform.scale(Math.Vec3.init(0.05, 0, 0));
-
         cmdbufs = try self.gc.createCommandBuffers(
             self.allocator,
         );
@@ -414,108 +407,22 @@ pub const App = struct {
         camera.updateProjectionMatrix();
         camera.setViewDirection(Math.Vec3.init(0, 0, 0), Math.Vec3.init(0, 0, 1), Math.Vec3.init(0, 1, 0));
 
-        // Initialize unified textured renderer with shared pipeline system
-        // textured_renderer = try TexturedRenderer.init(
-        //     self.allocator,
-        //     @constCast(&self.gc),
-        //     &shader_manager,
-        //     &unified_pipeline_system,
-        //     swapchain.render_pass,
-        // );
-
-        // Initialize ECS renderer with shared pipeline system
-        // ecs_renderer = try EcsRenderer.init(
-        //     self.allocator,
-        //     @constCast(&self.gc),
-        //     &shader_manager,
-        //     asset_manager, // asset_manager is already a pointer
-        //     &unified_pipeline_system,
-        //     swapchain.render_pass,
-        //     &new_ecs_world,
-        // );
         log(.INFO, "app", "ECS renderer initialized", .{});
 
-        // Material data is now managed by the asset_manager and bound via UnifiedPipelineSystem
-        // No need for separate updateMaterialData calls
-
-        // point_light_renderer = try PointLightRenderer.init(
-        //     @constCast(&self.gc),
-        //     &unified_pipeline_system,
-        //     swapchain.render_pass,
-        //     scene.asScene(),
-        //     global_ubo_set,
-        // );
-
-        // // Initialize unified raytracing renderer through the shared pipeline system
-        // raytracing_renderer = try RaytracingRenderer.init(
-        //     self.allocator,
-        //     @constCast(&self.gc),
-        //     &unified_pipeline_system,
-        //     &swapchain,
-        //     thread_pool,
-        //     global_ubo_set,
-        // );
-
         log(.INFO, "app", "Initialization complete", .{});
-        //     self.allocator,
-        //     &self.gc,
-        //     &shader_manager,
-        //     &unified_pipeline_system,
-        //     swapchain.render_pass,
-        //     PARTICLE_MAX,
-        // );
 
         log(.INFO, "app", "Unified particle renderer initialized", .{});
-
-        // ==================== OLD GENERIC RENDERER (DISABLED FOR RENDER GRAPH) ====================
-        // Initialize Generic Forward Renderer (rasterization only)
-        // forward_renderer = GenericRenderer.init(self.allocator);
-
-        // Set the scene bridge for renderers that need scene data
-        // forward_renderer.setSceneBridge(&scene_bridge);
-
-        // Set the swapchain for renderers that need it
-        // forward_renderer.setSwapchain(&swapchain);
-
-        // Add rasterization renderers to the forward renderer
-        // try forward_renderer.addRenderer("textured", RendererType.raster, &textured_renderer, TexturedRenderer);
-        // try forward_renderer.addRenderer("ecs_renderer", RendererType.raster, &ecs_renderer, EcsRenderer);
-        // try forward_renderer.addRenderer("point_light", RendererType.lighting, &point_light_renderer, PointLightRenderer);
-        // try forward_renderer.addRenderer("particle_renderer", RendererType.compute, &particle_renderer, ParticleRenderer);
-
-        // Prime renderer descriptor bindings once all raster renderers are registered
-        // try forward_renderer.onCreate();
-
-        // Initialize Raytracing Render Pass (separate from forward renderer)
-        // rt_render_pass = GenericRenderer.init(self.allocator);
-
-        // Set the scene bridge and swapchain for raytracing
-        // rt_render_pass.setSceneBridge(&scene_bridge);
-        // rt_render_pass.setSwapchain(&swapchain);
-
-        // Add raytracing renderer to its own render pass
-        // try rt_render_pass.addRenderer("raytracing", RendererType.raytracing, &raytracing_renderer, RaytracingRenderer);
-
-        // Ensure raytracing renderer receives initial descriptor bindings before the first frame
-        // try rt_render_pass.onCreate();
-
-        // Future renderers can be added here:
-        // try forward_renderer.addRenderer("particle", RendererType.compute, &particle_renderer, ParticleRenderer);
-        // try forward_renderer.addRenderer("shadow", RendererType.raster, &shadow_renderer, ShadowRenderer);
-        // ==================== END OLD GENERIC RENDERER ====================
 
         log(.INFO, "app", "Render pass manager system initialized (GenericRenderer disabled)", .{});
 
         var init_frame_info = frame_info;
-        init_frame_info.current_frame = current_frame;
-        init_frame_info.command_buffer = cmdbufs[current_frame];
+        init_frame_info.command_buffer = cmdbufs[frame_info.current_frame];
         init_frame_info.compute_buffer = vk.CommandBuffer.null_handle;
         init_frame_info.camera = &camera;
         // try forward_renderer.update(&init_frame_info);  // OLD: Disabled for RenderGraph
         // try rt_render_pass.update(&init_frame_info);    // OLD: Disabled for RenderGraph
 
         last_frame_time = c.glfwGetTime();
-        self.fps_last_time = last_frame_time; // Initialize FPS tracking
         frame_info.camera = &camera;
         frame_info.performance_monitor = null; // Will be set after initialization
 
@@ -537,6 +444,36 @@ pub const App = struct {
         if (scene_v2_enabled) {
             scene_v2.setPerformanceMonitor(performance_monitor);
         }
+
+        // Initialize Layer System
+        log(.INFO, "app", "Initializing Layer System...", .{});
+        layer_stack = LayerStack.init(self.allocator);
+        event_bus = EventBus.init(self.allocator);
+
+        // Wire up window callbacks to event bus
+        self.window.setEventBus(&event_bus);
+
+        // Create performance layer (should be first to track all frame timing)
+        performance_layer = PerformanceLayer.init(performance_monitor.?, &swapchain, &self.window);
+        try layer_stack.pushLayer(&performance_layer.base);
+
+        // Create render layer
+        render_layer = RenderLayer.init(&swapchain);
+        try layer_stack.pushLayer(&render_layer.base);
+
+        // Create input layer (handles camera movement and input)
+        input_layer = InputLayer.init(&self.window, &camera, &camera_controller, &scene_v2);
+        try layer_stack.pushLayer(&input_layer.base);
+
+        // Create scene layer (updates scene, ECS systems, UBO)
+        scene_layer = SceneLayer.init(&camera, &scene_v2, global_ubo_set, &transform_system, &new_ecs_world, performance_monitor);
+        try layer_stack.pushLayer(&scene_layer.base);
+
+        // Create UI layer (renders ImGui overlay)
+        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, &swapchain, &scene_v2, &camera_controller);
+        try layer_stack.pushOverlay(&ui_layer.base); // UI is an overlay (always on top)
+
+        log(.INFO, "app", "Layer System initialized with {} layers", .{layer_stack.count()});
 
         // // Legacy initialization removed - descriptors updated via SceneBridge during rendering
     }
@@ -573,170 +510,44 @@ pub const App = struct {
             }
         }
 
-        // _ = try scene_bridge.updateAsyncResources();
-
-        //std.debug.print("Updating frame {d}\n", .{current_frame});
         const current_time = c.glfwGetTime();
 
-        // Print performance report every 10 seconds in debug builds
-        if (comptime std.debug.runtime_safety) {
-            if (current_time - last_performance_report >= 10.0) {
-                asset_manager.printPerformanceReport();
-                last_performance_report = current_time;
-            }
-        }
-
-        // Update FPS in title bar every second
-        self.fps_frame_count += 1;
-        if (current_time - self.fps_last_time >= 1.0) {
-            self.current_fps = @as(f32, @floatFromInt(self.fps_frame_count)) / @as(f32, @floatCast(current_time - self.fps_last_time));
-
-            // Create title with FPS - use a stack buffer for the string
-            var title_buffer: [256:0]u8 = undefined;
-            const title_slice = std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine - FPS: {d:.1}", .{self.current_fps}) catch |err| blk: {
-                log(.WARN, "app", "Failed to format title: {}", .{err});
-                break :blk std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine", .{}) catch "ZulkanZengine";
-            };
-
-            self.window.setTitle(title_slice.ptr);
-
-            self.fps_frame_count = 0;
-            self.fps_last_time = current_time;
-        }
         const dt = current_time - last_frame_time;
 
-        // Begin performance monitoring for this frame (at the very start)
-        if (performance_monitor) |pm| {
-            try pm.beginFrame(current_frame);
-        }
-
-        const cmdbuf = cmdbufs[current_frame];
-        const computebuf = compute_bufs[current_frame];
-        frame_info.command_buffer = cmdbuf;
-        frame_info.compute_buffer = computebuf;
+        // ==================== PREPARE FRAME ====================
+        // Set up frame_info with command buffers, timing, and window state
+        frame_info.command_buffer = cmdbufs[frame_info.current_frame];
+        frame_info.compute_buffer = compute_bufs[frame_info.current_frame];
         frame_info.dt = @floatCast(dt);
-        frame_info.current_frame = current_frame;
 
         var width: c_int = 0;
         var height: c_int = 0;
         c.glfwGetWindowSize(@ptrCast(self.window.window.?), &width, &height);
         frame_info.extent = .{ .width = @as(u32, @intCast(width)), .height = @as(u32, @intCast(height)) };
 
-        // Process camera input
-        camera_controller.processInput(&self.window, &camera, dt);
+        // ==================== BEGIN FRAME (via Layer System) ====================
+        // PerformanceLayer.begin() -> calls performance_monitor.beginFrame()
+        // RenderLayer.begin() -> calls swapchain.beginFrame() and populates frame_info images
+        try layer_stack.begin(&frame_info);
 
-        // Toggle path tracing with 'T' key (with debouncing)
-        const GLFW_KEY_T = 84;
-        const t_key_state = c.glfwGetKey(@ptrCast(self.window.window.?), GLFW_KEY_T);
-        const toggle_time = c.glfwGetTime();
+        // ==================== PROCESS EVENTS ====================
+        // Dispatch all queued events to layers
+        event_bus.processEvents(&layer_stack);
 
-        if (t_key_state == c.GLFW_PRESS and (toggle_time - last_toggle_time) > TOGGLE_COOLDOWN) {
-            if (scene_v2_enabled and scene_v2.render_graph != null) {
-                // Check current path tracing state via the render graph
-                const pt_enabled = if (scene_v2.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
-                try scene_v2.setPathTracingEnabled(!pt_enabled);
-                last_toggle_time = toggle_time;
-                log(.INFO, "app", "Path tracing toggled: {}", .{!pt_enabled});
-            }
-        }
+        // ==================== UPDATE LAYERS ====================
+        // PerformanceLayer.update() -> resets queries and writes frame start timestamp
+        // InputLayer.update() -> processes input, camera movement
+        // SceneLayer.update() -> updates transforms, scene, UBO
+        try layer_stack.update(&frame_info);
 
-        // Use camera view matrix directly (no viewer object needed)
-        frame_info.camera.updateProjectionMatrix();
+        // ==================== RENDER LAYERS ====================
+        // SceneLayer.render() -> renders the scene
+        // UILayer.render() -> renders ImGui overlay
+        try layer_stack.render(&frame_info);
 
-        var ubo = GlobalUbo{
-            .view = frame_info.camera.viewMatrix,
-            .projection = frame_info.camera.projectionMatrix,
-            .dt = @floatCast(dt),
-        };
-
-        // Update ECS transform hierarchies
-        try transform_system.update(&new_ecs_world);
-
-        //log(.TRACE, "app", "Frame start", .{});
-
-        // Begin frame - starts both graphics and compute command buffers
-        try swapchain.beginFrame(frame_info);
-
-        if (performance_monitor) |pm| {
-            try pm.resetQueriesForFrame(frame_info.compute_buffer);
-            try pm.writeFrameStartTimestamp(frame_info.compute_buffer);
-        }
-
-        if (performance_monitor) |pm| {
-            try pm.beginPass("scene_update", current_frame, null); // CPU-only wrapper timing
-        }
-        try scene_v2.update(frame_info, &ubo);
-        if (performance_monitor) |pm| {
-            try pm.endPass("scene_update", current_frame, null);
-        }
-
-        if (performance_monitor) |pm| {
-            try pm.beginPass("ubo_update", current_frame, null); // CPU-only
-        }
-        global_ubo_set.*.update(frame_info.current_frame, &ubo);
-        if (performance_monitor) |pm| {
-            try pm.endPass("ubo_update", current_frame, null);
-        }
-
-        // Populate image views for dynamic rendering
-        const swap_image = swapchain.currentSwapImage();
-        frame_info.color_image = swapchain.currentImage();
-        frame_info.color_image_view = swap_image.view;
-        frame_info.depth_image_view = swap_image.depth_image_view;
-
-        if (scene_v2_enabled) {
-            try scene_v2.render(frame_info);
-        }
-
-        // Render ImGui UI on top of everything
-        const imgui_enabled = true; // Optimized implementation
-        if (imgui_enabled) {
-            imgui_context.newFrame();
-
-            // Prepare render stats for UI
-            const perf_stats = if (performance_monitor) |pm| pm.getStats() else null;
-            const stats = RenderStats{
-                .fps = self.current_fps,
-                .frame_time_ms = @as(f32, @floatCast(dt * 1000.0)),
-                .entity_count = new_ecs_world.entityCount(),
-                .draw_calls = 0, // TODO: track this
-                .path_tracing_enabled = if (scene_v2.render_graph) |*graph| blk: {
-                    break :blk if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
-                } else false,
-                .sample_count = 0, // TODO: track accumulated samples
-                .camera_pos = .{ camera_controller.position.x, camera_controller.position.y, camera_controller.position.z },
-                .camera_rot = .{ camera_controller.rotation.x, camera_controller.rotation.y, camera_controller.rotation.z },
-                .performance_stats = perf_stats,
-                .scene = &scene_v2,
-            };
-
-            ui_renderer.render(stats);
-
-            if (performance_monitor) |pm| {
-                try pm.beginPass("imgui", current_frame, frame_info.command_buffer); // GPU timing with graphics buffer
-            }
-
-            // Render ImGui using our custom dynamic rendering backend
-            // This renders on top of the existing frame without clearing
-            try imgui_context.render(frame_info.command_buffer, &swapchain, current_frame);
-
-            if (performance_monitor) |pm| {
-                try pm.endPass("imgui", current_frame, frame_info.command_buffer);
-            }
-        }
-
-        // End performance monitoring and write frame end timestamp (graphics buffer is last)
-        if (performance_monitor) |pm| {
-            try pm.writeFrameEndTimestamp(frame_info.command_buffer);
-            try pm.endFrame(frame_info.current_frame);
-        }
-
-        try swapchain.endFrame(frame_info, &current_frame);
-        // Update GPU timings from previous frame (after fence wait)
-        if (performance_monitor) |pm| {
-            const prev_frame = if (current_frame == 0) MAX_FRAMES_IN_FLIGHT - 1 else current_frame - 1;
-            try pm.updateGpuTimings(prev_frame, swapchain.frame_fence, swapchain.compute_fence);
-        }
+        // ==================== END FRAME ====================
+        // End all layers (cleanup, etc.)
+        try layer_stack.end(&frame_info);
 
         last_frame_time = current_time;
 
@@ -747,6 +558,11 @@ pub const App = struct {
         _ = self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {}; // Ensure all GPU work is finished before destroying resources
 
         swapchain.waitForAllFences() catch unreachable;
+
+        // Clean up Layer System
+        layer_stack.deinit();
+        event_bus.deinit();
+        log(.INFO, "app", "Layer System cleaned up", .{});
 
         // Clean up Performance Monitor
         if (performance_monitor) |pm| {

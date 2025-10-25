@@ -1,8 +1,36 @@
 # Systems Requiring Documentation
 
-**Status**: October 24, 2025
+**Status**: October 25, 2025
 
 This document tracks systems that are implemented but lack full documentation.
+
+## ✅ Completed (Fully Documented Systems)
+
+### Layer & Event System
+**Status**: ✅ Implemented, ✅ Documented
+
+**Implemented Features**:
+- Layer interface with VTable pattern for polymorphism
+- LayerStack for organized execution (begin/update/render/end phases)
+- EventBus with event queue and category filtering
+- GLFW callback integration for event generation
+- Event handlers in all layers (InputLayer, SceneLayer, UILayer)
+- Per-layer performance profiling (CPU time tracking)
+- Runtime toggles: F1 (UI), F2 (Performance Graphs), T (Path Tracing)
+- Event-driven architecture replacing direct input polling
+
+**Documentation**:
+- `docs/LAYER_EVENT_SYSTEM.md` - Full design and architecture
+- `docs/LAYER_SYSTEM_QUICK_REF.md` - Quick reference guide
+
+**Files**:
+- `src/core/layer.zig` - Layer interface
+- `src/core/layer_stack.zig` - Layer management
+- `src/core/event.zig` - Event types
+- `src/core/event_bus.zig` - Event queue and dispatching
+- `src/layers/*.zig` - All layer implementations
+
+---
 
 ## High Priority (Core Systems)
 

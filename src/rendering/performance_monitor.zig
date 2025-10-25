@@ -9,6 +9,7 @@ pub const PerformanceMonitor = struct {
     const MAX_PASSES = 16; // Maximum number of passes to track
     const QUERIES_PER_FRAME = MAX_PASSES * 2 + 2; // Frame start/end + per-pass begin/end
     const QUERY_RESULT_CAPACITY = QUERIES_PER_FRAME * 2; // Timestamp + availability per query
+    const HISTORY_SIZE = 20000; // Track last 20000 frames for graphs (~14 seconds at 1400fps)
 
     allocator: std.mem.Allocator,
     gc: *GraphicsContext,
@@ -26,6 +27,11 @@ pub const PerformanceMonitor = struct {
     // Rolling averages
     avg_cpu_time_ms: f32 = 0.0,
     avg_gpu_time_ms: f32 = 0.0,
+
+    // Frame history for graphs
+    cpu_frame_history: [HISTORY_SIZE]f32 = [_]f32{0.0} ** HISTORY_SIZE,
+    gpu_frame_history: [HISTORY_SIZE]f32 = [_]f32{0.0} ** HISTORY_SIZE,
+    history_write_idx: usize = 0,
 
     // Statistics window
     stats_window_size: usize = 60, // Average over 60 frames (1 second at 60fps)
@@ -87,6 +93,19 @@ pub const PerformanceMonitor = struct {
         fps: f32,
         pass_timings: []const PassTiming,
         timestamp_period: f32, // For converting GPU ticks to ms
+
+        // Frame history for graphs
+        cpu_frame_history: []const f32,
+        gpu_frame_history: []const f32,
+        history_offset: usize, // Current write position (oldest data is at offset, newest at offset-1)
+
+        // Min/Max/Avg over history window
+        cpu_min_ms: f32,
+        cpu_max_ms: f32,
+        cpu_avg_ms: f32,
+        gpu_min_ms: f32,
+        gpu_max_ms: f32,
+        gpu_avg_ms: f32,
     };
 
     pub fn init(allocator: std.mem.Allocator, gc: *GraphicsContext) !PerformanceMonitor {
@@ -191,7 +210,14 @@ pub const PerformanceMonitor = struct {
 
         // Update rolling averages
         const cpu_time = current.getFrameCpuTimeMs();
+        const gpu_time = current.getFrameGpuTimeMs();
         self.avg_cpu_time_ms = self.avg_cpu_time_ms * 0.95 + cpu_time * 0.05;
+        self.avg_gpu_time_ms = self.avg_gpu_time_ms * 0.95 + gpu_time * 0.05;
+
+        // Update frame history for graphing
+        self.cpu_frame_history[self.history_write_idx] = cpu_time;
+        self.gpu_frame_history[self.history_write_idx] = gpu_time;
+        self.history_write_idx = (self.history_write_idx + 1) % HISTORY_SIZE;
 
         // Increment total frames recorded
         self.total_frames_recorded += 1;
@@ -388,12 +414,47 @@ pub const PerformanceMonitor = struct {
 
         const fps = if (self.avg_cpu_time_ms > 0.0) 1000.0 / self.avg_cpu_time_ms else 0.0;
 
+        // Calculate min/max/avg from frame history
+        var cpu_min: f32 = std.math.floatMax(f32);
+        var cpu_max: f32 = 0.0;
+        var cpu_sum: f32 = 0.0;
+        var gpu_min: f32 = std.math.floatMax(f32);
+        var gpu_max: f32 = 0.0;
+        var gpu_sum: f32 = 0.0;
+        var valid_samples: usize = 0;
+
+        for (self.cpu_frame_history, self.gpu_frame_history) |cpu_time, gpu_time| {
+            if (cpu_time > 0.0) {
+                cpu_min = @min(cpu_min, cpu_time);
+                cpu_max = @max(cpu_max, cpu_time);
+                cpu_sum += cpu_time;
+
+                gpu_min = @min(gpu_min, gpu_time);
+                gpu_max = @max(gpu_max, gpu_time);
+                gpu_sum += gpu_time;
+
+                valid_samples += 1;
+            }
+        }
+
+        const cpu_avg = if (valid_samples > 0) cpu_sum / @as(f32, @floatFromInt(valid_samples)) else 0.0;
+        const gpu_avg = if (valid_samples > 0) gpu_sum / @as(f32, @floatFromInt(valid_samples)) else 0.0;
+
         return PerformanceStats{
             .cpu_time_ms = self.avg_cpu_time_ms,
             .gpu_time_ms = self.avg_gpu_time_ms,
             .fps = fps,
             .pass_timings = prev_frame.passes[0..prev_frame.pass_count],
             .timestamp_period = self.timestamp_period,
+            .cpu_frame_history = &self.cpu_frame_history,
+            .gpu_frame_history = &self.gpu_frame_history,
+            .history_offset = self.history_write_idx,
+            .cpu_min_ms = if (cpu_min == std.math.floatMax(f32)) 0.0 else cpu_min,
+            .cpu_max_ms = cpu_max,
+            .cpu_avg_ms = cpu_avg,
+            .gpu_min_ms = if (gpu_min == std.math.floatMax(f32)) 0.0 else gpu_min,
+            .gpu_max_ms = gpu_max,
+            .gpu_avg_ms = gpu_avg,
         };
     }
 
