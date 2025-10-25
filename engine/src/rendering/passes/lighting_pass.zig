@@ -153,17 +153,21 @@ pub const LightingPass = struct {
             .dynamic_rendering_depth_format = null, // No depth test for fullscreen
         };
 
-        self.lighting_pipeline = self.pipeline_system.createPipeline(pipeline_config) catch |err| {
-            log(.WARN, "lighting_pass", "Failed to create pipeline (shaders may be missing): {}", .{err});
-            return err;
-        };
-        const pipeline_entry = self.pipeline_system.pipelines.get(self.lighting_pipeline) orelse return error.PipelineNotFound;
+        const result = try self.pipeline_system.createPipeline(pipeline_config);
+        self.light_volume_pipeline = result.id;
+
+        if (!result.success) {
+            log(.WARN, "light_volume_pass", "Pipeline creation failed. Pass will be disabled.", .{});
+            return error.PipelineCreationFailed;
+        }
+
+        const pipeline_entry = self.pipeline_system.pipelines.get(self.light_volume_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
-        // Create light buffers (one per frame in flight)
-        try self.createLightBuffers();
+        // Bind global UBO to all frames
+        try self.updateDescriptors();
 
-        log(.INFO, "lighting_pass", "Setup complete", .{});
+        log(.INFO, "light_volume_pass", "Setup complete", .{});
     }
 
     fn createLightBuffers(self: *LightingPass) !void {
