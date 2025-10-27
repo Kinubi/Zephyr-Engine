@@ -10,6 +10,10 @@ const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 const RenderLayer = @import("../layers/render_layer.zig").RenderLayer;
 const PerformanceLayer = @import("../layers/performance_layer.zig").PerformanceLayer;
+const RenderThreadContext = @import("../threading/render_thread.zig").RenderThreadContext;
+const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const startRenderThread = @import("../threading/render_thread.zig").startRenderThread;
+const stopRenderThread = @import("../threading/render_thread.zig").stopRenderThread;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -37,6 +41,11 @@ pub const Engine = struct {
     // Optional systems
     asset_manager: ?*AssetManager = null,
     performance_monitor: ?*PerformanceMonitor = null,
+    
+    // Threading (optional)
+    thread_pool: ?*ThreadPool = null, // Required for render thread
+    render_thread_context: ?RenderThreadContext = null,
+    use_render_thread: bool = false,
 
     /// Engine configuration
     pub const Config = struct {
@@ -44,6 +53,8 @@ pub const Engine = struct {
         renderer: RendererConfig = .{},
         enable_validation: bool = false,
         enable_performance_monitoring: bool = true,
+        enable_render_thread: bool = false, // Phase 2.0: Separate render thread
+        thread_pool: ?*ThreadPool = null, // Required if enable_render_thread is true
 
         pub const WindowConfig = struct {
             width: u32 = 1280,
@@ -135,6 +146,31 @@ pub const Engine = struct {
         // For now, leave it null and let the application initialize it if needed
         engine.asset_manager = null;
 
+        // 9. Optional: Initialize render thread (Phase 2.0)
+        engine.thread_pool = config.thread_pool;
+        engine.use_render_thread = config.enable_render_thread;
+        engine.render_thread_context = null; // Explicitly initialize to null
+        if (config.enable_render_thread) {
+            std.log.info("Render thread ENABLED in config", .{});
+            if (config.thread_pool == null) {
+                std.log.err("Render thread enabled but no thread pool provided in config", .{});
+                return error.MissingThreadPool;
+            }
+            
+            engine.render_thread_context = RenderThreadContext.init(
+                allocator,
+                config.thread_pool.?,
+                &engine.graphics_context,
+                &engine.swapchain,
+            );
+            errdefer if (engine.render_thread_context) |*ctx| ctx.deinit();
+            
+            try startRenderThread(&engine.render_thread_context.?);
+            std.log.info("Render thread started successfully", .{});
+        } else {
+            std.log.info("Render thread DISABLED in config", .{});
+        }
+
         // 10. Initialize frame info
         engine.frame_info = FrameInfo{
             .current_frame = 0,
@@ -156,6 +192,16 @@ pub const Engine = struct {
         self.swapchain.waitForAllFences() catch {};
 
         // Clean up in reverse order of initialization
+        
+        // Render thread (if enabled)
+        if (self.render_thread_context) |*ctx| {
+            std.log.info("Stopping render thread...", .{});
+            stopRenderThread(ctx);
+            ctx.deinit();
+            std.log.info("Render thread stopped", .{});
+        } else {
+            std.log.info("No render thread to stop (was not enabled)", .{});
+        }
 
         // Asset manager (if initialized by application)
         if (self.asset_manager) |am| {
@@ -281,5 +327,66 @@ pub const Engine = struct {
     /// Get the swapchain
     pub fn getSwapchain(self: *Engine) *Swapchain {
         return &self.swapchain;
+    }
+    
+    // ==================== Render Thread API (Phase 2.0) ====================
+    // 
+    // Render thread mode decouples game logic from rendering for better performance.
+    // 
+    // Usage Example:
+    // ```zig
+    // var thread_pool = try ThreadPool.init(allocator, 4);
+    // defer thread_pool.deinit();
+    //
+    // const engine = try Engine.init(allocator, .{
+    //     .window = .{ .width = 1280, .height = 720 },
+    //     .enable_render_thread = true,
+    //     .thread_pool = &thread_pool,
+    // });
+    // defer engine.deinit();
+    //
+    // while (engine.isRunning()) {
+    //     // 1. Update game logic
+    //     updateGameLogic(world, camera);
+    //     
+    //     // 2. Capture state and signal render thread (non-blocking)
+    //     try engine.captureAndSignalRenderThread(&world, &camera);
+    //     
+    //     // 3. Continue with engine frame (will render previous frame in parallel)
+    //     const frame_info = try engine.beginFrame();
+    //     try engine.update(frame_info);
+    //     try engine.render(frame_info);
+    //     try engine.endFrame(frame_info);
+    // }
+    // ```
+    
+    /// Check if render thread mode is enabled
+    pub fn isRenderThreadEnabled(self: *Engine) bool {
+        return self.use_render_thread;
+    }
+    
+    /// Capture game state and signal render thread (Phase 2.0)
+    /// Only call this if render thread is enabled
+    /// This should be called from the main/game thread before beginFrame()
+    pub fn captureAndSignalRenderThread(
+        self: *Engine,
+        world: anytype, // *ecs.World or compatible
+        camera: anytype, // *Camera or compatible
+    ) !void {
+        if (!self.use_render_thread) {
+            return error.RenderThreadNotEnabled;
+        }
+        
+        if (self.render_thread_context) |*ctx| {
+            const mainThreadUpdate = @import("../threading/render_thread.zig").mainThreadUpdate;
+            try mainThreadUpdate(
+                ctx,
+                world,
+                camera,
+                self.frame_info.dt,
+            );
+        } else {
+            return error.RenderThreadNotInitialized;
+        }
     }
 };

@@ -69,7 +69,7 @@ pub const Scene = struct {
         asset_manager: *AssetManager,
         thread_pool: ?*@import("../threading/thread_pool.zig").ThreadPool,
         name: []const u8,
-    ) Scene {
+    ) !Scene {
         log(.INFO, "scene_v2", "Creating scene: {s}", .{name});
 
         // Initialize random number generator with current time as seed
@@ -86,7 +86,7 @@ pub const Scene = struct {
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
-            .render_system = ecs.RenderSystem.init(allocator, thread_pool),
+            .render_system = try ecs.RenderSystem.init(allocator, thread_pool),
         };
     }
 

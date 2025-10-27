@@ -50,7 +50,17 @@ pub const FileWatcher = struct {
     };
 
     /// Initialize the file watcher
-    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) FileWatcher {
+    pub fn init(allocator: std.mem.Allocator, thread_pool: *ThreadPool) !FileWatcher {
+        // Register hot_reload subsystem with thread pool
+        try thread_pool.registerSubsystem(.{
+            .name = "hot_reload",
+            .min_workers = 1,
+            .max_workers = 2,
+            .priority = .low,
+            .work_item_type = .hot_reload,
+        });
+        log(.INFO, "file_watcher", "Registered hot_reload subsystem with thread pool", .{});
+        
         return FileWatcher{
             .allocator = allocator,
             .watched_paths = std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),

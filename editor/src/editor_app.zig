@@ -171,23 +171,14 @@ pub const App = struct {
         // TODO: Restore thread exit hook once GraphicsContext.workerThreadExitHook is available
         // thread_pool.setThreadExitHook(GraphicsContext.workerThreadExitHook, @ptrCast(gc));
 
-        // Register subsystems with thread pool
-        try thread_pool.registerSubsystem(.{
-            .name = "hot_reload",
-            .min_workers = 1,
-            .max_workers = 2,
-            .priority = .low,
-            .work_item_type = .hot_reload,
-        });
-
-        try thread_pool.registerSubsystem(.{
-            .name = "bvh_building",
-            .min_workers = 1,
-            .max_workers = 4,
-            .priority = .critical,
-            .work_item_type = .bvh_building,
-        });
-
+        // Register application-specific subsystems with thread pool
+        // NOTE: System-specific subsystems are automatically registered by the systems themselves:
+        //   - "hot_reload" → FileWatcher.init()
+        //   - "bvh_building" → MultithreadedBvhBuilder.init()
+        //   - "ecs_update" → World.init()
+        //   - "render_extraction" → RenderSystem.init()
+        
+        // Register custom work subsystem for ad-hoc tasks
         try thread_pool.registerSubsystem(.{
             .name = "custom_work",
             .min_workers = 1,
@@ -196,28 +187,12 @@ pub const App = struct {
             .work_item_type = .custom,
         });
 
-        try thread_pool.registerSubsystem(.{
-            .name = "ecs_update",
-            .min_workers = 2,
-            .max_workers = 8,
-            .priority = .normal,
-            .work_item_type = .ecs_update,
-        });
-
-        try thread_pool.registerSubsystem(.{
-            .name = "render_extraction",
-            .min_workers = 2,
-            .max_workers = 8,
-            .priority = .high, // Frame-critical work
-            .work_item_type = .render_extraction,
-        });
-
         // Start the thread pool with initial workers
         try thread_pool.start(8); // Start with 8 workers
 
         // ==================== Initialize ECS System ====================
         log(.INFO, "app", "Initializing ECS system with ThreadPool support...", .{});
-        new_ecs_world = new_ecs.World.init(self.allocator, thread_pool);
+        new_ecs_world = try new_ecs.World.init(self.allocator, thread_pool);
         errdefer new_ecs_world.deinit();
 
         // Register all ECS components
@@ -240,7 +215,7 @@ pub const App = struct {
 
         // Create application-owned FileWatcher and hand it to hot-reload systems
         file_watcher = try self.allocator.create(FileWatcher);
-        file_watcher.* = FileWatcher.init(self.allocator, thread_pool);
+        file_watcher.* = try FileWatcher.init(self.allocator, thread_pool);
         try file_watcher.start();
 
         // Initialize Shader Manager for hot reload and compilation
@@ -262,7 +237,7 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene_v2 = SceneV2.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
+        scene_v2 = try SceneV2.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -515,14 +490,15 @@ pub const App = struct {
             log(.INFO, "app", "ECS system cleaned up", .{});
         }
 
-        // Shutdown thread pool
+        // Clean up engine FIRST (may need thread pool for render thread shutdown)
+        // Engine handles: window, graphics context, swapchain, layers, render thread
+        self.engine.deinit();
+        log(.INFO, "app", "Engine shut down", .{});
+
+        // Now safe to shutdown thread pool (engine no longer needs it)
         thread_pool.deinit();
         self.allocator.destroy(thread_pool);
         log(.INFO, "app", "Thread pool shut down", .{});
-
-        // Clean up engine (window, graphics context, swapchain, layers)
-        self.engine.deinit();
-        log(.INFO, "app", "Engine shut down", .{});
 
         // Clean up zstbi global state
         // TODO: Restore once Texture.deinitZstbi() is available

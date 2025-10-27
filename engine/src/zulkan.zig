@@ -52,6 +52,12 @@ pub const PipelineBuilder = @import("rendering/pipeline_builder.zig");
 
 // ========== Threading ==========
 pub const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
+pub const RenderThreadContext = @import("threading/render_thread.zig").RenderThreadContext;
+pub const startRenderThread = @import("threading/render_thread.zig").startRenderThread;
+pub const stopRenderThread = @import("threading/render_thread.zig").stopRenderThread;
+pub const mainThreadUpdate = @import("threading/render_thread.zig").mainThreadUpdate;
+pub const GameStateSnapshot = @import("threading/game_state_snapshot.zig").GameStateSnapshot;
+pub const captureSnapshot = @import("threading/game_state_snapshot.zig").captureSnapshot;
 
 // ========== ECS ==========
 pub const ecs = @import("ecs.zig");

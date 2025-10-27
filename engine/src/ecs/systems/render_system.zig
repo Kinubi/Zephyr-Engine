@@ -40,7 +40,19 @@ pub const RenderSystem = struct {
     cached_raster_data: ?RasterizationData = null,
     cached_raytracing_data: ?RaytracingData = null,
 
-    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) RenderSystem {
+    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !RenderSystem {
+        // Register with thread pool if provided
+        if (thread_pool) |tp| {
+            try tp.registerSubsystem(.{
+                .name = "render_extraction",
+                .min_workers = 2,
+                .max_workers = 8,
+                .priority = .high, // Frame-critical work
+                .work_item_type = .render_extraction,
+            });
+            log(.INFO, "render_system", "Registered render_extraction subsystem with thread pool", .{});
+        }
+        
         return .{
             .allocator = allocator,
             .thread_pool = thread_pool,
@@ -855,7 +867,7 @@ test "RenderSystem: extract empty world" {
     try world.registerComponent(Camera);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator, null);
+    var system = try RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     var render_data = try system.extractRenderData(&world);
@@ -875,7 +887,7 @@ test "RenderSystem: extract single renderable" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator, null);
+    var system = try RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create entity with transform and renderer
@@ -907,7 +919,7 @@ test "RenderSystem: disabled renderer not extracted" {
     try world.registerComponent(Camera);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator, null);
+    var system = try RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create entity with disabled renderer
@@ -934,7 +946,7 @@ test "RenderSystem: extract primary camera" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator, null);
+    var system = try RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create camera entity
@@ -968,7 +980,7 @@ test "RenderSystem: sort by layer" {
     try world.registerComponent(Camera);
     try world.registerComponent(MeshRenderer);
 
-    var system = RenderSystem.init(std.testing.allocator, null);
+    var system = try RenderSystem.init(std.testing.allocator, null);
     defer system.deinit();
 
     // Create entities with different layers (in reverse order)

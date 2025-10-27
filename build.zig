@@ -124,6 +124,36 @@ pub fn build(b: *std.Build) !void {
     const run_example_step = b.step("run-example", "Run the engine API test example");
     run_example_step.dependOn(&run_example.step);
 
+    // Render thread test example
+    const render_thread_test_mod = b.createModule(.{
+        .root_source_file = b.path("examples/render_thread_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const render_thread_test = b.addExecutable(.{
+        .name = "render_thread_test",
+        .root_module = render_thread_test_mod,
+    });
+    render_thread_test.root_module.addImport("zulkan", engine_mod);
+    render_thread_test.root_module.addImport("vulkan", vulkan_zig);
+
+    // Link system libraries
+    render_thread_test.linkSystemLibrary("glfw");
+    render_thread_test.linkSystemLibrary("x11");
+    render_thread_test.linkSystemLibrary("shaderc");
+    render_thread_test.linkSystemLibrary("pthread");
+    render_thread_test.linkLibC();
+    addSpirvCross(b, render_thread_test);
+
+    b.installArtifact(render_thread_test);
+
+    const run_render_thread_test = b.addRunArtifact(render_thread_test);
+    run_render_thread_test.step.dependOn(b.getInstallStep());
+
+    const run_render_thread_test_step = b.step("test-render-thread", "Run the render thread infrastructure test");
+    run_render_thread_test_step.dependOn(&run_render_thread_test.step);
+
     // ========== TESTS ==========
     const editor_test_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),

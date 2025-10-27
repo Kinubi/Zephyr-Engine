@@ -111,6 +111,16 @@ pub const MultithreadedBvhBuilder = struct {
     total_build_time_ns: std.atomic.Value(u64),
 
     pub fn init(gc: *GraphicsContext, thread_pool: *ThreadPool, allocator: std.mem.Allocator) !MultithreadedBvhBuilder {
+        // Register BVH building subsystem with thread pool
+        try thread_pool.registerSubsystem(.{
+            .name = "bvh_building",
+            .min_workers = 1,
+            .max_workers = 4,
+            .priority = .critical,
+            .work_item_type = .bvh_building,
+        });
+        log(.INFO, "bvh_builder", "Registered bvh_building subsystem with thread pool", .{});
+        
         var completed_blas = std.ArrayList(BlasResult){};
         try completed_blas.ensureTotalCapacity(allocator, 8);
 
