@@ -4,6 +4,9 @@ const Math = @import("../utils/math.zig");
 
 const ecs = @import("../ecs.zig");
 const Camera = @import("../rendering/camera.zig").Camera;
+const Transform = @import("../ecs/components/transform.zig").Transform;
+const MeshRenderer = @import("../ecs/components/mesh_renderer.zig").MeshRenderer;
+const AssetId = @import("../assets/asset_types.zig").AssetId;
 
 /// Flat, cache-friendly snapshot of game state for rendering.
 /// Passed from main thread to render thread via double-buffering.
@@ -34,9 +37,12 @@ pub const GameStateSnapshot = struct {
     pub const EntityRenderData = struct {
         entity_id: ecs.EntityId,
         transform: Math.Mat4x4,  // World transform matrix
-        mesh_id: u32,
-        material_id: u32,
-        // Add other render-relevant component data as needed
+        model_asset: AssetId,
+        material_asset: ?AssetId,
+        texture_asset: ?AssetId,
+        layer: u8,
+        casts_shadows: bool,
+        receives_shadows: bool,
     };
     
     pub const PointLightData = struct {
@@ -82,8 +88,6 @@ pub fn captureSnapshot(
     frame_index: u64,
     delta_time: f32,
 ) !GameStateSnapshot {
-    _ = world; // TODO: Implement ECS query
-    
     var snapshot = GameStateSnapshot.init(allocator);
     
     snapshot.frame_index = frame_index;
@@ -95,37 +99,50 @@ pub fn captureSnapshot(
     snapshot.camera_projection_matrix = camera.getProjectionMatrix();
     snapshot.camera_view_projection_matrix = snapshot.camera_projection_matrix.mul(snapshot.camera_view_matrix);
     
-    // Count entities with renderable components
-    // TODO: Query for Transform + MeshRenderer (or similar components)
-    // For now, use actual count from world
-    const estimated_entity_count = 0; // TODO: world.query(...).count()
+    // Query for entities with MeshRenderer (they may or may not have Transform)
+    const mesh_view = try world.view(MeshRenderer);
+    const renderable_entities = mesh_view.storage.entities.items;
+    
+    // Allocate array for entity data
     snapshot.entities = try allocator.alloc(
         GameStateSnapshot.EntityRenderData,
-        estimated_entity_count
+        renderable_entities.len
     );
     
     // Extract entity data
-    // TODO: Implement actual ECS query
-    // var iter = world.query(&.{Transform, MeshRenderer});
-    // while (iter.next()) |entry| {
-    //     snapshot.entities[snapshot.entity_count] = .{
-    //         .entity_id = entry.entity,
-    //         .transform = entry.get(Transform).matrix,
-    //         .mesh_id = entry.get(MeshRenderer).mesh_id,
-    //         .material_id = entry.get(MeshRenderer).material_id,
-    //     };
-    //     snapshot.entity_count += 1;
-    // }
-    snapshot.entity_count = 0; // Placeholder
+    var entity_index: usize = 0;
+    for (renderable_entities) |entity| {
+        const renderer = world.get(MeshRenderer, entity) orelse continue;
+        
+        // Skip disabled renderers or those without a model
+        if (!renderer.enabled or renderer.model_asset == null) continue;
+        
+        // Get transform (default to identity if missing)
+        const transform = world.get(Transform, entity);
+        const world_matrix = if (transform) |t| t.world_matrix else Math.Mat4x4.identity();
+        
+        // Store entity render data
+        snapshot.entities[entity_index] = .{
+            .entity_id = entity,
+            .transform = world_matrix,
+            .model_asset = renderer.model_asset.?,
+            .material_asset = renderer.material_asset,
+            .texture_asset = renderer.texture_asset,
+            .layer = renderer.layer,
+            .casts_shadows = renderer.casts_shadows,
+            .receives_shadows = renderer.receives_shadows,
+        };
+        entity_index += 1;
+    }
+    snapshot.entity_count = entity_index;
     
-    // Extract light data
-    // TODO: Query for PointLight component
-    const estimated_light_count = 0; // TODO: world.query(...).count()
+    // TODO: Extract light data when PointLight component exists
+    // For now, allocate empty light array
     snapshot.point_lights = try allocator.alloc(
         GameStateSnapshot.PointLightData,
-        estimated_light_count
+        0
     );
-    snapshot.point_light_count = 0; // Placeholder
+    snapshot.point_light_count = 0;
     
     return snapshot;
 }

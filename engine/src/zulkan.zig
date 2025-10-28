@@ -64,6 +64,8 @@ pub const ecs = @import("ecs.zig");
 pub const World = ecs.World;
 pub const Entity = @import("ecs/entity_registry.zig").EntityId;
 pub const EntityRegistry = @import("ecs/entity_registry.zig").EntityRegistry;
+pub const MeshRenderer = @import("ecs/components/mesh_renderer.zig").MeshRenderer;
+pub const Transform = @import("ecs/components/transform.zig").Transform;
 
 // ========== Scene ==========
 pub const Scene = @import("scene/scene_v2.zig").Scene;

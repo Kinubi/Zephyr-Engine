@@ -38,6 +38,9 @@ pub fn main() !void {
     var world = try ecs.World.init(allocator, thread_pool);
     defer world.deinit();
     
+    // Register MeshRenderer component (needed by captureSnapshot)
+    try world.registerComponent(zulkan.MeshRenderer);
+    
     // Create mock camera (just a struct with required fields)
     var mock_camera = MockCamera{};
     

@@ -357,6 +357,294 @@ pub const RenderSystem = struct {
         }
     }
 
+    // ============================================================================
+    // SNAPSHOT-BASED FUNCTIONS (Phase 2.1 - Render Thread Support)
+    // ============================================================================
+    
+    /// Rebuild caches from a GameStateSnapshot instead of World
+    /// This is called by the render thread with an immutable snapshot
+    pub fn rebuildCachesFromSnapshot(
+        self: *RenderSystem,
+        snapshot: *const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot,
+        asset_manager: *AssetManager,
+    ) !void {
+        const start_time = std.time.nanoTimestamp();
+
+        // Clean up old cached data
+        if (self.cached_raster_data) |data| {
+            self.allocator.free(data.objects);
+        }
+        if (self.cached_raytracing_data) |*data| {
+            self.allocator.free(data.instances);
+            self.allocator.free(data.geometries);
+            self.allocator.free(data.materials);
+        }
+
+        const cache_build_start = std.time.nanoTimestamp();
+
+        // Build caches from snapshot entities
+        const entities = snapshot.entities[0..snapshot.entity_count];
+        
+        // Use parallel cache building if thread_pool available and enough work
+        if (self.thread_pool != null and entities.len >= 50) {
+            try self.buildCachesFromSnapshotParallel(entities, asset_manager);
+        } else {
+            try self.buildCachesFromSnapshotSingleThreaded(entities, asset_manager);
+        }
+
+        const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
+        const cache_build_time_ms = @as(f64, @floatFromInt(cache_build_time_ns)) / 1_000_000.0;
+
+        const total_time_ns = std.time.nanoTimestamp() - start_time;
+        const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
+
+        // Frame budget enforcement
+        const budget_ms: f64 = 2.0;
+        if (total_time_ms > budget_ms) {
+            log(.WARN, "render_system", "Frame budget exceeded in snapshot rebuild! Total: {d:.2}ms (cache: {d:.2}ms) Budget: {d:.2}ms", .{ total_time_ms, cache_build_time_ms, budget_ms });
+        } else {
+            log(.DEBUG, "render_system", "Snapshot rebuild complete: {d:.2}ms (cache: {d:.2}ms)", .{ total_time_ms, cache_build_time_ms });
+        }
+
+        self.renderables_dirty = false;
+    }
+
+    /// Build caches from snapshot entities (single-threaded)
+    fn buildCachesFromSnapshotSingleThreaded(
+        self: *RenderSystem,
+        entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
+        asset_manager: *AssetManager,
+    ) !void {
+        // Count total meshes
+        var total_meshes: usize = 0;
+        for (entities) |entity_data| {
+            const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
+            total_meshes += model.meshes.items.len;
+        }
+
+        // Allocate output arrays
+        const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        const geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
+        const instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
+        const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
+
+        var mesh_idx: usize = 0;
+        for (entities) |entity_data| {
+            const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
+
+            var material_index: u32 = 0;
+            if (entity_data.material_asset) |material_asset_id| {
+                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
+                    material_index = @intCast(mat_idx);
+                }
+            }
+
+            for (model.meshes.items) |model_mesh| {
+                raster_objects[mesh_idx] = .{
+                    .transform = entity_data.transform.data,
+                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
+                    .material_index = material_index,
+                    .visible = true,
+                };
+
+                geometries[mesh_idx] = .{
+                    .mesh_ptr = model_mesh.geometry.mesh,
+                    .blas = null,
+                    .model_asset = entity_data.model_asset,
+                };
+
+                instances[mesh_idx] = .{
+                    .transform = entity_data.transform.to_3x4(),
+                    .instance_id = @intCast(mesh_idx),
+                    .mask = 0xFF,
+                    .geometry_index = @intCast(mesh_idx),
+                    .material_index = material_index,
+                };
+
+                mesh_idx += 1;
+            }
+        }
+
+        // Store cached data
+        self.cached_raster_data = .{
+            .objects = raster_objects,
+            .materials = materials,
+        };
+
+        self.cached_raytracing_data = .{
+            .instances = instances,
+            .geometries = geometries,
+            .materials = materials,
+        };
+    }
+
+    /// Build caches from snapshot entities (parallel)
+    fn buildCachesFromSnapshotParallel(
+        self: *RenderSystem,
+        entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
+        asset_manager: *AssetManager,
+    ) !void {
+        const pool = self.thread_pool.?;
+
+        // Count meshes per entity
+        var mesh_counts = try self.allocator.alloc(usize, entities.len);
+        defer self.allocator.free(mesh_counts);
+
+        var total_meshes: usize = 0;
+        for (entities, 0..) |entity_data, i| {
+            const model = asset_manager.getModel(entity_data.model_asset) orelse {
+                mesh_counts[i] = 0;
+                continue;
+            };
+            mesh_counts[i] = model.meshes.items.len;
+            total_meshes += model.meshes.items.len;
+        }
+
+        // Allocate output arrays
+        const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        errdefer self.allocator.free(raster_objects);
+
+        const geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
+        errdefer self.allocator.free(geometries);
+
+        const instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
+        errdefer self.allocator.free(instances);
+
+        const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
+        errdefer self.allocator.free(materials);
+
+        // Split work into chunks
+        const worker_count: usize = 4;
+        const chunk_size = (entities.len + worker_count - 1) / worker_count;
+
+        var completion = std.atomic.Value(usize).init(worker_count);
+        var contexts = try self.allocator.alloc(SnapshotCacheBuildContext, worker_count);
+        defer self.allocator.free(contexts);
+
+        // Calculate output offsets for each chunk
+        var current_offset: usize = 0;
+        for (0..worker_count) |i| {
+            const start_idx = i * chunk_size;
+            if (start_idx >= entities.len) break;
+            const end_idx = @min(start_idx + chunk_size, entities.len);
+
+            // Calculate this chunk's output offset
+            var chunk_mesh_count: usize = 0;
+            for (mesh_counts[start_idx..end_idx]) |count| {
+                chunk_mesh_count += count;
+            }
+
+            contexts[i] = SnapshotCacheBuildContext{
+                .entities = entities,
+                .start_idx = start_idx,
+                .end_idx = end_idx,
+                .raster_objects = raster_objects,
+                .geometries = geometries,
+                .instances = instances,
+                .asset_manager = asset_manager,
+                .output_offset = current_offset,
+                .completion = &completion,
+            };
+
+            try pool.submitWork(.{
+                .id = i,
+                .item_type = .render_extraction,
+                .priority = .high,
+                .data = .{ .render_extraction = .{
+                    .chunk_index = @intCast(i),
+                    .total_chunks = @intCast(worker_count),
+                    .user_data = &contexts[i],
+                } },
+                .worker_fn = snapshotCacheBuilderWorker,
+                .context = &contexts[i],
+            });
+
+            current_offset += chunk_mesh_count;
+        }
+
+        // Wait for completion
+        while (completion.load(.acquire) > 0) {
+            std.Thread.yield() catch {};
+        }
+
+        // Store cached data
+        self.cached_raster_data = .{
+            .objects = raster_objects,
+            .materials = materials,
+        };
+
+        self.cached_raytracing_data = .{
+            .instances = instances,
+            .geometries = geometries,
+            .materials = materials,
+        };
+    }
+
+    /// Context for snapshot-based parallel cache building
+    const SnapshotCacheBuildContext = struct {
+        entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
+        start_idx: usize,
+        end_idx: usize,
+        raster_objects: []RasterizationData.RenderableObject,
+        geometries: []RaytracingData.RTGeometry,
+        instances: []RaytracingData.RTInstance,
+        asset_manager: *AssetManager,
+        output_offset: usize,
+        completion: *std.atomic.Value(usize),
+    };
+
+    /// Worker function for snapshot-based parallel cache building
+    fn snapshotCacheBuilderWorker(context: *anyopaque, work_item: WorkItem) void {
+        const ctx = @as(*SnapshotCacheBuildContext, @ptrCast(@alignCast(context)));
+        _ = work_item;
+
+        var mesh_offset: usize = 0;
+
+        for (ctx.entities[ctx.start_idx..ctx.end_idx]) |entity_data| {
+            const model = ctx.asset_manager.getModel(entity_data.model_asset) orelse continue;
+
+            var material_index: u32 = 0;
+            if (entity_data.material_asset) |material_asset_id| {
+                if (ctx.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
+                    material_index = @intCast(mat_idx);
+                }
+            }
+
+            for (model.meshes.items) |model_mesh| {
+                const output_idx = ctx.output_offset + mesh_offset;
+
+                ctx.raster_objects[output_idx] = .{
+                    .transform = entity_data.transform.data,
+                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
+                    .material_index = material_index,
+                    .visible = true,
+                };
+
+                ctx.geometries[output_idx] = .{
+                    .mesh_ptr = model_mesh.geometry.mesh,
+                    .blas = null,
+                    .model_asset = entity_data.model_asset,
+                };
+
+                ctx.instances[output_idx] = .{
+                    .transform = entity_data.transform.to_3x4(),
+                    .instance_id = @intCast(output_idx),
+                    .mask = 0xFF,
+                    .geometry_index = @intCast(output_idx),
+                    .material_index = material_index,
+                };
+
+                mesh_offset += 1;
+            }
+        }
+
+        _ = ctx.completion.fetchSub(1, .release);
+    }
+
+    // ============================================================================
+    // END OF SNAPSHOT-BASED FUNCTIONS
+    // ============================================================================
+
     /// Comparison function for sorting by layer
     fn compareByLayer(context: void, a: RenderableEntity, b: RenderableEntity) bool {
         _ = context;
