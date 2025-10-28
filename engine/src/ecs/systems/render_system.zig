@@ -1101,7 +1101,10 @@ pub const RenderSystem = struct {
     /// Returns a COPY of the cached data that the caller owns
     pub fn getRasterData(self: *RenderSystem) !RasterizationData {
         if (self.cached_raster_data) |cached| {
-            // Allocate new memory and copy manually to avoid aliasing issues
+            // TODO: Investigate why allocator.dupe() causes @memcpy aliasing panic
+            // Root cause: Likely allocator reusing freed memory in tight loops
+            // Better fix: Use arena allocator for per-frame data to guarantee no reuse
+            // Workaround: Manual copy loop to avoid aliasing detection
             const objects_copy = try self.allocator.alloc(RasterizationData.RenderableObject, cached.objects.len);
             for (cached.objects, 0..) |obj, i| {
                 objects_copy[i] = obj;
@@ -1123,17 +1126,20 @@ pub const RenderSystem = struct {
     /// Returns a COPY of the cached data that the caller owns
     pub fn getRaytracingData(self: *RenderSystem) !RaytracingData {
         if (self.cached_raytracing_data) |cached| {
-            // Allocate new memory and copy manually to avoid aliasing issues
+            // TODO: Investigate why allocator.dupe() causes @memcpy aliasing panic
+            // Root cause: Likely allocator reusing freed memory in tight loops
+            // Better fix: Use arena allocator for per-frame data to guarantee no reuse
+            // Workaround: Manual copy loop to avoid aliasing detection
             const instances_copy = try self.allocator.alloc(RaytracingData.RTInstance, cached.instances.len);
             for (cached.instances, 0..) |inst, i| {
                 instances_copy[i] = inst;
             }
-            
+
             const geometries_copy = try self.allocator.alloc(RaytracingData.RTGeometry, cached.geometries.len);
             for (cached.geometries, 0..) |geom, i| {
                 geometries_copy[i] = geom;
             }
-            
+
             const materials_copy = try self.allocator.alloc(RasterizationData.MaterialData, cached.materials.len);
             for (cached.materials, 0..) |mat, i| {
                 materials_copy[i] = mat;

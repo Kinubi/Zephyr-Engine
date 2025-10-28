@@ -118,9 +118,10 @@ pub const PathTracingPass = struct {
 
     // Toggle between raster and path tracing
     enable_path_tracing: bool = false,
-    
+
     // Skip BVH rebuild for N frames after toggle to avoid fence conflicts
-    skip_bvh_rebuild_frames: u32 = 0,
+    // THREAD-SAFE: Atomic to prevent races if multiple systems call updateImpl()
+    skip_bvh_rebuild_frames: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -650,9 +651,9 @@ pub const PathTracingPass = struct {
         self.rt_system.flushDeferredFrame(frame_index);
 
         // Skip BVH rebuild for N frames after toggle to avoid fence threading conflicts
-        if (self.skip_bvh_rebuild_frames > 0) {
-            self.skip_bvh_rebuild_frames -= 1;
-            log(.DEBUG, "path_tracing_pass", "Skipping BVH rebuild ({} frames remaining)", .{self.skip_bvh_rebuild_frames});
+        const remaining = self.skip_bvh_rebuild_frames.load(.acquire);
+        if (remaining > 0) {
+            _ = self.skip_bvh_rebuild_frames.fetchSub(1, .release);
             return; // Skip this frame's BVH update
         }
 

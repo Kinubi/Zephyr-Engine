@@ -24,6 +24,11 @@ const Camera = ecs.Camera;
 
 const GameObject = @import("game_object_v2.zig").GameObject;
 
+// Configuration constants
+/// Number of frames to skip BVH rebuilding after RT mode toggle
+/// This allows the render thread to stabilize and prevents fence threading conflicts
+const BVH_SKIP_FRAMES_AFTER_RT_TOGGLE = 5;
+
 /// Scene represents a game level/map
 /// Provides high-level API for creating game objects backed by ECS
 pub const Scene = struct {
@@ -426,13 +431,12 @@ pub const Scene = struct {
                 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
                 const pt_pass: *PathTracingPass = @fieldParentPtr("base", pass);
                 pt_pass.enable_path_tracing = new_enabled;
-                
-                // Skip BVH rebuild for 5 frames after enabling to avoid fence conflicts
+
+                // Skip BVH rebuild for N frames after enabling to avoid fence conflicts
                 // This allows the render thread to stabilize before async BVH building starts
                 if (new_enabled) {
-                    pt_pass.skip_bvh_rebuild_frames = 5;
-                    log(.INFO, "scene_v2", "Skipping BVH rebuild for 5 frames after RT enable", .{});
-                    
+                    pt_pass.skip_bvh_rebuild_frames.store(BVH_SKIP_FRAMES_AFTER_RT_TOGGLE, .release);
+
                     // Clear any pending secondary command buffers from previous async BVH builds
                     // This prevents fence conflicts when old worker thread buffers try to execute
                     graph.graphics_context.clearPendingSecondaryBuffers();
@@ -661,7 +665,7 @@ pub const Scene = struct {
 
     /// Update scene state (animations, physics, etc.)
     /// Call this once per frame before rendering
-    /// 
+    ///
     /// DEPRECATED in render thread mode - use prepareFrame() on main thread
     /// and prepareRender() on render thread instead
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {

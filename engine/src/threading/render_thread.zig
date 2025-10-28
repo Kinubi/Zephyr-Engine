@@ -10,6 +10,7 @@ const Camera = @import("../rendering/camera.zig").Camera;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Swapchain = @import("../core/swapchain.zig").Swapchain;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
+const log = @import("../utils/log.zig").log;
 
 /// Context for managing the render thread and double-buffered game state.
 pub const RenderThreadContext = struct {
@@ -36,6 +37,7 @@ pub const RenderThreadContext = struct {
     // Frame tracking
     frame_index: std.atomic.Value(u64),
     last_rendered_frame: std.atomic.Value(u64), // Track which frame was last rendered to avoid duplicates
+    // Uses maxInt as sentinel to indicate "not started yet"
 
     pub fn init(
         allocator: Allocator,
@@ -59,7 +61,7 @@ pub const RenderThreadContext = struct {
             .swapchain = swapchain,
             .engine = null, // Will be set after engine is fully initialized
             .frame_index = std.atomic.Value(u64).init(0),
-            .last_rendered_frame = std.atomic.Value(u64).init(0), // Start at 0, will render frame 0 on first update
+            .last_rendered_frame = std.atomic.Value(u64).init(std.math.maxInt(u64)), // Sentinel: not started yet
         };
     }
 
@@ -84,10 +86,10 @@ pub fn startRenderThread(ctx: *RenderThreadContext) !void {
     }
 
     ctx.shutdown.store(false, .release);
-    
+
     // Post frame_consumed semaphore initially so main thread can start producing first frame
     ctx.frame_consumed.post();
-    
+
     ctx.render_thread = try std.Thread.spawn(.{}, renderThreadLoop, .{ctx});
 }
 
@@ -160,7 +162,7 @@ pub fn getEffectiveFrameCount(ctx: *RenderThreadContext) u64 {
 /// This is the function that the render thread executes in a loop.
 fn renderThreadLoop(ctx: *RenderThreadContext) void {
     renderThreadLoopImpl(ctx) catch |err| {
-        std.log.err("Render thread crashed with error: {}", .{err});
+        log(.ERROR, "render_thread", "Render thread crashed with error: {}", .{err});
     };
 }
 
@@ -187,7 +189,8 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
 
         // Check if we've already rendered this frame (main thread controls frame rate)
         const last_rendered = ctx.last_rendered_frame.load(.acquire);
-        if (snapshot.frame_index < last_rendered) {
+        // Skip if we've already rendered this frame (unless it's the first frame - sentinel value)
+        if (last_rendered != std.math.maxInt(u64) and snapshot.frame_index <= last_rendered) {
             // We've already rendered this frame, wait for next signal
             continue;
         }
@@ -196,7 +199,7 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
         if (engine_ptr) |engine| {
             // ============================================
             // PHASE 2.1 Render Thread Responsibilities:
-            // 
+            //
             // 1. Begin frame (acquire swapchain image)
             // 2. Prepare render (Vulkan descriptor updates) - scene.prepareRender()
             // 3. Execute render (Vulkan draw commands) - scene.render()
@@ -211,17 +214,16 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
             const frame_info = engine.beginFrame() catch |err| {
                 // If window is closed, treat as shutdown signal
                 if (err == error.WindowClosed) {
-                    std.log.info("Render thread: window closed, shutting down", .{});
                     break;
                 }
-                std.log.err("Render thread: beginFrame failed: {}", .{err});
+                log(.ERROR, "render_thread", "beginFrame failed: {}", .{err});
                 continue;
             };
 
             // PHASE 2.1: Update phase does Vulkan descriptor updates (render thread)
             // This calls render_graph.update() which updates descriptor sets
             engine.update(frame_info) catch |err| {
-                std.log.err("Render thread: update failed: {}", .{err});
+                log(.ERROR, "render_thread", "update failed: {}", .{err});
                 // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
                 continue;
@@ -230,14 +232,14 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
             // PHASE 2.1: Render phase does Vulkan draw commands (render thread)
             // This calls render_graph.execute() which records command buffers
             engine.render(frame_info) catch |err| {
-                std.log.err("Render thread: render failed: {}", .{err});
+                log(.ERROR, "render_thread", "render failed: {}", .{err});
                 // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
                 continue;
             };
 
             engine.endFrame(frame_info) catch |err| {
-                std.log.err("Render thread: endFrame failed: {}", .{err});
+                log(.ERROR, "render_thread", "endFrame failed: {}", .{err});
                 continue;
             };
 
@@ -260,6 +262,4 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
         // NOTE: Don't free snapshot here - mainThreadUpdate will free it
         // when it overwrites this buffer with a new snapshot
     }
-
-    std.log.info("Render thread shutting down gracefully", .{});
 }

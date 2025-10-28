@@ -40,14 +40,23 @@ pub const EventBus = struct {
 
     /// Process all queued events through the layer stack
     pub fn processEvents(self: *EventBus, layer_stack: *LayerStack) void {
-        // THREAD-SAFE: Lock while processing to prevent concurrent modifications
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // THREAD-SAFE: Swap to local list under lock to minimize lock contention
+        // This prevents holding the lock during potentially slow event dispatch
+        var local_events = std.ArrayList(Event){};
+        defer local_events.deinit(self.allocator);
 
-        for (self.event_queue.items) |*event| {
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Swap the queues so we can process without holding the lock
+            std.mem.swap(std.ArrayList(Event), &self.event_queue, &local_events);
+        }
+
+        // Process events without holding the lock (allows concurrent queueEvent calls)
+        for (local_events.items) |*event| {
             layer_stack.dispatchEvent(event);
         }
-        self.event_queue.clearRetainingCapacity();
     }
 
     /// Get number of queued events

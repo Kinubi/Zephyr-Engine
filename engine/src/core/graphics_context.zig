@@ -315,6 +315,23 @@ pub const GraphicsContext = struct {
         }
     }
 
+    /// Reset all worker thread command pools
+    /// This frees all command buffers allocated from worker pools, including orphaned secondary buffers
+    /// THREAD-SAFE: Must be called from render thread when no workers are active
+    pub fn resetAllWorkerCommandPools(self: *GraphicsContext) void {
+        self.command_pool_mutex.lock();
+        defer self.command_pool_mutex.unlock();
+
+        for (self.worker_command_pools.items) |worker_pool| {
+            // Reset the entire pool, freeing all command buffers
+            self.vkd.resetCommandPool(self.dev, worker_pool.pool, .{}) catch |err| {
+                log(.ERROR, "graphics_context", "Failed to reset worker command pool: {}", .{err});
+            };
+        }
+
+        log(.DEBUG, "graphics_context", "Reset {} worker command pools", .{self.worker_command_pools.items.len});
+    }
+
     pub fn getThreadQueue(self: *GraphicsContext) !Queue {
         // Use Zig's threadlocal storage for worker command pools
         return self.graphics_queue;
@@ -715,23 +732,28 @@ pub const GraphicsContext = struct {
 
     /// Clear any pending secondary command buffers without executing them
     /// Use this when switching rendering modes to discard async work from previous mode
-    /// Note: We don't free the buffers here because they belong to worker thread pools
-    /// and can't be safely freed from the render thread. They'll be cleaned up when
-    /// the worker threads reset their command pools.
+    ///
+    /// FIXED: Now properly frees command buffers by resetting all worker command pools
+    /// This is safe because:
+    /// 1. Called during RT toggle when no BVH building is active
+    /// 2. Worker threads are idle (waiting for work)
+    /// 3. vkResetCommandPool frees all buffers allocated from that pool
+    ///
+    /// WARNING: Only call this when you're certain no workers are using their command pools!
     pub fn clearPendingSecondaryBuffers(self: *GraphicsContext) void {
-        _ = self; // GraphicsContext not needed for this operation
         secondary_buffers_mutex.lock();
-        defer secondary_buffers_mutex.unlock();
-
-        if (!secondary_buffers_initialized) return;
-
         const count = pending_secondary_buffers.items.len;
-        
-        // Just clear the list - don't try to free the buffers
-        // The worker thread command pools will clean them up naturally
+
+        // Just clear the list - don't try to free individual buffers
+        // The worker thread command pools will be reset below
         pending_secondary_buffers.clearRetainingCapacity();
-        
-        log(.DEBUG, "graphics_context", "Discarded {} pending secondary command buffers", .{count});
+        secondary_buffers_mutex.unlock();
+
+        // Reset all worker command pools to free their command buffers
+        // This properly cleans up the secondary buffers without threading conflicts
+        self.resetAllWorkerCommandPools();
+
+        log(.DEBUG, "graphics_context", "Discarded {} pending secondary command buffers and reset worker pools", .{count});
     }
 
     /// Clean up submitted secondary command buffers after frame submission completes
