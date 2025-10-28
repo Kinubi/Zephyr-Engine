@@ -7,6 +7,7 @@ const LayerStack = @import("layer_stack.zig").LayerStack;
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
     event_queue: std.ArrayList(Event),
+    mutex: std.Thread.Mutex, // Protect event_queue from concurrent access
 
     // Event filtering by category
     enabled_categories: std.EnumSet(EventCategory),
@@ -15,6 +16,7 @@ pub const EventBus = struct {
         return .{
             .allocator = allocator,
             .event_queue = std.ArrayList(Event){},
+            .mutex = .{},
             .enabled_categories = std.EnumSet(EventCategory).initFull(),
         };
     }
@@ -30,11 +32,18 @@ pub const EventBus = struct {
             return; // Category is disabled, skip this event
         }
 
+        // THREAD-SAFE: Lock while appending to queue (called from GLFW callbacks)
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.event_queue.append(self.allocator, event);
     }
 
     /// Process all queued events through the layer stack
     pub fn processEvents(self: *EventBus, layer_stack: *LayerStack) void {
+        // THREAD-SAFE: Lock while processing to prevent concurrent modifications
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         for (self.event_queue.items) |*event| {
             layer_stack.dispatchEvent(event);
         }

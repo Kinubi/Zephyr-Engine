@@ -48,6 +48,7 @@ pub const InputLayer = struct {
     const vtable = Layer.VTable{
         .attach = attach,
         .detach = detach,
+        .prepare = null, // InputLayer has no main thread preparation work
         .begin = begin,
         .update = update,
         .render = render,

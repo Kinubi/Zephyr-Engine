@@ -14,26 +14,29 @@ const ThreadPool = @import("thread_pool.zig").ThreadPool;
 /// Context for managing the render thread and double-buffered game state.
 pub const RenderThreadContext = struct {
     allocator: Allocator,
-    
+
     // Double-buffered game state (ping-pong buffers)
     game_state: [2]GameStateSnapshot,
-    current_read: std.atomic.Value(usize),  // Which buffer render thread reads (0 or 1)
-    
+    current_read: std.atomic.Value(usize), // Which buffer render thread reads (0 or 1)
+
     // Synchronization primitives
-    state_ready: std.Thread.Semaphore,      // Main thread signals: new state available
-    
+    state_ready: std.Thread.Semaphore, // Main thread signals: new state available
+    frame_consumed: std.Thread.Semaphore, // Render thread signals: frame consumed, main can continue
+
     // Thread management
     render_thread: ?std.Thread,
     shutdown: std.atomic.Value(bool),
-    
+
     // Shared resources (owned externally, borrowed here)
     worker_pool: *ThreadPool,
-    graphics_context: *anyopaque,  // Can be *GraphicsContext or test mock
-    swapchain: *anyopaque,          // Can be *Swapchain or test mock
-    
+    graphics_context: *anyopaque, // Can be *GraphicsContext or test mock
+    swapchain: *anyopaque, // Can be *Swapchain or test mock
+    engine: ?*anyopaque, // Engine pointer for full frame rendering (null for tests)
+
     // Frame tracking
     frame_index: std.atomic.Value(u64),
-    
+    last_rendered_frame: std.atomic.Value(u64), // Track which frame was last rendered to avoid duplicates
+
     pub fn init(
         allocator: Allocator,
         worker_pool: *ThreadPool,
@@ -48,15 +51,24 @@ pub const RenderThreadContext = struct {
             },
             .current_read = std.atomic.Value(usize).init(0),
             .state_ready = .{},
+            .frame_consumed = .{},
             .render_thread = null,
             .shutdown = std.atomic.Value(bool).init(false),
             .worker_pool = worker_pool,
             .graphics_context = graphics_context,
             .swapchain = swapchain,
+            .engine = null, // Will be set after engine is fully initialized
             .frame_index = std.atomic.Value(u64).init(0),
+            .last_rendered_frame = std.atomic.Value(u64).init(0), // Start at 0, will render frame 0 on first update
         };
     }
-    
+
+    /// Set the engine pointer after engine initialization is complete.
+    /// This must be called before starting the render thread.
+    pub fn setEngine(self: *RenderThreadContext, engine: anytype) void {
+        self.engine = engine;
+    }
+
     pub fn deinit(self: *RenderThreadContext) void {
         // Clean up both snapshot buffers
         self.game_state[0].deinit();
@@ -70,8 +82,12 @@ pub fn startRenderThread(ctx: *RenderThreadContext) !void {
     if (ctx.render_thread != null) {
         return error.RenderThreadAlreadyRunning;
     }
-    
+
     ctx.shutdown.store(false, .release);
+    
+    // Post frame_consumed semaphore initially so main thread can start producing first frame
+    ctx.frame_consumed.post();
+    
     ctx.render_thread = try std.Thread.spawn(.{}, renderThreadLoop, .{ctx});
 }
 
@@ -81,13 +97,13 @@ pub fn stopRenderThread(ctx: *RenderThreadContext) void {
     if (ctx.render_thread) |thread| {
         // Signal shutdown
         ctx.shutdown.store(true, .release);
-        
+
         // Wake up render thread if it's waiting
         ctx.state_ready.post();
-        
+
         // Wait for thread to finish
         thread.join();
-        
+
         ctx.render_thread = null;
     }
 }
@@ -100,15 +116,20 @@ pub fn mainThreadUpdate(
     camera: anytype,
     delta_time: f32,
 ) !void {
+    // BACKPRESSURE: Wait for render thread to consume previous frame
+    // This prevents main thread from getting more than 1 frame ahead
+    // Ensures: no wasted work, low input latency, natural throttling
+    ctx.frame_consumed.wait();
+
     // Determine which buffer to write to (the one render thread is NOT reading)
     const read_idx = ctx.current_read.load(.acquire);
     const write_idx = 1 - read_idx;
-    
+
     // Free old snapshot in the write buffer
     if (ctx.game_state[write_idx].entity_count > 0) {
         freeSnapshot(&ctx.game_state[write_idx]);
     }
-    
+
     // Capture new snapshot
     const frame_idx = ctx.frame_index.fetchAdd(1, .monotonic);
     ctx.game_state[write_idx] = try captureSnapshot(
@@ -118,12 +139,21 @@ pub fn mainThreadUpdate(
         frame_idx,
         delta_time,
     );
-    
+
     // Atomically flip buffers
     ctx.current_read.store(write_idx, .release);
-    
-    // Signal render thread that new state is ready
+
+    // Signal render thread that new state is available
     ctx.state_ready.post();
+}
+
+/// Get the effective frame count (slowest of main thread and render thread)
+/// This represents the actual progress through frames that both threads have completed
+pub fn getEffectiveFrameCount(ctx: *RenderThreadContext) u64 {
+    const main_frame = ctx.frame_index.load(.monotonic);
+    const rendered_frame = ctx.last_rendered_frame.load(.acquire);
+    // Return the minimum - the slowest thread dictates the effective frame rate
+    return @min(main_frame, rendered_frame);
 }
 
 /// Render thread entry point - runs in separate thread.
@@ -135,56 +165,101 @@ fn renderThreadLoop(ctx: *RenderThreadContext) void {
 }
 
 fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
+    // Import Engine type for frame rendering
+    const Engine = @import("../core/engine.zig").Engine;
+
+    // Get engine pointer (null check for tests)
+    const engine_ptr = if (ctx.engine) |eng| @as(*Engine, @ptrCast(@alignCast(eng))) else null;
+
     while (!ctx.shutdown.load(.acquire)) {
-        // Wait for main thread to signal new state
+        // Wait for main thread to signal new state (with timeout for shutdown checks)
         ctx.state_ready.wait();
-        
+
         // Check shutdown again in case we were woken to exit
         if (ctx.shutdown.load(.acquire)) break;
-        
+
         // Get the current snapshot (lock-free read)
         const read_idx = ctx.current_read.load(.acquire);
         const snapshot = &ctx.game_state[read_idx];
-        
+
         // Skip if snapshot is empty (shouldn't happen in normal operation)
         if (snapshot.entity_count == 0) continue;
-        
-        // ============================================
-        // Phase 1.1: Parallel ECS Extraction (already implemented)
-        // TODO: Call extractRenderablesFromSnapshot() with worker pool
-        // ============================================
-        
-        // ============================================
-        // Phase 1.2: Parallel Cache Building (already implemented)
-        // TODO: Call buildCachesParallel() with worker pool
-        // ============================================
-        
-        // ============================================
-        // Command Recording (sequential for now, Phase 2.2 will parallelize)
-        // TODO: 
-        // 1. Acquire next swapchain image
-        // 2. Begin command buffer
-        // 3. Execute render graph passes
-        // 4. End command buffer
-        // 5. Submit to GPU
-        // 6. Present
-        // ============================================
-        
-        // Placeholder: Just log that we received a frame
-        std.log.debug("Render thread processing frame {}", .{snapshot.frame_index});
-        
-        // Simulate some rendering work (check shutdown periodically)
-        const sleep_chunks = 16; // Split 16ms into chunks
-        const sleep_per_chunk = std.time.ns_per_ms;
-        var i: usize = 0;
-        while (i < sleep_chunks) : (i += 1) {
-            if (ctx.shutdown.load(.acquire)) break;
-            std.Thread.sleep(sleep_per_chunk);
+
+        // Check if we've already rendered this frame (main thread controls frame rate)
+        const last_rendered = ctx.last_rendered_frame.load(.acquire);
+        if (snapshot.frame_index < last_rendered) {
+            // We've already rendered this frame, wait for next signal
+            continue;
         }
-        
-        // NOTE: Don't free snapshot here - mainThreadUpdate will free it 
+
+        // If we have an engine, do the full frame rendering
+        if (engine_ptr) |engine| {
+            // ============================================
+            // PHASE 2.1 Render Thread Responsibilities:
+            // 
+            // 1. Begin frame (acquire swapchain image)
+            // 2. Prepare render (Vulkan descriptor updates) - scene.prepareRender()
+            // 3. Execute render (Vulkan draw commands) - scene.render()
+            // 4. End frame (submit & present)
+            //
+            // IMPORTANT: NO ECS queries on render thread!
+            // - Main thread called scene.prepareFrame() which did ECS queries
+            // - Main thread captured snapshot for us to use
+            // - We only do Vulkan work (descriptor updates + draw commands)
+            // ============================================
+
+            const frame_info = engine.beginFrame() catch |err| {
+                // If window is closed, treat as shutdown signal
+                if (err == error.WindowClosed) {
+                    std.log.info("Render thread: window closed, shutting down", .{});
+                    break;
+                }
+                std.log.err("Render thread: beginFrame failed: {}", .{err});
+                continue;
+            };
+
+            // PHASE 2.1: Update phase does Vulkan descriptor updates (render thread)
+            // This calls render_graph.update() which updates descriptor sets
+            engine.update(frame_info) catch |err| {
+                std.log.err("Render thread: update failed: {}", .{err});
+                // Still try to end frame to avoid getting stuck
+                _ = engine.endFrame(frame_info) catch {};
+                continue;
+            };
+
+            // PHASE 2.1: Render phase does Vulkan draw commands (render thread)
+            // This calls render_graph.execute() which records command buffers
+            engine.render(frame_info) catch |err| {
+                std.log.err("Render thread: render failed: {}", .{err});
+                // Still try to end frame to avoid getting stuck
+                _ = engine.endFrame(frame_info) catch {};
+                continue;
+            };
+
+            engine.endFrame(frame_info) catch |err| {
+                std.log.err("Render thread: endFrame failed: {}", .{err});
+                continue;
+            };
+
+            // Mark this frame as rendered (main thread controls frame rate)
+            ctx.last_rendered_frame.store(snapshot.frame_index, .release);
+
+            // Signal main thread that frame is consumed, can produce next snapshot
+            ctx.frame_consumed.post();
+        } else {
+            // Test mode: Just simulate work without actual engine
+            std.Thread.sleep(std.time.ns_per_ms);
+
+            // Mark frame as rendered even in test mode
+            ctx.last_rendered_frame.store(snapshot.frame_index, .release);
+
+            // Signal main thread even in test mode
+            ctx.frame_consumed.post();
+        }
+
+        // NOTE: Don't free snapshot here - mainThreadUpdate will free it
         // when it overwrites this buffer with a new snapshot
     }
-    
+
     std.log.info("Render thread shutting down gracefully", .{});
 }

@@ -713,6 +713,27 @@ pub const GraphicsContext = struct {
         pending_secondary_buffers.clearRetainingCapacity();
     }
 
+    /// Clear any pending secondary command buffers without executing them
+    /// Use this when switching rendering modes to discard async work from previous mode
+    /// Note: We don't free the buffers here because they belong to worker thread pools
+    /// and can't be safely freed from the render thread. They'll be cleaned up when
+    /// the worker threads reset their command pools.
+    pub fn clearPendingSecondaryBuffers(self: *GraphicsContext) void {
+        _ = self; // GraphicsContext not needed for this operation
+        secondary_buffers_mutex.lock();
+        defer secondary_buffers_mutex.unlock();
+
+        if (!secondary_buffers_initialized) return;
+
+        const count = pending_secondary_buffers.items.len;
+        
+        // Just clear the list - don't try to free the buffers
+        // The worker thread command pools will clean them up naturally
+        pending_secondary_buffers.clearRetainingCapacity();
+        
+        log(.DEBUG, "graphics_context", "Discarded {} pending secondary command buffers", .{count});
+    }
+
     /// Clean up submitted secondary command buffers after frame submission completes
     pub fn cleanupSubmittedSecondaryBuffers(self: *GraphicsContext) void {
         submitted_buffers_mutex.lock();

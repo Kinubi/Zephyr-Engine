@@ -92,7 +92,7 @@ pub const App = struct {
     var camera_controller: KeyboardMovementController = undefined;
     var global_UBO_buffers: ?[]Buffer = undefined;
 
-    var frame_counter: u64 = 0; // Global frame counter for scheduling
+    var frame_counter: u64 = 0; // Global frame counter for scheduling (should track rendered frames, not game loop iterations)
     var thread_pool: *ThreadPool = undefined;
     var asset_manager: *AssetManager = undefined;
     var file_watcher: *FileWatcher = undefined;
@@ -142,6 +142,22 @@ pub const App = struct {
         // Initialize scheduled assets system
         scheduled_assets = std.ArrayList(ScheduledAsset){};
 
+        // ==================== Initialize Thread Pool ====================
+        // Initialize Thread Pool FIRST (needed by Engine if render thread enabled)
+        thread_pool = try self.allocator.create(ThreadPool);
+        thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
+        errdefer {
+            thread_pool.deinit();
+            self.allocator.destroy(thread_pool);
+        }
+
+        // Register application-specific subsystems with thread pool
+        // NOTE: System-specific subsystems are automatically registered by the systems themselves:
+        //   - "hot_reload" → FileWatcher.init()
+        //   - "bvh_building" → MultithreadedBvhBuilder.init()
+        //   - "ecs_update" → World.init()
+        //   - "render_extraction" → RenderSystem.init()
+
         // ==================== Initialize Engine ====================
         // Engine handles: window, graphics context, swapchain, command buffers, base layers
         log(.INFO, "app", "Initializing engine core systems...", .{});
@@ -153,6 +169,8 @@ pub const App = struct {
             },
             .enable_validation = false,
             .enable_performance_monitoring = true,
+            .enable_render_thread = true, // Phase 2.1 complete: prepare/update/render separation
+            .thread_pool = thread_pool, // Pass thread pool to engine
         });
         errdefer self.engine.deinit();
 
@@ -164,20 +182,10 @@ pub const App = struct {
         const window = self.engine.getWindow();
         const performance_monitor = self.engine.performance_monitor;
 
-        // ==================== Initialize Thread Pool ====================
-        // Initialize Thread Pool with dynamic scaling
-        thread_pool = try self.allocator.create(ThreadPool);
-        thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
-        // TODO: Restore thread exit hook once GraphicsContext.workerThreadExitHook is available
-        // thread_pool.setThreadExitHook(GraphicsContext.workerThreadExitHook, @ptrCast(gc));
-
-        // Register application-specific subsystems with thread pool
-        // NOTE: System-specific subsystems are automatically registered by the systems themselves:
-        //   - "hot_reload" → FileWatcher.init()
-        //   - "bvh_building" → MultithreadedBvhBuilder.init()
+        // Register custom application work subsystem (for ad-hoc tasks)
         //   - "ecs_update" → World.init()
         //   - "render_extraction" → RenderSystem.init()
-        
+
         // Register custom work subsystem for ad-hoc tasks
         try thread_pool.registerSubsystem(.{
             .name = "custom_work",
@@ -419,7 +427,15 @@ pub const App = struct {
         unified_pipeline_system.processDeferredDestroys();
 
         // Increment frame counter for scheduling
-        frame_counter += 1;
+        // In render thread mode, use the slowest thread's frame count (the bottleneck)
+        // This ensures scheduled assets appear based on actual rendered frames
+        if (self.engine.isRenderThreadEnabled()) {
+            // Use min(main_thread_frames, rendered_frames) - the effective progress
+            frame_counter = self.engine.getEffectiveFrameCount();
+        } else {
+            // Single-threaded: just increment
+            frame_counter += 1;
+        }
 
         // Check for scheduled asset loads
         for (scheduled_assets.items) |*scheduled_asset| {
@@ -442,17 +458,39 @@ pub const App = struct {
         }
 
         // ==================== USE ENGINE FRAME LOOP ====================
-        // Begin frame through engine
-        const frame_info = try self.engine.beginFrame();
+        if (self.engine.isRenderThreadEnabled()) {
+            // RENDER THREAD MODE (Phase 2.1): Main thread handles game logic, render thread handles GPU
+            
+            const dt = self.engine.frame_info.dt;
+            
+            // MAIN THREAD: Prepare all layers (game logic, ECS queries, NO Vulkan)
+            // This calls layer.prepare() which calls scene.prepareFrame()
+            try self.engine.prepare(dt);
+            
+            // MAIN THREAD: Capture game state snapshot and signal render thread (non-blocking)
+            // This copies data from World into snapshot for render thread to use
+            try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera);
 
-        // Update engine systems
-        try self.engine.update(frame_info);
+            // Main thread continues immediately without blocking on GPU
+            // The render thread will:
+            //   1. Wait for snapshot
+            //   2. Call engine.update() → layer.update() → scene.prepareRender() (Vulkan descriptors)
+            //   3. Call engine.render() → layer.render() → scene.render() (Vulkan draws)
+            //   4. Present
+        } else {
+            // SINGLE-THREADED MODE: Main thread does everything
+            // Begin frame through engine
+            const frame_info = try self.engine.beginFrame();
 
-        // Render frame
-        try self.engine.render(frame_info);
+            // Update engine systems
+            try self.engine.update(frame_info);
 
-        // End frame
-        try self.engine.endFrame(frame_info);
+            // Render frame
+            try self.engine.render(frame_info);
+
+            // End frame
+            try self.engine.endFrame(frame_info);
+        }
 
         return self.engine.isRunning();
     }

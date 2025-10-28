@@ -50,7 +50,14 @@ pub const LayerStack = struct {
         }
     }
 
-    /// Update all layers with current frame info
+    /// PHASE 2.1: Prepare all layers (MAIN THREAD - no Vulkan work)
+    pub fn prepare(self: *LayerStack, dt: f32) !void {
+        for (self.layers.items) |layer| {
+            try layer.prepare(dt);
+        }
+    }
+
+    /// Update all layers with current frame info (RENDER THREAD - Vulkan descriptors)
     pub fn update(self: *LayerStack, frame_info: *const FrameInfo) !void {
         for (self.layers.items) |layer| {
             try layer.update(frame_info);

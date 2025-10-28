@@ -23,6 +23,10 @@ pub const SceneLayer = struct {
     ecs_world: *World,
     performance_monitor: ?*PerformanceMonitor,
 
+    // Phase 2.1: Cached UBO from prepare() to update()
+    // Main thread populates this in prepare(), render thread uses it in update()
+    prepared_ubo: GlobalUbo = undefined,
+
     pub fn init(
         camera: *Camera,
         scene: *SceneV2,
@@ -49,6 +53,7 @@ pub const SceneLayer = struct {
     const vtable = Layer.VTable{
         .attach = attach,
         .detach = detach,
+        .prepare = prepare,
         .begin = begin,
         .update = update,
         .render = render,
@@ -66,6 +71,30 @@ pub const SceneLayer = struct {
         _ = self;
     }
 
+    fn prepare(base: *Layer, dt: f32) !void {
+        const self: *SceneLayer = @fieldParentPtr("base", base);
+
+        // PHASE 2.1: MAIN THREAD - Game logic, ECS queries (NO Vulkan work)
+        // Note: No performance monitoring here - this runs on main thread without frame context
+
+        // Update camera projection
+        self.camera.updateProjectionMatrix();
+
+        // Build UBO for scene preparation (includes lights after prepareFrame)
+        self.prepared_ubo = GlobalUbo{
+            .view = self.camera.viewMatrix,
+            .projection = self.camera.projectionMatrix,
+            .dt = dt,
+        };
+
+        // Update ECS transform hierarchies (CPU work, no Vulkan)
+        try self.transform_system.update(self.ecs_world);
+
+        // Prepare scene (ECS queries, particle spawning, light updates - no Vulkan)
+        // This updates prepared_ubo with light data
+        try self.scene.prepareFrame(&self.prepared_ubo, dt);
+    }
+
     fn begin(base: *Layer, frame_info: *const FrameInfo) !void {
         _ = base;
         _ = frame_info;
@@ -74,39 +103,33 @@ pub const SceneLayer = struct {
     fn update(base: *Layer, frame_info: *const FrameInfo) !void {
         const self: *SceneLayer = @fieldParentPtr("base", base);
 
-        // Update camera projection
-        self.camera.updateProjectionMatrix();
+        // PHASE 2.1: RENDER THREAD - Vulkan descriptor updates (NO ECS queries!)
+        // Main thread already did:
+        // - transform_system.update() (in prepare)
+        // - scene.prepareFrame() (in prepare) - populated lights in prepared_ubo
+        //
+        // Here we do Vulkan descriptor updates
 
-        // Build UBO using frame_info
-        var ubo = GlobalUbo{
-            .view = self.camera.viewMatrix,
-            .projection = self.camera.projectionMatrix,
-            .dt = frame_info.dt,
-        };
+        // Use the UBO prepared on main thread (includes light data)
+        // Just update the view/projection in case camera moved (though it should be captured in snapshot)
+        self.prepared_ubo.view = self.camera.viewMatrix;
+        self.prepared_ubo.projection = self.camera.projectionMatrix;
+        self.prepared_ubo.dt = frame_info.dt;
 
-        // Update ECS transform hierarchies
+        // Prepare Vulkan resources (descriptor updates)
         if (self.performance_monitor) |pm| {
-            try pm.beginPass("transform_update", frame_info.current_frame, null);
+            try pm.beginPass("scene_prepare_render", frame_info.current_frame, null);
         }
-        try self.transform_system.update(self.ecs_world);
+        try self.scene.prepareRender(frame_info);
         if (self.performance_monitor) |pm| {
-            try pm.endPass("transform_update", frame_info.current_frame, null);
-        }
-
-        // Update scene
-        if (self.performance_monitor) |pm| {
-            try pm.beginPass("scene_update", frame_info.current_frame, null);
-        }
-        try self.scene.update(frame_info.*, &ubo);
-        if (self.performance_monitor) |pm| {
-            try pm.endPass("scene_update", frame_info.current_frame, null);
+            try pm.endPass("scene_prepare_render", frame_info.current_frame, null);
         }
 
-        // Update UBO set for this frame
+        // Update UBO set for this frame using prepared_ubo (with lights!)
         if (self.performance_monitor) |pm| {
             try pm.beginPass("ubo_update", frame_info.current_frame, null);
         }
-        self.global_ubo_set.update(frame_info.current_frame, &ubo);
+        self.global_ubo_set.update(frame_info.current_frame, &self.prepared_ubo);
         if (self.performance_monitor) |pm| {
             try pm.endPass("ubo_update", frame_info.current_frame, null);
         }

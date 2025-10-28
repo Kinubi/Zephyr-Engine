@@ -41,7 +41,7 @@ pub const Engine = struct {
     // Optional systems
     asset_manager: ?*AssetManager = null,
     performance_monitor: ?*PerformanceMonitor = null,
-    
+
     // Threading (optional)
     thread_pool: ?*ThreadPool = null, // Required for render thread
     render_thread_context: ?RenderThreadContext = null,
@@ -156,7 +156,7 @@ pub const Engine = struct {
                 std.log.err("Render thread enabled but no thread pool provided in config", .{});
                 return error.MissingThreadPool;
             }
-            
+
             engine.render_thread_context = RenderThreadContext.init(
                 allocator,
                 config.thread_pool.?,
@@ -164,7 +164,10 @@ pub const Engine = struct {
                 &engine.swapchain,
             );
             errdefer if (engine.render_thread_context) |*ctx| ctx.deinit();
-            
+
+            // Set engine pointer so render thread can call beginFrame/render/endFrame
+            engine.render_thread_context.?.setEngine(engine);
+
             try startRenderThread(&engine.render_thread_context.?);
             std.log.info("Render thread started successfully", .{});
         } else {
@@ -192,13 +195,11 @@ pub const Engine = struct {
         self.swapchain.waitForAllFences() catch {};
 
         // Clean up in reverse order of initialization
-        
+
         // Render thread (if enabled)
         if (self.render_thread_context) |*ctx| {
-            std.log.info("Stopping render thread...", .{});
             stopRenderThread(ctx);
             ctx.deinit();
-            std.log.info("Render thread stopped", .{});
         } else {
             std.log.info("No render thread to stop (was not enabled)", .{});
         }
@@ -280,13 +281,19 @@ pub const Engine = struct {
         return &self.frame_info;
     }
 
-    /// Update engine logic
+    /// PHASE 2.1: Prepare frame on MAIN THREAD (game logic, ECS - no Vulkan)
+    pub fn prepare(self: *Engine, dt: f32) !void {
+        // Prepare all layers
+        try self.layer_stack.prepare(dt);
+    }
+
+    /// Update engine logic (RENDER THREAD - Vulkan descriptor updates)
     pub fn update(self: *Engine, frame_info: *FrameInfo) !void {
         // Update all layers
         try self.layer_stack.update(frame_info);
     }
 
-    /// Render the frame
+    /// Render the frame (RENDER THREAD - Vulkan draw commands)
     pub fn render(self: *Engine, frame_info: *FrameInfo) !void {
         // Render all layers
         try self.layer_stack.render(frame_info);
@@ -328,11 +335,11 @@ pub const Engine = struct {
     pub fn getSwapchain(self: *Engine) *Swapchain {
         return &self.swapchain;
     }
-    
+
     // ==================== Render Thread API (Phase 2.0) ====================
-    // 
+    //
     // Render thread mode decouples game logic from rendering for better performance.
-    // 
+    //
     // Usage Example:
     // ```zig
     // var thread_pool = try ThreadPool.init(allocator, 4);
@@ -348,10 +355,10 @@ pub const Engine = struct {
     // while (engine.isRunning()) {
     //     // 1. Update game logic
     //     updateGameLogic(world, camera);
-    //     
+    //
     //     // 2. Capture state and signal render thread (non-blocking)
     //     try engine.captureAndSignalRenderThread(&world, &camera);
-    //     
+    //
     //     // 3. Continue with engine frame (will render previous frame in parallel)
     //     const frame_info = try engine.beginFrame();
     //     try engine.update(frame_info);
@@ -359,12 +366,12 @@ pub const Engine = struct {
     //     try engine.endFrame(frame_info);
     // }
     // ```
-    
+
     /// Check if render thread mode is enabled
     pub fn isRenderThreadEnabled(self: *Engine) bool {
         return self.use_render_thread;
     }
-    
+
     /// Capture game state and signal render thread (Phase 2.0)
     /// Only call this if render thread is enabled
     /// This should be called from the main/game thread before beginFrame()
@@ -376,7 +383,7 @@ pub const Engine = struct {
         if (!self.use_render_thread) {
             return error.RenderThreadNotEnabled;
         }
-        
+
         if (self.render_thread_context) |*ctx| {
             const mainThreadUpdate = @import("../threading/render_thread.zig").mainThreadUpdate;
             try mainThreadUpdate(
@@ -388,5 +395,16 @@ pub const Engine = struct {
         } else {
             return error.RenderThreadNotInitialized;
         }
+    }
+
+    /// Get the effective frame count (slowest thread - the bottleneck)
+    /// Returns min(main_thread_frames, rendered_frames)
+    /// Use this for scheduling assets/events based on actual displayed frames
+    pub fn getEffectiveFrameCount(self: *Engine) u64 {
+        if (self.render_thread_context) |*ctx| {
+            const rtGetEffectiveFrameCount = @import("../threading/render_thread.zig").getEffectiveFrameCount;
+            return rtGetEffectiveFrameCount(ctx);
+        }
+        return 0;
     }
 };

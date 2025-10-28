@@ -62,6 +62,10 @@ pub const Scene = struct {
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
 
+    // Thread-safe path tracing toggle (set by main thread, applied by render thread)
+    // Uses a counter: each toggle increments it, render thread processes all pending toggles
+    pending_pt_toggles: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
     /// Initialize a new scene
     pub fn init(
         allocator: std.mem.Allocator,
@@ -389,22 +393,59 @@ pub const Scene = struct {
 
     /// Toggle path tracing on/off (switches between path tracing and raster)
     pub fn setPathTracingEnabled(self: *Scene, enabled: bool) !void {
-        // Update render graph pass states
+        // THREAD-SAFE: Increment toggle counter
+        // Main thread increments, render thread processes all pending toggles
+        _ = enabled; // Ignore the enabled parameter - just toggle!
+        _ = self.pending_pt_toggles.fetchAdd(1, .release);
+        log(.DEBUG, "scene_v2", "Path tracing toggle queued", .{});
+    }
+
+    /// Apply pending path tracing toggles (called on RENDER THREAD)
+    /// Returns true if any toggles were applied
+    fn applyPendingPathTracingToggle(self: *Scene) !bool {
+        // Get number of pending toggles and reset counter
+        const pending_count = self.pending_pt_toggles.swap(0, .acq_rel);
+        if (pending_count == 0) return false; // No pending toggles
+
+        // Apply all pending toggles (each one flips the state)
+        // If odd number of toggles, state changes. If even, state stays same.
+        const should_toggle = (pending_count % 2) == 1;
+        if (!should_toggle) {
+            log(.DEBUG, "scene_v2", "Even number of toggles ({}), state unchanged", .{pending_count});
+            return false;
+        }
+
+        // Update render graph pass states (SAFE: on render thread)
         if (self.render_graph) |*graph| {
-            // First, set the path tracing pass's internal flag
+            // Get current state and flip it
+            const currently_enabled = if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+            const new_enabled = !currently_enabled;
+
+            // Set the path tracing pass's internal flag
             if (graph.getPass("path_tracing_pass")) |pass| {
                 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
                 const pt_pass: *PathTracingPass = @fieldParentPtr("base", pass);
-                pt_pass.enable_path_tracing = enabled;
+                pt_pass.enable_path_tracing = new_enabled;
+                
+                // Skip BVH rebuild for 5 frames after enabling to avoid fence conflicts
+                // This allows the render thread to stabilize before async BVH building starts
+                if (new_enabled) {
+                    pt_pass.skip_bvh_rebuild_frames = 5;
+                    log(.INFO, "scene_v2", "Skipping BVH rebuild for 5 frames after RT enable", .{});
+                    
+                    // Clear any pending secondary command buffers from previous async BVH builds
+                    // This prevents fence conflicts when old worker thread buffers try to execute
+                    graph.graphics_context.clearPendingSecondaryBuffers();
+                }
             }
 
-            if (enabled) {
+            if (new_enabled) {
                 // Path tracing mode: disable raster passes, enable PT
                 graph.disablePass("geometry_pass");
                 graph.disablePass("particle_pass");
                 graph.disablePass("light_volume_pass");
                 graph.enablePass("path_tracing_pass");
-                try graph.recompile(); // Recompile after all state changes
+                try graph.recompile();
                 log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s}", .{self.name});
             } else {
                 // Raster mode: enable raster passes, disable PT
@@ -412,11 +453,13 @@ pub const Scene = struct {
                 graph.enablePass("particle_pass");
                 graph.enablePass("light_volume_pass");
                 graph.disablePass("path_tracing_pass");
-                try graph.recompile(); // Recompile after all state changes
+                try graph.recompile();
                 log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s}", .{self.name});
             }
+            return true;
         } else {
             log(.WARN, "scene_v2", "Cannot toggle path tracing - render graph not initialized", .{});
+            return false;
         }
     }
 
@@ -564,8 +607,63 @@ pub const Scene = struct {
         }
     }
 
+    /// Phase 2.1: Main thread preparation (game logic, ECS queries)
+    /// Call this on the MAIN THREAD before capturing snapshot
+    pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+        // Cache view-projection matrix for particle world-to-screen projection
+        self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
+
+        // Update animated lights and extract to GlobalUbo
+        try self.updateLights(global_ubo, dt);
+
+        // Update particles (CPU-side spawning)
+        try self.updateParticles(dt);
+
+        // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
+        // This queries the ECS World and MUST be on main thread
+        try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
+
+        // Phase 2.1: Allow passes to do CPU-side preparation (ECS queries, sorting, culling)
+        // Most passes won't need this since checkForChanges() above handles the main ECS queries
+        // But this allows for pass-specific preparation work on the main thread
+        if (self.render_graph) |*graph| {
+            // Create minimal frame_info for prepareExecute (no Vulkan resources needed yet)
+            const prep_frame_info = FrameInfo{
+                .command_buffer = vk.CommandBuffer.null_handle,
+                .current_frame = 0,
+                .dt = dt,
+                .extent = undefined,
+                .color_image = undefined,
+                .color_image_view = undefined,
+                .depth_image_view = undefined,
+                .performance_monitor = null,
+            };
+            try graph.prepareExecute(&prep_frame_info);
+        }
+
+        // Run ECS systems (transforms, physics, etc.)
+        // try self.ecs_world.update(dt);
+    }
+
+    /// Phase 2.1: Render thread preparation (Vulkan descriptor updates)
+    /// Call this on the RENDER THREAD before executing
+    pub fn prepareRender(self: *Scene, frame_info: *const FrameInfo) !void {
+        // PHASE 2.1: Apply any pending path tracing toggle (thread-safe)
+        // Main thread queues toggle, render thread applies it here
+        _ = try self.applyPendingPathTracingToggle();
+
+        // Update all render passes through the render graph (descriptor sets, pipeline checks)
+        // This does Vulkan work and MUST be on render thread
+        if (self.render_graph) |*graph| {
+            try graph.update(frame_info);
+        }
+    }
+
     /// Update scene state (animations, physics, etc.)
     /// Call this once per frame before rendering
+    /// 
+    /// DEPRECATED in render thread mode - use prepareFrame() on main thread
+    /// and prepareRender() on render thread instead
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
         // Cache view-projection matrix for particle world-to-screen projection
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);

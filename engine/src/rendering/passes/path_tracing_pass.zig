@@ -118,6 +118,9 @@ pub const PathTracingPass = struct {
 
     // Toggle between raster and path tracing
     enable_path_tracing: bool = false,
+    
+    // Skip BVH rebuild for N frames after toggle to avoid fence conflicts
+    skip_bvh_rebuild_frames: u32 = 0,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -646,10 +649,17 @@ pub const PathTracingPass = struct {
         // so resources queued during that frame are safe to destroy
         self.rt_system.flushDeferredFrame(frame_index);
 
+        // Skip BVH rebuild for N frames after toggle to avoid fence threading conflicts
+        if (self.skip_bvh_rebuild_frames > 0) {
+            self.skip_bvh_rebuild_frames -= 1;
+            log(.DEBUG, "path_tracing_pass", "Skipping BVH rebuild ({} frames remaining)", .{self.skip_bvh_rebuild_frames});
+            return; // Skip this frame's BVH update
+        }
+
         // // Check various dirty flags BEFORE updating (like rt_renderer.update does)
         // _ = self.render_system.checkBvhRebuildNeeded();
         const materials_dirty = self.asset_manager.materials_updated;
-        const textures_dirty = self.asset_manager.texture_descriptors_updated;
+        const textures_dirty = self.asset_manager.texture_descriptors_dirty;
 
         // Check if render system detected geometry changes
         const geometry_changed = self.render_system.raytracing_descriptors_dirty;

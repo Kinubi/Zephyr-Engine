@@ -52,7 +52,7 @@ pub const RenderSystem = struct {
             });
             log(.INFO, "render_system", "Registered render_extraction subsystem with thread pool", .{});
         }
-        
+
         return .{
             .allocator = allocator,
             .thread_pool = thread_pool,
@@ -360,7 +360,7 @@ pub const RenderSystem = struct {
     // ============================================================================
     // SNAPSHOT-BASED FUNCTIONS (Phase 2.1 - Render Thread Support)
     // ============================================================================
-    
+
     /// Rebuild caches from a GameStateSnapshot instead of World
     /// This is called by the render thread with an immutable snapshot
     pub fn rebuildCachesFromSnapshot(
@@ -384,7 +384,7 @@ pub const RenderSystem = struct {
 
         // Build caches from snapshot entities
         const entities = snapshot.entities[0..snapshot.entity_count];
-        
+
         // Use parallel cache building if thread_pool available and enough work
         if (self.thread_pool != null and entities.len >= 50) {
             try self.buildCachesFromSnapshotParallel(entities, asset_manager);
@@ -1101,8 +1101,11 @@ pub const RenderSystem = struct {
     /// Returns a COPY of the cached data that the caller owns
     pub fn getRasterData(self: *RenderSystem) !RasterizationData {
         if (self.cached_raster_data) |cached| {
-            // Return a copy with duplicated array
-            const objects_copy = try self.allocator.dupe(RasterizationData.RenderableObject, cached.objects);
+            // Allocate new memory and copy manually to avoid aliasing issues
+            const objects_copy = try self.allocator.alloc(RasterizationData.RenderableObject, cached.objects.len);
+            for (cached.objects, 0..) |obj, i| {
+                objects_copy[i] = obj;
+            }
 
             return RasterizationData{
                 .objects = objects_copy,
@@ -1120,10 +1123,21 @@ pub const RenderSystem = struct {
     /// Returns a COPY of the cached data that the caller owns
     pub fn getRaytracingData(self: *RenderSystem) !RaytracingData {
         if (self.cached_raytracing_data) |cached| {
-            // Return a copy with duplicated arrays
-            const instances_copy = try self.allocator.dupe(RaytracingData.RTInstance, cached.instances);
-            const geometries_copy = try self.allocator.dupe(RaytracingData.RTGeometry, cached.geometries);
-            const materials_copy = try self.allocator.dupe(RasterizationData.MaterialData, cached.materials);
+            // Allocate new memory and copy manually to avoid aliasing issues
+            const instances_copy = try self.allocator.alloc(RaytracingData.RTInstance, cached.instances.len);
+            for (cached.instances, 0..) |inst, i| {
+                instances_copy[i] = inst;
+            }
+            
+            const geometries_copy = try self.allocator.alloc(RaytracingData.RTGeometry, cached.geometries.len);
+            for (cached.geometries, 0..) |geom, i| {
+                geometries_copy[i] = geom;
+            }
+            
+            const materials_copy = try self.allocator.alloc(RasterizationData.MaterialData, cached.materials.len);
+            for (cached.materials, 0..) |mat, i| {
+                materials_copy[i] = mat;
+            }
 
             return RaytracingData{
                 .instances = instances_copy,

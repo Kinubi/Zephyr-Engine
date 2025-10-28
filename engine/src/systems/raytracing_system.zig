@@ -797,4 +797,12 @@ pub const RaytracingSystem = struct {
     pub fn flushDeferredFrame(self: *RaytracingSystem, frame_index: u32) void {
         self.flushDestroyQueue(&self.per_frame_destroy[frame_index]);
     }
+
+    /// Flush ALL pending destruction queues immediately
+    /// Use this when disabling the RT pass to clean up before re-enabling
+    pub fn flushAllPendingDestruction(self: *RaytracingSystem) void {
+        for (&self.per_frame_destroy) |*queue| {
+            self.flushDestroyQueue(queue);
+        }
+    }
 };

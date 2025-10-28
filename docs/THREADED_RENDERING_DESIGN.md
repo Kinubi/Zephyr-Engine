@@ -75,18 +75,20 @@
 
 **Synchronization Strategy:**
 - Semaphore-based signaling (main → render)
+- **Backpressure semaphore** (render → main) - prevents main thread from getting >1 frame ahead
 - Double-buffered game state (lock-free reads)
 - Atomic buffer flipping (no mutexes in hot path)
+- Main thread waits for render thread to consume snapshot before capturing next frame
 
 **FPS Mode:**
-- Main thread: Unlocked (500-1000+ Hz capable)
-- Render thread: Unlocked by default, VSync optional
+- Main thread: Naturally throttled by render thread consumption (typically 1 frame ahead)
+- Render thread: Unlocked by default, VSync optional (GPU-bound)
 - Workers: Burst usage (only during extract/record phases)
 
 **Expected Performance:**
-- Input latency: <2ms (main thread polling continuously)
-- Frame rate: 300-1000+ FPS (depending on GPU, VSync settings, scene complexity)
-- CPU utilization: 100% (main + render + workers fully utilized)
+- Input latency: 1-2 frames (main thread runs 1 frame ahead of display)
+- Frame rate: GPU-limited (60-300+ FPS depending on VSync, scene complexity)
+- CPU utilization: Main thread and render thread fully utilized, automatic throttling prevents wasted work
 
 ---
 
@@ -232,12 +234,15 @@ Total: 2.7ms                                  ← 2.2x overall speedup
   - Clean shutdown with interruptible render loop ✅
   - Test coverage with zero memory leaks ✅
   
-- **Phase 2.1: Prepare/Execute Separation** ⏳ NEXT
-  - Update RenderSystem to work with GameStateSnapshot
-  - Refactor extractRenderablesParallel() to accept snapshot instead of World
-  - Split render passes into `prepareExecute()` (CPU) and `execute()` (GPU)
-  - Clear separation of CPU work from GPU command recording
-  - Enables future parallel command recording
+- **Phase 2.1: Prepare/Execute Separation** ✅ COMPLETE
+  - Added Layer.prepare() for main thread CPU work (game logic, ECS queries) ✅
+  - Split Layer.update() to render thread only (Vulkan descriptor updates) ✅
+  - Layer.render() remains render thread (Vulkan draw commands) ✅
+  - Added RenderPass.prepareExecute() VTable method (optional) ✅
+  - Implemented backpressure semaphore to prevent main thread runaway ✅
+  - Main thread naturally throttled to stay 1 frame ahead of render thread ✅
+  - Frame counter tracks slowest thread (min of main/render) for scheduling ✅
+  - Fixed hot-reload pipeline layout race condition ✅
   
 - **Phase 2.2: Parallel Command Recording** ⏳ FUTURE
   - Secondary command buffers
