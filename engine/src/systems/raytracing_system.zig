@@ -336,53 +336,46 @@ pub const RaytracingSystem = struct {
 
     /// Create TLAS asynchronously using pre-computed raytracing data from the scene bridge
     pub fn createTlasAsyncFromRtData(self: *RaytracingSystem, rt_data: RenderData.RaytracingData, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
-        // Wait for BLAS to complete first
-        // if (!self.bvh_builder.isWorkComplete()) {
-        //     log(.WARN, "RaytracingSystem", "BLAS builds still in progress, cannot create TLAS yet", .{});
-        //     return error.BlasNotReady;
-        // }
+        // Use BLAS results that were already stored in RT system arrays via blasCompletionCallback
+        // Don't call takeCompletedBlas() - that would try to consume results that were already consumed by the callback
 
-        // Get completed BLAS results
-        const blas_results = try self.bvh_builder.takeCompletedBlas(self.allocator);
-        defer self.allocator.free(blas_results);
-
-        if (blas_results.len == 0) {
+        if (self.blas_handles.items.len == 0) {
             log(.WARN, "RaytracingSystem", "No BLAS results available for TLAS creation", .{});
             return error.NoBlasResults;
         }
 
-        // Create instance data from RT data and BLAS results
+        // Create instance data from RT data and stored BLAS results
         var instances = std.ArrayList(InstanceData){};
         defer instances.deinit(self.allocator);
 
-        // Match RT instances to BLAS results by geometry_id
+        // Match RT instances to BLAS by geometry_id
+        // BLAS are stored in order of geometry_id, so we can use indices directly
         for (rt_data.instances, 0..) |rt_instance, rt_index| {
-            // Find the corresponding BLAS result for this RT instance by geometry_id
-            var found_blas: ?BlasResult = null;
-            for (blas_results) |blas_result| {
-                // Match by geometry_id (which corresponds to the RT geometry index)
-                if (blas_result.geometry_id == rt_index) {
-                    found_blas = blas_result;
-                    break;
-                }
+            // Get BLAS device address using geometry_id as index
+            if (rt_index >= self.blas_handles.items.len) {
+                log(.WARN, "RaytracingSystem", "No BLAS found for RT instance {} (out of bounds)", .{rt_index});
+                continue;
             }
 
-            if (found_blas) |blas_result| {
-                const clamped_material_id = @min(rt_instance.material_index, 255); // Clamp to 8 bits for safety
+            // Get BLAS device address from stored acceleration structure
+            var blas_address_info = vk.AccelerationStructureDeviceAddressInfoKHR{
+                .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
+                .acceleration_structure = self.blas_handles.items[rt_index],
+            };
+            const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_address_info);
 
-                const instance_data = InstanceData{
-                    .blas_address = blas_result.device_address,
-                    .transform = rt_instance.transform,
-                    .custom_index = clamped_material_id,
-                    .mask = 0xFF,
-                    .sbt_offset = 0,
-                    .flags = 0,
-                };
+            const clamped_material_id = @min(rt_instance.material_index, 255); // Clamp to 8 bits for safety
 
-                try instances.append(self.allocator, instance_data);
-            } else {
-                log(.WARN, "RaytracingSystem", "No BLAS found for RT instance {} (geometry_id={})", .{ rt_index, rt_index });
-            }
+            const instance_data = InstanceData{
+                .blas_address = blas_device_address,
+                .transform = rt_instance.transform,
+                .custom_index = clamped_material_id,
+                .mask = 0xFF,
+                .sbt_offset = 0,
+                .flags = 0,
+            };
+
+            try instances.append(self.allocator, instance_data);
         }
 
         if (instances.items.len == 0) {
@@ -679,8 +672,6 @@ pub const RaytracingSystem = struct {
             };
         }
 
-        log(.INFO, "raytracing", "Completed {} BLAS builds", .{blas_results.len});
-
         // Update TLAS if provided
         if (tlas_result) |tlas| {
             self.tlas = tlas.acceleration_structure;
@@ -769,7 +760,10 @@ pub const RaytracingSystem = struct {
         queue.blas_handles.clearRetainingCapacity();
 
         for (queue.blas_buffers.items) |*buf| {
-            buf.deinit();
+            // Only deinit buffers that were actually created
+            if (buf.buffer != .null_handle or buf.memory != .null_handle) {
+                buf.deinit();
+            }
         }
         queue.blas_buffers.clearRetainingCapacity();
 
@@ -782,12 +776,18 @@ pub const RaytracingSystem = struct {
         queue.tlas_handles.clearRetainingCapacity();
 
         for (queue.tlas_buffers.items) |*buf| {
-            buf.deinit();
+            // Only deinit buffers that were actually created
+            if (buf.buffer != .null_handle or buf.memory != .null_handle) {
+                buf.deinit();
+            }
         }
         queue.tlas_buffers.clearRetainingCapacity();
 
         for (queue.tlas_instance_buffers.items) |*buf| {
-            buf.deinit();
+            // Only deinit buffers that were actually created
+            if (buf.buffer != .null_handle or buf.memory != .null_handle) {
+                buf.deinit();
+            }
         }
         queue.tlas_instance_buffers.clearRetainingCapacity();
     }

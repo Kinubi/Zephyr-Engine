@@ -36,9 +36,11 @@ pub const RenderSystem = struct {
     // geometry_change: mesh count/assets changed (full rebuild + descriptors)
     transform_only_change: bool = false,
 
-    // Cached render data (rebuilt when changes detected)
-    cached_raster_data: ?RasterizationData = null,
-    cached_raytracing_data: ?RaytracingData = null,
+    // Double-buffered cached render data (lock-free main/render thread access)
+    // Main thread writes to inactive buffer, render thread reads from active buffer
+    cached_raster_data: [2]?RasterizationData = .{ null, null },
+    cached_raytracing_data: [2]?RaytracingData = .{ null, null },
+    active_cache_index: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !RenderSystem {
         // Register with thread pool if provided
@@ -60,13 +62,18 @@ pub const RenderSystem = struct {
     }
 
     pub fn deinit(self: *RenderSystem) void {
-        if (self.cached_raster_data) |data| {
-            self.allocator.free(data.objects);
+        // Clean up both cache buffers
+        for (&self.cached_raster_data) |*data| {
+            if (data.*) |cache| {
+                self.allocator.free(cache.objects);
+            }
         }
-        if (self.cached_raytracing_data) |*data| {
-            self.allocator.free(data.instances);
-            self.allocator.free(data.geometries);
-            self.allocator.free(data.materials);
+        for (&self.cached_raytracing_data) |*data| {
+            if (data.*) |cache| {
+                self.allocator.free(cache.instances);
+                self.allocator.free(cache.geometries);
+                self.allocator.free(cache.materials);
+            }
         }
     }
 
@@ -363,6 +370,7 @@ pub const RenderSystem = struct {
 
     /// Rebuild caches from a GameStateSnapshot instead of World
     /// This is called by the render thread with an immutable snapshot
+    /// Writes to INACTIVE buffer, then atomically flips to make it active
     pub fn rebuildCachesFromSnapshot(
         self: *RenderSystem,
         snapshot: *const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot,
@@ -370,11 +378,15 @@ pub const RenderSystem = struct {
     ) !void {
         const start_time = std.time.nanoTimestamp();
 
-        // Clean up old cached data
-        if (self.cached_raster_data) |data| {
+        // Determine which buffer to write to (inactive = opposite of active)
+        const active_idx = self.active_cache_index.load(.acquire);
+        const write_idx = 1 - active_idx;
+
+        // Clean up old cached data in the WRITE buffer (safe - render thread reads ACTIVE buffer)
+        if (self.cached_raster_data[write_idx]) |data| {
             self.allocator.free(data.objects);
         }
-        if (self.cached_raytracing_data) |*data| {
+        if (self.cached_raytracing_data[write_idx]) |*data| {
             self.allocator.free(data.instances);
             self.allocator.free(data.geometries);
             self.allocator.free(data.materials);
@@ -387,9 +399,9 @@ pub const RenderSystem = struct {
 
         // Use parallel cache building if thread_pool available and enough work
         if (self.thread_pool != null and entities.len >= 50) {
-            try self.buildCachesFromSnapshotParallel(entities, asset_manager);
+            try self.buildCachesFromSnapshotParallel(entities, asset_manager, write_idx);
         } else {
-            try self.buildCachesFromSnapshotSingleThreaded(entities, asset_manager);
+            try self.buildCachesFromSnapshotSingleThreaded(entities, asset_manager, write_idx);
         }
 
         const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
@@ -410,10 +422,12 @@ pub const RenderSystem = struct {
     }
 
     /// Build caches from snapshot entities (single-threaded)
+    /// Builds caches in the WRITE buffer at write_idx
     fn buildCachesFromSnapshotSingleThreaded(
         self: *RenderSystem,
         entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
         asset_manager: *AssetManager,
+        write_idx: u8,
     ) !void {
         // Count total meshes
         var total_meshes: usize = 0;
@@ -465,17 +479,19 @@ pub const RenderSystem = struct {
             }
         }
 
-        // Store cached data
-        self.cached_raster_data = .{
+        // Store cached data in WRITE buffer
+        self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
-            .materials = materials,
         };
 
-        self.cached_raytracing_data = .{
+        self.cached_raytracing_data[write_idx] = .{
             .instances = instances,
             .geometries = geometries,
             .materials = materials,
         };
+
+        // Atomically flip to make the new cache active
+        self.active_cache_index.store(write_idx, .release);
     }
 
     /// Build caches from snapshot entities (parallel)
@@ -483,6 +499,7 @@ pub const RenderSystem = struct {
         self: *RenderSystem,
         entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
         asset_manager: *AssetManager,
+        write_idx: u8,
     ) !void {
         const pool = self.thread_pool.?;
 
@@ -567,17 +584,19 @@ pub const RenderSystem = struct {
             std.Thread.yield() catch {};
         }
 
-        // Store cached data
-        self.cached_raster_data = .{
+        // Store cached data in WRITE buffer
+        self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
-            .materials = materials,
         };
 
-        self.cached_raytracing_data = .{
+        self.cached_raytracing_data[write_idx] = .{
             .instances = instances,
             .geometries = geometries,
             .materials = materials,
         };
+
+        // Atomically flip to make the new cache active
+        self.active_cache_index.store(write_idx, .release);
     }
 
     /// Context for snapshot-based parallel cache building
@@ -688,9 +707,12 @@ pub const RenderSystem = struct {
         }
 
         // Check 2: Cache missing (cheap)
-        if (!changes_detected and self.cached_raster_data == null) {
-            changes_detected = true;
-            reason = "cache_missing";
+        if (!changes_detected) {
+            const active_idx = self.active_cache_index.load(.acquire);
+            if (self.cached_raster_data[active_idx] == null) {
+                changes_detected = true;
+                reason = "cache_missing";
+            }
         }
 
         // Check 3: Asset IDs and mesh pointers changed - async asset loading (medium cost)
@@ -711,7 +733,8 @@ pub const RenderSystem = struct {
                 }
             }
 
-            if (self.cached_raytracing_data) |rt_cache| {
+            const active_idx = self.active_cache_index.load(.acquire);
+            if (self.cached_raytracing_data[active_idx]) |rt_cache| {
                 if (current_mesh_asset_ids.items.len != rt_cache.geometries.len) {
                     changes_detected = true;
                     reason = "rt_geom_count_mismatch";
@@ -788,14 +811,19 @@ pub const RenderSystem = struct {
 
     /// Rebuild both raster and raytracing caches in one pass
     /// Called by checkForChanges when geometry changes detected
+    /// Writes to INACTIVE buffer, then atomically flips to make it active
     fn rebuildCaches(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
         const start_time = std.time.nanoTimestamp();
 
-        // Clean up old cached data
-        if (self.cached_raster_data) |data| {
+        // Determine which buffer to write to (inactive = opposite of active)
+        const active_idx = self.active_cache_index.load(.acquire);
+        const write_idx = 1 - active_idx;
+
+        // Clean up old cached data in the WRITE buffer (safe - render thread reads ACTIVE buffer)
+        if (self.cached_raster_data[write_idx]) |data| {
             self.allocator.free(data.objects);
         }
-        if (self.cached_raytracing_data) |*data| {
+        if (self.cached_raytracing_data[write_idx]) |*data| {
             self.allocator.free(data.instances);
             self.allocator.free(data.geometries);
             self.allocator.free(data.materials);
@@ -815,9 +843,9 @@ pub const RenderSystem = struct {
 
         // Use parallel cache building if thread_pool available and enough work
         if (self.thread_pool != null and temp_renderables.items.len >= 50) {
-            try self.buildCachesParallel(temp_renderables.items, asset_manager);
+            try self.buildCachesParallel(temp_renderables.items, asset_manager, write_idx);
         } else {
-            try self.buildCachesSingleThreaded(temp_renderables.items, asset_manager);
+            try self.buildCachesSingleThreaded(temp_renderables.items, asset_manager, write_idx);
         }
 
         const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
@@ -853,7 +881,8 @@ pub const RenderSystem = struct {
     }
 
     /// Single-threaded cache building
-    fn buildCachesSingleThreaded(self: *RenderSystem, renderables: []const RenderableEntity, asset_manager: *AssetManager) !void {
+    /// Builds caches in the WRITE buffer at write_idx
+    fn buildCachesSingleThreaded(self: *RenderSystem, renderables: []const RenderableEntity, asset_manager: *AssetManager, write_idx: u8) !void {
         // Count total meshes
         var total_meshes: usize = 0;
         for (renderables) |renderable| {
@@ -912,15 +941,18 @@ pub const RenderSystem = struct {
             }
         }
 
-        // Store caches
-        self.cached_raster_data = RasterizationData{
+        // Store caches in WRITE buffer
+        self.cached_raster_data[write_idx] = RasterizationData{
             .objects = raster_objects,
         };
-        self.cached_raytracing_data = RaytracingData{
+        self.cached_raytracing_data[write_idx] = RaytracingData{
             .instances = instances,
             .geometries = geometries,
             .materials = materials,
         };
+
+        // Atomically flip to make the new cache active (render thread will see it on next frame)
+        self.active_cache_index.store(write_idx, .release);
     }
 
     /// Context for parallel cache building
@@ -992,6 +1024,7 @@ pub const RenderSystem = struct {
         self: *RenderSystem,
         renderables: []const RenderableEntity,
         asset_manager: *AssetManager,
+        write_idx: u8,
     ) !void {
         const pool = self.thread_pool.?;
 
@@ -1077,15 +1110,18 @@ pub const RenderSystem = struct {
             std.Thread.yield() catch {};
         }
 
-        // Store caches
-        self.cached_raster_data = RasterizationData{
+        // Store caches in WRITE buffer
+        self.cached_raster_data[write_idx] = RasterizationData{
             .objects = raster_objects,
         };
-        self.cached_raytracing_data = RaytracingData{
+        self.cached_raytracing_data[write_idx] = RaytracingData{
             .instances = instances,
             .geometries = geometries,
             .materials = materials,
         };
+
+        // Atomically flip to make the new cache active
+        self.active_cache_index.store(write_idx, .release);
     }
 
     /// Check if BVH needs to be rebuilt (for ray tracing system)
@@ -1094,13 +1130,15 @@ pub const RenderSystem = struct {
 
         // The actual checking is done by checkForChanges() which runs every frame
         // Also check if cache doesn't exist yet (first frame)
-        return self.renderables_dirty or self.cached_raytracing_data == null;
+        const active_idx = self.active_cache_index.load(.acquire);
+        return self.renderables_dirty or self.cached_raytracing_data[active_idx] == null;
     }
 
-    /// Get cached raster data (already built by checkForChanges)
+    /// Get cached raster data from ACTIVE buffer (already built by checkForChanges on main thread)
     /// Returns a COPY of the cached data that the caller owns
     pub fn getRasterData(self: *RenderSystem) !RasterizationData {
-        if (self.cached_raster_data) |cached| {
+        const active_idx = self.active_cache_index.load(.acquire);
+        if (self.cached_raster_data[active_idx]) |cached| {
             // TODO: Investigate why allocator.dupe() causes @memcpy aliasing panic
             // Root cause: Likely allocator reusing freed memory in tight loops
             // Better fix: Use arena allocator for per-frame data to guarantee no reuse
@@ -1122,10 +1160,11 @@ pub const RenderSystem = struct {
         };
     }
 
-    /// Get cached raytracing data (already built by checkForChanges)
+    /// Get cached raytracing data from ACTIVE buffer (already built by checkForChanges on main thread)
     /// Returns a COPY of the cached data that the caller owns
     pub fn getRaytracingData(self: *RenderSystem) !RaytracingData {
-        if (self.cached_raytracing_data) |cached| {
+        const active_idx = self.active_cache_index.load(.acquire);
+        if (self.cached_raytracing_data[active_idx]) |cached| {
             // TODO: Investigate why allocator.dupe() causes @memcpy aliasing panic
             // Root cause: Likely allocator reusing freed memory in tight loops
             // Better fix: Use arena allocator for per-frame data to guarantee no reuse

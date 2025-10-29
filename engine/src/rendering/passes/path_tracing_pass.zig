@@ -413,6 +413,7 @@ pub const PathTracingPass = struct {
     }
     fn teardownImpl(base: *RenderPass) void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
+        log(.INFO, "path_tracing_pass", "Tearing down", .{});
 
         // Clean up per-frame descriptor data
         for (&self.per_frame) |*frame_data| {
@@ -420,10 +421,11 @@ pub const PathTracingPass = struct {
         }
 
         self.output_texture.deinit();
+
         self.rt_system.deinit();
+
         self.allocator.destroy(self.rt_system);
 
-        log(.INFO, "path_tracing_pass", "Cleaned up PathTracingPass", .{});
         self.allocator.destroy(self);
     }
 

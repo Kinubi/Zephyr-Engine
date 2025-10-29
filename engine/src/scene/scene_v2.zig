@@ -397,12 +397,11 @@ pub const Scene = struct {
         // Main thread increments, render thread processes all pending toggles
         _ = enabled; // Ignore the enabled parameter - just toggle!
         _ = self.pending_pt_toggles.fetchAdd(1, .release);
-        log(.DEBUG, "scene_v2", "Path tracing toggle queued", .{});
     }
 
     /// Apply pending path tracing toggles (called on RENDER THREAD)
     /// Returns true if any toggles were applied
-    fn applyPendingPathTracingToggle(self: *Scene) !bool {
+    pub fn applyPendingPathTracingToggle(self: *Scene) !bool {
         // Get number of pending toggles and reset counter
         const pending_count = self.pending_pt_toggles.swap(0, .acq_rel);
         if (pending_count == 0) return false; // No pending toggles
@@ -600,7 +599,6 @@ pub const Scene = struct {
         } else {
             log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
         }
-        _ = try self.applyPendingPathTracingToggle();
     }
 
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
@@ -647,18 +645,7 @@ pub const Scene = struct {
     /// Update scene state (Vulkan descriptor updates)
     /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
-
-        // Cache view-projection matrix for particle world-to-screen projection
-        self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
-
-        // Update animated lights and extract to GlobalUbo
-        try self.updateLights(global_ubo, frame_info.dt);
-
-        // Update particles (CPU-side spawning)
-        try self.updateParticles(frame_info.dt);
-
-        // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
-        try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
+        _ = global_ubo;
 
         // Update all render passes through the render graph (descriptor sets)
         if (self.render_graph) |*graph| {

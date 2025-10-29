@@ -143,8 +143,17 @@ pub const SceneLayer = struct {
     }
 
     fn end(base: *Layer, frame_info: *FrameInfo) !void {
-        _ = base;
+        const self: *SceneLayer = @fieldParentPtr("base", base);
         _ = frame_info;
+
+        // PHASE 2.1: Apply pending path tracing toggles AFTER endFrame() when GPU is idle
+        // This is safe because:
+        // 1. GPU has finished all work (frame submission completed)
+        // 2. No fences are in-flight (they've all been waited on)
+        // 3. Render graph recompile can happen without fence conflicts
+        _ = self.scene.applyPendingPathTracingToggle() catch |err| {
+            log(.ERROR, "scene_layer", "Failed to apply PT toggle: {}", .{err});
+        };
     }
 
     fn event(base: *Layer, evt: *Event) void {

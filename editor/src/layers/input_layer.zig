@@ -120,7 +120,6 @@ pub const InputLayer = struct {
                             const pt_enabled = if (self.scene.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
                             self.scene.setPathTracingEnabled(!pt_enabled) catch {};
                             self.last_toggle_time = toggle_time;
-                            log(.INFO, "InputLayer", "Path tracing toggled via event: {}", .{!pt_enabled});
                             evt.markHandled();
                         }
                     }

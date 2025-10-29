@@ -390,6 +390,7 @@ pub const GeometryPass = struct {
 
         // Pipeline cleanup handled by UnifiedPipelineSystem
         self.allocator.destroy(self);
+        log(.INFO, "geometry_pass", "Teardown complete", .{});
     }
 };
 
