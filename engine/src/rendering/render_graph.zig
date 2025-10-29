@@ -135,10 +135,17 @@ pub const RenderPassVTable = struct {
     /// Setup resources and declare dependencies
     setup: *const fn (pass: *RenderPass, graph: *RenderGraph) anyerror!void,
 
-    /// Update pass state each frame (e.g., BVH rebuilds, descriptor updates)
+    /// PHASE 2.1: Prepare CPU-side data (MAIN THREAD)
+    /// Called before snapshot capture to do ECS queries, sorting, culling
+    /// Optional - passes without CPU work can leave this null
+    prepareExecute: ?*const fn (pass: *RenderPass, frame_info: *const FrameInfo) anyerror!void = null,
+
+    /// Update pass state each frame (RENDER THREAD)
+    /// For Vulkan descriptor updates, pipeline state changes
     update: *const fn (pass: *RenderPass, frame_info: *const FrameInfo) anyerror!void,
 
-    /// Execute the pass (record commands)
+    /// Execute the pass (RENDER THREAD)
+    /// Record Vulkan draw commands ONLY - no ECS queries here
     execute: *const fn (pass: *RenderPass, frame_info: FrameInfo) anyerror!void,
 
     /// Cleanup resources
@@ -165,12 +172,19 @@ pub const RenderPass = struct {
         return self.vtable.setup(self, graph);
     }
 
-    /// Call update through vtable
+    /// Call prepareExecute through vtable (MAIN THREAD - ECS queries, sorting)
+    pub fn prepareExecute(self: *RenderPass, frame_info: *const FrameInfo) !void {
+        if (self.vtable.prepareExecute) |prepare| {
+            return prepare(self, frame_info);
+        }
+    }
+
+    /// Call update through vtable (RENDER THREAD - Vulkan descriptor updates)
     pub fn update(self: *RenderPass, frame_info: *const FrameInfo) !void {
         return self.vtable.update(self, frame_info);
     }
 
-    /// Call execute through vtable
+    /// Call execute through vtable (RENDER THREAD - Vulkan draw commands)
     pub fn execute(self: *RenderPass, frame_info: FrameInfo) !void {
         return self.vtable.execute(self, frame_info);
     }
@@ -370,7 +384,37 @@ pub const RenderGraph = struct {
         log(.INFO, "render_graph", "Execution order built: {} passes", .{self.execution_order.items.len});
     }
 
-    /// Update all enabled passes (call each frame before execute)
+    /// PHASE 2.1: Prepare CPU-side data for all passes (MAIN THREAD)
+    /// Called before snapshot capture to do ECS queries, sorting, culling
+    /// Passes without prepareExecute() are safely skipped
+    pub fn prepareExecute(self: *RenderGraph, frame_info: *const FrameInfo) !void {
+        if (!self.compiled) {
+            return error.GraphNotCompiled;
+        }
+
+        for (self.execution_order.items) |pass| {
+            // Skip passes that don't have CPU preparation work
+            if (pass.vtable.prepareExecute == null) {
+                continue;
+            }
+
+            // Optional performance monitoring
+            if (frame_info.performance_monitor) |pm| {
+                var name_buf: [64]u8 = undefined;
+                const prep_name = std.fmt.bufPrint(&name_buf, "{s}_prepare", .{pass.name}) catch pass.name;
+                try pm.beginPass(prep_name, frame_info.current_frame, frame_info.command_buffer);
+
+                try pass.prepareExecute(frame_info);
+
+                try pm.endPass(prep_name, frame_info.current_frame, frame_info.command_buffer);
+            } else {
+                try pass.prepareExecute(frame_info);
+            }
+        }
+    }
+
+    /// Update all enabled passes (RENDER THREAD - Vulkan descriptor updates)
+    /// Call each frame before execute
     pub fn update(self: *RenderGraph, frame_info: *const FrameInfo) !void {
         if (!self.compiled) {
             return error.GraphNotCompiled;

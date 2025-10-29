@@ -111,8 +111,22 @@ pub const UIRenderer = struct {
         const window_flags = c.ImGuiWindowFlags_NoCollapse;
 
         if (c.ImGui_Begin("Render Stats", null, window_flags)) {
-            c.ImGui_Text("FPS: %.1f", stats.fps);
-            c.ImGui_Text("Frame Time: %.2f ms", stats.frame_time_ms);
+            // FPS breakdown with timing
+            if (stats.performance_stats) |perf| {
+                // Calculate FPS from times
+                const total_frame_ms = stats.frame_time_ms;
+                const total_fps = if (total_frame_ms > 0) 1000.0 / total_frame_ms else 0.0;
+
+                const cpu_fps = if (perf.cpu_time_ms > 0) 1000.0 / perf.cpu_time_ms else 0.0;
+                const gpu_fps = if (perf.gpu_time_ms > 0) 1000.0 / perf.gpu_time_ms else 0.0;
+
+                c.ImGui_Text("CPU logic: %.1f fps (%.2f ms)", total_fps, total_frame_ms);
+                c.ImGui_Text("CPU render: %.1f fps (%.2f ms)", cpu_fps, perf.cpu_time_ms);
+                c.ImGui_Text("GPU render: %.1f fps (%.2f ms)", gpu_fps, perf.gpu_time_ms);
+            } else {
+                c.ImGui_Text("FPS: %.1f", stats.fps);
+                c.ImGui_Text("Frame Time: %.2f ms", stats.frame_time_ms);
+            }
             c.ImGui_Separator();
 
             c.ImGui_Text("Entities: %d", stats.entity_count);
@@ -127,7 +141,6 @@ pub const UIRenderer = struct {
             if (stats.performance_stats) |perf| {
                 c.ImGui_Separator();
                 c.ImGui_Text("Performance (rolling avg):");
-                c.ImGui_Text("CPU: %.2f ms | GPU: %.2f ms", perf.cpu_time_ms, perf.gpu_time_ms);
 
                 // Calculate pass sums
                 var cpu_sum: f32 = 0.0;

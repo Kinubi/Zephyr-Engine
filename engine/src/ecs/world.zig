@@ -21,7 +21,19 @@ pub const World = struct {
     storage_metadata: std.StringHashMap(StorageMetadata),
     thread_pool: ?*ThreadPool,
 
-    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) World {
+    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !World {
+        // Register ecs_update subsystem with thread pool if provided
+        if (thread_pool) |tp| {
+            try tp.registerSubsystem(.{
+                .name = "ecs_update",
+                .min_workers = 2,
+                .max_workers = 8,
+                .priority = .normal,
+                .work_item_type = .ecs_update,
+            });
+            log(.INFO, "ecs", "Registered ecs_update subsystem with thread pool", .{});
+        }
+        
         return .{
             .allocator = allocator,
             .entity_registry = EntityRegistry.init(allocator),

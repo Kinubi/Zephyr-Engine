@@ -13,6 +13,7 @@ pub const Layer = struct {
     timing: LayerTiming = .{},
 
     pub const LayerTiming = struct {
+        prepare_time_ns: u64 = 0,
         begin_time_ns: u64 = 0,
         update_time_ns: u64 = 0,
         render_time_ns: u64 = 0,
@@ -20,11 +21,12 @@ pub const Layer = struct {
         event_time_ns: u64 = 0,
 
         pub fn getTotalMs(self: LayerTiming) f32 {
-            const total_ns = self.begin_time_ns + self.update_time_ns + self.render_time_ns + self.end_time_ns + self.event_time_ns;
+            const total_ns = self.prepare_time_ns + self.begin_time_ns + self.update_time_ns + self.render_time_ns + self.end_time_ns + self.event_time_ns;
             return @as(f32, @floatFromInt(total_ns)) / 1_000_000.0;
         }
 
         pub fn reset(self: *LayerTiming) void {
+            self.prepare_time_ns = 0;
             self.begin_time_ns = 0;
             self.update_time_ns = 0;
             self.render_time_ns = 0;
@@ -41,14 +43,19 @@ pub const Layer = struct {
         /// Called when layer is detached from the stack
         detach: *const fn (layer: *Layer) void,
 
+        /// PHASE 2.1: Called on MAIN THREAD for CPU-side preparation
+        /// Game logic, ECS queries, physics - NO Vulkan work
+        /// Optional - can be null for layers without main thread work
+        prepare: ?*const fn (layer: *Layer, dt: f32) anyerror!void,
+
         /// Called at the start of the frame (before updates)
         begin: *const fn (layer: *Layer, frame_info: *const FrameInfo) anyerror!void,
 
-        /// Called every frame for updates (logic, input, etc.)
+        /// PHASE 2.1: Called on RENDER THREAD for Vulkan descriptor updates
         /// Receives full frame context including dt
         update: *const fn (layer: *Layer, frame_info: *const FrameInfo) anyerror!void,
 
-        /// Called every frame for rendering
+        /// PHASE 2.1: Called on RENDER THREAD for Vulkan draw commands
         render: *const fn (layer: *Layer, frame_info: *const FrameInfo) anyerror!void,
 
         /// Called at the end of the frame (after rendering)
@@ -66,6 +73,17 @@ pub const Layer = struct {
     /// Detach layer from stack
     pub fn detach(self: *Layer) void {
         return self.vtable.detach(self);
+    }
+
+    /// PHASE 2.1: Prepare layer (MAIN THREAD - no Vulkan work)
+    pub fn prepare(self: *Layer, dt: f32) !void {
+        if (!self.enabled) return;
+        if (self.vtable.prepare) |prep| {
+            const start_time = std.time.nanoTimestamp();
+            try prep(self, dt);
+            const end_time = std.time.nanoTimestamp();
+            self.timing.prepare_time_ns = @intCast(end_time - start_time);
+        }
     }
 
     /// Begin frame for this layer

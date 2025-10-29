@@ -40,6 +40,7 @@ pub const PerformanceLayer = struct {
     const vtable = Layer.VTable{
         .attach = attach,
         .detach = detach,
+        .prepare = null, // PerformanceLayer has no main thread work
         .begin = begin,
         .update = update,
         .render = render,

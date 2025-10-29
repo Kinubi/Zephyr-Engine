@@ -332,8 +332,9 @@ pub const GeometryPass = struct {
         // Bind pipeline with all descriptor sets (Set 0: global UBO, Set 1: materials/textures)
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.geometry_pipeline, frame_index);
 
-        // Use cached pipeline layout (no hashmap lookup needed)
-        const pipeline_layout = self.cached_pipeline_layout;
+        // Get pipeline layout from pipeline system (ensures we use the correct layout even during hot-reload)
+        // Don't use cached_pipeline_layout here - it might be stale during hot-reload
+        const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
         // Render each object (mesh pointers and material indices already resolved in cache)
         // NOTE: All objects in cache are currently visible (visibility culling not yet implemented)
@@ -389,6 +390,7 @@ pub const GeometryPass = struct {
 
         // Pipeline cleanup handled by UnifiedPipelineSystem
         self.allocator.destroy(self);
+        log(.INFO, "geometry_pass", "Teardown complete", .{});
     }
 };
 

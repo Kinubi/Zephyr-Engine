@@ -62,6 +62,10 @@ pub const Scene = struct {
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
 
+    // Thread-safe path tracing state (set by main thread, applied by render thread)
+    // -1 = no change pending, 0 = disable requested, 1 = enable requested
+    pending_pt_state: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
+
     /// Initialize a new scene
     pub fn init(
         allocator: std.mem.Allocator,
@@ -69,7 +73,7 @@ pub const Scene = struct {
         asset_manager: *AssetManager,
         thread_pool: ?*@import("../threading/thread_pool.zig").ThreadPool,
         name: []const u8,
-    ) Scene {
+    ) !Scene {
         log(.INFO, "scene_v2", "Creating scene: {s}", .{name});
 
         // Initialize random number generator with current time as seed
@@ -86,7 +90,7 @@ pub const Scene = struct {
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
-            .render_system = ecs.RenderSystem.init(allocator, thread_pool),
+            .render_system = try ecs.RenderSystem.init(allocator, thread_pool),
         };
     }
 
@@ -387,24 +391,57 @@ pub const Scene = struct {
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
     }
 
-    /// Toggle path tracing on/off (switches between path tracing and raster)
+    /// Set path tracing enabled/disabled state
+    /// @param enabled: true to enable path tracing, false to disable
+    /// This sets an explicit state rather than toggling, so calling with the same
+    /// value multiple times is idempotent (safe and will do nothing if already in that state)
     pub fn setPathTracingEnabled(self: *Scene, enabled: bool) !void {
-        // Update render graph pass states
+        // THREAD-SAFE: Set desired state atomically
+        // Main thread sets state, render thread applies it
+        const state_value: i32 = if (enabled) 1 else 0;
+        self.pending_pt_state.store(state_value, .release);
+    }
+
+    /// Apply pending path tracing state change (called on RENDER THREAD)
+    /// Returns true if state was changed
+    pub fn applyPendingPathTracingToggle(self: *Scene) !bool {
+        // Get pending state and reset to "no change pending"
+        const pending_state = self.pending_pt_state.swap(-1, .acq_rel);
+        if (pending_state == -1) return false; // No pending state change
+
+        const new_enabled = pending_state == 1;
+
+        // Update render graph pass states (SAFE: on render thread)
         if (self.render_graph) |*graph| {
-            // First, set the path tracing pass's internal flag
+            // Get current state to check if it actually needs to change
+            const currently_enabled = if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+            
+            // If state is already what we want, no need to change
+            if (currently_enabled == new_enabled) {
+                log(.DEBUG, "scene_v2", "Path tracing already in desired state ({}), no change needed", .{new_enabled});
+                return false;
+            }
+
+            // Set the path tracing pass's internal flag
             if (graph.getPass("path_tracing_pass")) |pass| {
                 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
                 const pt_pass: *PathTracingPass = @fieldParentPtr("base", pass);
-                pt_pass.enable_path_tracing = enabled;
+                pt_pass.enable_path_tracing = new_enabled;
             }
 
-            if (enabled) {
+            if (new_enabled) {
                 // Path tracing mode: disable raster passes, enable PT
                 graph.disablePass("geometry_pass");
                 graph.disablePass("particle_pass");
                 graph.disablePass("light_volume_pass");
                 graph.enablePass("path_tracing_pass");
-                try graph.recompile(); // Recompile after all state changes
+                try graph.recompile();
+                // CRITICAL: Wait for GPU to finish all in-flight work before continuing
+                // The render graph recompile changes pipeline state, and we need to ensure
+                // any previous frames using the old pipelines have completed before we
+                // submit new work. This prevents fence reuse issues where we try to use
+                // a fence that's still in-flight from the previous submit.
+
                 log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s}", .{self.name});
             } else {
                 // Raster mode: enable raster passes, disable PT
@@ -412,11 +449,13 @@ pub const Scene = struct {
                 graph.enablePass("particle_pass");
                 graph.enablePass("light_volume_pass");
                 graph.disablePass("path_tracing_pass");
-                try graph.recompile(); // Recompile after all state changes
+                try graph.recompile();
                 log(.INFO, "scene_v2", "Path tracing DISABLED for scene: {s}", .{self.name});
             }
+            return true;
         } else {
             log(.WARN, "scene_v2", "Cannot toggle path tracing - render graph not initialized", .{});
+            return false;
         }
     }
 
@@ -564,28 +603,56 @@ pub const Scene = struct {
         }
     }
 
-    /// Update scene state (animations, physics, etc.)
-    /// Call this once per frame before rendering
-    pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
+    /// Phase 2.1: Main thread preparation (game logic, ECS queries)
+    /// Call this on the MAIN THREAD before capturing snapshot
+    pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+        // Apply any pending path tracing toggles FIRST (CPU-side state change)
+        // This prepares the render graph state for frame N+1 while render thread renders frame N
+
         // Cache view-projection matrix for particle world-to-screen projection
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
         // Update animated lights and extract to GlobalUbo
-        try self.updateLights(global_ubo, frame_info.dt);
+        try self.updateLights(global_ubo, dt);
 
         // Update particles (CPU-side spawning)
-        try self.updateParticles(frame_info.dt);
+        try self.updateParticles(dt);
 
         // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
+        // This queries the ECS World and MUST be on main thread
         try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
 
-        // Update all render passes through the render graph
+        // Phase 2.1: Allow passes to do CPU-side preparation (ECS queries, sorting, culling)
+        // Most passes won't need this since checkForChanges() above handles the main ECS queries
+        // But this allows for pass-specific preparation work on the main thread
         if (self.render_graph) |*graph| {
-            try graph.update(&frame_info);
+            // Create minimal frame_info for prepareExecute (no Vulkan resources needed yet)
+            const prep_frame_info = FrameInfo{
+                .command_buffer = vk.CommandBuffer.null_handle,
+                .current_frame = 0,
+                .dt = dt,
+                .extent = undefined,
+                .color_image = undefined,
+                .color_image_view = undefined,
+                .depth_image_view = undefined,
+                .performance_monitor = null,
+            };
+            try graph.prepareExecute(&prep_frame_info);
         }
 
         // Run ECS systems (transforms, physics, etc.)
-        // try self.ecs_world.update(frame_info.dt);
+        // try self.ecs_world.update(dt);
+    }
+
+    /// Update scene state (Vulkan descriptor updates)
+    /// Call this once per frame on RENDER THREAD before rendering
+    pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
+        _ = global_ubo;
+
+        // Update all render passes through the render graph (descriptor sets)
+        if (self.render_graph) |*graph| {
+            try graph.update(&frame_info);
+        }
     }
 
     /// Extract lights from ECS and populate the GlobalUbo

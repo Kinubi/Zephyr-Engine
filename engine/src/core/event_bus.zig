@@ -7,6 +7,7 @@ const LayerStack = @import("layer_stack.zig").LayerStack;
 pub const EventBus = struct {
     allocator: std.mem.Allocator,
     event_queue: std.ArrayList(Event),
+    mutex: std.Thread.Mutex, // Protect event_queue from concurrent access
 
     // Event filtering by category
     enabled_categories: std.EnumSet(EventCategory),
@@ -15,6 +16,7 @@ pub const EventBus = struct {
         return .{
             .allocator = allocator,
             .event_queue = std.ArrayList(Event){},
+            .mutex = .{},
             .enabled_categories = std.EnumSet(EventCategory).initFull(),
         };
     }
@@ -30,15 +32,31 @@ pub const EventBus = struct {
             return; // Category is disabled, skip this event
         }
 
+        // THREAD-SAFE: Lock while appending to queue (called from GLFW callbacks)
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.event_queue.append(self.allocator, event);
     }
 
     /// Process all queued events through the layer stack
     pub fn processEvents(self: *EventBus, layer_stack: *LayerStack) void {
-        for (self.event_queue.items) |*event| {
+        // THREAD-SAFE: Swap to local list under lock to minimize lock contention
+        // This prevents holding the lock during potentially slow event dispatch
+        var local_events = std.ArrayList(Event){};
+        defer local_events.deinit(self.allocator);
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Swap the queues so we can process without holding the lock
+            std.mem.swap(std.ArrayList(Event), &self.event_queue, &local_events);
+        }
+
+        // Process events without holding the lock (allows concurrent queueEvent calls)
+        for (local_events.items) |*event| {
             layer_stack.dispatchEvent(event);
         }
-        self.event_queue.clearRetainingCapacity();
     }
 
     /// Get number of queued events

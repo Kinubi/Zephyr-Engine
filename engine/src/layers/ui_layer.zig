@@ -53,6 +53,7 @@ pub const UILayer = struct {
     const vtable = Layer.VTable{
         .attach = attach,
         .detach = detach,
+        .prepare = null, // UILayer has no main thread work (ImGui updates happen in update)
         .begin = begin,
         .update = update,
         .render = render,

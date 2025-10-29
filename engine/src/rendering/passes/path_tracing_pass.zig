@@ -413,6 +413,7 @@ pub const PathTracingPass = struct {
     }
     fn teardownImpl(base: *RenderPass) void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
+        log(.INFO, "path_tracing_pass", "Tearing down", .{});
 
         // Clean up per-frame descriptor data
         for (&self.per_frame) |*frame_data| {
@@ -420,10 +421,11 @@ pub const PathTracingPass = struct {
         }
 
         self.output_texture.deinit();
+
         self.rt_system.deinit();
+
         self.allocator.destroy(self.rt_system);
 
-        log(.INFO, "path_tracing_pass", "Cleaned up PathTracingPass", .{});
         self.allocator.destroy(self);
     }
 
@@ -646,10 +648,9 @@ pub const PathTracingPass = struct {
         // so resources queued during that frame are safe to destroy
         self.rt_system.flushDeferredFrame(frame_index);
 
-        // // Check various dirty flags BEFORE updating (like rt_renderer.update does)
-        // _ = self.render_system.checkBvhRebuildNeeded();
+        // Check various dirty flags BEFORE updating (like rt_renderer.update does)
         const materials_dirty = self.asset_manager.materials_updated;
-        const textures_dirty = self.asset_manager.texture_descriptors_updated;
+        const textures_dirty = self.asset_manager.texture_descriptors_dirty;
 
         // Check if render system detected geometry changes
         const geometry_changed = self.render_system.raytracing_descriptors_dirty;

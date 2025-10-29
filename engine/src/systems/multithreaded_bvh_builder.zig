@@ -111,6 +111,16 @@ pub const MultithreadedBvhBuilder = struct {
     total_build_time_ns: std.atomic.Value(u64),
 
     pub fn init(gc: *GraphicsContext, thread_pool: *ThreadPool, allocator: std.mem.Allocator) !MultithreadedBvhBuilder {
+        // Register BVH building subsystem with thread pool
+        try thread_pool.registerSubsystem(.{
+            .name = "bvh_building",
+            .min_workers = 1,
+            .max_workers = 4,
+            .priority = .critical,
+            .work_item_type = .bvh_building,
+        });
+        log(.INFO, "bvh_builder", "Registered bvh_building subsystem with thread pool", .{});
+
         var completed_blas = std.ArrayList(BlasResult){};
         try completed_blas.ensureTotalCapacity(allocator, 8);
 
@@ -137,9 +147,15 @@ pub const MultithreadedBvhBuilder = struct {
         self.blas_mutex.lock();
         defer self.blas_mutex.unlock();
 
-        for (self.completed_blas.items) |*blas_result| {
-            blas_result.buffer.deinit();
-            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_result.acceleration_structure, null);
+        // NOTE: If there are unconsumed BLAS results, it means the caller (RaytracingSystem)
+        // never called takeCompletedBlas(). This can happen if path tracing is never enabled.
+        // We need to clean up these buffers/AS properly to avoid memory leaks.
+        if (self.completed_blas.items.len > 0) {
+            log(.WARN, "bvh_builder", "Deinit: {} unconsumed BLAS results - cleaning up", .{self.completed_blas.items.len});
+            for (self.completed_blas.items) |*blas_result| {
+                blas_result.buffer.deinit();
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_result.acceleration_structure, null);
+            }
         }
         self.completed_blas.deinit(self.allocator);
 
@@ -149,7 +165,9 @@ pub const MultithreadedBvhBuilder = struct {
         self.persistent_geometry.deinit(self.allocator);
 
         // Clean up TLAS if it exists
+        // NOTE: Same as BLAS - if unconsumed, we need to clean it up
         if (self.completed_tlas) |*tlas_result| {
+            log(.WARN, "bvh_builder", "Deinit: unconsumed TLAS result - cleaning up", .{});
             tlas_result.buffer.deinit();
             tlas_result.instance_buffer.deinit();
             self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, tlas_result.acceleration_structure, null);
@@ -318,6 +336,7 @@ pub const MultithreadedBvhBuilder = struct {
     pub fn takeCompletedBlas(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
         self.blas_mutex.lock();
         defer self.blas_mutex.unlock();
+        log(.DEBUG, "bvh_builder", "Taking {} completed BLAS results", .{self.completed_blas.items.len});
 
         const results = try allocator.alloc(BlasResult, self.completed_blas.items.len);
         @memcpy(results, self.completed_blas.items);
@@ -329,6 +348,7 @@ pub const MultithreadedBvhBuilder = struct {
     pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
         self.tlas_mutex.lock();
         defer self.tlas_mutex.unlock();
+        log(.DEBUG, "bvh_builder", "Taking completed TLAS result", .{});
 
         const result = self.completed_tlas;
         if (result != null) {
@@ -391,7 +411,22 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
             var final_result = result;
             final_result.build_time_ns = build_time;
 
-            // Store result thread-safely
+            // Update metrics
+            _ = builder.total_blas_built.fetchAdd(1, .monotonic);
+            _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
+            _ = builder.pending_work.fetchSub(1, .monotonic);
+
+            // If callback provided, call it and transfer ownership to callback
+            // Otherwise, store in completed_blas for later retrieval via takeCompletedBlas()
+            if (work_data.completion_callback) |callback| {
+                if (work_data.callback_context) |cb_context| {
+                    callback(cb_context, .{ .build_blas = final_result });
+                    // Ownership transferred to callback - don't store in completed_blas
+                    return;
+                }
+            }
+
+            // No callback - store result for later retrieval
             builder.blas_mutex.lock();
             defer builder.blas_mutex.unlock();
 
@@ -399,18 +434,6 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
                 log(.ERROR, "bvh_builder", "Failed to store BLAS result: {}", .{err});
                 return;
             };
-
-            // Update metrics
-            _ = builder.total_blas_built.fetchAdd(1, .monotonic);
-            _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
-            _ = builder.pending_work.fetchSub(1, .monotonic);
-
-            // Call completion callback if provided
-            if (work_data.completion_callback) |callback| {
-                if (work_data.callback_context) |cb_context| {
-                    callback(cb_context, .{ .build_blas = final_result });
-                }
-            }
         },
         .tlas => {
             const work_data = @as(*BvhWorkData, @ptrCast(@alignCast(work_item.data.bvh_building.work_data)));

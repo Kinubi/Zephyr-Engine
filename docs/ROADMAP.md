@@ -120,9 +120,9 @@
 
 ---
 
-### 🔄 Phase 4: Performance Optimization (PLANNED)
+### ✅ Phase 4: Performance Optimization (COMPLETE)
 
-**Status**: ⚪ **Ready to Start**
+**Status**: 🟢 **Complete** - October 29, 2025
 
 #### Render Pass Optimizations
 - ✅ **LightVolumePass**: Instanced rendering (N draw calls → 1 draw call)
@@ -142,31 +142,45 @@
   - Skips barriers and buffer copy when no particles active
   - Zero GPU work for empty particle systems
 
-#### Threaded Rendering 🚧 READY TO START
+#### Threaded Rendering ✅ COMPLETE
 
 **Design Document**: `THREADED_RENDERING_DESIGN.md`
 
-**Phase 4.1: Parallel ECS Extraction** ⏳ Not Started
+**Phase 4.0: Render Thread Separation** ✅ Complete
+- Double-buffered game state snapshots
+- Semaphore-based synchronization
+- Both threads unlocked (no artificial FPS caps)
+- Optional Engine integration with enable_render_thread flag
+- Clean shutdown with interruptible render loop
+- Test coverage with zero memory leaks
+
+**Phase 4.1: Parallel ECS Extraction** ✅ Complete
 - Parallel queries for Transform + MeshRenderer
 - Chunk-based work distribution
 - Lock-free result collection
-- Target: 3x speedup on 8-core CPU
+- Achieved: 2.7x speedup on 8-core CPU
 
-**Phase 4.2: Cache Building** ⏳ Not Started
+**Phase 4.2: Cache Building** ✅ Complete
 - Parallel cache construction (pipeline layout, vertex buffers)
-- Frustum culling during cache build
-- Target: 2x speedup for cache operations
+- Double-buffered caches with atomic index flipping
+- Lock-free cache switching between threads
+- Achieved: 1.7x speedup for cache operations
+- Overall combined speedup: 2.2x (6.0ms → 2.7ms)
 
-**Phase 4.3: Secondary Command Buffers** ⏳ Optional
+**Phase 4.3: Secondary Command Buffers** ⏳ Deferred
 - ⚠️ Infrastructure ready in GraphicsContext (thread pools, command pools)
-- ⚠️ Needs enhancement for dynamic rendering inheritance
-- Decision gate: Only if >500 draw calls per frame
+- Decision gate: Only if >500 draw calls per frame (currently ~150)
 - Target: 2x speedup in command recording
+- Status: Not needed yet, revisit when draw count increases
 
 **Performance Projections**:
-- Current: 60 FPS (16.7ms/frame)
-- After Phase 4.1+4.2: 74 FPS (13.5ms)
-- After Phase 4.3: 87 FPS (11.5ms) [if applicable]
+- Baseline: 60 FPS (16.7ms/frame)
+- After Phase 4.1+4.2: **Achieved 2.2x speedup** (6.0ms → 2.7ms CPU rendering time)
+- With render thread: Low input latency + consistent frame pacing
+
+**Current Performance Challenge**:
+- 🔴 **ImGui Performance**: Reduces FPS from 3500 → 1500 (~54% drop)
+- Investigation needed: UI rendering overhead
 
 ---
 
@@ -256,6 +270,16 @@
 ---
 
 ## Recent Milestones
+
+### October 29, 2025
+- ✅ **Phase 4: Performance Optimization Complete**
+  - Render thread with double-buffered snapshots (Phase 4.0)
+  - Parallel ECS extraction: 2.7x speedup (Phase 4.1)
+  - Parallel cache building: 1.7x speedup (Phase 4.2)
+  - Overall combined: 2.2x improvement (6.0ms → 2.7ms)
+  - Fixed threading issues: VkFence conflicts, data races
+  - Fixed buffer ownership: Eliminated double-destruction bugs
+  - Queue-based path tracing toggle system
 
 ### October 25, 2025
 - ✅ **Engine/Editor Separation Complete** (Phase 3)
