@@ -62,9 +62,9 @@ pub const Scene = struct {
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
 
-    // Thread-safe path tracing toggle (set by main thread, applied by render thread)
-    // Uses a counter: each toggle increments it, render thread processes all pending toggles
-    pending_pt_toggles: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    // Thread-safe path tracing state (set by main thread, applied by render thread)
+    // -1 = no change pending, 0 = disable requested, 1 = enable requested
+    pending_pt_state: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
 
     /// Initialize a new scene
     pub fn init(
@@ -391,34 +391,36 @@ pub const Scene = struct {
         log(.INFO, "scene_v2", "Scene destroyed: {s}", .{self.name});
     }
 
-    /// Toggle path tracing on/off (switches between path tracing and raster)
+    /// Set path tracing enabled/disabled state
+    /// @param enabled: true to enable path tracing, false to disable
+    /// This sets an explicit state rather than toggling, so calling with the same
+    /// value multiple times is idempotent (safe and will do nothing if already in that state)
     pub fn setPathTracingEnabled(self: *Scene, enabled: bool) !void {
-        // THREAD-SAFE: Increment toggle counter
-        // Main thread increments, render thread processes all pending toggles
-        _ = enabled; // Ignore the enabled parameter - just toggle!
-        _ = self.pending_pt_toggles.fetchAdd(1, .release);
+        // THREAD-SAFE: Set desired state atomically
+        // Main thread sets state, render thread applies it
+        const state_value: i32 = if (enabled) 1 else 0;
+        self.pending_pt_state.store(state_value, .release);
     }
 
-    /// Apply pending path tracing toggles (called on RENDER THREAD)
-    /// Returns true if any toggles were applied
+    /// Apply pending path tracing state change (called on RENDER THREAD)
+    /// Returns true if state was changed
     pub fn applyPendingPathTracingToggle(self: *Scene) !bool {
-        // Get number of pending toggles and reset counter
-        const pending_count = self.pending_pt_toggles.swap(0, .acq_rel);
-        if (pending_count == 0) return false; // No pending toggles
+        // Get pending state and reset to "no change pending"
+        const pending_state = self.pending_pt_state.swap(-1, .acq_rel);
+        if (pending_state == -1) return false; // No pending state change
 
-        // Apply all pending toggles (each one flips the state)
-        // If odd number of toggles, state changes. If even, state stays same.
-        const should_toggle = (pending_count % 2) == 1;
-        if (!should_toggle) {
-            log(.DEBUG, "scene_v2", "Even number of toggles ({}), state unchanged", .{pending_count});
-            return false;
-        }
+        const new_enabled = pending_state == 1;
 
         // Update render graph pass states (SAFE: on render thread)
         if (self.render_graph) |*graph| {
-            // Get current state and flip it
+            // Get current state to check if it actually needs to change
             const currently_enabled = if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
-            const new_enabled = !currently_enabled;
+            
+            // If state is already what we want, no need to change
+            if (currently_enabled == new_enabled) {
+                log(.DEBUG, "scene_v2", "Path tracing already in desired state ({}), no change needed", .{new_enabled});
+                return false;
+            }
 
             // Set the path tracing pass's internal flag
             if (graph.getPass("path_tracing_pass")) |pass| {

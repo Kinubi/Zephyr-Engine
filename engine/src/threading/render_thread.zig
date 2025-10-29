@@ -185,13 +185,19 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
         const snapshot = &ctx.game_state[read_idx];
 
         // Skip if snapshot is empty (shouldn't happen in normal operation)
-        if (snapshot.entity_count == 0) continue;
+        if (snapshot.entity_count == 0) {
+            // Signal frame consumed before skipping
+            ctx.frame_consumed.post();
+            continue;
+        }
 
         // Check if we've already rendered this frame (main thread controls frame rate)
         const last_rendered = ctx.last_rendered_frame.load(.acquire);
         // Skip if we've already rendered this frame (unless it's the first frame - sentinel value)
         if (last_rendered != std.math.maxInt(u64) and snapshot.frame_index <= last_rendered) {
             // We've already rendered this frame, wait for next signal
+            // Signal frame consumed before skipping
+            ctx.frame_consumed.post();
             continue;
         }
 
@@ -217,6 +223,8 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                     break;
                 }
                 log(.ERROR, "render_thread", "beginFrame failed: {}", .{err});
+                // Signal frame consumed before skipping
+                ctx.frame_consumed.post();
                 continue;
             };
 
@@ -226,6 +234,8 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 log(.ERROR, "render_thread", "update failed: {}", .{err});
                 // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
+                // Signal frame consumed before skipping
+                ctx.frame_consumed.post();
                 continue;
             };
 
@@ -235,11 +245,15 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 log(.ERROR, "render_thread", "render failed: {}", .{err});
                 // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
+                // Signal frame consumed before skipping
+                ctx.frame_consumed.post();
                 continue;
             };
 
             engine.endFrame(frame_info) catch |err| {
                 log(.ERROR, "render_thread", "endFrame failed: {}", .{err});
+                // Signal frame consumed before skipping
+                ctx.frame_consumed.post();
                 continue;
             };
 

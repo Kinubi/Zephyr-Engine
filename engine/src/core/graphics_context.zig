@@ -742,15 +742,18 @@ pub const GraphicsContext = struct {
     /// WARNING: Only call this when you're certain no workers are using their command pools!
     pub fn clearPendingSecondaryBuffers(self: *GraphicsContext) void {
         secondary_buffers_mutex.lock();
+        defer secondary_buffers_mutex.unlock(); // Keep locked until after pool reset
+        
         const count = pending_secondary_buffers.items.len;
 
         // Just clear the list - don't try to free individual buffers
         // The worker thread command pools will be reset below
         pending_secondary_buffers.clearRetainingCapacity();
-        secondary_buffers_mutex.unlock();
 
         // Reset all worker command pools to free their command buffers
         // This properly cleans up the secondary buffers without threading conflicts
+        // IMPORTANT: Must be done while holding mutex to prevent race condition where
+        // another thread submits buffers after we clear the list but before pool reset
         self.resetAllWorkerCommandPools();
 
         log(.DEBUG, "graphics_context", "Discarded {} pending secondary command buffers and reset worker pools", .{count});

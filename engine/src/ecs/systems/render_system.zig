@@ -1139,10 +1139,6 @@ pub const RenderSystem = struct {
     pub fn getRasterData(self: *RenderSystem) !RasterizationData {
         const active_idx = self.active_cache_index.load(.acquire);
         if (self.cached_raster_data[active_idx]) |cached| {
-            // TODO: Investigate why allocator.dupe() causes @memcpy aliasing panic
-            // Root cause: Likely allocator reusing freed memory in tight loops
-            // Better fix: Use arena allocator for per-frame data to guarantee no reuse
-            // Workaround: Manual copy loop to avoid aliasing detection
             const objects_copy = try self.allocator.alloc(RasterizationData.RenderableObject, cached.objects.len);
             for (cached.objects, 0..) |obj, i| {
                 objects_copy[i] = obj;
@@ -1165,10 +1161,6 @@ pub const RenderSystem = struct {
     pub fn getRaytracingData(self: *RenderSystem) !RaytracingData {
         const active_idx = self.active_cache_index.load(.acquire);
         if (self.cached_raytracing_data[active_idx]) |cached| {
-            // TODO: Investigate why allocator.dupe() causes @memcpy aliasing panic
-            // Root cause: Likely allocator reusing freed memory in tight loops
-            // Better fix: Use arena allocator for per-frame data to guarantee no reuse
-            // Workaround: Manual copy loop to avoid aliasing detection
             const instances_copy = try self.allocator.alloc(RaytracingData.RTInstance, cached.instances.len);
             for (cached.instances, 0..) |inst, i| {
                 instances_copy[i] = inst;
