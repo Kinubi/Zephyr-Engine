@@ -1,45 +1,45 @@
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 // Core graphics imports from engine
-const Window = zulkan.Window;
-const GraphicsContext = zulkan.GraphicsContext;
-const Swapchain = zulkan.Swapchain;
+const Window = zephyr.Window;
+const GraphicsContext = zephyr.GraphicsContext;
+const Swapchain = zephyr.Swapchain;
 const MAX_FRAMES_IN_FLIGHT = 3; // TODO: Get from engine config
-const Buffer = zulkan.Buffer;
-const Texture = zulkan.Texture;
+const Buffer = zephyr.Buffer;
+const Texture = zephyr.Texture;
 
 // Rendering imports from engine
-const Vertex = zulkan.Vertex;
-const Mesh = zulkan.Mesh;
-const Model = zulkan.Model;
-const Camera = zulkan.Camera;
-const FrameInfo = zulkan.FrameInfo;
-const GlobalUbo = zulkan.GlobalUbo;
-const GlobalUboSet = zulkan.GlobalUboSet;
+const Vertex = zephyr.Vertex;
+const Mesh = zephyr.Mesh;
+const Model = zephyr.Model;
+const Camera = zephyr.Camera;
+const FrameInfo = zephyr.FrameInfo;
+const GlobalUbo = zephyr.GlobalUbo;
+const GlobalUboSet = zephyr.GlobalUboSet;
 
 // Scene v2 imports from engine (ECS-based scene system)
-const SceneV2 = zulkan.Scene;
-const GameObjectV2 = zulkan.GameObject;
+const SceneV2 = zephyr.Scene;
+const GameObjectV2 = zephyr.GameObject;
 
 // Asset system imports from engine
-const AssetManager = zulkan.AssetManager;
-const Material = zulkan.Material;
-const ThreadPool = zulkan.ThreadPool;
-const ShaderManager = zulkan.ShaderManager;
-const FileWatcher = zulkan.FileWatcher;
+const AssetManager = zephyr.AssetManager;
+const Material = zephyr.Material;
+const ThreadPool = zephyr.ThreadPool;
+const ShaderManager = zephyr.ShaderManager;
+const FileWatcher = zephyr.FileWatcher;
 
 // Unified pipeline system imports from engine
-const UnifiedPipelineSystem = zulkan.UnifiedPipelineSystem;
-const ResourceBinder = zulkan.ResourceBinder;
+const UnifiedPipelineSystem = zephyr.UnifiedPipelineSystem;
+const ResourceBinder = zephyr.ResourceBinder;
 
 const PARTICLE_MAX: u32 = 1024;
 
 // Utility imports from engine
-const Math = zulkan.math;
-const log = zulkan.log;
+const Math = zephyr.math;
+const log = zephyr.log;
 
-const new_ecs = zulkan.ecs; // New coherent ECS system
+const new_ecs = zephyr.ecs; // New coherent ECS system
 
 // Input controller (editor-specific)
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
@@ -50,30 +50,31 @@ const UIRenderer = @import("ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("ui/ui_renderer.zig").RenderStats;
 
 // Performance monitoring from engine
-const PerformanceMonitor = zulkan.PerformanceMonitor;
+const PerformanceMonitor = zephyr.PerformanceMonitor;
 
 // Layer system from engine
-const Layer = zulkan.Layer;
-const LayerStack = zulkan.LayerStack;
-const EventBus = zulkan.EventBus;
-const Event = zulkan.Event;
+const Layer = zephyr.Layer;
+const LayerStack = zephyr.LayerStack;
+const EventBus = zephyr.EventBus;
+const Event = zephyr.Event;
 const EventData = Event.EventData;
-const RenderLayer = zulkan.RenderLayer;
-const PerformanceLayer = zulkan.PerformanceLayer;
+const RenderLayer = zephyr.RenderLayer;
+const PerformanceLayer = zephyr.PerformanceLayer;
 // TODO: These have editor dependencies, temporarily importing locally
 const InputLayer = @import("layers/input_layer.zig").InputLayer;
-const SceneLayer = zulkan.SceneLayer;
+const SceneLayer = zephyr.SceneLayer;
 const UILayer = @import("layers/ui_layer.zig").UILayer;
 
 // Vulkan bindings and external C libraries
 const vk = @import("vulkan");
+const builtin = @import("builtin");
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
 pub const App = struct {
     // Core engine instance - manages window, graphics, swapchain, base layers
-    engine: *zulkan.Engine = undefined,
+    engine: *zephyr.Engine = undefined,
     allocator: std.mem.Allocator = undefined,
 
     // Initialize to true so descriptors are updated on first frames
@@ -135,7 +136,7 @@ pub const App = struct {
     var ui_layer: UILayer = undefined;
 
     pub fn init(self: *App) !void {
-        log(.INFO, "app", "Initializing ZulkanZengine Editor...", .{});
+        log(.INFO, "app", "Initializing Zephyr-Engine Editor...", .{});
 
         self.allocator = std.heap.page_allocator;
 
@@ -161,11 +162,11 @@ pub const App = struct {
         // ==================== Initialize Engine ====================
         // Engine handles: window, graphics context, swapchain, command buffers, base layers
         log(.INFO, "app", "Initializing engine core systems...", .{});
-        self.engine = try zulkan.Engine.init(self.allocator, .{
+        self.engine = try zephyr.Engine.init(self.allocator, .{
             .window = .{
                 .width = 1280,
                 .height = 720,
-                .title = "ZulkanEditor",
+                .title = "Zephyr Editor",
             },
             .enable_validation = false,
             .enable_performance_monitoring = true,

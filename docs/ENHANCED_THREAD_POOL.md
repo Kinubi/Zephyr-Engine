@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Enhanced ThreadPool is a sophisticated, demand-driven thread management system designed to efficiently allocate computational resources across multiple subsystems in ZulkanZengine. Unlike the original fixed-size ThreadPool, this system dynamically scales worker threads based on actual demand from different subsystems.
+The Enhanced ThreadPool is a sophisticated, demand-driven thread management system designed to efficiently allocate computational resources across multiple subsystems in Zephyr-Engine. Unlike the original fixed-size ThreadPool, this system dynamically scales worker threads based on actual demand from different subsystems.
 
 ## Key Features
 
@@ -304,4 +304,4 @@ fn onWorkerCountChanged(old_count: u32, new_count: u32) void {
 }
 ```
 
-This enhanced system provides a robust foundation for multi-threaded operations in ZulkanZengine, particularly important for the upcoming BVH building requirements in the raytracing system.
+This enhanced system provides a robust foundation for multi-threaded operations in Zephyr-Engine, particularly important for the upcoming BVH building requirements in the raytracing system.

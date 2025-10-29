@@ -14,7 +14,7 @@ pub const WindowProps = struct {
     width: u32 = 1280,
     height: u32 = 720,
     fullscreen: bool = false,
-    title: [:0]const u8 = "Hello Zulkan!",
+    title: [:0]const u8 = "Hello Zephyr!",
     vsync: bool = false,
 };
 

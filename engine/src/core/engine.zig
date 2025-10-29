@@ -59,7 +59,7 @@ pub const Engine = struct {
         pub const WindowConfig = struct {
             width: u32 = 1280,
             height: u32 = 720,
-            title: [:0]const u8 = "ZulkanEngine",
+            title: [:0]const u8 = "ZephyrEngine",
             fullscreen: bool = false,
             vsync: bool = false,
         };

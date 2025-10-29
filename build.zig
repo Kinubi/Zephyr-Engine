@@ -27,8 +27,8 @@ pub fn build(b: *std.Build) !void {
 
     // ========== ENGINE MODULE ==========
     // Create engine as a module that can be imported
-    const engine_mod = b.addModule("zulkan", .{
-        .root_source_file = b.path("engine/src/zulkan.zig"),
+    const engine_mod = b.addModule("zephyr", .{
+        .root_source_file = b.path("engine/src/zephyr.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -50,12 +50,12 @@ pub fn build(b: *std.Build) !void {
     });
 
     const editor = b.addExecutable(.{
-        .name = "ZulkanEditor",
+        .name = "ZephyrEditor",
         .root_module = editor_mod,
     });
 
     // Add engine module import to editor
-    editor.root_module.addImport("zulkan", engine_mod);
+    editor.root_module.addImport("zephyr", engine_mod);
 
     // Add vulkan module to editor (needed for editor-specific code)
     editor.root_module.addImport("vulkan", vulkan_zig);
@@ -105,7 +105,7 @@ pub fn build(b: *std.Build) !void {
         .name = "engine_api_test",
         .root_module = example_mod,
     });
-    example_api_test.root_module.addImport("zulkan", engine_mod);
+    example_api_test.root_module.addImport("zephyr", engine_mod);
     example_api_test.root_module.addImport("vulkan", vulkan_zig);
 
     // Link system libraries (same as editor)
@@ -135,7 +135,7 @@ pub fn build(b: *std.Build) !void {
         .name = "render_thread_test",
         .root_module = render_thread_test_mod,
     });
-    render_thread_test.root_module.addImport("zulkan", engine_mod);
+    render_thread_test.root_module.addImport("zephyr", engine_mod);
     render_thread_test.root_module.addImport("vulkan", vulkan_zig);
 
     // Link system libraries
@@ -164,7 +164,7 @@ pub fn build(b: *std.Build) !void {
     const editor_tests = b.addTest(.{
         .root_module = editor_test_mod,
     });
-    editor_tests.root_module.addImport("zulkan", engine_mod);
+    editor_tests.root_module.addImport("zephyr", engine_mod);
 
     const run_editor_tests = b.addRunArtifact(editor_tests);
     const test_step = b.step("test", "Run unit tests");

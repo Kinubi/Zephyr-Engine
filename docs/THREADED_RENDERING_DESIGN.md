@@ -2,14 +2,14 @@
 
 **Version:** 1.6  
 **Date:** October 27, 2025  
-**Author:** ZulkanZengine Team  
+**Author:** Zephyr-Engine Team  
 **Status:** Phase 1 Complete ✅, Phase 2.0 (Render Thread Infrastructure) Complete ✅
 
 ---
 
 ## Final Architecture Decision
 
-**ZulkanZengine will use a Hybrid Threading Model:**
+**Zephyr-Engine will use a Hybrid Threading Model:**
 
 ```
 ┌─────────────────────┐
@@ -126,7 +126,7 @@
 
 ## Executive Summary
 
-This document outlines the design and implementation status of parallelized rendering operations in ZulkanZengine. The engine uses a **hybrid threading architecture**: a main thread for game logic, a dedicated render thread for all Vulkan operations, and an optional worker pool spawned by the render thread for parallel tasks.
+This document outlines the design and implementation status of parallelized rendering operations in Zephyr-Engine. The engine uses a **hybrid threading architecture**: a main thread for game logic, a dedicated render thread for all Vulkan operations, and an optional worker pool spawned by the render thread for parallel tasks.
 
 **Current Status:** Phases 1 and 2.0 are fully implemented. Phase 1 (worker pool parallelization) achieved 2.7x speedup for extraction and 1.7x for cache building. Phase 2.0 (render thread infrastructure) is complete with double-buffered snapshots, atomic synchronization, and optional Engine integration. Next: Phase 2.1 (snapshot-based rendering).
 
@@ -1465,7 +1465,7 @@ captureSnapshot() ─────────────→ buildCaches()      
   - Added captureAndSignalRenderThread() API
   - Proper init/deinit ordering
   
-- `engine/src/zulkan.zig` ✅
+- `engine/src/zephyr.zig` ✅
   - Exported RenderThreadContext, GameStateSnapshot
   - Exported render thread functions
   
@@ -1893,7 +1893,7 @@ cmdDraw()                     // 2-5% of frame time (repeated per object)
 
 #### **2. Real-World Scene Characteristics**
 
-Let's analyze actual rendering scenarios in ZulkanZengine:
+Let's analyze actual rendering scenarios in Zephyr-Engine:
 
 ##### **Scenario A: Open World (Entity-Heavy)**
 ```
@@ -4621,7 +4621,7 @@ while (!window.shouldClose()) {
 - ⭐ = Good choice for that scenario
 - ⭐⭐⭐ = Optimal choice (worth the complexity)
 
-**ZulkanZengine's Sweet Spot:**
+**Zephyr-Engine's Sweet Spot:**
 - **Current:** Worker Pool (Phase 1-2) ✅
 - **Next:** Worker Pool (Phase 3) - parallel command recording
 - **Future:** Hybrid (if building competitive game) - all three stages
@@ -4655,7 +4655,7 @@ while (!window.shouldClose()) {
 
 ---
 
-### Our Recommendation for ZulkanZengine
+### Our Recommendation for Zephyr-Engine
 
 **Phase Progression:**
 
@@ -4702,7 +4702,7 @@ Gaming workloads are memory-bound, not compute-bound:
 
 A CPU stalled on memory is doing 0 IPC, regardless of its theoretical maximum.
 
-### ZulkanZengine's Cache-Friendly Design
+### Zephyr-Engine's Cache-Friendly Design
 
 #### 1. **DenseSet ECS Storage** (Already Implemented ✅)
 
@@ -4714,7 +4714,7 @@ components: [MAX_ENTITIES]?Transform  // Mostly null, scattered access
 
 **Our Solution: Dense Packing**
 ```zig
-// GOOD: DenseSet (ZulkanZengine implementation)
+// GOOD: DenseSet (Zephyr-Engine implementation)
 pub const DenseSet = struct {
     entities: ArrayList(Entity),           // [e1, e2, e3, e4] - packed!
     components: ArrayList(T),               // [c1, c2, c3, c4] - contiguous!
@@ -4945,7 +4945,7 @@ std.sort.pdq(u32, renderables, {}, struct {
 **Tools to Validate:**
 ```bash
 # Linux: perf stat
-perf stat -e cache-misses,cache-references,L1-dcache-loads,L1-dcache-load-misses ./zengine
+perf stat -e cache-misses,cache-references,L1-dcache-loads,L1-dcache-load-misses ./zephyr-editor
 
 # Expected results (optimized code):
 # L1 cache hit rate: >95% (hot loop stays in L1)
@@ -4966,7 +4966,7 @@ for (entities) |entity| {
 std.debug.print("Cache miss rate: {d:.1}%\n", .{cache_misses * 100.0 / entities.len});
 ```
 
-**Conclusion:** ZulkanZengine's architecture is already well-positioned to handle high-latency CPUs. The DenseSet ECS and chunked parallelism strategies ensure we maximize cache utilization, making us much less dependent on massive L3 caches than typical game engines.
+**Conclusion:** Zephyr-Engine's architecture is already well-positioned to handle high-latency CPUs. The DenseSet ECS and chunked parallelism strategies ensure we maximize cache utilization, making us much less dependent on massive L3 caches than typical game engines.
 
 ### Code Locations
 
@@ -5334,7 +5334,7 @@ Vulkan's SLI/CrossFire equivalent for multi-GPU rendering.
 - [Vulkan Spec: Timeline Semaphores](https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap7.html#synchronization-semaphores-timeline)
 - [GDC 2016: Multithreading in Doom](https://www.gdcvault.com/play/1023408/Multithreading-the-Entire-Destiny)
 - [SIGGRAPH 2015: Multithreaded Rendering](https://advances.realtimerendering.com/s2015/aaltonenhaar_siggraph2015_combined_final_footer_220dpi.pdf)
-- [ThreadPool Implementation: ZulkanZengine/engine/src/threading/thread_pool.zig](../engine/src/threading/thread_pool.zig)
+- [ThreadPool Implementation: Zephyr-Engine/engine/src/threading/thread_pool.zig](../engine/src/threading/thread_pool.zig)
 - [RenderGraph Documentation: RENDER_GRAPH_SYSTEM.md](RENDER_GRAPH_SYSTEM.md)
 - [ECS Documentation: ECS_SYSTEM.md](ECS_SYSTEM.md)
 

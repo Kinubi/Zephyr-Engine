@@ -2,7 +2,7 @@
 
 ## Overview
 
-The ZulkanZengine ECS provides a data-oriented foundation for game and simulation logic. It keeps component storage contiguous, schedules work across a shared thread pool, and extracts frame data for the renderer. The current implementation focuses on deterministic per-frame updates and low-latency data extraction while remaining extendable for future systems such as AI, input scripting, or animation.
+The Zephyr-Engine ECS provides a data-oriented foundation for game and simulation logic. It keeps component storage contiguous, schedules work across a shared thread pool, and extracts frame data for the renderer. The current implementation focuses on deterministic per-frame updates and low-latency data extraction while remaining extendable for future systems such as AI, input scripting, or animation.
 
 Key traits:
 

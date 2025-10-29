@@ -1,14 +1,14 @@
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 const c = @cImport({
     @cInclude("dcimgui.h");
 });
 
-const PerformanceMonitor = zulkan.PerformanceMonitor;
+const PerformanceMonitor = zephyr.PerformanceMonitor;
 const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
 const AssetBrowserPanel = @import("asset_browser_panel.zig").AssetBrowserPanel;
-const Scene = zulkan.Scene;
+const Scene = zephyr.Scene;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic

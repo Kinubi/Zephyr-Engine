@@ -1,6 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", "1");
@@ -9,11 +9,11 @@ const c = @cImport({
     @cInclude("dcimgui.h");
 });
 
-const GraphicsContext = zulkan.GraphicsContext;
-const Swapchain = zulkan.Swapchain;
+const GraphicsContext = zephyr.GraphicsContext;
+const Swapchain = zephyr.Swapchain;
 const ImGuiVulkanBackend = @import("imgui_backend_vulkan.zig").ImGuiVulkanBackend;
 const ImGuiGlfwInput = @import("imgui_glfw_input.zig").ImGuiGlfwInput;
-const UnifiedPipelineSystem = zulkan.UnifiedPipelineSystem;
+const UnifiedPipelineSystem = zephyr.UnifiedPipelineSystem;
 
 pub const ImGuiContext = struct {
     allocator: std.mem.Allocator,

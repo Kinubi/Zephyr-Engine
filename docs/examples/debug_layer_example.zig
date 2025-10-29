@@ -1,5 +1,5 @@
 // Example: Simple Debug Layer
-// This file demonstrates how to create a minimal custom layer for ZulkanZengine
+// This file demonstrates how to create a minimal custom layer for Zephyr-Engine
 // Location: Place this in src/layers/debug_layer.zig
 
 const std = @import("std");

@@ -3,7 +3,7 @@
 **Version:** 1.0  
 **Date:** October 24, 2025  
 **Status:** Design Proposal  
-**Author:** ZulkanZengine Team
+**Author:** Zephyr-Engine Team
 
 ---
 
@@ -785,7 +785,7 @@ pub const App = struct {
         
         // Initialize core systems
         app.window = try Window.init(.{});
-        app.gc = try GraphicsContext.init(allocator, "ZulkanZengine", app.window.window.?);
+        app.gc = try GraphicsContext.init(allocator, "Zephyr-Engine", app.window.window.?);
         app.swapchain = try Swapchain.init(&app.gc, allocator, extent);
         
         // Initialize layer stack

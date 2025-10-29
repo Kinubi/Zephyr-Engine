@@ -1,4 +1,4 @@
-# ZulkanZengine Development Roadmap
+# Zephyr-Engine Development Roadmap
 
 **Last Updated**: October 25, 2025  
 **Branch**: feature/editor-base
@@ -76,8 +76,8 @@
 
 #### Engine/Editor Separation ✅ COMPLETE
 - ✅ **Project Structure**: Separated into `engine/` and `editor/` directories
-  - Engine compiled as Zig module (`zulkan`)
-  - Editor imports engine via `@import("zulkan")`
+  - Engine compiled as Zig module (`zephyr`)
+  - Editor imports engine via `@import("zephyr")`
   - Clean architectural boundary enforced by build system
 
 - ✅ **Engine Core API** (`engine/src/core/engine.zig`):
@@ -89,7 +89,7 @@
   - `endFrame()` - Present and finalize frame
   - System accessors: getLayerStack(), getEventBus(), getWindow(), etc.
 
-- ✅ **Public API Exports** (`engine/src/zulkan.zig`):
+- ✅ **Public API Exports** (`engine/src/zephyr.zig`):
   - Core: Engine, Layer, LayerStack, Event, EventBus, Window
   - Graphics: GraphicsContext, Swapchain, Buffer, Shader, Texture
   - Rendering: Camera, FrameInfo, PerformanceMonitor, UnifiedPipelineSystem
