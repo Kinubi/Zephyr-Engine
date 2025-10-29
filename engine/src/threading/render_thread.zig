@@ -201,12 +201,12 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
             // PHASE 2.1 Render Thread Responsibilities:
             //
             // 1. Begin frame (acquire swapchain image)
-            // 2. Prepare render (Vulkan descriptor updates) - scene.prepareRender()
-            // 3. Execute render (Vulkan draw commands) - scene.render()
+            // 2. Update (Vulkan descriptor updates)
+            // 3. Render (Vulkan draw commands)
             // 4. End frame (submit & present)
             //
             // IMPORTANT: NO ECS queries on render thread!
-            // - Main thread called scene.prepareFrame() which did ECS queries
+            // - Main thread called scene.prepareFrame() which did ECS queries AND applied PT toggles
             // - Main thread captured snapshot for us to use
             // - We only do Vulkan work (descriptor updates + draw commands)
             // ============================================

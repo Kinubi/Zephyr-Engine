@@ -24,11 +24,6 @@ const Camera = ecs.Camera;
 
 const GameObject = @import("game_object_v2.zig").GameObject;
 
-// Configuration constants
-/// Number of frames to skip BVH rebuilding after RT mode toggle
-/// This allows the render thread to stabilize and prevents fence threading conflicts
-const BVH_SKIP_FRAMES_AFTER_RT_TOGGLE = 5;
-
 /// Scene represents a game level/map
 /// Provides high-level API for creating game objects backed by ECS
 pub const Scene = struct {
@@ -431,16 +426,6 @@ pub const Scene = struct {
                 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
                 const pt_pass: *PathTracingPass = @fieldParentPtr("base", pass);
                 pt_pass.enable_path_tracing = new_enabled;
-
-                // Skip BVH rebuild for N frames after enabling to avoid fence conflicts
-                // This allows the render thread to stabilize before async BVH building starts
-                if (new_enabled) {
-                    pt_pass.skip_bvh_rebuild_frames.store(BVH_SKIP_FRAMES_AFTER_RT_TOGGLE, .release);
-
-                    // Clear any pending secondary command buffers from previous async BVH builds
-                    // This prevents fence conflicts when old worker thread buffers try to execute
-                    graph.graphics_context.clearPendingSecondaryBuffers();
-                }
             }
 
             if (new_enabled) {
@@ -450,6 +435,12 @@ pub const Scene = struct {
                 graph.disablePass("light_volume_pass");
                 graph.enablePass("path_tracing_pass");
                 try graph.recompile();
+                // CRITICAL: Wait for GPU to finish all in-flight work before continuing
+                // The render graph recompile changes pipeline state, and we need to ensure
+                // any previous frames using the old pipelines have completed before we
+                // submit new work. This prevents fence reuse issues where we try to use
+                // a fence that's still in-flight from the previous submit.
+
                 log(.INFO, "scene_v2", "Path tracing ENABLED for scene: {s}", .{self.name});
             } else {
                 // Raster mode: enable raster passes, disable PT
@@ -609,11 +600,15 @@ pub const Scene = struct {
         } else {
             log(.WARN, "scene_v2", "Attempted to render scene without initialized RenderGraph: {s}", .{self.name});
         }
+        _ = try self.applyPendingPathTracingToggle();
     }
 
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
     /// Call this on the MAIN THREAD before capturing snapshot
     pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+        // Apply any pending path tracing toggles FIRST (CPU-side state change)
+        // This prepares the render graph state for frame N+1 while render thread renders frame N
+
         // Cache view-projection matrix for particle world-to-screen projection
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
@@ -649,26 +644,10 @@ pub const Scene = struct {
         // try self.ecs_world.update(dt);
     }
 
-    /// Phase 2.1: Render thread preparation (Vulkan descriptor updates)
-    /// Call this on the RENDER THREAD before executing
-    pub fn prepareRender(self: *Scene, frame_info: *const FrameInfo) !void {
-        // PHASE 2.1: Apply any pending path tracing toggle (thread-safe)
-        // Main thread queues toggle, render thread applies it here
-        _ = try self.applyPendingPathTracingToggle();
-
-        // Update all render passes through the render graph (descriptor sets, pipeline checks)
-        // This does Vulkan work and MUST be on render thread
-        if (self.render_graph) |*graph| {
-            try graph.update(frame_info);
-        }
-    }
-
-    /// Update scene state (animations, physics, etc.)
-    /// Call this once per frame before rendering
-    ///
-    /// DEPRECATED in render thread mode - use prepareFrame() on main thread
-    /// and prepareRender() on render thread instead
+    /// Update scene state (Vulkan descriptor updates)
+    /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
+
         // Cache view-projection matrix for particle world-to-screen projection
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
@@ -681,13 +660,10 @@ pub const Scene = struct {
         // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
         try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
 
-        // Update all render passes through the render graph
+        // Update all render passes through the render graph (descriptor sets)
         if (self.render_graph) |*graph| {
             try graph.update(&frame_info);
         }
-
-        // Run ECS systems (transforms, physics, etc.)
-        // try self.ecs_world.update(frame_info.dt);
     }
 
     /// Extract lights from ECS and populate the GlobalUbo

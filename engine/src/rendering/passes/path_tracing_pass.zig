@@ -119,10 +119,6 @@ pub const PathTracingPass = struct {
     // Toggle between raster and path tracing
     enable_path_tracing: bool = false,
 
-    // Skip BVH rebuild for N frames after toggle to avoid fence conflicts
-    // THREAD-SAFE: Atomic to prevent races if multiple systems call updateImpl()
-    skip_bvh_rebuild_frames: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-
     pub fn create(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
@@ -650,15 +646,7 @@ pub const PathTracingPass = struct {
         // so resources queued during that frame are safe to destroy
         self.rt_system.flushDeferredFrame(frame_index);
 
-        // Skip BVH rebuild for N frames after toggle to avoid fence threading conflicts
-        const remaining = self.skip_bvh_rebuild_frames.load(.acquire);
-        if (remaining > 0) {
-            _ = self.skip_bvh_rebuild_frames.fetchSub(1, .release);
-            return; // Skip this frame's BVH update
-        }
-
-        // // Check various dirty flags BEFORE updating (like rt_renderer.update does)
-        // _ = self.render_system.checkBvhRebuildNeeded();
+        // Check various dirty flags BEFORE updating (like rt_renderer.update does)
         const materials_dirty = self.asset_manager.materials_updated;
         const textures_dirty = self.asset_manager.texture_descriptors_dirty;
 

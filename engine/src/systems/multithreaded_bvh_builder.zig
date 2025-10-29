@@ -120,7 +120,7 @@ pub const MultithreadedBvhBuilder = struct {
             .work_item_type = .bvh_building,
         });
         log(.INFO, "bvh_builder", "Registered bvh_building subsystem with thread pool", .{});
-        
+
         var completed_blas = std.ArrayList(BlasResult){};
         try completed_blas.ensureTotalCapacity(allocator, 8);
 

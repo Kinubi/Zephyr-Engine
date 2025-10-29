@@ -403,9 +403,9 @@ pub const RenderGraph = struct {
                 var name_buf: [64]u8 = undefined;
                 const prep_name = std.fmt.bufPrint(&name_buf, "{s}_prepare", .{pass.name}) catch pass.name;
                 try pm.beginPass(prep_name, frame_info.current_frame, frame_info.command_buffer);
-                
+
                 try pass.prepareExecute(frame_info);
-                
+
                 try pm.endPass(prep_name, frame_info.current_frame, frame_info.command_buffer);
             } else {
                 try pass.prepareExecute(frame_info);

@@ -116,13 +116,13 @@ pub const SceneLayer = struct {
         self.prepared_ubo.projection = self.camera.projectionMatrix;
         self.prepared_ubo.dt = frame_info.dt;
 
-        // Prepare Vulkan resources (descriptor updates)
+        // Update Vulkan resources (descriptor updates)
         if (self.performance_monitor) |pm| {
-            try pm.beginPass("scene_prepare_render", frame_info.current_frame, null);
+            try pm.beginPass("scene_update", frame_info.current_frame, null);
         }
-        try self.scene.prepareRender(frame_info);
+        try self.scene.update(frame_info.*, &self.prepared_ubo);
         if (self.performance_monitor) |pm| {
-            try pm.endPass("scene_prepare_render", frame_info.current_frame, null);
+            try pm.endPass("scene_update", frame_info.current_frame, null);
         }
 
         // Update UBO set for this frame using prepared_ubo (with lights!)
