@@ -1,4 +1,4 @@
-# ZulkanEngine API Reference
+# Zephyr Engine API Reference
 
 **Version:** 1.0  
 **Last Updated:** October 25, 2025
@@ -24,12 +24,12 @@
 
 ### Installation
 
-Add ZulkanEngine to your `build.zig.zon`:
+Add Zephyr Engine to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
-    .zulkan = .{
-        .path = "../ZulkanZengine/engine",
+    .zephyr = .{
+        .path = "../Zephyr-Engine/engine",
     },
 },
 ```
@@ -38,7 +38,7 @@ Add ZulkanEngine to your `build.zig.zon`:
 
 ```zig
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -46,7 +46,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     
     // Initialize engine
-    const engine = try zulkan.Engine.init(allocator, .{
+    const engine = try zephyr.Engine.init(allocator, .{
         .window = .{
             .width = 1280,
             .height = 720,
@@ -87,7 +87,7 @@ Initialize the engine with the given configuration.
 
 **Example:**
 ```zig
-const engine = try zulkan.Engine.init(allocator, .{
+const engine = try zephyr.Engine.init(allocator, .{
     .window = .{
         .width = 1920,
         .height = 1080,
@@ -217,7 +217,7 @@ Window configuration options.
 pub const WindowConfig = struct {
     width: u32 = 1280,
     height: u32 = 720,
-    title: [:0]const u8 = "ZulkanEngine",
+    title: [:0]const u8 = "Zephyr Engine",
     fullscreen: bool = false,
     vsync: bool = false,
 };
@@ -326,7 +326,7 @@ pub const Layer = struct {
 
 ```zig
 const MyLayer = struct {
-    base: zulkan.Layer,
+    base: zephyr.Layer,
     // Your custom fields
     
     pub fn init() MyLayer {
@@ -339,7 +339,7 @@ const MyLayer = struct {
         };
     }
     
-    const vtable = zulkan.Layer.VTable{
+    const vtable = zephyr.Layer.VTable{
         .attach = attach,
         .detach = detach,
         .begin = begin,
@@ -349,7 +349,7 @@ const MyLayer = struct {
         .event = event,
     };
     
-    fn update(base: *zulkan.Layer, frame_info: *const zulkan.FrameInfo) !void {
+    fn update(base: *zephyr.Layer, frame_info: *const zephyr.FrameInfo) !void {
         const self: *MyLayer = @fieldParentPtr("base", base);
         // Your update logic here
     }
@@ -459,7 +459,7 @@ The engine includes a full Entity Component System.
 ### Importing ECS
 
 ```zig
-const ecs = @import("zulkan").ecs;
+const ecs = @import("zephyr").ecs;
 ```
 
 ### Creating a World
@@ -487,7 +487,7 @@ For more details, see [ECS_SYSTEM.md](ECS_SYSTEM.md) and [ECS_QUICK_REFERENCE.md
 Default maximum number of frames in flight (value: 3).
 
 ```zig
-const max_frames = zulkan.MAX_FRAMES_IN_FLIGHT;
+const max_frames = zephyr.MAX_FRAMES_IN_FLIGHT;
 ```
 
 ---
@@ -498,13 +498,13 @@ const max_frames = zulkan.MAX_FRAMES_IN_FLIGHT;
 
 ```zig
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     
-    const engine = try zulkan.Engine.init(gpa.allocator(), .{
+    const engine = try zephyr.Engine.init(gpa.allocator(), .{
         .window = .{ .title = "Minimal Example" },
     });
     defer engine.deinit();
@@ -522,7 +522,7 @@ pub fn main() !void {
 
 ```zig
 const GameLayer = struct {
-    base: zulkan.Layer,
+    base: zephyr.Layer,
     player_pos: [3]f32 = .{ 0, 0, 0 },
     
     pub fn init() GameLayer {
@@ -535,7 +535,7 @@ const GameLayer = struct {
         };
     }
     
-    const vtable = zulkan.Layer.VTable{
+    const vtable = zephyr.Layer.VTable{
         .attach = attach,
         .detach = detach,
         .begin = begin,
@@ -545,27 +545,27 @@ const GameLayer = struct {
         .event = event,
     };
     
-    fn attach(base: *zulkan.Layer) !void {
+    fn attach(base: *zephyr.Layer) !void {
         const self: *GameLayer = @fieldParentPtr("base", base);
         std.debug.print("GameLayer attached!\n", .{});
     }
     
-    fn update(base: *zulkan.Layer, frame_info: *const zulkan.FrameInfo) !void {
+    fn update(base: *zephyr.Layer, frame_info: *const zephyr.FrameInfo) !void {
         const self: *GameLayer = @fieldParentPtr("base", base);
         // Move player based on input
         self.player_pos[0] += frame_info.dt * 2.0;
     }
     
-    fn render(base: *zulkan.Layer, frame_info: *const zulkan.FrameInfo) !void {
+    fn render(base: *zephyr.Layer, frame_info: *const zephyr.FrameInfo) !void {
         const self: *GameLayer = @fieldParentPtr("base", base);
         // Render player...
     }
     
     // Stub implementations for other functions
-    fn detach(base: *zulkan.Layer) void { _ = base; }
-    fn begin(base: *zulkan.Layer, frame_info: *const zulkan.FrameInfo) !void { _ = base; _ = frame_info; }
-    fn end(base: *zulkan.Layer, frame_info: *const zulkan.FrameInfo) !void { _ = base; _ = frame_info; }
-    fn event(base: *zulkan.Layer, evt: zulkan.Event) void { _ = base; _ = evt; }
+    fn detach(base: *zephyr.Layer) void { _ = base; }
+    fn begin(base: *zephyr.Layer, frame_info: *const zephyr.FrameInfo) !void { _ = base; _ = frame_info; }
+    fn end(base: *zephyr.Layer, frame_info: *const zephyr.FrameInfo) !void { _ = base; _ = frame_info; }
+    fn event(base: *zephyr.Layer, evt: zephyr.Event) void { _ = base; _ = evt; }
 };
 ```
 
@@ -575,7 +575,7 @@ const GameLayer = struct {
 
 1. **Always use defer for cleanup:**
    ```zig
-   const engine = try zulkan.Engine.init(allocator, config);
+   const engine = try zephyr.Engine.init(allocator, config);
    defer engine.deinit();
    ```
 

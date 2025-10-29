@@ -1,11 +1,11 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
-const GraphicsContext = zulkan.GraphicsContext;
-const Math = zulkan.math;
-const Window = zulkan.Window;
-const Camera = zulkan.Camera;
+const GraphicsContext = zephyr.GraphicsContext;
+const Math = zephyr.math;
+const Window = zephyr.Window;
+const Camera = zephyr.Camera;
 const glfw = @import("mach-glfw");
 
 const c = @cImport({

@@ -22,7 +22,7 @@
 
 ## Overview
 
-The Layer System provides a modular architecture for organizing application logic in ZulkanZengine. Each layer represents a distinct concern (input, scene, rendering, UI) and executes in a well-defined order.
+The Layer System provides a modular architecture for organizing application logic in Zephyr-Engine. Each layer represents a distinct concern (input, scene, rendering, UI) and executes in a well-defined order.
 
 ### Key Benefits
 

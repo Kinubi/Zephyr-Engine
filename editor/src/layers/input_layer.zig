@@ -1,15 +1,15 @@
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
-const Layer = zulkan.Layer;
-const Event = zulkan.Event;
-const EventType = zulkan.EventType;
-const FrameInfo = zulkan.FrameInfo;
-const Window = zulkan.Window;
-const Camera = zulkan.Camera;
+const Layer = zephyr.Layer;
+const Event = zephyr.Event;
+const EventType = zephyr.EventType;
+const FrameInfo = zephyr.FrameInfo;
+const Window = zephyr.Window;
+const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
-const SceneV2 = zulkan.Scene;
-const log = zulkan.log;
+const SceneV2 = zephyr.Scene;
+const log = zephyr.log;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });

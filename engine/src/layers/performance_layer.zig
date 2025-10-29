@@ -84,8 +84,8 @@ pub const PerformanceLayer = struct {
 
             // Update window title with FPS
             var title_buffer: [256:0]u8 = undefined;
-            const title_slice = std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine - FPS: {d:.1}", .{self.current_fps}) catch blk: {
-                break :blk std.fmt.bufPrintZ(title_buffer[0..], "ZulkanZengine", .{}) catch "ZulkanZengine";
+            const title_slice = std.fmt.bufPrintZ(title_buffer[0..], "Zephyr Engine - FPS: {d:.1}", .{self.current_fps}) catch blk: {
+                break :blk std.fmt.bufPrintZ(title_buffer[0..], "Zephyr Engine", .{}) catch "Zephyr Engine";
             };
 
             self.window.setTitle(title_slice.ptr);

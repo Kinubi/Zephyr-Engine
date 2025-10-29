@@ -1,11 +1,11 @@
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 const c = @cImport({
     @cInclude("dcimgui.h");
 });
 
-const ecs = zulkan.ecs;
+const ecs = zephyr.ecs;
 const World = ecs.World;
 const EntityId = ecs.EntityId;
 const Transform = ecs.Transform;
@@ -14,8 +14,8 @@ const Camera = ecs.Camera;
 const PointLight = ecs.PointLight;
 const ParticleEmitter = ecs.ParticleEmitter;
 
-const Scene = zulkan.Scene;
-const Math = zulkan.math;
+const Scene = zephyr.Scene;
+const Math = zephyr.math;
 
 /// Scene Hierarchy Panel - ImGui panel showing all entities in the ECS world
 pub const SceneHierarchyPanel = struct {

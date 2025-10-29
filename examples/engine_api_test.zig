@@ -1,5 +1,5 @@
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 /// Simple example demonstrating the Engine API
 /// This shows how to use the engine without directly managing systems
@@ -12,12 +12,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== ZulkanEngine API Test ===\n", .{});
+    std.debug.print("=== Zephyr Engine API Test ===\n", .{});
     std.debug.print("This is a minimal example - no rendering is performed.\n", .{});
     std.debug.print("Validation warnings about image layouts are expected.\n\n", .{});
 
     // Initialize engine with configuration
-    const engine = try zulkan.Engine.init(allocator, .{
+    const engine = try zephyr.Engine.init(allocator, .{
         .window = .{
             .width = 800,
             .height = 600,

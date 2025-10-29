@@ -22,9 +22,9 @@
 
 ### Goal
 
-Separate ZulkanZengine into two distinct components:
-- **ZulkanEngine** - Core engine as a static library
-- **ZulkanEditor** - Editor application using the engine
+Separate Zephyr-Engine into two distinct components:
+- **Zephyr Engine** - Core engine as a static library
+- **Zephyr Editor** - Editor application using the engine
 
 ### Benefits
 
@@ -49,7 +49,7 @@ Separate ZulkanZengine into two distinct components:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     ZulkanEditor (exe)                      │
+│                     Zephyr Editor (exe)                      │
 ├─────────────────────────────────────────────────────────────┤
 │  Editor Layers        │  Editor Panels   │  Editor Tools    │
 │  - ViewportLayer      │  - Hierarchy     │  - Asset Import  │
@@ -60,7 +60,7 @@ Separate ZulkanZengine into two distinct components:
                          │ uses
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    ZulkanEngine (lib)                       │
+│                    Zephyr Engine (lib)                       │
 ├─────────────────────────────────────────────────────────────┤
 │  Core                 │  Systems          │  Subsystems      │
 │  - Engine             │  - Rendering      │  - Assets        │
@@ -124,13 +124,13 @@ Separate ZulkanZengine into two distinct components:
 ### New Directory Layout
 
 ```
-ZulkanZengine/
+Zephyr-Engine/
 ├─ build.zig                    # Root build - builds both lib and exe
 ├─ build.zig.zon               # Dependencies
 │
 ├─ engine/                      # ENGINE LIBRARY
 │  ├─ src/
-│  │  ├─ zulkan.zig            # Main module export (public API)
+│  │  ├─ zephyr.zig            # Main module export (public API)
 │  │  ├─ core/
 │  │  │  ├─ engine.zig         # Engine struct (main API)
 │  │  │  ├─ window.zig
@@ -242,7 +242,7 @@ pub const Engine = struct {
         pub const WindowConfig = struct {
             width: u32 = 1280,
             height: u32 = 720,
-            title: [:0]const u8 = "ZulkanEngine",
+            title: [:0]const u8 = "Zephyr Engine",
             fullscreen: bool = false,
             vsync: bool = false,
         };
@@ -318,11 +318,11 @@ pub const Engine = struct {
 };
 ```
 
-### Module Export (`engine/src/zulkan.zig`)
+### Module Export (`engine/src/zephyr.zig`)
 
 ```zig
 // Main engine module export
-// This is what users import: @import("zulkan")
+// This is what users import: @import("zephyr")
 
 pub const Engine = @import("core/engine.zig").Engine;
 pub const EngineConfig = Engine.Config;
@@ -367,7 +367,7 @@ pub const log = @import("utils/log.zig").log;
 
 ```zig
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -375,9 +375,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     
     // Configure engine
-    const config = zulkan.EngineConfig{
+    const config = zephyr.EngineConfig{
         .window = .{
-            .title = "ZulkanEditor",
+            .title = "Zephyr Editor",
             .width = 1920,
             .height = 1080,
         },
@@ -385,7 +385,7 @@ pub fn main() !void {
     };
     
     // Initialize engine
-    var engine = try zulkan.Engine.init(allocator, config);
+    var engine = try zephyr.Engine.init(allocator, config);
     defer engine.deinit();
     
     // Add custom editor layers
@@ -417,8 +417,8 @@ pub fn build(b: *std.Build) void {
     
     // ========== ENGINE LIBRARY ==========
     const engine = b.addStaticLibrary(.{
-        .name = "zulkan",
-        .root_source_file = b.path("engine/src/zulkan.zig"),
+        .name = "zephyr",
+        .root_source_file = b.path("engine/src/zephyr.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -431,7 +431,7 @@ pub fn build(b: *std.Build) void {
     
     // ========== EDITOR EXECUTABLE ==========
     const editor = b.addExecutable(.{
-        .name = "ZulkanEditor",
+        .name = "Zephyr Editor",
         .root_source_file = b.path("editor/src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -524,7 +524,7 @@ mv src/app.zig editor/src/editor_app.zig
 **Step 4: Create API files**
 ```bash
 # Create engine module export
-touch engine/src/zulkan.zig
+touch engine/src/zephyr.zig
 
 # Create Engine class
 touch engine/src/core/engine.zig
@@ -540,7 +540,7 @@ touch engine/src/core/engine.zig
 ### Phase 3: Define Engine API (Week 1-2)
 
 1. Implement `Engine` struct in `engine/src/core/engine.zig`
-2. Create `zulkan.zig` module export
+2. Create `zephyr.zig` module export
 3. Update `app.zig` → `editor_app.zig` to use Engine API
 4. Remove direct system access from editor
 
@@ -722,9 +722,9 @@ touch engine/src/core/engine.zig
 
 **Directory Structure:**
 ```
-ZulkanZengine/
+Zephyr-Engine/
 ├─ engine/src/          # Engine library source
-│  ├─ zulkan.zig        # Public API module export
+│  ├─ zephyr.zig        # Public API module export
 │  ├─ ecs.zig           # ECS module export
 │  ├─ core/             # Core systems (Window, Graphics, Events, Layers)
 │  ├─ rendering/        # Rendering systems
@@ -738,7 +738,7 @@ ZulkanZengine/
 │
 ├─ editor/src/          # Editor application source
 │  ├─ main.zig          # Editor entry point
-│  ├─ editor_app.zig    # Editor application (uses zulkan module)
+│  ├─ editor_app.zig    # Editor application (uses zephyr module)
 │  ├─ layers/           # Editor-specific layers (InputLayer, UILayer)
 │  ├─ ui/               # ImGui UI code
 │  └─ keyboard_movement_controller.zig
@@ -747,12 +747,12 @@ ZulkanZengine/
 ```
 
 **Build System:**
-- Engine compiled as Zig module (`zulkan`)
-- Editor imports engine via `@import("zulkan")`
+- Engine compiled as Zig module (`zephyr`)
+- Editor imports engine via `@import("zephyr")`
 - All engine types accessible through clean API
 - Editor successfully builds and runs
 
-**Public API Exports (zulkan.zig):**
+**Public API Exports (zephyr.zig):**
 - Core: Engine, Layer, LayerStack, Event, EventBus, Window, WindowProps
 - Graphics: GraphicsContext, Swapchain, Buffer, Shader, Texture, Descriptors
 - Rendering: Camera, FrameInfo, PerformanceMonitor, UnifiedPipelineSystem, ResourceBinder, Mesh, PipelineBuilder

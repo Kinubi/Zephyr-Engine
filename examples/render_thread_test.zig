@@ -1,10 +1,10 @@
 const std = @import("std");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
-const RenderThreadContext = zulkan.RenderThreadContext;
-const GameStateSnapshot = zulkan.GameStateSnapshot;
-const ThreadPool = zulkan.ThreadPool;
-const ecs = zulkan.ecs;
+const RenderThreadContext = zephyr.RenderThreadContext;
+const GameStateSnapshot = zephyr.GameStateSnapshot;
+const ThreadPool = zephyr.ThreadPool;
+const ecs = zephyr.ecs;
 
 /// Minimal test to validate render thread infrastructure.
 /// This test verifies:
@@ -39,7 +39,7 @@ pub fn main() !void {
     defer world.deinit();
 
     // Register MeshRenderer component (needed by captureSnapshot)
-    try world.registerComponent(zulkan.MeshRenderer);
+    try world.registerComponent(zephyr.MeshRenderer);
 
     // Create mock camera (just a struct with required fields)
     var mock_camera = MockCamera{};
@@ -62,7 +62,7 @@ pub fn main() !void {
     // ==================== Start Render Thread ====================
     std.debug.print("3. Starting render thread...\n", .{});
 
-    try zulkan.startRenderThread(&render_ctx);
+    try zephyr.startRenderThread(&render_ctx);
 
     std.debug.print("   ✓ Render thread started successfully\n\n", .{});
 
@@ -77,7 +77,7 @@ pub fn main() !void {
         std.Thread.sleep(5 * std.time.ns_per_ms);
 
         // Capture and send snapshot to render thread
-        try zulkan.mainThreadUpdate(
+        try zephyr.mainThreadUpdate(
             &render_ctx,
             &world,
             &mock_camera,
@@ -95,7 +95,7 @@ pub fn main() !void {
     // Give render thread a moment to process pending frames
     std.Thread.sleep(50 * std.time.ns_per_ms);
 
-    zulkan.stopRenderThread(&render_ctx);
+    zephyr.stopRenderThread(&render_ctx);
 
     std.debug.print("   ✓ Render thread stopped gracefully\n\n", .{});
 
@@ -118,7 +118,7 @@ const MockSwapchain = struct {
 
 /// Mock camera for testing (implements minimal Camera interface)
 const MockCamera = struct {
-    viewMatrix: zulkan.math.Mat4x4 = zulkan.math.Mat4x4.identity(),
-    projectionMatrix: zulkan.math.Mat4x4 = zulkan.math.Mat4x4.identity(),
-    inverseViewMatrix: zulkan.math.Mat4x4 = zulkan.math.Mat4x4.identity(),
+    viewMatrix: zephyr.math.Mat4x4 = zephyr.math.Mat4x4.identity(),
+    projectionMatrix: zephyr.math.Mat4x4 = zephyr.math.Mat4x4.identity(),
+    inverseViewMatrix: zephyr.math.Mat4x4 = zephyr.math.Mat4x4.identity(),
 };

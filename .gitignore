@@ -2,7 +2,7 @@
 
 /zig-out/*
 
-zig-out/bin/ZulkanZengine
+zig-out/bin/ZephyrEditor
 
 # Pipeline cache directory
 /cache/

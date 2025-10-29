@@ -1,4 +1,4 @@
-# Lighting System for ZulkanZengine
+# Lighting System for Zephyr-Engine
 
 **Last Updated**: October 24, 2025  
 **Status**: ✅ Implemented with Instanced Rendering

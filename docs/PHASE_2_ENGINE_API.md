@@ -15,7 +15,7 @@ Phase 2 focuses on implementing the `Engine` struct in `engine/src/core/engine.z
 
 **✅ Completed:**
 - ✅ Engine struct exists with method signatures
-- ✅ Module export (zulkan.zig) created with all necessary types
+- ✅ Module export (zephyr.zig) created with all necessary types
 - ✅ Build system configured for engine-as-module
 - ✅ Application compiles and runs successfully
 - ✅ Engine.init() implementation complete
@@ -218,11 +218,11 @@ pub fn update(self: *App) !bool {
 ```zig
 pub fn init(self: *App) !void {
     // Initialize engine with config
-    self.engine = try zulkan.Engine.init(self.allocator, .{
+    self.engine = try zephyr.Engine.init(self.allocator, .{
         .window = .{
             .width = 1280,
             .height = 720,
-            .title = "ZulkanEditor",
+            .title = "Zephyr Editor",
         },
         .enable_validation = true,
         .enable_performance_monitoring = true,

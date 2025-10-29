@@ -1,23 +1,23 @@
-# ZulkanZengine
+# Zephyr-Engine
 
 A modern, high-performance game engine built in Zig with Vulkan, featuring an Entity Component System (ECS), path tracing, and advanced asset management.
 
 ## 🏗️ Architecture
 
-ZulkanZengine is structured as a **modular engine library** with a separate editor application:
+Zephyr-Engine is structured as a **modular engine library** with a separate editor application:
 
 ```
 ┌─────────────────────────────────────────┐
-│     ZulkanEditor (Executable)           │
+│     Zephyr Editor (Executable)           │
 │  - Editor UI (ImGui)                    │
 │  - Viewport/Hierarchy/Inspector         │
 │  - Asset Browser                        │
 │  - Scene Editing Tools                  │
 └──────────────┬──────────────────────────┘
-               │ imports zulkan
+               │ imports zephyr
                ▼
 ┌─────────────────────────────────────────┐
-│     ZulkanEngine (Library Module)       │
+│     Zephyr Engine (Library Module)       │
 │  - Engine API (init/frame loop)         │
 │  - Core Systems (Window, Graphics)      │
 │  - Layer System (Pluggable)             │
@@ -31,7 +31,7 @@ ZulkanZengine is structured as a **modular engine library** with a separate edit
 ```
 
 **Key Benefits:**
-- ✅ Clean API boundary via `@import("zulkan")`
+- ✅ Clean API boundary via `@import("zephyr")`
 - ✅ Engine can be used in games, tools, or standalone
 - ✅ Faster iteration (editor changes don't rebuild engine)
 - ✅ Simple initialization: `Engine.init(allocator, config)`
@@ -41,10 +41,10 @@ ZulkanZengine is structured as a **modular engine library** with a separate edit
 ### Project Structure
 
 ```
-ZulkanZengine/
+Zephyr-Engine/
 ├── engine/                 # Engine Library (Module)
 │   └── src/
-│       ├── zulkan.zig      # Public API export
+│       ├── zephyr.zig      # Public API export
 │       ├── ecs.zig         # ECS module export
 │       ├── core/           # Engine core (Engine, Window, Graphics, Events, Layers)
 │       ├── rendering/      # Rendering systems
@@ -59,7 +59,7 @@ ZulkanZengine/
 ├── editor/                 # Editor Application
 │   └── src/
 │       ├── main.zig        # Editor entry point
-│       ├── editor_app.zig  # Editor application (uses zulkan)
+│       ├── editor_app.zig  # Editor application (uses zephyr)
 │       ├── layers/         # Editor layers (UI, Input)
 │       ├── ui/             # ImGui integration
 │       └── keyboard_movement_controller.zig
@@ -77,7 +77,7 @@ ZulkanZengine/
 
 ## Architecture Overview
 
-ZulkanZengine features a modern architecture consisting of these main pillars:
+Zephyr-Engine features a modern architecture consisting of these main pillars:
 
 ### 🧩 **Entity Component System (ECS)** ✅ IMPLEMENTED
 - **Data-Oriented Design**: Components stored in packed arrays for optimal cache performance
@@ -160,9 +160,9 @@ ZulkanZengine features a modern architecture consisting of these main pillars:
 ### Project Structure
 
 ```
-ZulkanZengine/
+Zephyr-Engine/
 ├─ engine/src/          # Engine library (Zig module)
-│  ├─ zulkan.zig        # Public API exports
+│  ├─ zephyr.zig        # Public API exports
 │  ├─ core/             # Core systems
 │  ├─ rendering/        # Rendering pipeline
 │  ├─ ecs/              # Entity Component System
@@ -185,7 +185,7 @@ ZulkanZengine/
 ```sh
 # Clone the repository
 git clone <repository-url>
-cd ZulkanZengine
+cd Zephyr-Engine
 
 # Ensure glslc is on your PATH (for shader compilation)
 # On macOS, add to ~/.zprofile:
@@ -211,7 +211,7 @@ zig build run -Ddebug=true
 ## Project Structure
 
 ```
-ZulkanZengine/
+Zephyr-Engine/
 ├── src/
 │   ├── ecs/                      # Entity Component System ✅
 │   │   ├── world.zig            # ECS World and EntityManager

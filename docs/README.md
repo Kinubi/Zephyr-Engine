@@ -1,6 +1,6 @@
-# ZulkanZengine Documentation
+# Zephyr-Engine Documentation
 
-This directory contains technical documentation for the ZulkanZengine rendering system.
+This directory contains technical documentation for the Zephyr-Engine rendering system.
 
 📑 **[Complete Documentation Index](INDEX.md)** - Quick navigation to all docs
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const zulkan = @import("zulkan");
+const zephyr = @import("zephyr");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", "1");
@@ -10,15 +10,15 @@ const c = @cImport({
     @cInclude("backends/dcimgui_impl_glfw.h");
 });
 
-const GraphicsContext = zulkan.GraphicsContext;
-const Swapchain = zulkan.Swapchain;
-const Buffer = zulkan.Buffer;
-const Texture = zulkan.Texture;
-const UnifiedPipelineSystem = zulkan.UnifiedPipelineSystem;
-const PipelineId = zulkan.PipelineId;
-const Resource = zulkan.Resource;
-const ResourceBinder = zulkan.ResourceBinder;
-const DynamicRenderingHelper = zulkan.DynamicRenderingHelper;
+const GraphicsContext = zephyr.GraphicsContext;
+const Swapchain = zephyr.Swapchain;
+const Buffer = zephyr.Buffer;
+const Texture = zephyr.Texture;
+const UnifiedPipelineSystem = zephyr.UnifiedPipelineSystem;
+const PipelineId = zephyr.PipelineId;
+const Resource = zephyr.Resource;
+const ResourceBinder = zephyr.ResourceBinder;
+const DynamicRenderingHelper = zephyr.DynamicRenderingHelper;
 const MAX_FRAMES_IN_FLIGHT = 3; // TODO: Get from engine config
 
 pub const ImGuiVulkanBackend = struct {
@@ -161,7 +161,7 @@ pub const ImGuiVulkanBackend = struct {
         const color_formats = [_]vk.Format{self.swapchain_format};
 
         // Define ImGui vertex input layout
-        const PipelineBuilder = zulkan.PipelineBuilder;
+        const PipelineBuilder = zephyr.PipelineBuilder;
 
         const bindings = [_]PipelineBuilder.VertexInputBinding{
             .{ .binding = 0, .stride = @sizeOf(c.ImDrawVert), .input_rate = .vertex },

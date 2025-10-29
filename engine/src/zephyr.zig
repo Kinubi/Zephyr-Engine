@@ -1,7 +1,7 @@
-// ZulkanEngine - Main module export
-// This is what users import: @import("zulkan")
+// Zephyr Engine - Main module export
+// This is what users import: @import("zephyr")
 
-// ZulkanEngine Public API
+// Zephyr Engine Public API
 // This is the main entry point for using the engine
 
 const std = @import("std");

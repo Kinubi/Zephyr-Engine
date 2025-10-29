@@ -4,10 +4,10 @@ const builtin = @import("builtin");
 comptime {
     const target = builtin.target;
     if (target.cpu.arch != .x86 and target.cpu.arch != .x86_64) {
-        @compileError("ZulkanZengine ECS requires an x86/x86_64 target with AVX2 support");
+        @compileError("Zephyr-Engine ECS requires an x86/x86_64 target with AVX2 support");
     }
     if (!target.cpu.features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx2))) {
-        @compileError("ZulkanZengine ECS requires AVX2-capable CPUs");
+        @compileError("Zephyr-Engine ECS requires AVX2-capable CPUs");
     }
 }
 
