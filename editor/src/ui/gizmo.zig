@@ -7,29 +7,53 @@ const c = @import("imgui_c.zig").c;
 const Camera = zephyr.Camera;
 const Scene = zephyr.Scene;
 const ViewportPicker = @import("viewport_picker.zig");
-fn transformPointRow(m: *Math.Mat4x4, p: Math.Vec3) Math.Vec3 {
-    const x = p.x * m.get(0, 0).* + p.y * m.get(1, 0).* + p.z * m.get(2, 0).* + m.get(3, 0).*;
-    const y = p.x * m.get(0, 1).* + p.y * m.get(1, 1).* + p.z * m.get(2, 1).* + m.get(3, 1).*;
-    const z = p.x * m.get(0, 2).* + p.y * m.get(1, 2).* + p.z * m.get(2, 2).* + m.get(3, 2).*;
-    return Math.Vec3.init(x, y, z);
+fn transformVec4Row(m: *Math.Mat4x4, v: Math.Vec4) Math.Vec4 {
+    const x = v.x * m.get(0, 0).* + v.y * m.get(1, 0).* + v.z * m.get(2, 0).* + v.w * m.get(3, 0).*;
+    const y = v.x * m.get(0, 1).* + v.y * m.get(1, 1).* + v.z * m.get(2, 1).* + v.w * m.get(3, 1).*;
+    const z = v.x * m.get(0, 2).* + v.y * m.get(1, 2).* + v.z * m.get(2, 2).* + v.w * m.get(3, 2).*;
+    const w = v.x * m.get(0, 3).* + v.y * m.get(1, 3).* + v.z * m.get(2, 3).* + v.w * m.get(3, 3).*;
+    return Math.Vec4.init(x, y, z, w);
 }
 
 fn project(camera: *Camera, vp_pos: [2]f32, vp_size: [2]f32, point: Math.Vec3) ?[2]f32 {
-    const view_pt = transformPointRow(&camera.viewMatrix, point);
-    if (view_pt.z <= 0.0) return null;
+    _ = vp_pos;
+    _ = vp_size;
 
-    const fovy = Math.radians(camera.fov);
-    const tan_half = @tan(fovy * 0.5);
-    const aspect = if (vp_size[1] > 0.0) vp_size[0] / vp_size[1] else camera.aspectRatio;
+    // Use the same projection pipeline as the bbox (proper view-projection with perspective divide)
+    const point4 = Math.Vec4.init(point.x, point.y, point.z, 1.0);
 
-    const ndc_x = (view_pt.x / view_pt.z) / (aspect * tan_half);
-    const ndc_y = (view_pt.y / view_pt.z) / tan_half;
+    // Transform to view space
+    const view4 = transformVec4Row(&camera.viewMatrix, point4);
+    if (view4.z <= 0.0) return null;
 
-    if (ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0) return null;
+    // Transform to clip space
+    const clip4 = transformVec4Row(&camera.projectionMatrix, view4);
+    if (@abs(clip4.w) < 1e-6) return null;
 
-    const screen_x = vp_pos[0] + ((ndc_x + 1.0) * 0.5) * vp_size[0];
-    const screen_y = vp_pos[1] + ((ndc_y + 1.0) * 0.5) * vp_size[1];
-    return .{ screen_x, screen_y };
+    // Perspective divide to get NDC coordinates
+    const inv_w = 1.0 / clip4.w;
+    const ndc_x = clip4.x * inv_w;
+    const ndc_y = clip4.y * inv_w;
+    const ndc_z = clip4.z * inv_w;
+
+    // Check if point is within NDC bounds
+    if (ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0 or ndc_z < 0.0 or ndc_z > 1.0)
+        return null;
+
+    // Convert NDC to window coordinates (use main window, not viewport, for proper alignment)
+    const main_viewport = c.ImGui_GetMainViewport();
+    const window_origin_x = main_viewport.*.Pos.x;
+    const window_origin_y = main_viewport.*.Pos.y;
+    const window_width = main_viewport.*.Size.x;
+    const window_height = main_viewport.*.Size.y;
+
+    if (window_width <= 0.0 or window_height <= 0.0)
+        return null;
+
+    const window_x = window_origin_x + ((ndc_x + 1.0) * 0.5) * window_width;
+    const window_y = window_origin_y + ((ndc_y + 1.0) * 0.5) * window_height;
+
+    return .{ window_x, window_y };
 }
 
 pub const Gizmo = struct {
@@ -326,7 +350,7 @@ fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_si
         if (hovered_kind == Gizmo.PickKind.Ring and hovered_axis == .X) {
             col = makeColor(255, 214, 0, 255);
         }
-        
+
         var prev_screen: ?[2]f32 = null;
         var i: u32 = 0;
         while (i <= num_segments) : (i += 1) {
@@ -334,7 +358,7 @@ fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_si
             const y = @cos(angle) * world_radius;
             const z = @sin(angle) * world_radius;
             const world_point = Math.Vec3.init(world_pos.x, world_pos.y + y, world_pos.z + z);
-            
+
             if (project(camera, viewport_pos, viewport_size, world_point)) |screen| {
                 if (prev_screen) |prev| {
                     c.ImDrawList_AddLine(draw_list, .{ .x = prev[0], .y = prev[1] }, .{ .x = screen[0], .y = screen[1] }, col);
@@ -352,7 +376,7 @@ fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_si
         if (hovered_kind == Gizmo.PickKind.Ring and hovered_axis == .Y) {
             col = makeColor(255, 214, 0, 255);
         }
-        
+
         var prev_screen: ?[2]f32 = null;
         var i: u32 = 0;
         while (i <= num_segments) : (i += 1) {
@@ -360,7 +384,7 @@ fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_si
             const x = @cos(angle) * world_radius;
             const z = @sin(angle) * world_radius;
             const world_point = Math.Vec3.init(world_pos.x + x, world_pos.y, world_pos.z + z);
-            
+
             if (project(camera, viewport_pos, viewport_size, world_point)) |screen| {
                 if (prev_screen) |prev| {
                     c.ImDrawList_AddLine(draw_list, .{ .x = prev[0], .y = prev[1] }, .{ .x = screen[0], .y = screen[1] }, col);
@@ -378,7 +402,7 @@ fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_si
         if (hovered_kind == Gizmo.PickKind.Ring and hovered_axis == .Z) {
             col = makeColor(255, 214, 0, 255);
         }
-        
+
         var prev_screen: ?[2]f32 = null;
         var i: u32 = 0;
         while (i <= num_segments) : (i += 1) {
@@ -386,7 +410,7 @@ fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_si
             const x = @cos(angle) * world_radius;
             const y = @sin(angle) * world_radius;
             const world_point = Math.Vec3.init(world_pos.x + x, world_pos.y + y, world_pos.z);
-            
+
             if (project(camera, viewport_pos, viewport_size, world_point)) |screen| {
                 if (prev_screen) |prev| {
                     c.ImDrawList_AddLine(draw_list, .{ .x = prev[0], .y = prev[1] }, .{ .x = screen[0], .y = screen[1] }, col);
@@ -608,10 +632,10 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
         const num_segments: u32 = 32; // Fewer segments for picking (performance)
         const angle_step = (2.0 * std.math.pi) / @as(f32, @floatFromInt(num_segments));
         const pick_threshold: f32 = 12.0;
-        
+
         var best_ring_axis: Gizmo.Axis = .None;
         var best_ring_dist: f32 = 1e9;
-        
+
         // Check X-axis ring (YZ plane)
         {
             var i: u32 = 0;
@@ -620,7 +644,7 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
                 const y = @cos(angle) * world_radius;
                 const z = @sin(angle) * world_radius;
                 const world_point = Math.Vec3.init(center.x, center.y + y, center.z + z);
-                
+
                 if (project(camera, vp_pos, vp_size, world_point)) |screen| {
                     const dx = mouse_x - screen[0];
                     const dy = mouse_y - screen[1];
@@ -632,7 +656,7 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
                 }
             }
         }
-        
+
         // Check Y-axis ring (XZ plane)
         {
             var i: u32 = 0;
@@ -641,7 +665,7 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
                 const x = @cos(angle) * world_radius;
                 const z = @sin(angle) * world_radius;
                 const world_point = Math.Vec3.init(center.x + x, center.y, center.z + z);
-                
+
                 if (project(camera, vp_pos, vp_size, world_point)) |screen| {
                     const dx = mouse_x - screen[0];
                     const dy = mouse_y - screen[1];
@@ -653,7 +677,7 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
                 }
             }
         }
-        
+
         // Check Z-axis ring (XY plane)
         {
             var i: u32 = 0;
@@ -662,7 +686,7 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
                 const x = @cos(angle) * world_radius;
                 const y = @sin(angle) * world_radius;
                 const world_point = Math.Vec3.init(center.x + x, center.y + y, center.z);
-                
+
                 if (project(camera, vp_pos, vp_size, world_point)) |screen| {
                     const dx = mouse_x - screen[0];
                     const dy = mouse_y - screen[1];
@@ -674,7 +698,7 @@ fn pickAxisOrRing(center: Math.Vec3, vp_pos: [2]f32, vp_size: [2]f32, mouse_x: f
                 }
             }
         }
-        
+
         if (best_ring_dist <= pick_threshold and best_ring_axis != .None) {
             return .{ .kind = Gizmo.PickKind.Ring, .axis = best_ring_axis };
         }

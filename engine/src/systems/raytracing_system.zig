@@ -49,6 +49,12 @@ const PerFrameDestroyQueue = struct {
 pub const RaytracingSystem = struct {
     gc: *GraphicsContext, // Use 'gc' for consistency with Swapchain
 
+    // Double-buffered TLAS for safe async updates
+    // render_tlas: stable TLAS used for rendering (never changed during frame)
+    // tlas: working TLAS that gets updated by async callbacks
+    render_tlas: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
+    render_tlas_valid: bool = false,
+
     // Legacy single AS support (for compatibility)
     blas: vk.AccelerationStructureKHR = undefined,
     tlas: vk.AccelerationStructureKHR = undefined,
@@ -403,6 +409,22 @@ pub const RaytracingSystem = struct {
         geo_changed: bool,
     ) !bool {
         const frame_index = frame_info.current_frame;
+
+        // ATOMIC TLAS SWAP: Double-buffer approach
+        // At the start of each frame, atomically promote the working TLAS to render TLAS
+        // This ensures render_tlas is stable for the entire frame, even if async callbacks update tlas
+        if (self.tlas != vk.AccelerationStructureKHR.null_handle and self.tlas != self.render_tlas) {
+            // New TLAS available - atomically swap to it
+
+            self.render_tlas = self.tlas;
+            self.render_tlas_valid = true;
+
+            // The old render_tlas is no longer needed for rendering, but don't destroy it yet
+            // It's already been marked as orphaned by the async callback when the new tlas was created
+        } else if (self.tlas == vk.AccelerationStructureKHR.null_handle and self.render_tlas != vk.AccelerationStructureKHR.null_handle) {
+            // Working TLAS was invalidated - keep using render_tlas until we have a new one
+            log(.DEBUG, "raytracing", "Working TLAS invalidated, keeping render_tlas for stability", .{});
+        }
 
         // Process any orphaned TLAS from async callbacks
         // When a new TLAS completes while another is still in use, the old one is marked as orphaned
