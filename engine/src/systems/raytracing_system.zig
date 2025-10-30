@@ -718,16 +718,21 @@ pub const RaytracingSystem = struct {
             log(.WARN, "RaytracingSystem", "Failed to wait for device idle during deinit: {}", .{err});
         };
 
-        // Deinit multithreaded BVH builder first (heap allocated)
+        // Flush all per-frame destruction queues FIRST (before deinit-ing BVH builder)
+        // These contain deferred resources from recent frames that need cleanup
+        for (&self.per_frame_destroy) |*queue| {
+            self.flushDestroyQueue(queue);
+        }
+
+        // Deinit multithreaded BVH builder (heap allocated)
         self.bvh_builder.deinit();
         self.allocator.destroy(self.bvh_builder);
 
         if (self.tlas_instance_buffer_initialized) self.tlas_instance_buffer.deinit();
         if (self.tlas_buffer_initialized) self.tlas_buffer.deinit();
 
-        // Flush all per-frame destruction queues
+        // Now free the per-frame queue allocations
         for (&self.per_frame_destroy) |*queue| {
-            self.flushDestroyQueue(queue);
             queue.deinit(self.allocator);
         }
 
