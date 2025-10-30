@@ -62,10 +62,10 @@ pub const EntityRegistry = struct {
             return error.TooManyEntities;
         }
 
-        try self.generations.append(self.allocator, 0); // Initial generation is 0
+        try self.generations.append(self.allocator, 1); // Reserve generation 0 for invalid handle
         self.next_index += 1;
 
-        return EntityId.make(0, idx);
+        return EntityId.make(self.generations.items[idx], idx);
     }
 
     /// Destroy an entity (invalidates the handle)

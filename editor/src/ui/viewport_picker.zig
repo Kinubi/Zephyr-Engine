@@ -7,7 +7,8 @@ const Scene = zephyr.Scene;
 const MeshRenderer = zephyr.MeshRenderer;
 const AssetManager = zephyr.AssetManager;
 const Model = zephyr.Model;
-const Mesh = zephyr.Mesh;
+const MeshModule = zephyr.Mesh;
+const Mesh = MeshModule.Mesh;
 
 pub const PickResult = struct {
     entity: zephyr.Entity,
@@ -16,22 +17,117 @@ pub const PickResult = struct {
 };
 
 fn transformPoint(m: *Math.Mat4x4, p: Math.Vec3) Math.Vec3 {
-    // row-major multiplication: out = m * vec4(p,1)
-    const x = m.get(0, 0).* * p.x + m.get(0, 1).* * p.y + m.get(0, 2).* * p.z + m.get(0, 3).* * 1.0;
-    const y = m.get(1, 0).* * p.x + m.get(1, 1).* * p.y + m.get(1, 2).* * p.z + m.get(1, 3).* * 1.0;
-    const z = m.get(2, 0).* * p.x + m.get(2, 1).* * p.y + m.get(2, 2).* * p.z + m.get(2, 3).* * 1.0;
+    // Matrix stores translation in the last row; treat input as row-vector * matrix
+    const x = p.x * m.get(0, 0).* + p.y * m.get(1, 0).* + p.z * m.get(2, 0).* + m.get(3, 0).*;
+    const y = p.x * m.get(0, 1).* + p.y * m.get(1, 1).* + p.z * m.get(2, 1).* + m.get(3, 1).*;
+    const z = p.x * m.get(0, 2).* + p.y * m.get(1, 2).* + p.z * m.get(2, 2).* + m.get(3, 2).*;
     return Math.Vec3.init(x, y, z);
 }
 
 fn transformDirection(m: *Math.Mat4x4, d: Math.Vec3) Math.Vec3 {
-    // multiply by matrix ignoring translation: out = m * vec4(d,0)
-    const x = m.get(0, 0).* * d.x + m.get(0, 1).* * d.y + m.get(0, 2).* * d.z;
-    const y = m.get(1, 0).* * d.x + m.get(1, 1).* * d.y + m.get(1, 2).* * d.z;
-    const z = m.get(2, 0).* * d.x + m.get(2, 1).* * d.y + m.get(2, 2).* * d.z;
+    // Same layout as transformPoint but without the translation term
+    const x = d.x * m.get(0, 0).* + d.y * m.get(1, 0).* + d.z * m.get(2, 0).*;
+    const y = d.x * m.get(0, 1).* + d.y * m.get(1, 1).* + d.z * m.get(2, 1).*;
+    const z = d.x * m.get(0, 2).* + d.y * m.get(1, 2).* + d.z * m.get(2, 2).*;
     return Math.Vec3.init(x, y, z);
 }
 
 const Ray = struct { origin: Math.Vec3, dir: Math.Vec3 };
+
+const AxisAlignedBoundingBox = struct {
+    min: Math.Vec3,
+    max: Math.Vec3,
+};
+
+fn computeMeshAABB(mesh: *const Mesh) AxisAlignedBoundingBox {
+    var min_vec = Math.Vec3.init(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+    var max_vec = Math.Vec3.init(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
+
+    for (mesh.vertices.items) |vertex| {
+        const vx = vertex.pos[0];
+        const vy = vertex.pos[1];
+        const vz = vertex.pos[2];
+        if (vx < min_vec.x) min_vec.x = vx;
+        if (vy < min_vec.y) min_vec.y = vy;
+        if (vz < min_vec.z) min_vec.z = vz;
+        if (vx > max_vec.x) max_vec.x = vx;
+        if (vy > max_vec.y) max_vec.y = vy;
+        if (vz > max_vec.z) max_vec.z = vz;
+    }
+
+    return AxisAlignedBoundingBox{ .min = min_vec, .max = max_vec };
+}
+
+fn transformAABB(world_mat: *Math.Mat4x4, local: AxisAlignedBoundingBox) AxisAlignedBoundingBox {
+    // Transform the 8 corners to capture the world-space extents
+    const min = local.min;
+    const max = local.max;
+    const corners = [_]Math.Vec3{
+        Math.Vec3.init(min.x, min.y, min.z),
+        Math.Vec3.init(min.x, min.y, max.z),
+        Math.Vec3.init(min.x, max.y, min.z),
+        Math.Vec3.init(min.x, max.y, max.z),
+        Math.Vec3.init(max.x, min.y, min.z),
+        Math.Vec3.init(max.x, min.y, max.z),
+        Math.Vec3.init(max.x, max.y, min.z),
+        Math.Vec3.init(max.x, max.y, max.z),
+    };
+
+    var world_min = Math.Vec3.init(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+    var world_max = Math.Vec3.init(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
+
+    for (corners) |corner| {
+        const world_corner = transformPoint(world_mat, corner);
+        if (world_corner.x < world_min.x) world_min.x = world_corner.x;
+        if (world_corner.y < world_min.y) world_min.y = world_corner.y;
+        if (world_corner.z < world_min.z) world_min.z = world_corner.z;
+        if (world_corner.x > world_max.x) world_max.x = world_corner.x;
+        if (world_corner.y > world_max.y) world_max.y = world_corner.y;
+        if (world_corner.z > world_max.z) world_max.z = world_corner.z;
+    }
+
+    const padding: f32 = 0.01;
+    world_min.x -= padding;
+    world_min.y -= padding;
+    world_min.z -= padding;
+    world_max.x += padding;
+    world_max.y += padding;
+    world_max.z += padding;
+
+    return AxisAlignedBoundingBox{ .min = world_min, .max = world_max };
+}
+
+fn rayIntersectsAABB(origin: Math.Vec3, dir: Math.Vec3, aabb: AxisAlignedBoundingBox) ?f32 {
+    const EPS: f32 = 1e-6;
+    var t_min: f32 = -std.math.inf(f32);
+    var t_max: f32 = std.math.inf(f32);
+
+    const orig_components = [_]f32{ origin.x, origin.y, origin.z };
+    const dir_components = [_]f32{ dir.x, dir.y, dir.z };
+    const min_components = [_]f32{ aabb.min.x, aabb.min.y, aabb.min.z };
+    const max_components = [_]f32{ aabb.max.x, aabb.max.y, aabb.max.z };
+
+    for (orig_components, dir_components, min_components, max_components) |orig, direction, min_val, max_val| {
+        if (@abs(direction) < EPS) {
+            if (orig < min_val or orig > max_val) return null;
+        } else {
+            const inv_dir = 1.0 / direction;
+            var t1 = (min_val - orig) * inv_dir;
+            var t2 = (max_val - orig) * inv_dir;
+            if (t1 > t2) {
+                const tmp = t1;
+                t1 = t2;
+                t2 = tmp;
+            }
+            if (t1 > t_min) t_min = t1;
+            if (t2 < t_max) t_max = t2;
+            if (t_min > t_max) return null;
+        }
+    }
+
+    if (t_max < 0.0) return null;
+    return if (t_min > 0.0) t_min else t_max;
+}
 
 pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32, vp_size: [2]f32) Ray {
     // Guard against degenerate viewport size
@@ -49,35 +145,29 @@ pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32,
     const u = (mouse_x - vp_pos[0]) / vp_size[0];
     const v = (mouse_y - vp_pos[1]) / vp_size[1];
     const ndc_x = u * 2.0 - 1.0; // [0,1] -> [-1,1]
-    const ndc_y = 1.0 - v * 2.0; // [0,1] -> [1,-1] (flip Y since mouse Y increases down)
-
-    const mouse_vp_x = mouse_x - vp_pos[0];
-    const mouse_vp_y = mouse_y - vp_pos[1];
-    std.debug.print("[PICKER] Mouse global: ({d:.1}, {d:.1}), VP pos: ({d:.1}, {d:.1}), Mouse in VP: ({d:.1}, {d:.1}), VP size: ({d:.1}, {d:.1})\n", .{ mouse_x, mouse_y, vp_pos[0], vp_pos[1], mouse_vp_x, mouse_vp_y, vp_size[0], vp_size[1] });
-    std.debug.print("[PICKER] u={d:.3}, v={d:.3}, NDC: ({d:.3}, {d:.3})\n", .{ u, v, ndc_x, ndc_y });
+    const ndc_y = v * 2.0 - 1.0; // Vulkan clip space already assumes +Y down
 
     const fovy = Math.radians(camera.fov);
     const tanHalf = @tan(fovy * 0.5);
 
-    // Use viewport's actual aspect ratio, not camera's stored aspect ratio
-    // This ensures picking works correctly even if viewport is resized
+    // Use viewport's actual aspect ratio
     const aspect = vp_size[0] / vp_size[1];
 
-    // Ray in camera/view space
-    // Camera space: X right, Y up, Z forward (into screen, +Z)
-    var dir_cam = Math.Vec3.init(ndc_x * aspect * tanHalf, ndc_y * tanHalf, 1.0);
-    dir_cam = dir_cam.normalize();
+    // Perspective ray: point through the camera frustum
+    const dir_cam = Math.Vec3.init(ndc_x * aspect * tanHalf, ndc_y * tanHalf, 1.0);
 
     // Convert to world space using inverse view matrix
     const inv_view = &camera.inverseViewMatrix;
 
-    // Extract camera position from inverse view matrix
-    // Translation is stored at row 3, columns 0-2 (see camera.zig line 99-101)
-    const origin = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
+    // Camera position in world space
+    const camera_pos = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
 
     var world_dir = transformDirection(inv_view, dir_cam);
     world_dir = world_dir.normalize();
+    var origin = camera_pos;
 
+    const origin_epsilon: f32 = 1e-3;
+    origin = Math.Vec3.add(origin, Math.Vec3.scale(world_dir, origin_epsilon));
     return Ray{ .origin = origin, .dir = world_dir };
 }
 
@@ -101,17 +191,9 @@ fn intersectTriangle(orig: Math.Vec3, dir: Math.Vec3, v0: Math.Vec3, v1: Math.Ve
 }
 
 pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32, vp_size: [2]f32) ?PickResult {
-    // Calculate NDC for logging
-    const u = (mouse_x - vp_pos[0]) / vp_size[0];
-    const v = (mouse_y - vp_pos[1]) / vp_size[1];
-    const ndc_x = u * 2.0 - 1.0;
-    const ndc_y = 1.0 - v * 2.0;
-
     const ray = rayFromMouse(camera, mouse_x, mouse_y, vp_pos, vp_size);
     const orig = ray.origin;
     const dir = ray.dir;
-
-    std.debug.print("[PICKER] NDC: ({d:.2}, {d:.2}), Camera pos: ({d:.2}, {d:.2}, {d:.2}), Ray dir: ({d:.2}, {d:.2}, {d:.2})\n", .{ ndc_x, ndc_y, orig.x, orig.y, orig.z, dir.x, dir.y, dir.z });
 
     var best_t: f32 = 1e30;
     var best_entity: ?zephyr.Entity = null;
@@ -119,11 +201,13 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
 
     var object_count: usize = 0;
     var tested_count: usize = 0;
+    var hit_count: usize = 0;
 
     // Iterate scene objects
     for (scene.iterateObjects()) |*game_obj| {
         object_count += 1;
         const eid = game_obj.entity_id;
+        if (eid == zephyr.Entity.invalid) continue;
 
         // Skip if no MeshRenderer
         const mr = scene.ecs_world.get(MeshRenderer, eid) orelse continue;
@@ -140,51 +224,34 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
         tested_count += 1;
 
         var mesh_count: usize = 0;
-        var tri_count: usize = 0;
-        var hit_count: usize = 0;
 
         // For each mesh in the model
         for (model.meshes.items) |model_mesh| {
             const mesh = model_mesh.geometry.mesh;
             mesh_count += 1;
 
-            // Iterate triangles (assume indices are triangle list)
-            const idx_len = mesh.indices.items.len;
-            var i: usize = 0;
-            while (i + 2 < idx_len) : (i += 3) {
-                tri_count += 1;
-                const ia = @as(usize, mesh.indices.items[i]);
-                const ib = @as(usize, mesh.indices.items[i + 1]);
-                const ic = @as(usize, mesh.indices.items[i + 2]);
+            const local_aabb = computeMeshAABB(mesh);
+            const world_aabb = transformAABB(world_mat, local_aabb);
+            const aabb_hit = rayIntersectsAABB(orig, dir, world_aabb);
 
-                const pa = transformPoint(world_mat, Math.Vec3.init(mesh.vertices.items[ia].pos[0], mesh.vertices.items[ia].pos[1], mesh.vertices.items[ia].pos[2]));
-                const pb = transformPoint(world_mat, Math.Vec3.init(mesh.vertices.items[ib].pos[0], mesh.vertices.items[ib].pos[1], mesh.vertices.items[ib].pos[2]));
-                const pc = transformPoint(world_mat, Math.Vec3.init(mesh.vertices.items[ic].pos[0], mesh.vertices.items[ic].pos[1], mesh.vertices.items[ic].pos[2]));
-
-                if (intersectTriangle(orig, dir, pa, pb, pc)) |t| {
+            if (aabb_hit == null) {
+                continue;
+            }
+            if (aabb_hit) |t| {
+                if (t < best_t) {
+                    best_t = t;
+                    best_entity = eid;
+                    best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
                     hit_count += 1;
-                    if (t < best_t) {
-                        best_t = t;
-                        best_entity = eid;
-                        best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
-                    }
                 }
             }
         }
-
-        if (tested_count == 1) {
-            // Log first object's details for debugging
-            std.debug.print("[PICKER] Entity {}: {} meshes, {} triangles, {} hits\n", .{ eid, mesh_count, tri_count, hit_count });
-        }
     }
-
-    std.debug.print("[PICKER] Tested {}/{} objects with valid meshes\n", .{ tested_count, object_count });
 
     if (best_entity) |e| {
-        std.debug.print("[PICKER] Found hit: entity={}, distance={d:.2}\n", .{ e, best_t });
         return PickResult{ .entity = e, .distance = best_t, .pos = best_pos };
     }
-    std.debug.print("[PICKER] No hit found\n", .{});
+
     return null;
 }
 

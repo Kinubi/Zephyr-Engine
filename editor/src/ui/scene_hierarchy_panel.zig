@@ -61,8 +61,7 @@ pub const SceneHierarchyPanel = struct {
             c.ImGui_Text("Selected Count: %d", self.selected_entities.items.len);
             var sel_idx: usize = 0;
             for (self.selected_entities.items) |eid| {
-                const eid_u32: u32 = @intFromEnum(eid);
-                c.ImGui_Text("  [%d] %d", sel_idx, eid_u32);
+                c.ImGui_Text("  [%d] idx=%d (raw=%u)", sel_idx, eid.index(), @intFromEnum(eid));
                 sel_idx += 1;
             }
             c.ImGui_Separator();
@@ -153,8 +152,7 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Begin("Inspector", null, window_flags)) {
             if (self.selected_entities.items.len > 0) {
                 const entity = self.selected_entities.items[0];
-                const entity_u32: u32 = @intFromEnum(entity);
-                c.ImGui_Text("Entity ID: %d", entity_u32);
+                c.ImGui_Text("Entity Index: %d (raw=%u)", entity.index(), @intFromEnum(entity));
                 c.ImGui_Separator();
 
                 // Transform component
@@ -200,6 +198,7 @@ pub const SceneHierarchyPanel = struct {
     fn buildEntityLabel(self: *SceneHierarchyPanel, world: *World, entity: EntityId, buf: []u8) ![:0]const u8 {
         _ = self;
 
+        const entity_index = entity.index();
         const entity_u32: u32 = @intFromEnum(entity);
         var components = std.ArrayList(u8){};
         defer components.deinit(std.heap.page_allocator);
@@ -233,9 +232,9 @@ pub const SceneHierarchyPanel = struct {
         }
 
         const label = if (has_any)
-            try std.fmt.bufPrintZ(buf, "Entity {d} [{s}]", .{ entity_u32, components.items })
+            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d}) [{s}]", .{ entity_u32, entity_index, components.items })
         else
-            try std.fmt.bufPrintZ(buf, "Entity {d}", .{entity_u32});
+            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d})", .{ entity_u32, entity_index });
 
         return label;
     }

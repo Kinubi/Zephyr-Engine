@@ -166,7 +166,7 @@ pub const UILayer = struct {
             if (in_viewport) {
                 log(.DEBUG, "picking", "Attempting to pick scene...", .{});
                 if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_pos, vp_size)) |res| {
-                    log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity, res.distance });
+                    log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity.index(), res.distance });
                     // Single-select the hit entity
                     if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
                         self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();

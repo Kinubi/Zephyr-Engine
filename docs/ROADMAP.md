@@ -1,7 +1,7 @@
 # Zephyr-Engine Development Roadmap
 
-**Last Updated**: October 25, 2025  
-**Branch**: feature/editor-base
+**Last Updated**: October 30, 2025  
+**Branch**: features/ui-stuff
 
 ## Current Status: Phase 3 - Engine/Editor Architecture
 
@@ -202,7 +202,7 @@
 #### Editor Tools
 - [x] **Camera Controller** - Keyboard movement (WASD) and rotation (arrows)
 - [ ] **Transform Gizmos** - Visual move, rotate, scale tools
-- [ ] **Entity Selection** - Mouse picking in viewport
+- [x] **Entity Selection** - Perspective ray picking with AABB filtering and closest-hit refinement (Oct 30, 2025)
 - [ ] **Asset Importer** - Drag-and-drop asset import
 - [ ] **Scene Serialization** - Save/load scenes to disk
 - [ ] **Lighting Tools** - Visual light placement and editing
@@ -226,10 +226,10 @@
 - **Asset browser with file navigation and icons**
 
 **Next Steps:**
-1. Implement entity selection via mouse picking
-2. Add visual feedback for selected entities
-3. Create transform gizmos for manipulation
-4. Add console panel for logging output
+1. Add visual feedback for selected entities (outline/highlight)
+2. Create transform gizmos for manipulation
+3. Add console panel for logging output
+4. Begin undo/redo command framework design
 
 ---
 
@@ -270,6 +270,13 @@
 ---
 
 ## Recent Milestones
+
+### October 30, 2025
+- ✅ **Viewport Picking Revamp**
+  - Corrected perspective ray construction in editor viewport
+  - Added AABB coarse culling with closest-hit refinement
+  - Exposed friendly entity indices in logs/UI for debugging
+  - Validated floor/ceiling/back-wall selection, restored vase hits
 
 ### October 29, 2025
 - ✅ **Phase 4: Performance Optimization Complete**
