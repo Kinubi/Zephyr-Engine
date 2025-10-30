@@ -1,6 +1,9 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 const Math = zephyr.math;
+const c = @cImport({
+    @cInclude("dcimgui.h");
+});
 
 const Camera = zephyr.Camera;
 const Scene = zephyr.Scene;
@@ -34,7 +37,7 @@ fn transformDirection(m: *Math.Mat4x4, d: Math.Vec3) Math.Vec3 {
 
 const Ray = struct { origin: Math.Vec3, dir: Math.Vec3 };
 
-const AxisAlignedBoundingBox = struct {
+pub const AxisAlignedBoundingBox = struct {
     min: Math.Vec3,
     max: Math.Vec3,
 };
@@ -139,19 +142,30 @@ pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32,
         return Ray{ .origin = origin, .dir = Math.Vec3.init(0, 0, -1) };
     }
 
-    // NDC coords in [-1,1]
-    // Mouse coordinates: (0,0) at top-left, increases right and down
-    // NDC: (-1,-1) at bottom-left, (1,1) at top-right (standard)
-    const u = (mouse_x - vp_pos[0]) / vp_size[0];
-    const v = (mouse_y - vp_pos[1]) / vp_size[1];
-    const ndc_x = u * 2.0 - 1.0; // [0,1] -> [-1,1]
-    const ndc_y = v * 2.0 - 1.0; // Vulkan clip space already assumes +Y down
+    _ = vp_pos;
+
+    const main_viewport = c.ImGui_GetMainViewport();
+    const window_origin_x = main_viewport.*.Pos.x;
+    const window_origin_y = main_viewport.*.Pos.y;
+    const window_width = main_viewport.*.Size.x;
+    const window_height = main_viewport.*.Size.y;
+
+    if (window_width <= 0.0 or window_height <= 0.0) {
+        const inv_view = &camera.inverseViewMatrix;
+        const origin = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
+        return Ray{ .origin = origin, .dir = Math.Vec3.init(0, 0, -1) };
+    }
+
+    // Convert mouse position (ImGui space) into clip space coordinates
+    const window_u = (mouse_x - window_origin_x) / window_width;
+    const window_v = (mouse_y - window_origin_y) / window_height;
+    const ndc_x = window_u * 2.0 - 1.0;
+    const ndc_y = window_v * 2.0 - 1.0;
 
     const fovy = Math.radians(camera.fov);
     const tanHalf = @tan(fovy * 0.5);
 
-    // Use viewport's actual aspect ratio
-    const aspect = vp_size[0] / vp_size[1];
+    const aspect = window_width / window_height;
 
     // Perspective ray: point through the camera frustum
     const dir_cam = Math.Vec3.init(ndc_x * aspect * tanHalf, ndc_y * tanHalf, 1.0);
@@ -169,6 +183,39 @@ pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32,
     const origin_epsilon: f32 = 1e-3;
     origin = Math.Vec3.add(origin, Math.Vec3.scale(world_dir, origin_epsilon));
     return Ray{ .origin = origin, .dir = world_dir };
+}
+
+pub fn computeEntityWorldAABB(scene: *Scene, entity: zephyr.Entity) ?AxisAlignedBoundingBox {
+    if (entity == zephyr.Entity.invalid) return null;
+
+    const mr = scene.ecs_world.get(MeshRenderer, entity) orelse return null;
+    if (!mr.hasValidAssets()) return null;
+
+    const model_ptr = scene.asset_manager.getLoadedModelConst(mr.model_asset.?) orelse return null;
+    const model = model_ptr.*;
+
+    const transform = scene.ecs_world.get(zephyr.Transform, entity) orelse return null;
+    const world_mat = &transform.world_matrix;
+
+    var combined_min = Math.Vec3.init(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+    var combined_max = Math.Vec3.init(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
+    var found_mesh: bool = false;
+
+    for (model.meshes.items) |model_mesh| {
+        const mesh = model_mesh.geometry.mesh;
+        const local_aabb = computeMeshAABB(mesh);
+        const world_aabb = transformAABB(world_mat, local_aabb);
+        if (world_aabb.min.x < combined_min.x) combined_min.x = world_aabb.min.x;
+        if (world_aabb.min.y < combined_min.y) combined_min.y = world_aabb.min.y;
+        if (world_aabb.min.z < combined_min.z) combined_min.z = world_aabb.min.z;
+        if (world_aabb.max.x > combined_max.x) combined_max.x = world_aabb.max.x;
+        if (world_aabb.max.y > combined_max.y) combined_max.y = world_aabb.max.y;
+        if (world_aabb.max.z > combined_max.z) combined_max.z = world_aabb.max.z;
+        found_mesh = true;
+    }
+
+    if (!found_mesh) return null;
+    return AxisAlignedBoundingBox{ .min = combined_min, .max = combined_max };
 }
 
 fn intersectTriangle(orig: Math.Vec3, dir: Math.Vec3, v0: Math.Vec3, v1: Math.Vec3, v2: Math.Vec3) ?f32 {
@@ -201,7 +248,6 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
 
     var object_count: usize = 0;
     var tested_count: usize = 0;
-    var hit_count: usize = 0;
 
     // Iterate scene objects
     for (scene.iterateObjects()) |*game_obj| {
@@ -242,7 +288,6 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
                     best_t = t;
                     best_entity = eid;
                     best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
-                    hit_count += 1;
                 }
             }
         }

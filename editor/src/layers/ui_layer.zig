@@ -182,6 +182,8 @@ pub const UILayer = struct {
             }
         }
 
+        self.ui_renderer.renderSelectionOverlay(self.scene, self.camera);
+
         // Now render the scene hierarchy so the new selection is visible immediately
 
         self.ui_renderer.renderHierarchy(self.scene);
