@@ -5,15 +5,19 @@ const Layer = zephyr.Layer;
 const Event = zephyr.Event;
 const EventType = zephyr.EventType;
 const FrameInfo = zephyr.FrameInfo;
+const log = zephyr.log;
 const ImGuiContext = @import("../ui/imgui_context.zig").ImGuiContext;
 const UIRenderer = @import("../ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("../ui/ui_renderer.zig").RenderStats;
+const ViewportPicker = @import("../ui/viewport_picker.zig");
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const Swapchain = zephyr.Swapchain;
 const SceneV2 = zephyr.Scene;
+const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
+    @cInclude("dcimgui.h");
 });
 
 /// UI overlay layer
@@ -25,6 +29,7 @@ pub const UILayer = struct {
     performance_monitor: ?*PerformanceMonitor,
     swapchain: *Swapchain,
     scene: *SceneV2,
+    camera: *Camera,
     camera_controller: *KeyboardMovementController,
     show_ui: bool = true,
     current_fps: f32 = 0.0,
@@ -35,6 +40,7 @@ pub const UILayer = struct {
         performance_monitor: ?*PerformanceMonitor,
         swapchain: *Swapchain,
         scene: *SceneV2,
+        camera: *Camera,
         camera_controller: *KeyboardMovementController,
     ) UILayer {
         return .{
@@ -48,6 +54,7 @@ pub const UILayer = struct {
             .performance_monitor = performance_monitor,
             .swapchain = swapchain,
             .scene = scene,
+            .camera = camera,
             .camera_controller = camera_controller,
         };
     }
@@ -131,8 +138,53 @@ pub const UILayer = struct {
             .scene = self.scene,
         };
 
-        // Render UI widgets
+        // Render UI widgets (except scene hierarchy)
         self.ui_renderer.render(stats);
+
+        // Accurate CPU-based picking using per-triangle raycasts (viewport_picker)
+        const io = c.ImGui_GetIO();
+        const mouse_x = io.*.MousePos.x;
+        const mouse_y = io.*.MousePos.y;
+
+        const mouse_clicked = c.ImGui_IsMouseClicked(0);
+
+        // Check if mouse is within viewport bounds (regardless of ImGui's WantCaptureMouse)
+        // This allows picking even when ImGui thinks it should capture the mouse
+        if (mouse_clicked) {
+            const vp_pos = self.ui_renderer.viewport_pos;
+            const vp_size = self.ui_renderer.viewport_size;
+
+            const in_viewport = vp_size[0] > 1.0 and vp_size[1] > 1.0 and
+                mouse_x >= vp_pos[0] and mouse_x <= vp_pos[0] + vp_size[0] and
+                mouse_y >= vp_pos[1] and mouse_y <= vp_pos[1] + vp_size[1];
+
+            log(.DEBUG, "picking", "Mouse click detected at ({d:.1}, {d:.1}), viewport pos=({d:.1}, {d:.1}), size=({d:.1}x{d:.1}), in_viewport={}", .{ mouse_x, mouse_y, vp_pos[0], vp_pos[1], vp_size[0], vp_size[1], in_viewport });
+
+            // Pick if click is within viewport bounds
+            // We check viewport bounds instead of WantCaptureMouse because the viewport window
+            // itself is an ImGui window, so ImGui always wants to capture mouse over it
+            if (in_viewport) {
+                log(.DEBUG, "picking", "Attempting to pick scene...", .{});
+                if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_pos, vp_size)) |res| {
+                    log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity, res.distance });
+                    // Single-select the hit entity
+                    if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
+                        self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
+                    }
+                    _ = self.ui_renderer.hierarchy_panel.selected_entities.append(std.heap.page_allocator, res.entity) catch {};
+                } else {
+                    log(.DEBUG, "picking", "No entity hit", .{});
+                    // Click in viewport but no hit - clear selection
+                    self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
+                }
+            } else {
+                log(.DEBUG, "picking", "Click outside viewport bounds", .{});
+            }
+        }
+
+        // Now render the scene hierarchy so the new selection is visible immediately
+
+        self.ui_renderer.renderHierarchy(self.scene);
 
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {

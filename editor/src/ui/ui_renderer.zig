@@ -23,6 +23,10 @@ pub const UIRenderer = struct {
     // Scene hierarchy panel
     hierarchy_panel: SceneHierarchyPanel,
 
+    // Last viewport position/size (filled every frame when Viewport window is created)
+    viewport_pos: [2]f32 = .{ 0.0, 0.0 },
+    viewport_size: [2]f32 = .{ 0.0, 0.0 },
+
     // Asset browser panel
     asset_browser_panel: AssetBrowserPanel,
 
@@ -80,6 +84,17 @@ pub const UIRenderer = struct {
         // Transparent viewport window in the center
         const viewport_flags = c.ImGuiWindowFlags_NoBackground | c.ImGuiWindowFlags_NoScrollbar;
         _ = c.ImGui_Begin("Viewport", null, viewport_flags);
+        // Record viewport position/size so other layers (picking, overlays) can use it
+        // IMPORTANT: Use content region (excludes title bar) for accurate mouse picking
+        const win_pos = c.ImGui_GetWindowPos();
+        const content_region_min = c.ImGui_GetWindowContentRegionMin();
+        const content_region_max = c.ImGui_GetWindowContentRegionMax();
+
+        // Calculate actual content region position and size
+        // Content region min/max are relative to window position
+        self.viewport_pos = .{ win_pos.x + content_region_min.x, win_pos.y + content_region_min.y };
+        self.viewport_size = .{ content_region_max.x - content_region_min.x, content_region_max.y - content_region_min.y };
+
         c.ImGui_Text("3D Viewport");
         c.ImGui_End();
 
@@ -99,10 +114,12 @@ pub const UIRenderer = struct {
             self.asset_browser_panel.render();
         }
 
-        // Render scene hierarchy if scene is provided
-        if (stats.scene) |scene| {
-            self.hierarchy_panel.render(scene);
-        }
+        // NOTE: scene hierarchy is rendered by the caller after any picking logic
+    }
+
+    /// Render only the scene hierarchy (used by caller to render after picking)
+    pub fn renderHierarchy(self: *UIRenderer, scene: *Scene) void {
+        self.hierarchy_panel.render(scene);
     }
 
     fn renderStatsWindow(self: *UIRenderer, stats: RenderStats) void {

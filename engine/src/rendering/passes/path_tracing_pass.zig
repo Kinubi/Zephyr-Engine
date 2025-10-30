@@ -665,9 +665,6 @@ pub const PathTracingPass = struct {
         if (tlas_changed) {
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
-
-            // Clear renderables dirty flag now that TLAS is built and ready
-            self.render_system.renderables_dirty = false;
         }
 
         const needs_update = bvh_rebuilt or
@@ -680,8 +677,13 @@ pub const PathTracingPass = struct {
         if (needs_update and self.tlas_valid) {
             try self.updateDescriptors();
 
-            // Clear the raytracing flag after updating descriptors
-            self.render_system.raytracing_descriptors_dirty = false;
+            // Clear dirty flags ONLY after successful descriptor update
+            // This ensures geometry changes aren't lost if descriptor update fails
+            if (geometry_changed or tlas_changed) {
+                self.render_system.raytracing_descriptors_dirty = false;
+                self.render_system.renderables_dirty = false;
+                self.render_system.transform_only_change = false;
+            }
         }
     }
 

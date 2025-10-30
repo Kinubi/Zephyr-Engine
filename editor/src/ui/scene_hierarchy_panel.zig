@@ -19,7 +19,7 @@ const Math = zephyr.math;
 
 /// Scene Hierarchy Panel - ImGui panel showing all entities in the ECS world
 pub const SceneHierarchyPanel = struct {
-    selected_entity: ?EntityId = null,
+    selected_entities: std.ArrayList(EntityId) = std.ArrayList(EntityId){},
     show_hierarchy: bool = true,
     show_inspector: bool = true,
 
@@ -27,11 +27,16 @@ pub const SceneHierarchyPanel = struct {
     temp_buffer: [256]u8 = undefined,
 
     pub fn init() SceneHierarchyPanel {
-        return .{};
+        var panel = SceneHierarchyPanel{};
+        panel.selected_entities = std.ArrayList(EntityId){};
+        return panel;
     }
 
     pub fn deinit(self: *SceneHierarchyPanel) void {
-        _ = self;
+        // free selected_entities storage if used
+        if (self.selected_entities.items.len > 0) {
+            self.selected_entities.deinit(std.heap.page_allocator);
+        }
     }
 
     /// Render the hierarchy panel and inspector
@@ -40,7 +45,7 @@ pub const SceneHierarchyPanel = struct {
             self.renderHierarchy(scene);
         }
 
-        if (self.show_inspector and self.selected_entity != null) {
+        if (self.show_inspector and self.selected_entities.items.len > 0) {
             self.renderInspector(scene);
         }
     }
@@ -52,14 +57,28 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Begin("Scene Hierarchy", null, window_flags)) {
             c.ImGui_Text("Scene: %s", scene.name.ptr);
             c.ImGui_Text("Entities: %d", scene.getEntityCount());
+            // Debug: show current selection count and IDs to verify picking
+            c.ImGui_Text("Selected Count: %d", self.selected_entities.items.len);
+            var sel_idx: usize = 0;
+            for (self.selected_entities.items) |eid| {
+                const eid_u32: u32 = @intFromEnum(eid);
+                c.ImGui_Text("  [%d] %d", sel_idx, eid_u32);
+                sel_idx += 1;
+            }
             c.ImGui_Separator();
 
             // Iterate over all game objects
             for (scene.iterateObjects()) |*game_obj| {
                 const entity = game_obj.entity_id;
 
-                // Check if this entity is selected
-                const is_selected = if (self.selected_entity) |sel| sel == entity else false;
+                // Check if this entity is selected (multi-select support)
+                var is_selected: bool = false;
+                for (self.selected_entities.items) |eid| {
+                    if (eid == entity) {
+                        is_selected = true;
+                        break;
+                    }
+                }
 
                 // Build entity label with component info
                 var label_buf: [128]u8 = undefined;
@@ -71,19 +90,53 @@ pub const SceneHierarchyPanel = struct {
 
                 _ = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags | selected_flag);
 
-                // Handle selection
+                // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
                 if (c.ImGui_IsItemClicked()) {
-                    self.selected_entity = entity;
+                    const io = c.ImGui_GetIO();
+                    if (io.*.KeyCtrl) {
+                        // toggle membership
+                        var found = false;
+                        var found_idx: usize = 0;
+                        var scan_idx: usize = 0;
+                        for (self.selected_entities.items) |eid| {
+                            if (eid == entity) {
+                                found = true;
+                                found_idx = scan_idx;
+                                break;
+                            }
+                            scan_idx += 1;
+                        }
+                        if (found) {
+                            _ = self.selected_entities.swapRemove(found_idx);
+                        } else {
+                            _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                        }
+                    } else if (io.*.KeyShift) {
+                        // add to selection
+                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                    } else {
+                        // single select
+                        if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
+                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                    }
                 }
 
                 // Context menu for entity operations
                 if (c.ImGui_BeginPopupContextItem()) {
                     if (c.ImGui_MenuItem("Delete Entity")) {
                         scene.destroyObject(game_obj);
-                        if (self.selected_entity) |sel| {
-                            if (sel == entity) {
-                                self.selected_entity = null;
+                        // remove from selection if present
+                        var remove_idx: ?usize = null;
+                        var scan_idx2: usize = 0;
+                        for (self.selected_entities.items) |eid| {
+                            if (eid == entity) {
+                                remove_idx = scan_idx2;
+                                break;
                             }
+                            scan_idx2 += 1;
+                        }
+                        if (remove_idx) |i| {
+                            _ = self.selected_entities.swapRemove(i);
                         }
                     }
                     c.ImGui_EndPopup();
@@ -98,7 +151,8 @@ pub const SceneHierarchyPanel = struct {
         const window_flags = c.ImGuiWindowFlags_NoCollapse;
 
         if (c.ImGui_Begin("Inspector", null, window_flags)) {
-            if (self.selected_entity) |entity| {
+            if (self.selected_entities.items.len > 0) {
+                const entity = self.selected_entities.items[0];
                 const entity_u32: u32 = @intFromEnum(entity);
                 c.ImGui_Text("Entity ID: %d", entity_u32);
                 c.ImGui_Separator();
