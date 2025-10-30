@@ -42,23 +42,16 @@ pub const AxisAlignedBoundingBox = struct {
     max: Math.Vec3,
 };
 
-fn computeMeshAABB(mesh: *const Mesh) AxisAlignedBoundingBox {
-    var min_vec = Math.Vec3.init(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
-    var max_vec = Math.Vec3.init(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
-
-    for (mesh.vertices.items) |vertex| {
-        const vx = vertex.pos[0];
-        const vy = vertex.pos[1];
-        const vz = vertex.pos[2];
-        if (vx < min_vec.x) min_vec.x = vx;
-        if (vy < min_vec.y) min_vec.y = vy;
-        if (vz < min_vec.z) min_vec.z = vz;
-        if (vx > max_vec.x) max_vec.x = vx;
-        if (vy > max_vec.y) max_vec.y = vy;
-        if (vz > max_vec.z) max_vec.z = vz;
+fn computeMeshAABB(mesh: *Mesh) AxisAlignedBoundingBox {
+    if (mesh.getOrComputeLocalBounds()) |bounds| {
+        return AxisAlignedBoundingBox{ .min = bounds.min, .max = bounds.max };
     }
 
-    return AxisAlignedBoundingBox{ .min = min_vec, .max = max_vec };
+    // Fallback for unexpected empty meshes
+    return AxisAlignedBoundingBox{
+        .min = Math.Vec3.zero(),
+        .max = Math.Vec3.zero(),
+    };
 }
 
 fn transformAABB(world_mat: *Math.Mat4x4, local: AxisAlignedBoundingBox) AxisAlignedBoundingBox {
