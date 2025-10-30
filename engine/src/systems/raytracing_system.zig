@@ -450,8 +450,9 @@ pub const RaytracingSystem = struct {
                     self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, self.tlas) catch |err| {
                         log(.ERROR, "raytracing", "Failed to queue TLAS handle for destruction: {}", .{err});
                         self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
-                        self.tlas = vk.AccelerationStructureKHR.null_handle;
                     };
+                    // Clear handle immediately to prevent async callback from creating an orphan
+                    self.tlas = vk.AccelerationStructureKHR.null_handle;
                 }
 
                 if (self.tlas_buffer_initialized) {

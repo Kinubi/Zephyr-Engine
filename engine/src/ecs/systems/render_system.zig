@@ -871,8 +871,6 @@ pub const RenderSystem = struct {
         } else if (total_time_ms > budget_ms * 0.8) {
             // Warn at 80% of budget
             log(.INFO, "render_system", "Approaching frame budget: {d:.2}ms / {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, budget_ms, extraction_time_ms, cache_build_time_ms });
-        } else {
-            log(.DEBUG, "render_system", "Rebuild complete: {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, extraction_time_ms, cache_build_time_ms });
         }
 
         // Clear dirty flags only for renderable entities (not lights, cameras, etc.)

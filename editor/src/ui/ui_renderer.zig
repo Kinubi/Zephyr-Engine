@@ -1,14 +1,13 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 
-const c = @cImport({
-    @cInclude("dcimgui.h");
-});
+const c = @import("imgui_c.zig").c;
 
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
 const AssetBrowserPanel = @import("asset_browser_panel.zig").AssetBrowserPanel;
 const ViewportPicker = @import("viewport_picker.zig");
+const Gizmo = @import("gizmo.zig").Gizmo;
 const Scene = zephyr.Scene;
 const Camera = zephyr.Camera;
 const Math = zephyr.math;
@@ -131,18 +130,33 @@ pub const UIRenderer = struct {
         self.hierarchy_panel.render(scene);
     }
 
-    pub fn renderSelectionOverlay(self: *UIRenderer, scene: *Scene, camera: *Camera) void {
-        if (self.viewport_draw_list == null) return;
+    pub fn renderSelectionOverlay(self: *UIRenderer, scene: *Scene, camera: *Camera) bool {
+        if (self.viewport_draw_list == null) return false;
         const selected = self.hierarchy_panel.selected_entities.items;
-        if (selected.len == 0) return;
-        if (self.viewport_size[0] < 1.0 or self.viewport_size[1] < 1.0) return;
+        if (selected.len == 0) return false;
+        if (self.viewport_size[0] < 1.0 or self.viewport_size[1] < 1.0) return false;
 
         const draw_list = self.viewport_draw_list.?;
+        var sel_count: usize = 0;
+        var last_aabb: ?ViewportPicker.AxisAlignedBoundingBox = null;
         for (selected) |entity| {
             if (ViewportPicker.computeEntityWorldAABB(scene, entity)) |aabb| {
                 drawEntityAABB(self, draw_list, camera, aabb);
+                sel_count += 1;
+                last_aabb = aabb;
             }
         }
+
+        // If a single entity is selected, draw and handle gizmo interaction at its center
+        if (sel_count == 1) {
+            if (last_aabb) |aabb| {
+                const center = Math.Vec3.init((aabb.min.x + aabb.max.x) * 0.5, (aabb.min.y + aabb.max.y) * 0.5, (aabb.min.z + aabb.max.z) * 0.5);
+                // Pass the scene and aabb center so the gizmo can perform interactive transforms
+                return Gizmo.process(draw_list, self.viewport_pos, self.viewport_size, camera, center, scene, selected[0]);
+            }
+        }
+
+        return false;
     }
 
     fn drawEntityAABB(self: *UIRenderer, draw_list: *c.ImDrawList, camera: *Camera, aabb: ViewportPicker.AxisAlignedBoundingBox) void {

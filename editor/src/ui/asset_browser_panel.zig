@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("dcimgui.h");
-});
+const c = @import("imgui_c.zig").c;
 
 /// Asset Browser Panel
 /// Displays project assets in a file browser interface

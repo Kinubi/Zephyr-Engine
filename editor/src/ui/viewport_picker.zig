@@ -1,9 +1,7 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 const Math = zephyr.math;
-const c = @cImport({
-    @cInclude("dcimgui.h");
-});
+const c = @import("imgui_c.zig").c;
 
 const Camera = zephyr.Camera;
 const Scene = zephyr.Scene;
@@ -35,7 +33,7 @@ fn transformDirection(m: *Math.Mat4x4, d: Math.Vec3) Math.Vec3 {
     return Math.Vec3.init(x, y, z);
 }
 
-const Ray = struct { origin: Math.Vec3, dir: Math.Vec3 };
+pub const Ray = struct { origin: Math.Vec3, dir: Math.Vec3 };
 
 pub const AxisAlignedBoundingBox = struct {
     min: Math.Vec3,

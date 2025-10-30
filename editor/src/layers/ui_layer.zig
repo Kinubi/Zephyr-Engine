@@ -15,10 +15,8 @@ const Swapchain = zephyr.Swapchain;
 const SceneV2 = zephyr.Scene;
 const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
-const c = @cImport({
-    @cInclude("GLFW/glfw3.h");
-    @cInclude("dcimgui.h");
-});
+const c = @import("../ui/imgui_c.zig").c;
+const Gizmo = @import("../ui/gizmo.zig").Gizmo;
 
 /// UI overlay layer
 /// Renders ImGui interface with performance stats and debug info
@@ -141,48 +139,50 @@ pub const UILayer = struct {
         // Render UI widgets (except scene hierarchy)
         self.ui_renderer.render(stats);
 
+        // Draw overlays (gizmo) and give the gizmo a chance to consume mouse clicks
+        const gizmo_consumed: bool = self.ui_renderer.renderSelectionOverlay(self.scene, self.camera);
+
         // Accurate CPU-based picking using per-triangle raycasts (viewport_picker)
-        const io = c.ImGui_GetIO();
-        const mouse_x = io.*.MousePos.x;
-        const mouse_y = io.*.MousePos.y;
+        // Only run scene picking if the gizmo did not consume the click (i.e. a gizmo handle wasn't clicked)
+        if (!gizmo_consumed) {
+            const io = c.ImGui_GetIO();
+            const mouse_x = io.*.MousePos.x;
+            const mouse_y = io.*.MousePos.y;
 
-        const mouse_clicked = c.ImGui_IsMouseClicked(0);
+            const mouse_clicked = c.ImGui_IsMouseClicked(0);
 
-        // Check if mouse is within viewport bounds (regardless of ImGui's WantCaptureMouse)
-        // This allows picking even when ImGui thinks it should capture the mouse
-        if (mouse_clicked) {
-            const vp_pos = self.ui_renderer.viewport_pos;
-            const vp_size = self.ui_renderer.viewport_size;
+            // Check if mouse is within viewport bounds (regardless of ImGui's WantCaptureMouse)
+            // This allows picking even when ImGui thinks it should capture the mouse
+            if (mouse_clicked) {
+                const vp_pos = self.ui_renderer.viewport_pos;
+                const vp_size = self.ui_renderer.viewport_size;
 
-            const in_viewport = vp_size[0] > 1.0 and vp_size[1] > 1.0 and
-                mouse_x >= vp_pos[0] and mouse_x <= vp_pos[0] + vp_size[0] and
-                mouse_y >= vp_pos[1] and mouse_y <= vp_pos[1] + vp_size[1];
+                const in_viewport = vp_size[0] > 1.0 and vp_size[1] > 1.0 and
+                    mouse_x >= vp_pos[0] and mouse_x <= vp_pos[0] + vp_size[0] and
+                    mouse_y >= vp_pos[1] and mouse_y <= vp_pos[1] + vp_size[1];
 
-            log(.DEBUG, "picking", "Mouse click detected at ({d:.1}, {d:.1}), viewport pos=({d:.1}, {d:.1}), size=({d:.1}x{d:.1}), in_viewport={}", .{ mouse_x, mouse_y, vp_pos[0], vp_pos[1], vp_size[0], vp_size[1], in_viewport });
-
-            // Pick if click is within viewport bounds
-            // We check viewport bounds instead of WantCaptureMouse because the viewport window
-            // itself is an ImGui window, so ImGui always wants to capture mouse over it
-            if (in_viewport) {
-                log(.DEBUG, "picking", "Attempting to pick scene...", .{});
-                if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_pos, vp_size)) |res| {
-                    log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity.index(), res.distance });
-                    // Single-select the hit entity
-                    if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
+                // Pick if click is within viewport bounds
+                // We check viewport bounds instead of WantCaptureMouse because the viewport window
+                // itself is an ImGui window, so ImGui always wants to capture mouse over it
+                if (in_viewport) {
+                    log(.DEBUG, "picking", "Attempting to pick scene...", .{});
+                    if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_pos, vp_size)) |res| {
+                        log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity.index(), res.distance });
+                        // Single-select the hit entity
+                        if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
+                            self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
+                        }
+                        _ = self.ui_renderer.hierarchy_panel.selected_entities.append(std.heap.page_allocator, res.entity) catch {};
+                    } else {
+                        log(.DEBUG, "picking", "No entity hit", .{});
+                        // Click in viewport but no hit - clear selection
                         self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
                     }
-                    _ = self.ui_renderer.hierarchy_panel.selected_entities.append(std.heap.page_allocator, res.entity) catch {};
                 } else {
-                    log(.DEBUG, "picking", "No entity hit", .{});
-                    // Click in viewport but no hit - clear selection
-                    self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
+                    log(.DEBUG, "picking", "Click outside viewport bounds", .{});
                 }
-            } else {
-                log(.DEBUG, "picking", "Click outside viewport bounds", .{});
             }
         }
-
-        self.ui_renderer.renderSelectionOverlay(self.scene, self.camera);
 
         // Now render the scene hierarchy so the new selection is visible immediately
 
@@ -229,6 +229,10 @@ pub const UILayer = struct {
             .KeyPressed => {
                 const GLFW_KEY_F1 = 290;
                 const GLFW_KEY_F2 = 291;
+                const GLFW_KEY_G = 71;
+                const GLFW_KEY_R = 82;
+                const GLFW_KEY_S = 83;
+                const GLFW_KEY_ESCAPE = 256;
 
                 if (evt.data.KeyPressed.key == GLFW_KEY_F1) {
                     self.show_ui = !self.show_ui;
@@ -236,6 +240,18 @@ pub const UILayer = struct {
                 } else if (evt.data.KeyPressed.key == GLFW_KEY_F2) {
                     // Toggle performance graphs
                     self.ui_renderer.show_performance_graphs = !self.ui_renderer.show_performance_graphs;
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == GLFW_KEY_G) {
+                    Gizmo.setTool(Gizmo.Tool.Translate);
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == GLFW_KEY_R) {
+                    Gizmo.setTool(Gizmo.Tool.Rotate);
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == GLFW_KEY_S) {
+                    Gizmo.setTool(Gizmo.Tool.Scale);
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == GLFW_KEY_ESCAPE) {
+                    Gizmo.cancelDrag();
                     evt.markHandled();
                 }
             },

@@ -57,19 +57,45 @@ pub const Transform = struct {
     /// Calculate local transform matrix (TRS: Translation * Rotation * Scale)
     pub fn getLocalMatrix(self: *const Transform) math.Mat4 {
         // Build TRS matrix: Translation * Rotation * Scale
-        // Start with identity
+
+        // 1. Create rotation matrix from Euler angles (XYZ order)
+        const cx = @cos(self.rotation.x);
+        const sx = @sin(self.rotation.x);
+        const cy = @cos(self.rotation.y);
+        const sy = @sin(self.rotation.y);
+        const cz = @cos(self.rotation.z);
+        const sz = @sin(self.rotation.z);
+
+        // Rotation matrix for Euler XYZ order: Rz * Ry * Rx
         var mat = math.Mat4.identity();
 
-        // Apply scale
+        // Combined rotation matrix elements
+        mat.data[0] = cy * cz;
+        mat.data[1] = cy * sz;
+        mat.data[2] = -sy;
+
+        mat.data[4] = sx * sy * cz - cx * sz;
+        mat.data[5] = sx * sy * sz + cx * cz;
+        mat.data[6] = sx * cy;
+
+        mat.data[8] = cx * sy * cz + sx * sz;
+        mat.data[9] = cx * sy * sz - sx * cz;
+        mat.data[10] = cx * cy;
+
+        // 2. Apply scale to the rotation matrix
         mat.data[0] *= self.scale.x;
+        mat.data[1] *= self.scale.x;
+        mat.data[2] *= self.scale.x;
+
+        mat.data[4] *= self.scale.y;
         mat.data[5] *= self.scale.y;
+        mat.data[6] *= self.scale.y;
+
+        mat.data[8] *= self.scale.z;
+        mat.data[9] *= self.scale.z;
         mat.data[10] *= self.scale.z;
 
-        // Apply rotation (would need proper rotation matrix multiplication)
-        // For now, just handle translation and scale
-        // TODO: Add proper rotation support when needed
-
-        // Apply translation
+        // 3. Apply translation
         mat.data[12] = self.position.x;
         mat.data[13] = self.position.y;
         mat.data[14] = self.position.z;
@@ -92,22 +118,28 @@ pub const Transform = struct {
         // self.dirty = false;
     }
 
-    /// Set position and mark dirty
+    /// Set position and mark dirty only if changed
     pub fn setPosition(self: *Transform, pos: math.Vec3) void {
-        self.position = pos;
-        self.dirty = true;
+        if (self.position.x != pos.x or self.position.y != pos.y or self.position.z != pos.z) {
+            self.position = pos;
+            self.dirty = true;
+        }
     }
 
-    /// Set rotation and mark dirty
+    /// Set rotation and mark dirty only if changed
     pub fn setRotation(self: *Transform, rot: math.Vec3) void {
-        self.rotation = rot;
-        self.dirty = true;
+        if (self.rotation.x != rot.x or self.rotation.y != rot.y or self.rotation.z != rot.z) {
+            self.rotation = rot;
+            self.dirty = true;
+        }
     }
 
-    /// Set scale and mark dirty
+    /// Set scale and mark dirty only if changed
     pub fn setScale(self: *Transform, scl: math.Vec3) void {
-        self.scale = scl;
-        self.dirty = true;
+        if (self.scale.x != scl.x or self.scale.y != scl.y or self.scale.z != scl.z) {
+            self.scale = scl;
+            self.dirty = true;
+        }
     }
 
     /// Translate by offset

@@ -381,13 +381,16 @@ pub const PathTracingPass = struct {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
         const frame_index = frame_info.current_frame;
 
-        // Skip if TLAS is not valid (like rt_renderer.render does)
+        // Skip if TLAS is not valid (no TLAS built yet - initial state)
         if (!self.tlas_valid) {
             return;
         }
 
-        // Skip if descriptors are dirty (like rt_renderer.render does)
-        if (self.descriptor_dirty_flags[frame_index]) {
+        // During gizmo dragging, continue rendering with current TLAS even if descriptors
+        // are marked dirty due to async TLAS rebuild in progress. This prevents blank frames.
+        // The descriptors will be updated once the new TLAS completes.
+        // Only skip if this is the very first frame before any descriptors are bound.
+        if (self.descriptor_dirty_flags[frame_index] and self.tlas == vk.AccelerationStructureKHR.null_handle) {
             return;
         }
 

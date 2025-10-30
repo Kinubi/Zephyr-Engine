@@ -72,7 +72,7 @@ pub const TransformSystem = struct {
 
             // Process batch when full
             if (batch_count == 8) {
-                processBatchSIMD(batch_buffer[0..8]);
+                processBatch(batch_buffer[0..8]);
                 batch_count = 0;
             }
         }
@@ -80,16 +80,34 @@ pub const TransformSystem = struct {
         // Process remaining transforms in batch (if any)
         if (batch_count > 0) {
             // Process the partial batch (some lanes will be wasted but that's ok)
-            processBatchSIMD(batch_buffer[0..batch_count]);
+            processBatch(batch_buffer[0..batch_count]);
         }
     }
 
-    /// Process a batch of up to 8 transforms using SIMD
-    fn processBatchSIMD(transforms: []*Transform) void {
+    /// Process a batch of up to 8 transforms
+    /// Uses optimized SIMD path for non-rotated transforms, falls back to scalar for rotated ones
+    fn processBatch(transforms: []*Transform) void {
         const batch_size = transforms.len;
         if (batch_size == 0) return;
 
-        // Prepare SIMD vectors for position and scale (8 lanes each)
+        // Check if any transform in the batch has rotation
+        var has_rotation = false;
+        for (transforms[0..batch_size]) |t| {
+            if (t.rotation.x != 0 or t.rotation.y != 0 or t.rotation.z != 0) {
+                has_rotation = true;
+                break;
+            }
+        }
+
+        // If any transform has rotation, use scalar path for all (simpler, still fast enough)
+        if (has_rotation) {
+            for (transforms[0..batch_size]) |t| {
+                t.updateWorldMatrix();
+            }
+            return;
+        }
+
+        // Fast path: SIMD for non-rotated transforms
         var pos_x_data: [8]f32 = undefined;
         var pos_y_data: [8]f32 = undefined;
         var pos_z_data: [8]f32 = undefined;

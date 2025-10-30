@@ -1,9 +1,7 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 
-const c = @cImport({
-    @cInclude("dcimgui.h");
-});
+const c = @import("imgui_c.zig").c;
 
 const ecs = zephyr.ecs;
 const World = ecs.World;
