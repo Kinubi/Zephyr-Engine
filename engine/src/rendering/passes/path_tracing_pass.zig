@@ -257,10 +257,6 @@ pub const PathTracingPass = struct {
 
     /// Update descriptors for all frames (exactly like rt_renderer.update does)
     fn updateDescriptors(self: *PathTracingPass) !void {
-        if (!self.tlas_valid) {
-            // TLAS not ready yet - this is normal during async BVH building
-            return;
-        }
 
         // Get raytracing data from render system (already cached)
         const rt_data = try self.render_system.getRaytracingData();
@@ -336,8 +332,7 @@ pub const PathTracingPass = struct {
             }
         }
 
-        // Now bind TLAS, output image, and camera UBO for all frames
-        const accel_resource = Resource{ .acceleration_structure = self.tlas };
+        // Prepare output image resource for all frames
         const output_descriptor = self.output_texture.getDescriptorInfo();
         const output_resource = Resource{
             .image = .{
@@ -347,6 +342,7 @@ pub const PathTracingPass = struct {
             },
         };
 
+        // Bind TLAS, output image, and camera UBO for all frames
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const target_frame: u32 = @intCast(frame_idx);
 
@@ -361,7 +357,12 @@ pub const PathTracingPass = struct {
             };
 
             // Binding 0: Acceleration Structure (TLAS)
-            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+            // Only bind if TLAS is valid - prevents binding VK_NULL_HANDLE or invalid handles
+            if (self.tlas_valid and self.tlas != vk.AccelerationStructureKHR.null_handle) {
+                const accel_resource = Resource{ .acceleration_structure = self.tlas };
+                try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+            }
+
             // Binding 1: Output Image (storage image)
             try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
             // Binding 2: Camera UBO (global uniform buffer)
@@ -433,12 +434,24 @@ pub const PathTracingPass = struct {
     }
 
     fn updateTLAS(self: *PathTracingPass, new_tlas: vk.AccelerationStructureKHR) void {
-        self.tlas = new_tlas;
-        self.tlas_valid = true;
+        // Validate the TLAS handle before storing it
+        // A null handle or the same handle means no real change
+        if (new_tlas == vk.AccelerationStructureKHR.null_handle) {
+            // If we're receiving a null handle, invalidate our cached TLAS
+            self.tlas = vk.AccelerationStructureKHR.null_handle;
+            self.tlas_valid = false;
+            return;
+        }
+        
+        // Only update if the TLAS actually changed
+        if (self.tlas != new_tlas) {
+            self.tlas = new_tlas;
+            self.tlas_valid = true;
 
-        // Mark all descriptors as dirty since TLAS changed
-        for (&self.descriptor_dirty_flags) |*dirty| {
-            dirty.* = true;
+            // Mark all descriptors as dirty since TLAS changed
+            for (&self.descriptor_dirty_flags) |*dirty| {
+                dirty.* = true;
+            }
         }
     }
 
@@ -662,22 +675,37 @@ pub const PathTracingPass = struct {
         const bvh_rebuilt = try self.rt_system.update(self.render_system, frame_info, geometry_changed);
 
         // Check if TLAS changed (handle changed OR dirty flag set)
+        // Important: If rt_system has a different TLAS handle than us, our cached handle is stale/invalid
+        const tlas_handle_changed = self.tlas != self.rt_system.tlas;
         const tlas_changed = self.rt_system.tlas != vk.AccelerationStructureKHR.null_handle and
-            (!self.tlas_valid or self.rt_system.tlas_dirty or self.tlas != self.rt_system.tlas);
+            (!self.tlas_valid or self.rt_system.tlas_dirty or tlas_handle_changed);
 
-        if (tlas_changed) {
+        // Only update our cached TLAS if no build is in progress
+        // During rapid rebuilds (fast transforms), the TLAS handle can change multiple times per frame
+        // We keep using the last stable TLAS until the rebuilds settle to avoid binding stale handles
+        if (tlas_changed and !self.rt_system.bvh_build_in_progress) {
+            // If our cached handle differs from rt_system, it means rt_system has a newer one
+            if (tlas_handle_changed and self.tlas != vk.AccelerationStructureKHR.null_handle) {
+                log(.INFO, "path_tracing_pass", "TLAS handle changed (old: {}, new: {}), updating cached handle", .{self.tlas, self.rt_system.tlas});
+            }
+            
             self.updateTLAS(self.rt_system.tlas);
             self.rt_system.tlas_dirty = false;
+        } else if (self.rt_system.bvh_build_in_progress and tlas_handle_changed) {
+            // BVH rebuild in progress - keep using current TLAS, don't switch to potentially stale one
+            log(.DEBUG, "path_tracing_pass", "BVH build in progress, deferring TLAS update", .{});
         }
 
         const needs_update = bvh_rebuilt or
             materials_dirty or
             textures_dirty or
             geometry_changed or
-            self.descriptor_dirty_flags[frame_index] or tlas_changed;
+            self.descriptor_dirty_flags[frame_index] or 
+            (tlas_changed and !self.rt_system.bvh_build_in_progress);
 
-        // Only update descriptors if TLAS is valid
-        if (needs_update and self.tlas_valid) {
+        // Only update descriptors if TLAS is valid AND no build is in progress
+        // This prevents binding TLAS handles that might become invalid during rapid rebuilds
+        if (needs_update and self.tlas_valid and !self.rt_system.bvh_build_in_progress) {
             try self.updateDescriptors();
 
             // Clear dirty flags ONLY after successful descriptor update
