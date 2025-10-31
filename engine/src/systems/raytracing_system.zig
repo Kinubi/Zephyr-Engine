@@ -409,6 +409,7 @@ pub const RaytracingSystem = struct {
             .instances = instances_copy,
             .allocator = self.allocator,
             .builder = self.bvh_builder,
+            .completion_sem = .{},
         };
 
         // Spawn TLAS worker asynchronously via ThreadPool

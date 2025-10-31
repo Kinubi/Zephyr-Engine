@@ -45,6 +45,9 @@ pub const TlasJob = struct {
     // Allocator for this job's resources
     allocator: std.mem.Allocator,
 
+    // Semaphore signaled by BLAS workers when they fill a slot
+    completion_sem: std.Thread.Semaphore,
+
     // Builder reference for spawning missing BLAS jobs and storing result
     builder: *MultithreadedBvhBuilder,
 };
@@ -58,6 +61,8 @@ pub fn fillBlasSlot(job: *TlasJob, geometry_index: u32, blas_result: *BlasResult
 
     // Increment filled count
     _ = job.filled_count.fetchAdd(1, .release);
+    // Signal the TLAS job that a BLAS slot has been filled
+    job.completion_sem.post();
 }
 
 pub fn tlasWorkerMain(context: *anyopaque, work_item: WorkItem) void {
@@ -132,7 +137,7 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             };
 
             // Build BLAS asynchronously - worker will fill slot when done
-            const work_data = try job.allocator.create(BvhWorkData);
+                const work_data = try job.allocator.create(BvhWorkData);
             work_data.* = .{
                 .work_type = .build_blas,
                 .geometry_data = geom_data,
@@ -158,23 +163,19 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             try job.builder.thread_pool.submitWork(blas_work_item);
         }
 
-        // Step 3: Loop until all BLAS slots are filled
-        const max_poll_iterations = 10000;
-        const poll_sleep_ns = 100_000; // 100 microseconds
-
-        var iterations: u32 = 0;
-        while (iterations < max_poll_iterations) : (iterations += 1) {
-            const filled = job.filled_count.load(.acquire);
-            if (filled >= job.expected_count) {
-                break;
+        // Step 3: Wait for all BLAS workers to signal completion of their slots.
+        // We only wait for the number of missing slots we spawned.
+        if (missing_count > 0) {
+            for (0..missing_count) |_| {
+                job.completion_sem.wait();
             }
-            std.Thread.sleep(poll_sleep_ns);
-        }
 
-        if (iterations >= max_poll_iterations) {
-            const filled = job.filled_count.load(.acquire);
-            log(.ERROR, "tlas_worker", "TLAS job {} timed out: {}/{} slots filled", .{ job.job_id, filled, job.expected_count });
-            return error.TlasJobTimeout;
+            // After waiting, verify all slots are filled
+            const filled_after = job.filled_count.load(.acquire);
+            if (filled_after < job.expected_count) {
+                log(.ERROR, "tlas_worker", "TLAS job {} timed out: {}/{} slots filled", .{ job.job_id, filled_after, job.expected_count });
+                return error.TlasJobTimeout;
+            }
         }
     }
 

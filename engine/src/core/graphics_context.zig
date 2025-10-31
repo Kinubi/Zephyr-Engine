@@ -623,8 +623,8 @@ pub const GraphicsContext = struct {
             }
             // For worker pools: command buffer will be freed when pool is reset (no explicit free needed)
         }
-    }; 
-    
+    };
+
     // Atomic double-buffer for lock-free secondary command buffer collection
     var pending_buffers: [2]std.ArrayList(SecondaryCommandBuffer) = undefined;
     var current_write_index: std.atomic.Value(u8) = std.atomic.Value(u8).init(0);
@@ -697,7 +697,7 @@ pub const GraphicsContext = struct {
 
         // Append to current write buffer (short lock only for ArrayList append)
         const write_idx = current_write_index.load(.acquire);
-        
+
         append_mutex.lock();
         defer append_mutex.unlock();
         try pending_buffers[write_idx].append(self.allocator, secondary_cmd.*);
@@ -711,8 +711,8 @@ pub const GraphicsContext = struct {
     /// Execute all pending secondary command buffers on main thread
     pub fn executeCollectedSecondaryBuffers(self: *GraphicsContext, primary_cmd: vk.CommandBuffer) !void {
         // Atomic flip: swap write index and take ownership of read buffer
-        const read_idx = current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
-        
+        const read_idx = 1 - current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
+
         // No lock needed - we own the read buffer
         if (pending_buffers[read_idx].items.len == 0) return;
 

@@ -81,6 +81,7 @@ pub const SystemStage = struct {
                 .update_fn = system.update_fn,
                 .completion = &self.completion,
                 .system_name = system.name,
+                .allocator = pool.allocator,
             };
 
             try pool.submitWork(.{
@@ -112,20 +113,22 @@ const SystemWorkContext = struct {
     update_fn: SystemFn,
     completion: *std.atomic.Value(usize),
     system_name: []const u8,
+    allocator: std.mem.Allocator,
 };
 
 /// Worker function for parallel system execution
 fn systemWorker(context: *anyopaque, work_item: @import("../threading/thread_pool.zig").WorkItem) void {
     _ = work_item;
-    const ctx: *SystemWorkContext = @ptrCast(@alignCast(context));
+    const ctx = @as(*SystemWorkContext, @ptrCast(@alignCast(context)));
     defer {
         _ = ctx.completion.fetchSub(1, .release);
-        // Note: We don't free context here as it may be needed for error reporting
-        // Consider using an arena allocator for work contexts
+        // Free the work context allocated for this job
+        ctx.allocator.destroy(ctx);
     }
 
     ctx.update_fn(ctx.world, ctx.dt) catch |err| {
-        log(.ERROR, "system_scheduler", "System '{any}' failed with error: {any}", .{ ctx.system_name, err });
+        // Use correct string placeholder for system_name and keep error formatting
+        log(.ERROR, "system_scheduler", "System '{s}' failed with error: {}", .{ ctx.system_name, err });
         // System failure doesn't crash the frame - log and continue
     };
 }
