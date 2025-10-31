@@ -71,6 +71,10 @@ pub const BvhWorkData = struct {
     completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void,
     callback_context: ?*anyopaque,
     work_id: u64,
+    
+    // Optional TlasJob for per-job BLAS tracking
+    // If set, BLAS completion will push to this job's atomic list
+    tlas_job: ?*@import("tlas_worker.zig").TlasJob = null,
 };
 
 pub const BvhWorkType = enum {
@@ -98,6 +102,12 @@ pub const MultithreadedBvhBuilder = struct {
     tlas_mutex: std.Thread.Mutex,
     queue_mutex: std.Thread.Mutex,
 
+    // Lock-free BLAS registry: array indexed by geometry_id with atomic pointers
+    // Each slot holds an atomic pointer to a heap-allocated BlasResult
+    // null = BLAS not built yet, non-null = BLAS available
+    blas_registry: []std.atomic.Value(?*BlasResult),
+    max_geometry_id: u32,
+
     // Persistent geometry data for async work (using pointers to avoid copies)
     persistent_geometry: std.ArrayList(GeometryData),
     geometry_mutex: std.Thread.Mutex,
@@ -124,6 +134,14 @@ pub const MultithreadedBvhBuilder = struct {
         var completed_blas = std.ArrayList(BlasResult){};
         try completed_blas.ensureTotalCapacity(allocator, 8);
 
+        // Allocate lock-free BLAS registry
+        // Start with 256 geometry slots (can grow if needed)
+        const max_geom = 256;
+        const registry = try allocator.alloc(std.atomic.Value(?*BlasResult), max_geom);
+        for (registry) |*slot| {
+            slot.* = std.atomic.Value(?*BlasResult).init(null);
+        }
+
         return MultithreadedBvhBuilder{
             .gc = gc,
             .thread_pool = thread_pool,
@@ -133,6 +151,8 @@ pub const MultithreadedBvhBuilder = struct {
             .blas_mutex = .{},
             .tlas_mutex = .{},
             .queue_mutex = .{},
+            .blas_registry = registry,
+            .max_geometry_id = max_geom,
             .persistent_geometry = std.ArrayList(GeometryData){},
             .geometry_mutex = .{},
             .next_work_id = std.atomic.Value(u64).init(1),
@@ -158,6 +178,17 @@ pub const MultithreadedBvhBuilder = struct {
             }
         }
         self.completed_blas.deinit(self.allocator);
+
+        // Clean up lock-free BLAS registry
+        // No lock needed - called during shutdown when no workers are active
+        for (self.blas_registry) |*slot| {
+            if (slot.load(.acquire)) |blas_ptr| {
+                blas_ptr.buffer.deinit();
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_ptr.acceleration_structure, null);
+                self.allocator.destroy(blas_ptr);
+            }
+        }
+        self.allocator.free(self.blas_registry);
 
         // Clean up persistent geometry data
         self.geometry_mutex.lock();
@@ -374,6 +405,46 @@ pub const MultithreadedBvhBuilder = struct {
         };
     }
 
+    /// Lock-free BLAS registration using atomic CAS
+    /// Allocates a new BlasResult on the heap and atomically installs it in the registry
+    /// If a BLAS already exists for this geometry_id, it will be properly cleaned up
+    pub fn registerBlas(self: *MultithreadedBvhBuilder, blas: BlasResult) !void {
+        if (blas.geometry_id >= self.max_geometry_id) {
+            log(.ERROR, "bvh_builder", "Geometry ID {} exceeds max registry size {}", .{ blas.geometry_id, self.max_geometry_id });
+            return error.GeometryIdOutOfBounds;
+        }
+
+        // Allocate heap copy of the BLAS result
+        const blas_ptr = try self.allocator.create(BlasResult);
+        blas_ptr.* = blas;
+
+        // Atomically install it in the registry slot
+        const slot = &self.blas_registry[blas.geometry_id];
+        const old_ptr = slot.swap(blas_ptr, .acq_rel);
+
+        // If there was an old BLAS, clean it up
+        if (old_ptr) |old_blas| {
+            log(.INFO, "bvh_builder", "Replacing BLAS for geometry_id {} - cleaning up old BLAS", .{blas.geometry_id});
+            old_blas.buffer.deinit();
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
+            self.allocator.destroy(old_blas);
+        }
+    }
+
+    /// Lock-free BLAS lookup by geometry_id
+    /// Returns a copy of the BlasResult if found, null otherwise
+    pub fn lookupBlas(self: *MultithreadedBvhBuilder, geometry_id: u32) ?BlasResult {
+        if (geometry_id >= self.max_geometry_id) {
+            return null;
+        }
+
+        const slot = &self.blas_registry[geometry_id];
+        if (slot.load(.acquire)) |blas_ptr| {
+            return blas_ptr.*; // Return a copy
+        }
+        return null;
+    }
+
     /// Clear completed results
     pub fn clearResults(self: *MultithreadedBvhBuilder) void {
         self.blas_mutex.lock();
@@ -414,6 +485,36 @@ fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
             _ = builder.total_blas_built.fetchAdd(1, .monotonic);
             _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
             _ = builder.pending_work.fetchSub(1, .monotonic);
+
+            // ALWAYS register BLAS in the lock-free registry for future lookups
+            builder.registerBlas(final_result) catch |err| {
+                log(.ERROR, "bvh_builder", "Failed to register BLAS in registry: {}", .{err});
+            };
+
+            // If this BLAS is part of a TLAS job, push to the job's atomic list
+            if (work_data.tlas_job) |job| {
+                const tlas_worker = @import("tlas_worker.zig");
+                
+                // Allocate a BlasNode for the linked list
+                const node = builder.allocator.create(tlas_worker.BlasNode) catch |err| {
+                    log(.ERROR, "bvh_builder", "Failed to allocate BlasNode: {}", .{err});
+                    // Still continue - BLAS is registered, just can't notify job
+                    return;
+                };
+                
+                node.* = tlas_worker.BlasNode{
+                    .next = null,
+                    .work_id = work_data.work_id,
+                    .result = final_result,
+                    .status = std.atomic.Value(u8).init(1), // 1 = done
+                };
+                
+                // Lock-free push to job's atomic list
+                tlas_worker.pushBlasResult(job, node);
+                
+                log(.DEBUG, "bvh_builder", "BLAS for geometry {} pushed to TLAS job {}", .{ final_result.geometry_id, job.job_id });
+                return; // Don't call callback or store in completed_blas
+            }
 
             // If callback provided, call it and transfer ownership to callback
             // Otherwise, store in completed_blas for later retrieval via takeCompletedBlas()
