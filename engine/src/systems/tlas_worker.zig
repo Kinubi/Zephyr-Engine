@@ -137,7 +137,7 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             };
 
             // Build BLAS asynchronously - worker will fill slot when done
-                const work_data = try job.allocator.create(BvhWorkData);
+            const work_data = try job.allocator.create(BvhWorkData);
             work_data.* = .{
                 .work_type = .build_blas,
                 .geometry_data = geom_data,
