@@ -203,6 +203,8 @@
 - [x] **Camera Controller** - Keyboard movement (WASD) and rotation (arrows)
 - [x] **Transform Gizmos** - Visual move, rotate, scale tools with proper projection (Oct 30, 2025)
 - [x] **Entity Selection** - Perspective ray picking with AABB filtering and closest-hit refinement (Oct 30, 2025)
+- [x] **Selection Outline** - Add visual feedback for selected entities  (Oct 31, 2025)
+- [x] **Gizmos** - Create transform gizmos for manipulation (Oct 31, 2025)
 - [ ] **Asset Importer** - Drag-and-drop asset import
 - [ ] **Scene Serialization** - Save/load scenes to disk
 - [ ] **Lighting Tools** - Visual light placement and editing
@@ -224,12 +226,6 @@
 - Camera position/rotation tracking
 - Path tracing toggle and status display
 - **Asset browser with file navigation and icons**
-
-**Next Steps:**
-1. Add visual feedback for selected entities (outline/highlight)
-2. Create transform gizmos for manipulation
-3. Add console panel for logging output
-4. Begin undo/redo command framework design
 
 ---
 
