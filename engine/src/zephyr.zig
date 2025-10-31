@@ -91,3 +91,9 @@ pub const math = @import("utils/math.zig");
 pub const log = @import("utils/log.zig").log;
 pub const DynamicRenderingHelper = @import("utils/dynamic_rendering.zig").DynamicRenderingHelper;
 pub const FileWatcher = @import("utils/file_watcher.zig").FileWatcher;
+
+// ========== Scripting (expose for examples/tests) ==========
+pub const scripting = @import("scripting/script_runner.zig");
+pub const ScriptRunner = scripting.ScriptRunner;
+pub const StatePool = @import("scripting/state_pool.zig").StatePool;
+pub const ActionQueue = @import("scripting/action_queue.zig").ActionQueue;

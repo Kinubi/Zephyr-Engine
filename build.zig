@@ -154,6 +154,31 @@ pub fn build(b: *std.Build) !void {
     const run_render_thread_test_step = b.step("test-render-thread", "Run the render thread infrastructure test");
     run_render_thread_test_step.dependOn(&run_render_thread_test.step);
 
+    // ========== SCRIPT DEMO EXAMPLE ==========
+    const script_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/script_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const script_demo = b.addExecutable(.{
+        .name = "script_demo",
+        .root_module = script_demo_mod,
+    });
+    script_demo.root_module.addImport("zephyr", engine_mod);
+
+    // Link Lua system library for the scripting demo (PUC-Rio Lua)
+    script_demo.linkSystemLibrary("lua");
+    script_demo.linkLibC();
+
+    b.installArtifact(script_demo);
+
+    const run_script_demo = b.addRunArtifact(script_demo);
+    run_script_demo.step.dependOn(b.getInstallStep());
+
+    const run_script_demo_step = b.step("run-script-demo", "Run the scripting demo example");
+    run_script_demo_step.dependOn(&run_script_demo.step);
+
     // ========== TESTS ==========
     const editor_test_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),
