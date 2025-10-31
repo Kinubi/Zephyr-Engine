@@ -678,7 +678,9 @@ pub const PathTracingPass = struct {
         // Update cached TLAS when rt_system's render_tlas changed
         // render_tlas is stable for the entire frame, so this is always safe
         if (tlas_changed) {
-            if (self.tlas != vk.AccelerationStructureKHR.null_handle) {}
+            // Update cached TLAS to the stable render TLAS produced by rt_system.
+            // The render_tlas value is stable for the entire frame, so it's safe
+            // to swap it in immediately and mark descriptors dirty.
             self.tlas = self.rt_system.render_tlas;
             self.tlas_valid = self.rt_system.render_tlas_valid;
         }

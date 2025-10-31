@@ -201,7 +201,7 @@
 
 #### Editor Tools
 - [x] **Camera Controller** - Keyboard movement (WASD) and rotation (arrows)
-- [ ] **Transform Gizmos** - Visual move, rotate, scale tools
+- [x] **Transform Gizmos** - Visual move, rotate, scale tools with proper projection (Oct 30, 2025)
 - [x] **Entity Selection** - Perspective ray picking with AABB filtering and closest-hit refinement (Oct 30, 2025)
 - [ ] **Asset Importer** - Drag-and-drop asset import
 - [ ] **Scene Serialization** - Save/load scenes to disk

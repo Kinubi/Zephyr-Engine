@@ -312,8 +312,7 @@ pub const RenderSystem = struct {
         defer self.allocator.free(worker_results);
 
         // Initialize each worker's local results list
-        var wi: usize = 0;
-        while (wi < worker_count) : (wi += 1) {
+        for (0..worker_count) |wi| {
             worker_results[wi] = std.ArrayList(RenderableEntity){};
         }
 

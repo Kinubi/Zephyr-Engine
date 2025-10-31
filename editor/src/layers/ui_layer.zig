@@ -6,7 +6,7 @@ const Event = zephyr.Event;
 const EventType = zephyr.EventType;
 const FrameInfo = zephyr.FrameInfo;
 const log = zephyr.log;
-const ImGuiContext = @import("../ui/imgui_context.zig").ImGuiContext;
+const ImGuiContext = @import("../ui/backend/imgui_context.zig").ImGuiContext;
 const UIRenderer = @import("../ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("../ui/ui_renderer.zig").RenderStats;
 const ViewportPicker = @import("../ui/viewport_picker.zig");
@@ -15,7 +15,7 @@ const Swapchain = zephyr.Swapchain;
 const SceneV2 = zephyr.Scene;
 const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
-const c = @import("../ui/imgui_c.zig").c;
+const c = @import("../ui/backend/imgui_c.zig").c;
 const Gizmo = @import("../ui/gizmo.zig").Gizmo;
 
 /// UI overlay layer
@@ -166,7 +166,7 @@ pub const UILayer = struct {
                 // itself is an ImGui window, so ImGui always wants to capture mouse over it
                 if (in_viewport) {
                     log(.DEBUG, "picking", "Attempting to pick scene...", .{});
-                    if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_pos, vp_size)) |res| {
+                    if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_size)) |res| {
                         log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity.index(), res.distance });
                         // Single-select the hit entity
                         if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
@@ -227,30 +227,24 @@ pub const UILayer = struct {
 
         switch (evt.event_type) {
             .KeyPressed => {
-                const GLFW_KEY_F1 = 290;
-                const GLFW_KEY_F2 = 291;
-                const GLFW_KEY_G = 71;
-                const GLFW_KEY_R = 82;
-                const GLFW_KEY_S = 83;
-                const GLFW_KEY_ESCAPE = 256;
-
-                if (evt.data.KeyPressed.key == GLFW_KEY_F1) {
+                // Use glfw key constants from imgui_c (c.GLFW_KEY_*) for clarity
+                if (evt.data.KeyPressed.key == c.GLFW_KEY_F1) {
                     self.show_ui = !self.show_ui;
                     evt.markHandled();
-                } else if (evt.data.KeyPressed.key == GLFW_KEY_F2) {
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_F2) {
                     // Toggle performance graphs
                     self.ui_renderer.show_performance_graphs = !self.ui_renderer.show_performance_graphs;
                     evt.markHandled();
-                } else if (evt.data.KeyPressed.key == GLFW_KEY_G) {
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_G) {
                     Gizmo.setTool(Gizmo.Tool.Translate);
                     evt.markHandled();
-                } else if (evt.data.KeyPressed.key == GLFW_KEY_R) {
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_R) {
                     Gizmo.setTool(Gizmo.Tool.Rotate);
                     evt.markHandled();
-                } else if (evt.data.KeyPressed.key == GLFW_KEY_S) {
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_S) {
                     Gizmo.setTool(Gizmo.Tool.Scale);
                     evt.markHandled();
-                } else if (evt.data.KeyPressed.key == GLFW_KEY_ESCAPE) {
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_ESCAPE) {
                     Gizmo.cancelDrag();
                     evt.markHandled();
                 }

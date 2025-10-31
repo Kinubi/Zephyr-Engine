@@ -1,7 +1,7 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 const Math = zephyr.math;
-const c = @import("imgui_c.zig").c;
+const c = @import("backend/imgui_c.zig").c;
 
 const Camera = zephyr.Camera;
 const Scene = zephyr.Scene;
@@ -123,7 +123,7 @@ fn rayIntersectsAABB(origin: Math.Vec3, dir: Math.Vec3, aabb: AxisAlignedBoundin
     return if (t_min > 0.0) t_min else t_max;
 }
 
-pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32, vp_size: [2]f32) Ray {
+pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_size: [2]f32) Ray {
     // Guard against degenerate viewport size
     if (vp_size[0] < 1.0 or vp_size[1] < 1.0) {
         // Return a ray pointing forward if viewport is too small
@@ -132,8 +132,6 @@ pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32,
         const origin = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
         return Ray{ .origin = origin, .dir = Math.Vec3.init(0, 0, -1) };
     }
-
-    _ = vp_pos;
 
     const main_viewport = c.ImGui_GetMainViewport();
     const window_origin_x = main_viewport.*.Pos.x;
@@ -228,8 +226,8 @@ fn intersectTriangle(orig: Math.Vec3, dir: Math.Vec3, v0: Math.Vec3, v1: Math.Ve
     return null;
 }
 
-pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_pos: [2]f32, vp_size: [2]f32) ?PickResult {
-    const ray = rayFromMouse(camera, mouse_x, mouse_y, vp_pos, vp_size);
+pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_size: [2]f32) ?PickResult {
+    const ray = rayFromMouse(camera, mouse_x, mouse_y, vp_size);
     const orig = ray.origin;
     const dir = ray.dir;
 

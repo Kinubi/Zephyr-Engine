@@ -1,7 +1,7 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 
-const c = @import("imgui_c.zig").c;
+const c = @import("backend/imgui_c.zig").c;
 
 const ecs = zephyr.ecs;
 const World = ecs.World;
@@ -31,10 +31,10 @@ pub const SceneHierarchyPanel = struct {
     }
 
     pub fn deinit(self: *SceneHierarchyPanel) void {
-        // free selected_entities storage if used
-        if (self.selected_entities.items.len > 0) {
-            self.selected_entities.deinit(std.heap.page_allocator);
-        }
+        // always free selected_entities storage (ArrayList.deinit is safe
+        // even if the list is empty) so we don't leak if capacity was
+        // allocated earlier.
+        self.selected_entities.deinit(std.heap.page_allocator);
     }
 
     /// Render the hierarchy panel and inspector
@@ -91,20 +91,12 @@ pub const SceneHierarchyPanel = struct {
                 if (c.ImGui_IsItemClicked()) {
                     const io = c.ImGui_GetIO();
                     if (io.*.KeyCtrl) {
-                        // toggle membership
-                        var found = false;
-                        var found_idx: usize = 0;
-                        var scan_idx: usize = 0;
-                        for (self.selected_entities.items) |eid| {
-                            if (eid == entity) {
-                                found = true;
-                                found_idx = scan_idx;
-                                break;
-                            }
-                            scan_idx += 1;
-                        }
-                        if (found) {
-                            _ = self.selected_entities.swapRemove(found_idx);
+                        // toggle membership: use std.mem.indexOf for concise lookup
+                        // Ensure we pass an explicit slice to match std.mem.indexOf signature
+                        const needle = [_]EntityId{entity};
+                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                        if (maybe_idx) |i| {
+                            _ = self.selected_entities.swapRemove(i);
                         } else {
                             _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
                         }
@@ -123,16 +115,10 @@ pub const SceneHierarchyPanel = struct {
                     if (c.ImGui_MenuItem("Delete Entity")) {
                         scene.destroyObject(game_obj);
                         // remove from selection if present
-                        var remove_idx: ?usize = null;
-                        var scan_idx2: usize = 0;
-                        for (self.selected_entities.items) |eid| {
-                            if (eid == entity) {
-                                remove_idx = scan_idx2;
-                                break;
-                            }
-                            scan_idx2 += 1;
-                        }
-                        if (remove_idx) |i| {
+                        // Find and remove the entity from the selection (if present)
+                        const needle = [_]EntityId{entity};
+                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                        if (maybe_idx) |i| {
                             _ = self.selected_entities.swapRemove(i);
                         }
                     }

@@ -45,7 +45,7 @@ const new_ecs = zephyr.ecs; // New coherent ECS system
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
 
 // UI system (editor-specific)
-const ImGuiContext = @import("ui/imgui_context.zig").ImGuiContext;
+const ImGuiContext = @import("ui/backend/imgui_context.zig").ImGuiContext;
 const UIRenderer = @import("ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("ui/ui_renderer.zig").RenderStats;
 

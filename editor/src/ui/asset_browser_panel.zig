@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("imgui_c.zig").c;
+const c = @import("backend/imgui_c.zig").c;
 
 /// Asset Browser Panel
 /// Displays project assets in a file browser interface
