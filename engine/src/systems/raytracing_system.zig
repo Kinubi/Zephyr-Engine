@@ -13,6 +13,8 @@ const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
 const TlasResult = @import("multithreaded_bvh_builder.zig").TlasResult;
 const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
 const BvhBuildResult = @import("multithreaded_bvh_builder.zig").BvhBuildResult;
+const TlasWorker = @import("tlas_worker.zig");
+const TlasJob = TlasWorker.TlasJob;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
@@ -45,48 +47,44 @@ const PerFrameDestroyQueue = struct {
     }
 };
 
+/// TLAS Registry: Double-buffered TLAS for safe lifecycle management
+/// Similar to BLAS registry, but single entry since we only have one scene TLAS
+const TlasRegistry = struct {
+    current: std.atomic.Value(?*TlasEntry) = std.atomic.Value(?*TlasEntry).init(null),
+
+    const TlasEntry = struct {
+        acceleration_structure: vk.AccelerationStructureKHR,
+        buffer: Buffer,
+        instance_buffer: Buffer,
+        device_address: vk.DeviceAddress,
+        instance_count: u32,
+        build_time_ns: u64,
+    };
+};
+
 /// Enhanced Raytracing system with multithreaded BVH building
 pub const RaytracingSystem = struct {
     gc: *GraphicsContext, // Use 'gc' for consistency with Swapchain
 
-    // Double-buffered TLAS for safe async updates
-    // render_tlas: stable TLAS used for rendering (never changed during frame)
-    // tlas: working TLAS that gets updated by async callbacks
-    render_tlas: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
-    render_tlas_valid: bool = false,
+    // TLAS Registry: atomic pointer to current TLAS
+    // When new TLAS arrives: get old, store new, queue old for destruction
+    // Always know which TLAS to destroy - no handle juggling needed
+    tlas_registry: TlasRegistry = .{},
 
-    // Legacy single AS support (for compatibility)
-    blas: vk.AccelerationStructureKHR = undefined,
-    tlas: vk.AccelerationStructureKHR = undefined,
-    tlas_buffer: Buffer = undefined,
-    tlas_instance_buffer: Buffer = undefined,
-    tlas_instance_buffer_initialized: bool = false,
-    tlas_buffer_initialized: bool = false,
-    tlas_dirty: bool = false,
-
-    // New multithreaded BVH system
+    // Multithreaded BVH system
     bvh_builder: *MultithreadedBvhBuilder = undefined,
-    completed_tlas: ?TlasResult = null,
     bvh_build_in_progress: bool = false,
+    next_tlas_job_id: u64 = 1,
 
+    // Shader Binding Table (for raytracing)
     shader_binding_table: vk.Buffer = undefined,
     shader_binding_table_memory: vk.DeviceMemory = undefined,
 
-    // Legacy BLAS arrays (for compatibility)
-    blas_handles: std.ArrayList(vk.AccelerationStructureKHR) = undefined,
-    blas_buffers: std.ArrayList(Buffer) = undefined,
-
-    // Per-frame destruction queues
+    // Per-frame destruction queues for deferred resource cleanup
+    // Flow: When spawning TLAS worker, we queue old TLAS/BLAS for destruction in per_frame_destroy[current_frame]
+    // These are destroyed MAX_FRAMES_IN_FLIGHT frames later (after GPU finishes using them)
+    // This ensures GPU synchronization without blocking or orphaning
     per_frame_destroy: [MAX_FRAMES_IN_FLIGHT]PerFrameDestroyQueue = undefined,
-
-    // Orphaned TLAS from async callbacks (processed in next update with proper frame context)
-    orphaned_tlas: ?struct {
-        handle: vk.AccelerationStructureKHR,
-        buffer: Buffer,
-        instance_buffer: Buffer,
-        buffer_initialized: bool,
-        instance_buffer_initialized: bool,
-    } = null,
 
     allocator: std.mem.Allocator = undefined,
 
@@ -112,18 +110,10 @@ pub const RaytracingSystem = struct {
         return RaytracingSystem{
             .gc = gc,
             .bvh_builder = bvh_builder,
-            .completed_tlas = null,
             .bvh_build_in_progress = false,
-            .blas_handles = try std.ArrayList(vk.AccelerationStructureKHR).initCapacity(allocator, 8),
-            .blas_buffers = try std.ArrayList(Buffer).initCapacity(allocator, 8),
             .per_frame_destroy = per_frame_destroy,
             .allocator = allocator,
-            .tlas_instance_buffer_initialized = false,
-            .tlas_buffer_initialized = false,
-            .blas = vk.AccelerationStructureKHR.null_handle,
-            .tlas = vk.AccelerationStructureKHR.null_handle,
-            .tlas_buffer = undefined,
-            .tlas_instance_buffer = undefined,
+            .tlas_registry = .{}, // Registry starts empty (null)
             .shader_binding_table = vk.Buffer.null_handle,
             .shader_binding_table_memory = vk.DeviceMemory.null_handle,
         };
@@ -256,151 +246,6 @@ pub const RaytracingSystem = struct {
         }
     }
 
-    /// Rebuild TLAS using existing BLAS with updated transforms (optimization for transform-only changes)
-    fn rebuildTlasWithExistingBlas(self: *RaytracingSystem, rt_data: RenderData.RaytracingData, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
-        // Create instance data from RT data using existing BLAS handles
-        var instances = std.ArrayList(InstanceData){};
-        defer instances.deinit(self.allocator);
-
-        // Match RT instances to existing BLAS by index
-        for (rt_data.instances, 0..) |rt_instance, rt_index| {
-            if (rt_index >= self.blas_handles.items.len) {
-                log(.WARN, "raytracing", "RT instance {} exceeds BLAS count {}", .{ rt_index, self.blas_handles.items.len });
-                continue;
-            }
-
-            // Get BLAS device address from existing BLAS
-            const blas_handle = self.blas_handles.items[rt_index];
-            var addr_info = vk.AccelerationStructureDeviceAddressInfoKHR{
-                .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
-                .acceleration_structure = blas_handle,
-            };
-            const blas_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &addr_info);
-
-            const clamped_material_id = @min(rt_instance.material_index, 255);
-
-            const instance_data = InstanceData{
-                .blas_address = blas_address,
-                .transform = rt_instance.transform, // NEW transforms!
-                .custom_index = clamped_material_id,
-                .mask = 0xFF,
-                .sbt_offset = 0,
-                .flags = 0,
-            };
-
-            try instances.append(self.allocator, instance_data);
-        }
-
-        if (instances.items.len == 0) {
-            log(.ERROR, "raytracing", "No instances created for TLAS rebuild!", .{});
-            return error.NoInstances;
-        }
-
-        // Build new TLAS with existing BLAS and new transforms
-        _ = try self.bvh_builder.buildTlasAsync(instances.items, .high, completion_callback, callback_context);
-    }
-
-    /// Update TLAS instance transforms without rebuilding BVH
-    /// This is much faster than rebuilding when only transforms have changed
-    fn updateTlasInstanceTransforms(self: *RaytracingSystem, render_system: *@import("../ecs/systems/render_system.zig").RenderSystem) !void {
-        // Get updated instance data
-        const rt_data = try render_system.getRaytracingData();
-        defer {
-            self.allocator.free(rt_data.instances);
-            self.allocator.free(rt_data.geometries);
-            self.allocator.free(rt_data.materials);
-        }
-
-        // Map the instance buffer if not already mapped
-        const instance_buffer_size = self.tlas_instance_buffer.buffer_size;
-        const was_mapped = self.tlas_instance_buffer.mapped != null;
-        if (!was_mapped) {
-            try self.tlas_instance_buffer.map(instance_buffer_size, 0);
-        }
-        defer {
-            if (!was_mapped) {
-                self.tlas_instance_buffer.unmap();
-            }
-        }
-
-        // Get the mapped memory as an array of acceleration structure instances
-        const instance_data = @as([*]vk.AccelerationStructureInstanceKHR, @ptrCast(@alignCast(self.tlas_instance_buffer.mapped.?)));
-        const instance_count = @min(rt_data.instances.len, instance_buffer_size / @sizeOf(vk.AccelerationStructureInstanceKHR));
-
-        // Update each instance's transform matrix
-        for (rt_data.instances[0..instance_count], 0..) |rt_instance, i| {
-            // Copy the 3x4 transform matrix (first 12 floats of the instance)
-            const transform_3x4 = rt_instance.transform;
-            @memcpy(&instance_data[i].transform.matrix, &transform_3x4);
-        }
-
-        // Flush the changes to ensure GPU sees them
-        try self.tlas_instance_buffer.flush(instance_buffer_size, 0);
-    }
-
-    /// Create BLAS asynchronously using pre-computed raytracing data from the scene bridge
-    pub fn createBlasAsyncFromRtData(self: *RaytracingSystem, rt_data: RenderData.RaytracingData, completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void, callback_context: ?*anyopaque) !void {
-        if (self.bvh_build_in_progress) {
-            // Reset progress flag to allow new build to supersede
-            self.bvh_build_in_progress = false;
-        }
-
-        self.bvh_build_in_progress = true;
-        try self.bvh_builder.buildRtDataBvhAsync(rt_data, completion_callback, callback_context);
-    }
-
-    /// Create TLAS asynchronously using pre-computed raytracing data from the scene bridge
-    pub fn createTlasAsyncFromRtData(self: *RaytracingSystem, rt_data: RenderData.RaytracingData, completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void, callback_context: ?*anyopaque) !void {
-        // Use BLAS results that were already stored in RT system arrays via blasCompletionCallback
-        // Don't call takeCompletedBlas() - that would try to consume results that were already consumed by the callback
-
-        if (self.blas_handles.items.len == 0) {
-            log(.WARN, "RaytracingSystem", "No BLAS results available for TLAS creation", .{});
-            return error.NoBlasResults;
-        }
-
-        // Create instance data from RT data and stored BLAS results
-        var instances = std.ArrayList(InstanceData){};
-        defer instances.deinit(self.allocator);
-
-        // Match RT instances to BLAS by geometry_id
-        // BLAS are stored in order of geometry_id, so we can use indices directly
-        for (rt_data.instances, 0..) |rt_instance, rt_index| {
-            // Get BLAS device address using geometry_id as index
-            if (rt_index >= self.blas_handles.items.len) {
-                log(.WARN, "RaytracingSystem", "No BLAS found for RT instance {} (out of bounds)", .{rt_index});
-                continue;
-            }
-
-            // Get BLAS device address from stored acceleration structure
-            var blas_address_info = vk.AccelerationStructureDeviceAddressInfoKHR{
-                .s_type = vk.StructureType.acceleration_structure_device_address_info_khr,
-                .acceleration_structure = self.blas_handles.items[rt_index],
-            };
-            const blas_device_address = self.gc.vkd.getAccelerationStructureDeviceAddressKHR(self.gc.dev, &blas_address_info);
-
-            const clamped_material_id = @min(rt_instance.material_index, 255); // Clamp to 8 bits for safety
-
-            const instance_data = InstanceData{
-                .blas_address = blas_device_address,
-                .transform = rt_instance.transform,
-                .custom_index = clamped_material_id,
-                .mask = 0xFF,
-                .sbt_offset = 0,
-                .flags = 0,
-            };
-
-            try instances.append(self.allocator, instance_data);
-        }
-
-        if (instances.items.len == 0) {
-            log(.ERROR, "RaytracingSystem", "No instances created for TLAS from RT data! Check if RT instances match BLAS count", .{});
-            return error.NoInstances;
-        }
-
-        _ = try self.bvh_builder.buildTlasAsync(instances.items, .high, completion_callback, callback_context);
-    }
-
     /// Update BVH state using data from RenderSystem (for modern ECS-based rendering)
     pub fn update(
         self: *RaytracingSystem,
@@ -410,190 +255,105 @@ pub const RaytracingSystem = struct {
     ) !bool {
         const frame_index = frame_info.current_frame;
 
-        // ATOMIC TLAS SWAP: Double-buffer approach
-        // At the start of each frame, atomically promote the working TLAS to render TLAS
-        // This ensures render_tlas is stable for the entire frame, even if async callbacks update tlas
-        if (self.tlas != vk.AccelerationStructureKHR.null_handle and self.tlas != self.render_tlas) {
-            // New TLAS available - atomically swap to it
+        // FIRST: Check if TLAS worker has completed and pick up the result
+        if (self.bvh_build_in_progress) {
+            if (self.bvh_builder.tryPickupCompletedTlas()) |tlas_result| {
+                // TLAS build completed successfully!
+                // Create heap-allocated TLAS entry for the registry
+                const new_entry = try self.allocator.create(TlasRegistry.TlasEntry);
+                new_entry.* = .{
+                    .acceleration_structure = tlas_result.acceleration_structure,
+                    .buffer = tlas_result.buffer,
+                    .instance_buffer = tlas_result.instance_buffer,
+                    .device_address = tlas_result.device_address,
+                    .instance_count = tlas_result.instance_count,
+                    .build_time_ns = tlas_result.build_time_ns,
+                };
 
-            self.render_tlas = self.tlas;
-            self.render_tlas_valid = true;
+                // Atomically swap: get old TLAS, store new TLAS
+                const old_entry = self.tlas_registry.current.swap(new_entry, .acq_rel);
 
-            // The old render_tlas is no longer needed for rendering, but don't destroy it yet
-            // It's already been marked as orphaned by the async callback when the new tlas was created
-        } else if (self.tlas == vk.AccelerationStructureKHR.null_handle and self.render_tlas != vk.AccelerationStructureKHR.null_handle) {
-            // Working TLAS was invalidated - keep using render_tlas until we have a new one
-            log(.DEBUG, "raytracing", "Working TLAS invalidated, keeping render_tlas for stability", .{});
+                // Queue old TLAS for destruction (if it existed)
+                if (old_entry) |old| {
+
+                    // Queue handle for destruction
+                    self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, old.acceleration_structure) catch |err| {
+                        log(.ERROR, "raytracing", "Failed to queue old TLAS handle: {}", .{err});
+                        self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old.acceleration_structure, null);
+                    };
+
+                    // Queue buffers for destruction
+                    self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old.buffer) catch |err| {
+                        log(.ERROR, "raytracing", "Failed to queue old TLAS buffer: {}", .{err});
+                        var immediate = old.buffer;
+                        immediate.deinit();
+                    };
+
+                    self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, old.instance_buffer) catch |err| {
+                        log(.ERROR, "raytracing", "Failed to queue old TLAS instance buffer: {}", .{err});
+                        var immediate = old.instance_buffer;
+                        immediate.deinit();
+                    };
+
+                    // Free the old entry struct itself
+                    self.allocator.destroy(old);
+                }
+
+                // Mark build as no longer in progress
+                self.bvh_build_in_progress = false;
+            }
         }
 
-        // Process any orphaned TLAS from async callbacks
-        // When a new TLAS completes while another is still in use, the old one is marked as orphaned
-        // We queue it here with proper frame context rather than destroying it immediately in the callback
-        if (self.orphaned_tlas) |orphan| {
-            self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, orphan.handle) catch |err| {
-                log(.ERROR, "raytracing", "Failed to queue orphaned TLAS handle: {}", .{err});
+        // Pick up any old BLAS that were replaced in the registry and need deferred destruction
+        const old_blas_list = self.bvh_builder.takeOldBlasForDestruction(self.allocator) catch |err| blk: {
+            log(.ERROR, "raytracing", "Failed to take old BLAS for destruction: {}", .{err});
+            break :blk &[_]BlasResult{};
+        };
+        defer self.allocator.free(old_blas_list);
+
+        // Queue them for per-frame destruction
+        for (old_blas_list) |old_blas| {
+            self.per_frame_destroy[frame_index].blas_handles.append(self.allocator, old_blas.acceleration_structure) catch |err| {
+                log(.ERROR, "raytracing", "Failed to queue old BLAS handle for destruction: {}", .{err});
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
+                var immediate = old_blas.buffer;
+                immediate.deinit();
+                continue;
             };
-            if (orphan.buffer_initialized) {
-                self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, orphan.buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue orphaned TLAS buffer: {}", .{err});
-                };
-            }
-            if (orphan.instance_buffer_initialized) {
-                self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, orphan.instance_buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue orphaned TLAS instance buffer: {}", .{err});
-                };
-            }
 
-            self.orphaned_tlas = null;
+            self.per_frame_destroy[frame_index].blas_buffers.append(self.allocator, old_blas.buffer) catch |err| {
+                log(.ERROR, "raytracing", "Failed to queue old BLAS buffer for destruction: {}", .{err});
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
+                var immediate = old_blas.buffer;
+                immediate.deinit();
+                if (self.per_frame_destroy[frame_index].blas_handles.items.len > 0) {
+                    self.per_frame_destroy[frame_index].blas_handles.items.len -= 1;
+                }
+                continue;
+            };
         }
 
-        // OPTIMIZATION: Transform-only rebuild path
-        // If only entity transforms changed (no new/deleted geometry), we can keep existing BLAS
-        // and just rebuild the TLAS with updated instance transforms - much faster than full rebuild
+        // Check if we need to spawn a TLAS worker for either transform-only or geometry changes
         const is_transform_only = render_system.transform_only_change and render_system.renderables_dirty;
-
-        if (is_transform_only and self.tlas != .null_handle and self.blas_handles.items.len > 0 and !self.bvh_build_in_progress) {
-            // Get updated RT data to verify geometry count matches
-            const rt_data_check = try render_system.getRaytracingData();
-            defer {
-                self.allocator.free(rt_data_check.instances);
-                self.allocator.free(rt_data_check.geometries);
-                self.allocator.free(rt_data_check.materials);
-            }
-
-            // Verify BLAS count matches current geometry count (safety check)
-            // If counts don't match, geometry changed and we need a full rebuild instead
-            if (self.blas_handles.items.len == rt_data_check.geometries.len) {
-                // Safe to do transform-only update - just rebuild TLAS, keep BLAS
-                self.bvh_build_in_progress = true;
-
-                // Queue old TLAS resources for destruction (BLAS stays - geometry unchanged)
-                if (self.tlas != .null_handle) {
-                    self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, self.tlas) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue TLAS handle for destruction: {}", .{err});
-                        self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
-                    };
-                    // Clear handle immediately to prevent async callback from creating an orphan
-                    self.tlas = vk.AccelerationStructureKHR.null_handle;
-                }
-
-                if (self.tlas_buffer_initialized) {
-                    self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, self.tlas_buffer) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue TLAS buffer for destruction: {}", .{err});
-                        var immediate = self.tlas_buffer;
-                        immediate.deinit();
-                    };
-                    self.tlas_buffer_initialized = false;
-                }
-
-                if (self.tlas_instance_buffer_initialized) {
-                    self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, self.tlas_instance_buffer) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue TLAS instance buffer for destruction: {}", .{err});
-                        var immediate = self.tlas_instance_buffer;
-                        immediate.deinit();
-                    };
-                    self.tlas_instance_buffer_initialized = false;
-                }
-
-                // Rebuild TLAS with existing BLAS and updated instance transforms
-                self.completed_tlas = null;
-                try self.rebuildTlasWithExistingBlas(rt_data_check, tlasCompletionCallback, self);
-
-                // Clear dirty flags immediately to prevent triggering another rebuild next frame
-                render_system.renderables_dirty = false;
-                render_system.transform_only_change = false;
-
-                return true;
-            } else {
-                // Geometry count mismatch detected - need full rebuild instead
-                log(.WARN, "raytracing", "Transform-only rebuild aborted: BLAS count ({}) != geometry count ({}). Falling back to full rebuild.", .{ self.blas_handles.items.len, rt_data_check.geometries.len });
-                // Fall through to full rebuild path below
-            }
-        }
-
-        // Full BVH rebuild path - triggered when geometry changes or BLAS/TLAS don't exist
-        // This rebuilds both BLAS (geometry acceleration structures) and TLAS (instance hierarchy)
         const rebuild_needed = try render_system.checkBvhRebuildNeeded();
-        if ((rebuild_needed or geo_changed) and !self.bvh_build_in_progress) {
-            // Mark build as in progress immediately to prevent duplicate builds
+
+        if ((is_transform_only or rebuild_needed or geo_changed) and !self.bvh_build_in_progress) {
+            // Get current raytracing data
+            const rt_data = try render_system.getRaytracingData();
+            defer {
+                self.allocator.free(rt_data.instances);
+                self.allocator.free(rt_data.geometries);
+                self.allocator.free(rt_data.materials);
+            }
+
+            // Mark build as in progress
             self.bvh_build_in_progress = true;
 
-            // Get raytracing data from RenderSystem
-            const rebuild_rt_data = try render_system.getRaytracingData();
-            defer {
-                self.allocator.free(rebuild_rt_data.instances);
-                self.allocator.free(rebuild_rt_data.geometries);
-                self.allocator.free(rebuild_rt_data.materials);
-            }
+            // Create TlasJob and spawn TLAS worker
+            // When it completes, registry will handle the swap automatically
+            try self.spawnTlasWorker(rt_data);
 
-            // Queue old TLAS resources for destruction (will be destroyed after GPU finishes)
-            if (self.tlas != .null_handle) {
-                self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, self.tlas) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue TLAS handle for destruction: {}", .{err});
-                    self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
-                };
-                // Clear handle immediately so async callback won't try to queue it again
-                self.tlas = vk.AccelerationStructureKHR.null_handle;
-            }
-
-            if (self.tlas_buffer_initialized) {
-                self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, self.tlas_buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue TLAS buffer for destruction: {}", .{err});
-                    var immediate = self.tlas_buffer;
-                    immediate.deinit();
-                };
-                self.tlas_buffer_initialized = false;
-            }
-
-            if (self.tlas_instance_buffer_initialized) {
-                self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, self.tlas_instance_buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue TLAS instance buffer for destruction: {}", .{err});
-                    var immediate = self.tlas_instance_buffer;
-                    immediate.deinit();
-                };
-                self.tlas_instance_buffer_initialized = false;
-            }
-
-            // Queue all old BLAS resources for destruction
-            for (self.blas_handles.items, self.blas_buffers.items) |handle, buffer| {
-                self.per_frame_destroy[frame_index].blas_handles.append(self.allocator, handle) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue BLAS handle for destruction: {}", .{err});
-                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-                    var immediate = buffer;
-                    immediate.deinit();
-                    continue;
-                };
-
-                self.per_frame_destroy[frame_index].blas_buffers.append(self.allocator, buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue BLAS buffer for destruction: {}", .{err});
-                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-                    var temp = buffer;
-                    temp.deinit();
-                    if (self.per_frame_destroy[frame_index].blas_handles.items.len > 0) {
-                        self.per_frame_destroy[frame_index].blas_handles.items.len -= 1;
-                    }
-                    continue;
-                };
-            }
-
-            // Clear local arrays - new BLAS will be added by async callbacks
-            self.blas_handles.clearRetainingCapacity();
-            self.blas_buffers.clearRetainingCapacity();
-
-            // Clear any stale results from previous builds
-            self.bvh_builder.clearResults();
-            self.completed_tlas = null;
-
-            // Start async BLAS building - completion callbacks will trigger TLAS build
-            self.createBlasAsyncFromRtData(rebuild_rt_data, blasCompletionCallback, self) catch |err| {
-                log(.ERROR, "raytracing", "Failed to start BVH rebuild from RT data: {}", .{err});
-                self.bvh_build_in_progress = false;
-                return false;
-            };
-
-            // Clear ALL dirty flags immediately after starting rebuild
-            // This is critical to prevent rebuild spam - without this, the flags would still be set
-            // on the next frame, triggering another rebuild even though one is already in progress
+            // Clear dirty flags
             render_system.renderables_dirty = false;
             render_system.transform_only_change = false;
             render_system.raytracing_descriptors_dirty = false;
@@ -601,199 +361,92 @@ pub const RaytracingSystem = struct {
             return true;
         }
 
-        // TLAS creation check - happens after BLAS building completes
-        // If BLAS exist but no TLAS, create one from the current geometry
-        // Get current raytracing data for checks (BLAS building creates raytracing cache)
-        const rt_data = try render_system.getRaytracingData();
-        defer {
-            self.allocator.free(rt_data.instances);
-            self.allocator.free(rt_data.geometries);
-            self.allocator.free(rt_data.materials);
-        }
-
-        // Simple TLAS creation check: BLAS count matches geometry count AND no TLAS exists
-        const blas_count = self.blas_handles.items.len;
-        const geometry_count = rt_data.geometries.len;
-        const has_tlas = self.completed_tlas != null;
-        const counts_match = blas_count == geometry_count;
-        const has_blas = blas_count > 0;
-        const should_create_tlas = counts_match and !has_tlas and has_blas;
-        if (should_create_tlas) {
-            self.bvh_build_in_progress = true;
-            log(.INFO, "raytracing", "Starting TLAS creation from RT data ({} geometries)", .{geometry_count});
-            // Use RT data-based TLAS creation for consistency with callback
-            self.createTlasAsyncFromRtData(rt_data, tlasCompletionCallback, self) catch |err| {
-                log(.ERROR, "raytracing", "Failed to start TLAS creation from RT data: {}", .{err});
-            };
-
-            return true; // TLAS creation started
-        }
-
         return false; // No rebuild needed or already in progress
     }
 
-    /// Update BVH state using data gathered from the scene bridge
-    /// Update using RenderData (for legacy scene system)
-    pub fn updateFromRenderData(self: *RaytracingSystem, scene_bridge: *RenderData.RenderData, frame_info: *const FrameInfo) !bool {
-        const frame_index = frame_info.current_frame;
+    /// Spawn TLAS worker as a ThreadPool job - event-driven approach
+    fn spawnTlasWorker(self: *RaytracingSystem, rt_data: RenderData.RaytracingData) !void {
+        // Extract stable geometry IDs from rt_data using asset IDs
+        const required_geom_ids = try self.allocator.alloc(u32, rt_data.geometries.len);
+        for (rt_data.geometries, 0..) |geom, i| {
+            required_geom_ids[i] = geom.getGeometryId();
+        }
 
-        // Check if BVH rebuild is needed using RenderData's intelligent tracking
-        if (scene_bridge.checkBvhRebuildNeeded(false)) {
-            // Get current raytracing data (will be rebuilt if cache is dirty)
-            const rebuild_rt_data = scene_bridge.getRaytracingData();
+        // Copy geometries for BLAS spawning
+        const geometries_copy = try self.allocator.alloc(RenderData.RaytracingData.RTGeometry, rt_data.geometries.len);
+        for (rt_data.geometries, 0..) |geom, i| {
+            geometries_copy[i] = geom;
+        }
 
-            // Debug the condition evaluation
-            if (self.tlas != .null_handle) {
-                self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, self.tlas) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue TLAS handle for destruction: {}", .{err});
-                    self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
-                };
-                self.tlas = vk.AccelerationStructureKHR.null_handle;
-            }
-
-            if (self.tlas_buffer_initialized) {
-                self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, self.tlas_buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue TLAS buffer for destruction: {}", .{err});
-                    var immediate = self.tlas_buffer;
-                    immediate.deinit();
-                };
-                self.tlas_buffer_initialized = false;
-            }
-
-            if (self.tlas_instance_buffer_initialized) {
-                self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, self.tlas_instance_buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue TLAS instance buffer for destruction: {}", .{err});
-                    var immediate = self.tlas_instance_buffer;
-                    immediate.deinit();
-                };
-                self.tlas_instance_buffer_initialized = false;
-            }
-
-            for (self.blas_handles.items, self.blas_buffers.items) |handle, buffer| {
-                self.per_frame_destroy[frame_index].blas_handles.append(self.allocator, handle) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue BLAS handle for destruction: {}", .{err});
-                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-                    var immediate = buffer;
-                    immediate.deinit();
-                    continue;
-                };
-
-                self.per_frame_destroy[frame_index].blas_buffers.append(self.allocator, buffer) catch |err| {
-                    log(.ERROR, "raytracing", "Failed to queue BLAS buffer for destruction: {}", .{err});
-                    if (handle != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-                    var temp = buffer;
-                    temp.deinit();
-                    if (self.per_frame_destroy[frame_index].blas_handles.items.len > 0) {
-                        self.per_frame_destroy[frame_index].blas_handles.items.len -= 1;
-                    }
-                    continue;
-                };
-            }
-
-            self.blas_handles.clearRetainingCapacity();
-            self.blas_buffers.clearRetainingCapacity();
-
-            // Check if we can start rebuild immediately or need to queue it
-            self.bvh_build_in_progress = true;
-
-            // Clear existing results to prevent accumulation from previous rebuilds
-            self.bvh_builder.clearResults();
-            self.completed_tlas = null;
-
-            // Use the new RT data-based BVH building to ensure consistency with BLAS callback
-            self.createBlasAsyncFromRtData(rebuild_rt_data, blasCompletionCallback, self) catch |err| {
-                log(.ERROR, "raytracing", "Failed to start BVH rebuild from RT data: {}", .{err});
-                return false;
+        // Copy instances for the job
+        const instances_copy = try self.allocator.alloc(InstanceData, rt_data.instances.len);
+        for (rt_data.instances, 0..) |inst, i| {
+            instances_copy[i] = InstanceData{
+                .blas_address = 0, // Will be filled by TLAS worker from buffer
+                .transform = inst.transform,
+                .custom_index = inst.material_index,
+                .mask = inst.mask,
+                .sbt_offset = 0,
+                .flags = 0,
             };
         }
 
-        // Get current raytracing data for checks (BLAS building creates raytracing cache)
-        const rt_data = scene_bridge.getRaytracingData();
-
-        // Simple TLAS creation check: BLAS count matches geometry count AND no TLAS exists
-        const blas_count = self.blas_handles.items.len;
-        const geometry_count = rt_data.geometries.len;
-        const has_tlas = self.completed_tlas != null;
-        const counts_match = blas_count == geometry_count;
-        const has_blas = blas_count > 0;
-        const should_create_tlas = counts_match and !has_tlas and has_blas;
-
-        if (should_create_tlas) {
-            // Use RT data-based TLAS creation for consistency with callback
-            self.createTlasAsyncFromRtData(rt_data, tlasCompletionCallback, self) catch |err| {
-                log(.ERROR, "raytracing", "Failed to start TLAS creation from RT data: {}", .{err});
-            };
-            return true; // TLAS creation started
+        // Create atomic BLAS buffer: one slot per geometry
+        // BLAS workers will fill their slots atomically
+        const blas_buffer = try self.allocator.alloc(std.atomic.Value(?*BlasResult), rt_data.geometries.len);
+        for (blas_buffer) |*slot| {
+            slot.* = std.atomic.Value(?*BlasResult).init(null);
         }
 
-        return false; // No rebuild needed or already in progress
+        // Create TlasJob
+        const job = try self.allocator.create(TlasJob);
+        job.* = TlasJob{
+            .job_id = @atomicRmw(u64, &self.next_tlas_job_id, .Add, 1, .monotonic),
+            .blas_buffer = blas_buffer,
+            .filled_count = std.atomic.Value(u32).init(0),
+            .expected_count = @intCast(rt_data.geometries.len),
+            .required_geometry_ids = required_geom_ids,
+            .geometries = geometries_copy,
+            .instances = instances_copy,
+            .allocator = self.allocator,
+            .builder = self.bvh_builder,
+        };
+
+        // Spawn TLAS worker asynchronously via ThreadPool
+        // Create work item for TLAS building
+        const work_id = job.job_id;
+        const thread_pool = @import("../threading/thread_pool.zig");
+
+        // Use createBvhBuildingWork for TLAS with job as work_data
+        const work_item = thread_pool.createBvhBuildingWork(
+            work_id,
+            .tlas,
+            @ptrCast(job),
+            .full_rebuild,
+            .high, // TLAS builds are high priority
+            TlasWorker.tlasWorkerMain,
+            @ptrCast(job), // Pass job as context
+        );
+
+        // Submit to thread pool
+        // Note: Job cleanup will happen when system picks up completed_tlas
+        // or in deinit if still pending
+        try self.bvh_builder.thread_pool.submitWork(work_item);
     }
 
-    /// BLAS completion callback - called asynchronously when BLAS builds finish
-    /// Updates internal arrays with new acceleration structures
-    fn blasCompletionCallback(context: *anyopaque, blas_results: []const BlasResult, tlas_result: ?TlasResult) void {
-        const self = @as(*RaytracingSystem, @ptrCast(@alignCast(context)));
-
-        // Store completed BLAS in internal arrays
-        for (blas_results) |blas_result| {
-            self.blas_handles.append(self.allocator, blas_result.acceleration_structure) catch |err| {
-                log(.ERROR, "raytracing", "Failed to append BLAS handle: {}", .{err});
-            };
-            self.blas_buffers.append(self.allocator, blas_result.buffer) catch |err| {
-                log(.ERROR, "raytracing", "Failed to append BLAS buffer: {}", .{err});
-            };
+    /// Get the current TLAS handle for rendering
+    /// Returns null if no TLAS has been built yet
+    /// This is safe to call from any thread and stable for the entire frame
+    pub fn getTlas(self: *const RaytracingSystem) ?vk.AccelerationStructureKHR {
+        if (self.tlas_registry.current.load(.acquire)) |entry| {
+            return entry.acceleration_structure;
         }
-
-        // If TLAS was also built (full rebuild path), update it
-        if (tlas_result) |tlas| {
-            self.tlas = tlas.acceleration_structure;
-            self.tlas_buffer = tlas.buffer;
-            self.tlas_buffer_initialized = true;
-            self.tlas_instance_buffer = tlas.instance_buffer;
-            self.tlas_instance_buffer_initialized = true;
-            self.bvh_build_in_progress = false;
-            self.completed_tlas = tlas;
-        }
+        return null;
     }
 
-    /// TLAS completion callback - called when TLAS build finishes
-    fn tlasCompletionCallback(context: *anyopaque, result: BvhBuildResult) void {
-        const self = @as(*RaytracingSystem, @ptrCast(@alignCast(context)));
-
-        switch (result) {
-            .build_tlas => |tlas_result| {
-                // TLAS build completed asynchronously - update system state
-
-                // Handle case where a new TLAS completes while an old one still exists
-                // This can happen during rapid rebuilds (e.g., hot-reload scenarios)
-                // Mark old TLAS as orphaned rather than destroying immediately - we don't have frame context here
-                if (self.tlas != .null_handle) {
-                    self.orphaned_tlas = .{
-                        .handle = self.tlas,
-                        .buffer = self.tlas_buffer,
-                        .instance_buffer = self.tlas_instance_buffer,
-                        .buffer_initialized = self.tlas_buffer_initialized,
-                        .instance_buffer_initialized = self.tlas_instance_buffer_initialized,
-                    };
-                }
-
-                // Update raytracing system state with completed TLAS
-                self.tlas = tlas_result.acceleration_structure;
-                self.tlas_buffer = tlas_result.buffer;
-                self.tlas_buffer_initialized = true;
-                self.tlas_instance_buffer = tlas_result.instance_buffer;
-                self.tlas_instance_buffer_initialized = true;
-                self.completed_tlas = tlas_result;
-                self.bvh_build_in_progress = false;
-                self.tlas_dirty = true;
-
-                // Clear builder ownership now that the system tracks this TLAS
-                _ = self.bvh_builder.takeCompletedTlas();
-            },
-            else => {
-                log(.WARN, "raytracing", "TLAS callback received unexpected result type", .{});
-            },
-        }
+    /// Check if TLAS is valid/available
+    pub fn isTlasValid(self: *const RaytracingSystem) bool {
+        return self.tlas_registry.current.load(.acquire) != null;
     }
 
     pub fn deinit(self: *RaytracingSystem) void {
@@ -802,28 +455,20 @@ pub const RaytracingSystem = struct {
             log(.WARN, "raytracing", "Failed to wait for device idle during deinit: {}", .{err});
         };
 
-        // Clean up current resources first (before flushing queues)
-        // This ensures we don't double-free if current resources were queued for destruction
-        if (self.tlas_instance_buffer_initialized) {
-            self.tlas_instance_buffer.deinit();
-            self.tlas_instance_buffer_initialized = false;
-        }
-        if (self.tlas_buffer_initialized) {
-            self.tlas_buffer.deinit();
-            self.tlas_buffer_initialized = false;
-        }
-        if (self.tlas != .null_handle) {
-            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, self.tlas, null);
-            self.tlas = .null_handle;
+        // Clean up TLAS registry - destroy the current TLAS if it exists
+        if (self.tlas_registry.current.load(.acquire)) |entry| {
+            log(.INFO, "raytracing", "Deinit: destroying TLAS from registry {x}", .{@intFromEnum(entry.acceleration_structure)});
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, entry.acceleration_structure, null);
+            var buf = entry.buffer;
+            buf.deinit();
+            var inst_buf = entry.instance_buffer;
+            inst_buf.deinit();
+            self.allocator.destroy(entry);
+            _ = self.tlas_registry.current.swap(null, .release);
         }
 
-        // Destroy all current BLAS
-        for (self.blas_buffers.items, self.blas_handles.items) |*buf, blas| {
-            buf.deinit();
-            if (blas != .null_handle) self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas, null);
-        }
-        self.blas_buffers.clearRetainingCapacity();
-        self.blas_handles.clearRetainingCapacity();
+        // Flush all per-frame destruction queues (old resources queued for deferred destruction)
+        log(.INFO, "raytracing", "Deinit: flushing per-frame destruction queues", .{});
 
         // Flush all per-frame destruction queues (old resources queued for deferred destruction)
         for (&self.per_frame_destroy) |*queue| {
@@ -839,13 +484,9 @@ pub const RaytracingSystem = struct {
             queue.deinit(self.allocator);
         }
 
-        self.blas_buffers.deinit(self.allocator);
-        self.blas_handles.deinit(self.allocator);
         // Destroy shader binding table buffer and free its memory
         if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
-        // Destroy output image/texture
-
     }
 
     /// Flush a single destroy queue (used during deinit)
@@ -899,7 +540,13 @@ pub const RaytracingSystem = struct {
     /// Flush ALL pending destruction queues immediately
     /// Use this when disabling the RT pass to clean up before re-enabling
     pub fn flushAllPendingDestruction(self: *RaytracingSystem) void {
-        for (&self.per_frame_destroy) |*queue| {
+        log(.INFO, "raytracing", "Flushing ALL pending destruction queues", .{});
+        for (&self.per_frame_destroy, 0..) |*queue, i| {
+            const blas_count = queue.blas_handles.items.len;
+            const tlas_count = queue.tlas_handles.items.len;
+            if (blas_count > 0 or tlas_count > 0) {
+                log(.INFO, "raytracing", "  Frame {}: {} BLAS, {} TLAS", .{ i, blas_count, tlas_count });
+            }
             self.flushDestroyQueue(queue);
         }
     }

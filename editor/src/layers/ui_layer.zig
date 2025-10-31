@@ -165,21 +165,16 @@ pub const UILayer = struct {
                 // We check viewport bounds instead of WantCaptureMouse because the viewport window
                 // itself is an ImGui window, so ImGui always wants to capture mouse over it
                 if (in_viewport) {
-                    log(.DEBUG, "picking", "Attempting to pick scene...", .{});
                     if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_size)) |res| {
-                        log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity.index(), res.distance });
                         // Single-select the hit entity
                         if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
                             self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
                         }
                         _ = self.ui_renderer.hierarchy_panel.selected_entities.append(std.heap.page_allocator, res.entity) catch {};
                     } else {
-                        log(.DEBUG, "picking", "No entity hit", .{});
                         // Click in viewport but no hit - clear selection
                         self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
                     }
-                } else {
-                    log(.DEBUG, "picking", "Click outside viewport bounds", .{});
                 }
             }
         }

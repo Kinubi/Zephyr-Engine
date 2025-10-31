@@ -51,6 +51,11 @@ pub const RaytracingData = struct {
         mesh_ptr: *Mesh,
         blas: ?vk.AccelerationStructureKHR = null,
         model_asset: AssetId, // Track which asset this geometry came from
+
+        /// Get stable geometry_id from asset ID (lower 16 bits to fit in 256-slot registry)
+        pub fn getGeometryId(self: RTGeometry) u32 {
+            return @truncate(@intFromEnum(self.model_asset) & 0xFFFF);
+        }
     };
 
     pub const BvhChangeTracker = struct {

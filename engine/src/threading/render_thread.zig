@@ -222,6 +222,11 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 if (err == error.WindowClosed) {
                     break;
                 }
+                // DeviceLost is fatal - panic to see stack trace
+                if (err == error.DeviceLost) {
+                    log(.ERROR, "render_thread", "FATAL: DeviceLost error - panicking to see stack trace", .{});
+                    @panic("DeviceLost - check stack trace for cause");
+                }
                 log(.ERROR, "render_thread", "beginFrame failed: {}", .{err});
                 // Signal frame consumed before skipping
                 ctx.frame_consumed.post();

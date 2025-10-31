@@ -668,21 +668,22 @@ pub const PathTracingPass = struct {
         const geometry_changed = self.render_system.raytracing_descriptors_dirty;
 
         // Update BVH using rt_system (handles BLAS/TLAS building)
-        // After this, rt_system.render_tlas is guaranteed stable for the entire frame
+        // After this, rt_system's TLAS registry is guaranteed stable for the entire frame
         const bvh_rebuilt = try self.rt_system.update(self.render_system, frame_info, geometry_changed);
 
-        // Check if render TLAS changed (uses double-buffered render_tlas which is stable per frame)
-        const tlas_handle_changed = self.tlas != self.rt_system.render_tlas;
-        const tlas_changed = self.rt_system.render_tlas_valid and tlas_handle_changed;
+        // Check if TLAS changed (get from registry - atomic, stable per frame)
+        const new_tlas = self.rt_system.getTlas();
+        const tlas_handle_changed = if (new_tlas) |handle| self.tlas != handle else false;
+        const tlas_changed = self.rt_system.isTlasValid() and tlas_handle_changed;
 
-        // Update cached TLAS when rt_system's render_tlas changed
-        // render_tlas is stable for the entire frame, so this is always safe
-        if (tlas_changed) {
-            // Update cached TLAS to the stable render TLAS produced by rt_system.
-            // The render_tlas value is stable for the entire frame, so it's safe
+        // Update cached TLAS when rt_system's registry TLAS changed
+        // Registry TLAS is stable for the entire frame (atomic swap only happens on completion)
+        if (tlas_changed and new_tlas != null) {
+            // Update cached TLAS to the stable TLAS from registry
+            // The registry value is stable for the entire frame, so it's safe
             // to swap it in immediately and mark descriptors dirty.
-            self.tlas = self.rt_system.render_tlas;
-            self.tlas_valid = self.rt_system.render_tlas_valid;
+            self.tlas = new_tlas.?;
+            self.tlas_valid = self.rt_system.isTlasValid();
         }
 
         const needs_update = bvh_rebuilt or

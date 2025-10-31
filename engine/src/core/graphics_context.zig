@@ -607,11 +607,17 @@ pub const GraphicsContext = struct {
                 }
                 resources.deinit(self.allocator);
             }
-            {
+            
+            // IMPORTANT: Do NOT call vkFreeCommandBuffers on worker thread command buffers!
+            // Command pools can only be accessed from the thread that created them.
+            // Worker thread command buffers will be freed when their pools are reset via resetAllWorkerCommandPools()
+            // Only free if this is from the main thread's pool
+            if (self.pool == gc.command_pool) {
                 gc.command_pool_mutex.lock();
                 defer gc.command_pool_mutex.unlock();
                 gc.vkd.freeCommandBuffers(gc.dev, self.pool, 1, @ptrCast(&self.command_buffer));
             }
+            // For worker pools: command buffer will be freed when pool is reset (no explicit free needed)
         }
     }; // Collection of secondary command buffers to execute at frame end
     var pending_secondary_buffers: std.ArrayList(SecondaryCommandBuffer) = undefined;
