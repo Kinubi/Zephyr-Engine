@@ -179,6 +179,31 @@ pub fn build(b: *std.Build) !void {
     const run_script_demo_step = b.step("run-script-demo", "Run the scripting demo example");
     run_script_demo_step.dependOn(&run_script_demo.step);
 
+    // ========== SCRIPT MULTI-JOB DEMO ==========
+    const script_multi_mod = b.createModule(.{
+        .root_source_file = b.path("examples/script_multi_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const script_multi = b.addExecutable(.{
+        .name = "script_multi_demo",
+        .root_module = script_multi_mod,
+    });
+    script_multi.root_module.addImport("zephyr", engine_mod);
+
+    // Link Lua system library for the scripting demo (PUC-Rio Lua)
+    script_multi.linkSystemLibrary("lua");
+    script_multi.linkLibC();
+
+    b.installArtifact(script_multi);
+
+    const run_script_multi = b.addRunArtifact(script_multi);
+    run_script_multi.step.dependOn(b.getInstallStep());
+
+    const run_script_multi_step = b.step("run-script-multi", "Run the scripting multi-job example");
+    run_script_multi_step.dependOn(&run_script_multi.step);
+
     // ========== TESTS ==========
     const editor_test_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),

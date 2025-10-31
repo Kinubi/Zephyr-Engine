@@ -185,23 +185,18 @@ fn threadPoolWorker(context: *anyopaque, wi: @import("../threading/thread_pool.z
     const job = @as(*ScriptJob, @ptrCast(@alignCast(job_ptr_any)));
 
     // Run the same per-job logic as the local worker
-    // Acquire leased state if configured, otherwise create a temporary one
+    // Acquire leased state from the configured StatePool. We require a pool
+    // to be present; ScriptRunner should be configured with `setupLuaStatePool`.
     var leased_state: ?*anyopaque = null;
-    var created_temp_state: bool = false;
     if (runner.state_pool) |sp| {
         leased_state = sp.acquire();
     } else {
-        const tmp = lua.createLuaState(runner.allocator);
-        if (tmp) |t| {
-            leased_state = t;
-            created_temp_state = true;
-        } else {
-            const msg: []const u8 = "(failed to create lua state)";
-            if (job.callback) |cb| cb(job.id, job.context, false, msg);
-            job.allocator.free(job.script);
-            job.allocator.destroy(job);
-            return;
-        }
+        log(.WARN, "scripting", "no state_pool configured; cannot execute job {}", .{job.id});
+        const msg_no_pool: []const u8 = "(no lua state pool configured)";
+        if (job.callback) |cb| cb(job.id, job.context, false, msg_no_pool);
+        job.allocator.free(job.script);
+        job.allocator.destroy(job);
+        return;
     }
 
     var res = lua.ExecuteResult{ .success = false, .message = "" };
@@ -233,12 +228,8 @@ fn threadPoolWorker(context: *anyopaque, wi: @import("../threading/thread_pool.z
         if (res.message.len > 0) runner.allocator.free(@constCast(res.message));
     }
 
-    // Release/destroy state
-    if (created_temp_state) {
-        lua.destroyLuaState(leased_state.?);
-    } else if (leased_state) |s| {
-        runner.state_pool.?.release(s);
-    }
+    // Release leased state back to the pool
+    runner.state_pool.?.release(leased_state.?);
 
     job.allocator.free(job.script);
     job.allocator.destroy(job);

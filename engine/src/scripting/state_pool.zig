@@ -32,8 +32,6 @@ pub const StatePool = struct {
         for (0..initial_capacity) |_| {
             const r = create_fn(allocator) orelse return createError.UnableToCreateResource;
             try s.pool.append(allocator, r);
-            // Each appended resource corresponds to one semaphore post
-            s.sem.post();
         }
 
         return s;
@@ -53,14 +51,45 @@ pub const StatePool = struct {
 
     /// Acquire a resource from the pool. Blocks until one is available.
     pub fn acquire(self: *StatePool) *anyopaque {
-        self.sem.wait();
+        // Blocking acquire implemented by polling with a short sleep to avoid
+        // depending on a semaphore API that doesn't expose a non-blocking wait.
+        while (true) {
+            self.mutex.lock();
+            if (self.pool.items.len > 0) {
+                const idx = self.pool.items.len - 1;
+                const r = self.pool.items[idx];
+                _ = self.pool.orderedRemove(idx);
+                self.mutex.unlock();
+                return r;
+            }
+            self.mutex.unlock();
+            std.Thread.sleep(std.time.ns_per_ms);
+        }
+    }
+
+    /// Try to acquire a resource without blocking. Returns null if none available.
+    pub fn tryAcquire(self: *StatePool) ?*anyopaque {
         self.mutex.lock();
-        // Pop last
+        if (self.pool.items.len == 0) {
+            self.mutex.unlock();
+            return null;
+        }
         const idx = self.pool.items.len - 1;
         const r = self.pool.items[idx];
         _ = self.pool.orderedRemove(idx);
         self.mutex.unlock();
         return r;
+    }
+
+    /// Try to acquire a resource, waiting up to `timeout_ms` milliseconds.
+    /// Returns null on timeout.
+    pub fn acquireTimeout(self: *StatePool, timeout_ms: i64) ?*anyopaque {
+        const deadline = std.time.milliTimestamp() + timeout_ms;
+        while (std.time.milliTimestamp() <= deadline) {
+            if (self.tryAcquire()) |r| return r;
+            std.Thread.sleep(std.time.ns_per_ms);
+        }
+        return null;
     }
 
     /// Release a resource back to the pool.
@@ -73,8 +102,60 @@ pub const StatePool = struct {
             return;
         };
         self.mutex.unlock();
-        self.sem.post();
     }
 };
 
 pub const createError = error{UnableToCreateResource};
+
+// -----------------------
+// Unit tests
+// -----------------------
+
+fn testCreateInt(_: std.mem.Allocator) ?*anyopaque {
+    const p = std.heap.page_allocator.create(i32) catch return null;
+    p.* = 0;
+    return @ptrCast(p);
+}
+
+fn testDestroyInt(ptr: *anyopaque) void {
+    const p: *i32 = @ptrCast(@alignCast(ptr));
+    std.heap.page_allocator.destroy(p);
+}
+
+test "StatePool basic acquire/release" {
+    const allocator = std.heap.page_allocator;
+    var pool = try StatePool.init(allocator, 1, &testCreateInt, &testDestroyInt);
+    defer pool.deinit();
+
+    const r = pool.acquire();
+    const ip: *i32 = @ptrCast(@alignCast(r));
+    ip.* += 1; // increment
+    pool.release(r);
+
+    const r2 = pool.acquire();
+    const ip2: *i32 = @ptrCast(@alignCast(r2));
+    try std.testing.expect(ip2.* == 1);
+    pool.release(r2);
+}
+
+test "StatePool tryAcquire and acquireTimeout" {
+    const allocator = std.heap.page_allocator;
+    var pool = try StatePool.init(allocator, 1, &testCreateInt, &testDestroyInt);
+    defer pool.deinit();
+
+    const r = pool.acquire();
+
+    // tryAcquire should fail now
+    const t = pool.tryAcquire();
+    try std.testing.expect(t == null);
+
+    // acquireTimeout should time out (short timeout)
+    const at = pool.acquireTimeout(10);
+    try std.testing.expect(at == null);
+
+    // release and ensure tryAcquire succeeds
+    pool.release(r);
+    const t2 = pool.tryAcquire();
+    try std.testing.expect(t2 != null);
+    pool.release(t2.?);
+}

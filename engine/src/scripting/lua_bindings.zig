@@ -74,5 +74,21 @@ pub fn executeLuaBuffer(allocator: std.mem.Allocator, state: *anyopaque, buf: []
         return ExecuteResult{ .success = false, .message = out[0..len] };
     }
 
+    // If the chunk returned values, convert the top-most return value to a
+    // string and return it as the message so callers can observe return values.
+    const ret_count = c.lua_gettop(L);
+    if (ret_count > 0) {
+        const msg = c.lua_tolstring(L, -1, null);
+        if (msg == null) {
+            return ExecuteResult{ .success = true, .message = "" };
+        }
+        const len = c.strlen(msg);
+        const out = try allocator.alloc(u8, len + 1);
+        const msg_ptr3: [*]const u8 = @ptrCast(msg);
+        std.mem.copyForwards(u8, out[0..len], msg_ptr3[0..len]);
+        out[len] = 0;
+        return ExecuteResult{ .success = true, .message = out[0..len] };
+    }
+
     return ExecuteResult{ .success = true, .message = "" };
 }
