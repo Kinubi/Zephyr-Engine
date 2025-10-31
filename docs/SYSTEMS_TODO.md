@@ -45,7 +45,7 @@ This document tracks systems that are implemented but lack full documentation.
 - Prefab system (if implemented)
 
 **Files**:
-- `src/scene/scene_v2.zig`
+- `src/scene/scene.zig`
 - `src/scene/game_object_v2.zig`
 
 ### 2. Buffer System

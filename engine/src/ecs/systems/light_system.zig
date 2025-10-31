@@ -3,6 +3,7 @@ const World = @import("../world.zig").World;
 const Transform = @import("../components/transform.zig").Transform;
 const PointLight = @import("../components/point_light.zig").PointLight;
 const Math = @import("../../utils/math.zig");
+const GlobalUbo = @import("../../rendering/frameinfo.zig").GlobalUbo;
 const log = @import("../../utils/log.zig").log;
 
 /// Extracted light data for rendering
@@ -128,3 +129,65 @@ pub const LightSystem = struct {
         self.lights_dirty = true;
     }
 };
+
+/// Standalone system function for animating lights (for SystemScheduler)
+/// This animates point lights in a circle pattern
+pub fn animateLightsSystem(world: *World, dt: f32) !void {
+    // Static time accumulator (persists across calls)
+    const State = struct {
+        var time_elapsed: f32 = 0.0;
+    };
+    State.time_elapsed += dt;
+
+    // Get GlobalUbo from world userdata for extraction
+
+    const ubo_ptr = world.getUserData("global_ubo");
+    const global_ubo: ?*GlobalUbo = if (ubo_ptr) |ptr| @ptrCast(@alignCast(ptr)) else null;
+
+    var view = try world.view(PointLight);
+    var iter = view.iterator();
+    var light_index: usize = 0;
+
+    while (iter.next()) |entry| : (light_index += 1) {
+        const point_light = entry.component;
+        const transform_ptr = world.get(Transform, entry.entity) orelse continue;
+
+        // Animate position in a circle
+        const radius: f32 = 1.5;
+        const height: f32 = 0.5;
+        const speed: f32 = 1.0;
+        const angle_offset: f32 = @as(f32, @floatFromInt(light_index)) * (2.0 * std.math.pi / 3.0);
+
+        const angle = State.time_elapsed * speed + angle_offset;
+        const x = @cos(angle) * radius;
+        const z = @sin(angle) * radius;
+
+        // Update transform position using setter to mark dirty flag
+        transform_ptr.setPosition(Math.Vec3.init(x, height, z));
+
+        // Extract to GlobalUbo if available
+        if (global_ubo) |ubo| {
+            if (light_index < 16) {
+                ubo.point_lights[light_index] = .{
+                    .position = Math.Vec4.init(x, height, z, 1.0),
+                    .color = Math.Vec4.init(
+                        point_light.color.x * point_light.intensity,
+                        point_light.color.y * point_light.intensity,
+                        point_light.color.z * point_light.intensity,
+                        point_light.intensity,
+                    ),
+                };
+            }
+        }
+    }
+
+    // Finalize GlobalUbo light data
+    if (global_ubo) |ubo| {
+        ubo.num_point_lights = @intCast(@min(light_index, 16));
+
+        // Clear remaining light slots
+        for (light_index..16) |i| {
+            ubo.point_lights[i] = .{};
+        }
+    }
+}

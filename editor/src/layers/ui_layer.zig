@@ -12,7 +12,7 @@ const RenderStats = @import("../ui/ui_renderer.zig").RenderStats;
 const ViewportPicker = @import("../ui/viewport_picker.zig");
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const Swapchain = zephyr.Swapchain;
-const SceneV2 = zephyr.Scene;
+const Scene = zephyr.Scene;
 const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
 const c = @import("../ui/backend/imgui_c.zig").c;
@@ -26,7 +26,7 @@ pub const UILayer = struct {
     ui_renderer: *UIRenderer,
     performance_monitor: ?*PerformanceMonitor,
     swapchain: *Swapchain,
-    scene: *SceneV2,
+    scene: *Scene,
     camera: *Camera,
     camera_controller: *KeyboardMovementController,
     show_ui: bool = true,
@@ -37,7 +37,7 @@ pub const UILayer = struct {
         ui_renderer: *UIRenderer,
         performance_monitor: ?*PerformanceMonitor,
         swapchain: *Swapchain,
-        scene: *SceneV2,
+        scene: *Scene,
         camera: *Camera,
         camera_controller: *KeyboardMovementController,
     ) UILayer {

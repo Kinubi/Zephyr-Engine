@@ -21,6 +21,16 @@ pub const TransformSystem = struct {
         _ = self;
     }
 
+    /// Static wrapper for use with SystemScheduler
+    /// This allows TransformSystem.update to be called without needing self
+    pub fn updateSystem(world: *World, dt: f32) !void {
+        _ = dt;
+        // Create a temporary system instance just for the update
+        // (TransformSystem doesn't actually use any instance state)
+        var temp_system = TransformSystem{ .allocator = undefined };
+        try temp_system.update(world);
+    }
+
     /// Update all transforms in the world
     /// This updates local-to-world matrices for transforms with parents
     /// Uses SIMD batch processing for transforms without parents (8 at a time)

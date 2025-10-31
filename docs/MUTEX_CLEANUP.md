@@ -142,9 +142,15 @@ Phase 5 — ThreadPool
 ✅ **COMPLETED**: Event-driven TLAS worker (spawned from rt_system.update)
 ✅ **COMPLETED**: Per-TLAS-job atomic BLAS tracking
 ✅ **COMPLETED**: Worker-local command pools (no cross-thread pool access)
+✅ **COMPLETED**: BVH Builder lock-free (removed blas_mutex and tlas_mutex)
+  - Lock-free linked list for BLAS destruction queue using CAS operations
+  - Atomic pointer for TLAS completion handoff
+✅ **COMPLETED**: GraphicsContext secondary buffers (atomic double-buffer)
+  - Removed secondary_buffers_mutex
+  - Atomic double-buffer with index flip for lock-free consumer reads
+  - Short append_mutex only for ArrayList append operations
 
 **REMAINING WORK** (Prioritized by Impact):
-- [ ] **HIGH PRIORITY**: GraphicsContext secondary buffers (atomic double-buffer)
 - [ ] **LOW PRIORITY**: EventBus (already well-optimized with swap pattern)
 - [ ] **SKIP**: FileWatcher (low frequency, no contention expected)
 

@@ -5,10 +5,11 @@ const EventType = @import("../core/event.zig").EventType;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const Camera = @import("../rendering/camera.zig").Camera;
-const SceneV2 = @import("../scene/scene_v2.zig").Scene;
+const Scene = @import("../scene/scene.zig").Scene;
 const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const TransformSystem = @import("../ecs.zig").TransformSystem;
 const World = @import("../ecs.zig").World;
+const SystemScheduler = @import("../ecs.zig").SystemScheduler;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 const log = @import("../utils/log.zig").log;
 
@@ -17,11 +18,12 @@ const log = @import("../utils/log.zig").log;
 pub const SceneLayer = struct {
     base: Layer,
     camera: *Camera,
-    scene: *SceneV2,
+    scene: *Scene,
     global_ubo_set: *GlobalUboSet,
     transform_system: *TransformSystem,
     ecs_world: *World,
     performance_monitor: ?*PerformanceMonitor,
+    system_scheduler: ?SystemScheduler,
 
     // Phase 2.1: Cached UBO from prepare() to update()
     // Main thread populates this in prepare(), render thread uses it in update()
@@ -29,12 +31,71 @@ pub const SceneLayer = struct {
 
     pub fn init(
         camera: *Camera,
-        scene: *SceneV2,
+        scene: *Scene,
         global_ubo_set: *GlobalUboSet,
         transform_system: *TransformSystem,
         ecs_world: *World,
         performance_monitor: ?*PerformanceMonitor,
     ) SceneLayer {
+        // Build parallel system scheduler if thread pool is available
+        var scheduler: ?SystemScheduler = null;
+        if (ecs_world.thread_pool != null) {
+            scheduler = SystemScheduler.buildDefault(ecs_world.allocator, ecs_world.thread_pool) catch |err| blk: {
+                log(.WARN, "scene_layer", "Failed to build system scheduler: {}, falling back to sequential", .{err});
+                break :blk null;
+            };
+
+            if (scheduler) |*sched| {
+                const ecs = @import("../ecs.zig");
+
+                // Stage 1: Light animation (modifies light transforms)
+                const stage1 = &sched.stages.items[0];
+
+                stage1.addSystem(.{
+                    .name = "LightAnimationSystem",
+                    .update_fn = ecs.animateLightsSystem,
+                    .access = .{
+                        .reads = &[_][]const u8{"PointLight"},
+                        .writes = &[_][]const u8{"Transform"},
+                    },
+                }) catch |err| {
+                    log(.WARN, "scene_layer", "Failed to add light animation system: {}", .{err});
+                };
+
+                // Stage 2: Transform updates (processes all transforms including animated lights)
+                if (sched.addStage("TransformUpdates")) |stage2| {
+                    stage2.addSystem(.{
+                        .name = "TransformSystem",
+                        .update_fn = ecs.updateTransformSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{},
+                            .writes = &[_][]const u8{"Transform"},
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add transform system: {}", .{err});
+                    };
+                } else |err| {
+                    log(.WARN, "scene_layer", "Failed to add stage 2: {}", .{err});
+                }
+
+                // Stage 3: Particle emitter updates (reads transforms)
+                if (sched.addStage("ParticleEmitterUpdates")) |stage3| {
+                    stage3.addSystem(.{
+                        .name = "ParticleEmitterSystem",
+                        .update_fn = ecs.updateParticleEmittersSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{ "ParticleEmitter", "Transform" },
+                            .writes = &[_][]const u8{},
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add particle emitter system: {}", .{err});
+                    };
+                } else |err| {
+                    log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
+                }
+            }
+        }
+
         return .{
             .base = .{
                 .name = "SceneLayer",
@@ -47,6 +108,7 @@ pub const SceneLayer = struct {
             .transform_system = transform_system,
             .ecs_world = ecs_world,
             .performance_monitor = performance_monitor,
+            .system_scheduler = scheduler,
         };
     }
 
@@ -68,7 +130,9 @@ pub const SceneLayer = struct {
 
     fn detach(base: *Layer) void {
         const self: *SceneLayer = @fieldParentPtr("base", base);
-        _ = self;
+        if (self.system_scheduler) |*sched| {
+            sched.deinit();
+        }
     }
 
     fn prepare(base: *Layer, dt: f32) !void {
@@ -87,11 +151,23 @@ pub const SceneLayer = struct {
             .dt = dt,
         };
 
-        // Update ECS transform hierarchies (CPU work, no Vulkan)
-        try self.transform_system.update(self.ecs_world);
+        // Store GlobalUbo pointer in World so systems can access it
+        try self.ecs_world.setUserData("global_ubo", @ptrCast(&self.prepared_ubo));
+
+        // Update ECS systems (CPU work, no Vulkan)
+        // Use parallel scheduler if available, otherwise fallback to sequential
+        if (self.system_scheduler) |*scheduler| {
+            // Parallel execution of all registered systems
+            // Systems can now extract data to GlobalUbo via userdata
+            try scheduler.execute(self.ecs_world, dt);
+        } else {
+            // Fallback: Sequential execution
+            try self.transform_system.update(self.ecs_world);
+        }
 
         // Prepare scene (ECS queries, particle spawning, light updates - no Vulkan)
-        // This updates prepared_ubo with light data
+        // NOTE: Light extraction now happens in animateLightsSystem
+        // NOTE: Particle GPU updates now happen in updateParticleEmittersSystem
         try self.scene.prepareFrame(&self.prepared_ubo, dt);
     }
 

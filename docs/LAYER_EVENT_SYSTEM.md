@@ -84,7 +84,7 @@ if (performance_monitor) |pm| {
 }
 
 // Scene update
-try scene_v2.update(frame_info, &ubo);
+try scene.update(frame_info, &ubo);
 
 // More performance monitoring
 if (performance_monitor) |pm| {
@@ -98,7 +98,7 @@ asset_manager.beginFrame();
 try swapchain.beginFrame(frame_info);
 
 // More scene stuff
-try scene_v2.render(frame_info);
+try scene.render(frame_info);
 
 // UI rendering
 if (show_ui) {
