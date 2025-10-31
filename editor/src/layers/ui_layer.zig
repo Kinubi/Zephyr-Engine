@@ -5,16 +5,18 @@ const Layer = zephyr.Layer;
 const Event = zephyr.Event;
 const EventType = zephyr.EventType;
 const FrameInfo = zephyr.FrameInfo;
-const ImGuiContext = @import("../ui/imgui_context.zig").ImGuiContext;
+const log = zephyr.log;
+const ImGuiContext = @import("../ui/backend/imgui_context.zig").ImGuiContext;
 const UIRenderer = @import("../ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("../ui/ui_renderer.zig").RenderStats;
+const ViewportPicker = @import("../ui/viewport_picker.zig");
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const Swapchain = zephyr.Swapchain;
 const SceneV2 = zephyr.Scene;
+const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
-const c = @cImport({
-    @cInclude("GLFW/glfw3.h");
-});
+const c = @import("../ui/backend/imgui_c.zig").c;
+const Gizmo = @import("../ui/gizmo.zig").Gizmo;
 
 /// UI overlay layer
 /// Renders ImGui interface with performance stats and debug info
@@ -25,6 +27,7 @@ pub const UILayer = struct {
     performance_monitor: ?*PerformanceMonitor,
     swapchain: *Swapchain,
     scene: *SceneV2,
+    camera: *Camera,
     camera_controller: *KeyboardMovementController,
     show_ui: bool = true,
     current_fps: f32 = 0.0,
@@ -35,6 +38,7 @@ pub const UILayer = struct {
         performance_monitor: ?*PerformanceMonitor,
         swapchain: *Swapchain,
         scene: *SceneV2,
+        camera: *Camera,
         camera_controller: *KeyboardMovementController,
     ) UILayer {
         return .{
@@ -48,6 +52,7 @@ pub const UILayer = struct {
             .performance_monitor = performance_monitor,
             .swapchain = swapchain,
             .scene = scene,
+            .camera = camera,
             .camera_controller = camera_controller,
         };
     }
@@ -131,8 +136,57 @@ pub const UILayer = struct {
             .scene = self.scene,
         };
 
-        // Render UI widgets
+        // Render UI widgets (except scene hierarchy)
         self.ui_renderer.render(stats);
+
+        // Draw overlays (gizmo) and give the gizmo a chance to consume mouse clicks
+        const gizmo_consumed: bool = self.ui_renderer.renderSelectionOverlay(self.scene, self.camera);
+
+        // Accurate CPU-based picking using per-triangle raycasts (viewport_picker)
+        // Only run scene picking if the gizmo did not consume the click (i.e. a gizmo handle wasn't clicked)
+        if (!gizmo_consumed) {
+            const io = c.ImGui_GetIO();
+            const mouse_x = io.*.MousePos.x;
+            const mouse_y = io.*.MousePos.y;
+
+            const mouse_clicked = c.ImGui_IsMouseClicked(0);
+
+            // Check if mouse is within viewport bounds (regardless of ImGui's WantCaptureMouse)
+            // This allows picking even when ImGui thinks it should capture the mouse
+            if (mouse_clicked) {
+                const vp_pos = self.ui_renderer.viewport_pos;
+                const vp_size = self.ui_renderer.viewport_size;
+
+                const in_viewport = vp_size[0] > 1.0 and vp_size[1] > 1.0 and
+                    mouse_x >= vp_pos[0] and mouse_x <= vp_pos[0] + vp_size[0] and
+                    mouse_y >= vp_pos[1] and mouse_y <= vp_pos[1] + vp_size[1];
+
+                // Pick if click is within viewport bounds
+                // We check viewport bounds instead of WantCaptureMouse because the viewport window
+                // itself is an ImGui window, so ImGui always wants to capture mouse over it
+                if (in_viewport) {
+                    log(.DEBUG, "picking", "Attempting to pick scene...", .{});
+                    if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_size)) |res| {
+                        log(.INFO, "picking", "Hit entity {} at distance {d:.2}", .{ res.entity.index(), res.distance });
+                        // Single-select the hit entity
+                        if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
+                            self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
+                        }
+                        _ = self.ui_renderer.hierarchy_panel.selected_entities.append(std.heap.page_allocator, res.entity) catch {};
+                    } else {
+                        log(.DEBUG, "picking", "No entity hit", .{});
+                        // Click in viewport but no hit - clear selection
+                        self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
+                    }
+                } else {
+                    log(.DEBUG, "picking", "Click outside viewport bounds", .{});
+                }
+            }
+        }
+
+        // Now render the scene hierarchy so the new selection is visible immediately
+
+        self.ui_renderer.renderHierarchy(self.scene);
 
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {
@@ -173,15 +227,25 @@ pub const UILayer = struct {
 
         switch (evt.event_type) {
             .KeyPressed => {
-                const GLFW_KEY_F1 = 290;
-                const GLFW_KEY_F2 = 291;
-
-                if (evt.data.KeyPressed.key == GLFW_KEY_F1) {
+                // Use glfw key constants from imgui_c (c.GLFW_KEY_*) for clarity
+                if (evt.data.KeyPressed.key == c.GLFW_KEY_F1) {
                     self.show_ui = !self.show_ui;
                     evt.markHandled();
-                } else if (evt.data.KeyPressed.key == GLFW_KEY_F2) {
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_F2) {
                     // Toggle performance graphs
                     self.ui_renderer.show_performance_graphs = !self.ui_renderer.show_performance_graphs;
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_G) {
+                    Gizmo.setTool(Gizmo.Tool.Translate);
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_R) {
+                    Gizmo.setTool(Gizmo.Tool.Rotate);
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_S) {
+                    Gizmo.setTool(Gizmo.Tool.Scale);
+                    evt.markHandled();
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_ESCAPE) {
+                    Gizmo.cancelDrag();
                     evt.markHandled();
                 }
             },

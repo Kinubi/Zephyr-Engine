@@ -1,12 +1,12 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Math = @import("../utils/math.zig");
 const Obj = @import("zig-obj");
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const Geometry = @import("geometry.zig").Geometry;
 const log = @import("../utils/log.zig").log;
+const Math = @import("../utils/math.zig");
 
 pub const Vertex = struct {
     pos: [3]f32 align(16),
@@ -24,11 +24,14 @@ pub const Mesh = struct {
 
     material_id: u32 = 0, // Index into Scene.materials
 
+    cached_local_bounds: ?BoundingBox = null,
+
     pub fn init(allocator: std.mem.Allocator) Mesh {
         _ = allocator; // Mesh itself doesn't store allocator
         return .{
             .vertices = std.ArrayList(Vertex){},
             .indices = std.ArrayList(u32){},
+            .cached_local_bounds = null,
         };
     }
 
@@ -101,6 +104,44 @@ pub const Mesh = struct {
         if (self.index_buffer) |*buf| buf.deinit();
         self.vertex_buffer = null;
         self.index_buffer = null;
+        self.cached_local_bounds = null;
+    }
+
+    pub const BoundingBox = struct {
+        min: Math.Vec3,
+        max: Math.Vec3,
+    };
+
+    pub fn getOrComputeLocalBounds(self: *Mesh) ?BoundingBox {
+        if (self.cached_local_bounds) |bounds| return bounds;
+        if (self.vertices.items.len == 0) return null;
+
+        var min_vec = Math.Vec3.init(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+        var max_vec = Math.Vec3.init(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
+
+        for (self.vertices.items) |vertex| {
+            const vx = vertex.pos[0];
+            const vy = vertex.pos[1];
+            const vz = vertex.pos[2];
+            if (vx < min_vec.x) min_vec.x = vx;
+            if (vy < min_vec.y) min_vec.y = vy;
+            if (vz < min_vec.z) min_vec.z = vz;
+            if (vx > max_vec.x) max_vec.x = vx;
+            if (vy > max_vec.y) max_vec.y = vy;
+            if (vz > max_vec.z) max_vec.z = vz;
+        }
+
+        const padding: f32 = 0.01;
+        min_vec.x -= padding;
+        min_vec.y -= padding;
+        min_vec.z -= padding;
+        max_vec.x += padding;
+        max_vec.y += padding;
+        max_vec.z += padding;
+
+        const bounds = BoundingBox{ .min = min_vec, .max = max_vec };
+        self.cached_local_bounds = bounds;
+        return bounds;
     }
 
     pub fn draw(self: *const Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {

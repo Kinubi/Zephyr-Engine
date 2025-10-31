@@ -1,14 +1,17 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 
-const c = @cImport({
-    @cInclude("dcimgui.h");
-});
+const c = @import("backend/imgui_c.zig").c;
 
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
 const AssetBrowserPanel = @import("asset_browser_panel.zig").AssetBrowserPanel;
+const ViewportPicker = @import("viewport_picker.zig");
+const Gizmo = @import("gizmo.zig").Gizmo;
+const UIMath = @import("backend/ui_math.zig");
 const Scene = zephyr.Scene;
+const Camera = zephyr.Camera;
+const Math = zephyr.math;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic
@@ -23,8 +26,15 @@ pub const UIRenderer = struct {
     // Scene hierarchy panel
     hierarchy_panel: SceneHierarchyPanel,
 
+    // Last viewport position/size (filled every frame when Viewport window is created)
+    viewport_pos: [2]f32 = .{ 0.0, 0.0 },
+    viewport_size: [2]f32 = .{ 0.0, 0.0 },
+
     // Asset browser panel
     asset_browser_panel: AssetBrowserPanel,
+
+    // Cached draw list for the viewport window (used for overlays)
+    viewport_draw_list: ?*c.ImDrawList = null,
 
     pub fn init(allocator: std.mem.Allocator) UIRenderer {
         var renderer = UIRenderer{
@@ -77,9 +87,23 @@ pub const UIRenderer = struct {
 
         c.ImGui_End();
 
+        self.viewport_draw_list = null;
+
         // Transparent viewport window in the center
         const viewport_flags = c.ImGuiWindowFlags_NoBackground | c.ImGuiWindowFlags_NoScrollbar;
         _ = c.ImGui_Begin("Viewport", null, viewport_flags);
+        // Record viewport position/size so other layers (picking, overlays) can use it
+        // IMPORTANT: Use content region (excludes title bar) for accurate mouse picking
+        const win_pos = c.ImGui_GetWindowPos();
+        const content_region_min = c.ImGui_GetWindowContentRegionMin();
+        const content_region_max = c.ImGui_GetWindowContentRegionMax();
+
+        // Calculate actual content region position and size
+        // Content region min/max are relative to window position
+        self.viewport_pos = .{ win_pos.x + content_region_min.x, win_pos.y + content_region_min.y };
+        self.viewport_size = .{ content_region_max.x - content_region_min.x, content_region_max.y - content_region_min.y };
+        self.viewport_draw_list = c.ImGui_GetWindowDrawList();
+
         c.ImGui_Text("3D Viewport");
         c.ImGui_End();
 
@@ -99,11 +123,85 @@ pub const UIRenderer = struct {
             self.asset_browser_panel.render();
         }
 
-        // Render scene hierarchy if scene is provided
-        if (stats.scene) |scene| {
-            self.hierarchy_panel.render(scene);
+        // NOTE: scene hierarchy is rendered by the caller after any picking logic
+    }
+
+    /// Render only the scene hierarchy (used by caller to render after picking)
+    pub fn renderHierarchy(self: *UIRenderer, scene: *Scene) void {
+        self.hierarchy_panel.render(scene);
+    }
+
+    pub fn renderSelectionOverlay(self: *UIRenderer, scene: *Scene, camera: *Camera) bool {
+        if (self.viewport_draw_list == null) return false;
+        const selected = self.hierarchy_panel.selected_entities.items;
+        if (selected.len == 0) return false;
+        if (self.viewport_size[0] < 1.0 or self.viewport_size[1] < 1.0) return false;
+
+        const draw_list = self.viewport_draw_list.?;
+        var sel_count: usize = 0;
+        var last_aabb: ?ViewportPicker.AxisAlignedBoundingBox = null;
+        for (selected) |entity| {
+            if (ViewportPicker.computeEntityWorldAABB(scene, entity)) |aabb| {
+                drawEntityAABB(self, draw_list, camera, aabb);
+                sel_count += 1;
+                last_aabb = aabb;
+            }
+        }
+
+        // If a single entity is selected, draw and handle gizmo interaction at its center
+        if (sel_count == 1) {
+            if (last_aabb) |aabb| {
+                const center = Math.Vec3.init((aabb.min.x + aabb.max.x) * 0.5, (aabb.min.y + aabb.max.y) * 0.5, (aabb.min.z + aabb.max.z) * 0.5);
+                // Pass the scene and aabb center so the gizmo can perform interactive transforms
+                return Gizmo.process(draw_list, self.viewport_size, camera, center, scene, selected[0]);
+            }
+        }
+
+        return false;
+    }
+
+    fn drawEntityAABB(self: *UIRenderer, draw_list: *c.ImDrawList, camera: *Camera, aabb: ViewportPicker.AxisAlignedBoundingBox) void {
+        const min = aabb.min;
+        const max = aabb.max;
+        const corners = [_]Math.Vec3{
+            Math.Vec3.init(min.x, min.y, min.z),
+            Math.Vec3.init(min.x, min.y, max.z),
+            Math.Vec3.init(min.x, max.y, min.z),
+            Math.Vec3.init(min.x, max.y, max.z),
+            Math.Vec3.init(max.x, min.y, min.z),
+            Math.Vec3.init(max.x, min.y, max.z),
+            Math.Vec3.init(max.x, max.y, min.z),
+            Math.Vec3.init(max.x, max.y, max.z),
+        };
+
+        var projected: [8][2]f32 = undefined;
+        var i: usize = 0;
+        while (i < corners.len) : (i += 1) {
+            if (UIMath.project(camera, self.viewport_size, corners[i])) |screen_pos| {
+                projected[i] = screen_pos;
+            } else {
+                return; // Skip drawing if any corner cannot be projected (behind camera or degenerate)
+            }
+        }
+
+        const color: u32 = UIMath.makeColor(255, 214, 0, 220);
+        const edges = [_][2]usize{
+            .{ 0, 1 }, .{ 0, 2 }, .{ 0, 4 },
+            .{ 1, 3 }, .{ 1, 5 }, .{ 2, 3 },
+            .{ 2, 6 }, .{ 3, 7 }, .{ 4, 5 },
+            .{ 4, 6 }, .{ 5, 7 }, .{ 6, 7 },
+        };
+
+        for (edges) |edge| {
+            const a = projected[edge[0]];
+            const b = projected[edge[1]];
+            c.ImDrawList_AddLine(draw_list, .{ .x = a[0], .y = a[1] }, .{ .x = b[0], .y = b[1] }, color);
         }
     }
+
+    // Projection and matrix helpers moved to `ui_math.zig` and reused here via UIMath
+
+    // Color helper moved to `ui_math.zig` and reused via UIMath
 
     fn renderStatsWindow(self: *UIRenderer, stats: RenderStats) void {
         _ = self;

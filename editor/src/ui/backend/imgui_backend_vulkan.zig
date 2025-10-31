@@ -2,13 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const zephyr = @import("zephyr");
 
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_VULKAN", "1");
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cInclude("GLFW/glfw3.h");
-    @cInclude("dcimgui.h");
-    @cInclude("backends/dcimgui_impl_glfw.h");
-});
+const c = @import("imgui_c.zig").c;
 
 const GraphicsContext = zephyr.GraphicsContext;
 const Swapchain = zephyr.Swapchain;

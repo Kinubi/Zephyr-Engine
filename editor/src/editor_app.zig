@@ -45,7 +45,7 @@ const new_ecs = zephyr.ecs; // New coherent ECS system
 const KeyboardMovementController = @import("keyboard_movement_controller.zig").KeyboardMovementController;
 
 // UI system (editor-specific)
-const ImGuiContext = @import("ui/imgui_context.zig").ImGuiContext;
+const ImGuiContext = @import("ui/backend/imgui_context.zig").ImGuiContext;
 const UIRenderer = @import("ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("ui/ui_renderer.zig").RenderStats;
 
@@ -411,7 +411,7 @@ pub const App = struct {
         try self.engine.getLayerStack().pushLayer(&scene_layer.base);
 
         // Create UI layer (renders ImGui overlay)
-        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, swapchain, &scene_v2, &camera_controller);
+        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, swapchain, &scene_v2, &camera, &camera_controller);
         try self.engine.getLayerStack().pushOverlay(&ui_layer.base); // UI is an overlay (always on top)
 
         log(.INFO, "app", "Editor layers added - Total layers: {}", .{self.engine.getLayerStack().count()});
@@ -461,13 +461,13 @@ pub const App = struct {
         // ==================== USE ENGINE FRAME LOOP ====================
         if (self.engine.isRenderThreadEnabled()) {
             // RENDER THREAD MODE (Phase 2.1): Main thread handles game logic, render thread handles GPU
-            
+
             const dt = self.engine.frame_info.dt;
-            
+
             // MAIN THREAD: Prepare all layers (game logic, ECS queries, NO Vulkan)
             // This calls layer.prepare() which calls scene.prepareFrame()
             try self.engine.prepare(dt);
-            
+
             // MAIN THREAD: Capture game state snapshot and signal render thread (non-blocking)
             // This copies data from World into snapshot for render thread to use
             try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera);

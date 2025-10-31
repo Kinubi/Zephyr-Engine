@@ -1,9 +1,7 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
 
-const c = @cImport({
-    @cInclude("dcimgui.h");
-});
+const c = @import("backend/imgui_c.zig").c;
 
 const ecs = zephyr.ecs;
 const World = ecs.World;
@@ -19,7 +17,7 @@ const Math = zephyr.math;
 
 /// Scene Hierarchy Panel - ImGui panel showing all entities in the ECS world
 pub const SceneHierarchyPanel = struct {
-    selected_entity: ?EntityId = null,
+    selected_entities: std.ArrayList(EntityId) = std.ArrayList(EntityId){},
     show_hierarchy: bool = true,
     show_inspector: bool = true,
 
@@ -27,11 +25,16 @@ pub const SceneHierarchyPanel = struct {
     temp_buffer: [256]u8 = undefined,
 
     pub fn init() SceneHierarchyPanel {
-        return .{};
+        var panel = SceneHierarchyPanel{};
+        panel.selected_entities = std.ArrayList(EntityId){};
+        return panel;
     }
 
     pub fn deinit(self: *SceneHierarchyPanel) void {
-        _ = self;
+        // always free selected_entities storage (ArrayList.deinit is safe
+        // even if the list is empty) so we don't leak if capacity was
+        // allocated earlier.
+        self.selected_entities.deinit(std.heap.page_allocator);
     }
 
     /// Render the hierarchy panel and inspector
@@ -40,7 +43,7 @@ pub const SceneHierarchyPanel = struct {
             self.renderHierarchy(scene);
         }
 
-        if (self.show_inspector and self.selected_entity != null) {
+        if (self.show_inspector and self.selected_entities.items.len > 0) {
             self.renderInspector(scene);
         }
     }
@@ -52,14 +55,27 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Begin("Scene Hierarchy", null, window_flags)) {
             c.ImGui_Text("Scene: %s", scene.name.ptr);
             c.ImGui_Text("Entities: %d", scene.getEntityCount());
+            // Debug: show current selection count and IDs to verify picking
+            c.ImGui_Text("Selected Count: %d", self.selected_entities.items.len);
+            var sel_idx: usize = 0;
+            for (self.selected_entities.items) |eid| {
+                c.ImGui_Text("  [%d] idx=%d (raw=%u)", sel_idx, eid.index(), @intFromEnum(eid));
+                sel_idx += 1;
+            }
             c.ImGui_Separator();
 
             // Iterate over all game objects
             for (scene.iterateObjects()) |*game_obj| {
                 const entity = game_obj.entity_id;
 
-                // Check if this entity is selected
-                const is_selected = if (self.selected_entity) |sel| sel == entity else false;
+                // Check if this entity is selected (multi-select support)
+                var is_selected: bool = false;
+                for (self.selected_entities.items) |eid| {
+                    if (eid == entity) {
+                        is_selected = true;
+                        break;
+                    }
+                }
 
                 // Build entity label with component info
                 var label_buf: [128]u8 = undefined;
@@ -71,19 +87,39 @@ pub const SceneHierarchyPanel = struct {
 
                 _ = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags | selected_flag);
 
-                // Handle selection
+                // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
                 if (c.ImGui_IsItemClicked()) {
-                    self.selected_entity = entity;
+                    const io = c.ImGui_GetIO();
+                    if (io.*.KeyCtrl) {
+                        // toggle membership: use std.mem.indexOf for concise lookup
+                        // Ensure we pass an explicit slice to match std.mem.indexOf signature
+                        const needle = [_]EntityId{entity};
+                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                        if (maybe_idx) |i| {
+                            _ = self.selected_entities.swapRemove(i);
+                        } else {
+                            _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                        }
+                    } else if (io.*.KeyShift) {
+                        // add to selection
+                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                    } else {
+                        // single select
+                        if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
+                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                    }
                 }
 
                 // Context menu for entity operations
                 if (c.ImGui_BeginPopupContextItem()) {
                     if (c.ImGui_MenuItem("Delete Entity")) {
                         scene.destroyObject(game_obj);
-                        if (self.selected_entity) |sel| {
-                            if (sel == entity) {
-                                self.selected_entity = null;
-                            }
+                        // remove from selection if present
+                        // Find and remove the entity from the selection (if present)
+                        const needle = [_]EntityId{entity};
+                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                        if (maybe_idx) |i| {
+                            _ = self.selected_entities.swapRemove(i);
                         }
                     }
                     c.ImGui_EndPopup();
@@ -98,9 +134,9 @@ pub const SceneHierarchyPanel = struct {
         const window_flags = c.ImGuiWindowFlags_NoCollapse;
 
         if (c.ImGui_Begin("Inspector", null, window_flags)) {
-            if (self.selected_entity) |entity| {
-                const entity_u32: u32 = @intFromEnum(entity);
-                c.ImGui_Text("Entity ID: %d", entity_u32);
+            if (self.selected_entities.items.len > 0) {
+                const entity = self.selected_entities.items[0];
+                c.ImGui_Text("Entity Index: %d (raw=%u)", entity.index(), @intFromEnum(entity));
                 c.ImGui_Separator();
 
                 // Transform component
@@ -146,6 +182,7 @@ pub const SceneHierarchyPanel = struct {
     fn buildEntityLabel(self: *SceneHierarchyPanel, world: *World, entity: EntityId, buf: []u8) ![:0]const u8 {
         _ = self;
 
+        const entity_index = entity.index();
         const entity_u32: u32 = @intFromEnum(entity);
         var components = std.ArrayList(u8){};
         defer components.deinit(std.heap.page_allocator);
@@ -179,9 +216,9 @@ pub const SceneHierarchyPanel = struct {
         }
 
         const label = if (has_any)
-            try std.fmt.bufPrintZ(buf, "Entity {d} [{s}]", .{ entity_u32, components.items })
+            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d}) [{s}]", .{ entity_u32, entity_index, components.items })
         else
-            try std.fmt.bufPrintZ(buf, "Entity {d}", .{entity_u32});
+            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d})", .{ entity_u32, entity_index });
 
         return label;
     }

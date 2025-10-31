@@ -348,7 +348,6 @@ pub const MultithreadedBvhBuilder = struct {
     pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
         self.tlas_mutex.lock();
         defer self.tlas_mutex.unlock();
-        log(.DEBUG, "bvh_builder", "Taking completed TLAS result", .{});
 
         const result = self.completed_tlas;
         if (result != null) {

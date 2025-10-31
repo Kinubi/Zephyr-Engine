@@ -166,48 +166,58 @@ pub fn batchBuildTRSMatrices(
 ) void {
     std.debug.assert(output.len >= 128);
 
-    // Build 8 TRS matrices in parallel
-    // Matrix layout (column-major):
-    // [0  4  8  12]
-    // [1  5  9  13]
-    // [2  6  10 14]
-    // [3  7  11 15]
+    // Build 8 TRS matrices in parallel using proper SIMD operations
+    // We'll construct matrices in SoA (Structure of Arrays) format, then transpose to AoS
+    // Matrix layout (row-major in memory, since Vulkan expects row-major [3][4]):
+    // Each matrix is 16 floats: [m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14 m15]
 
-    // For each of the 8 matrices, write in column-major order
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        const mat_offset = i * 16;
+    const zero: F32x8 = @splat(0.0);
+    const one: F32x8 = @splat(1.0);
 
-        // Column 0: [scale_x, 0, 0, 0]
-        output[mat_offset + 0] = @as([8]f32, @bitCast(scale_x))[i];
-        output[mat_offset + 1] = 0.0;
-        output[mat_offset + 2] = 0.0;
-        output[mat_offset + 3] = 0.0;
+    // Build matrix rows as SIMD vectors (8 matrices worth of each row element)
+    // For simple TRS (no rotation), the matrix structure is:
+    // [sx  0   0   px]
+    // [0   sy  0   py]
+    // [0   0   sz  pz]
+    // [0   0   0   1 ]
 
-        // Column 1: [0, scale_y, 0, 0]
-        output[mat_offset + 4] = 0.0;
-        output[mat_offset + 5] = @as([8]f32, @bitCast(scale_y))[i];
-        output[mat_offset + 6] = 0.0;
-        output[mat_offset + 7] = 0.0;
+    // We need to transpose from SoA (8 values per matrix element) to AoS (16 elements per matrix)
+    // Transpose and store: convert from 16 vectors of 8 elements to 8 matrices of 16 elements
+    // For each matrix element position, we have a vector of 8 values (one per matrix)
+    comptime var elem: usize = 0;
+    inline while (elem < 16) : (elem += 1) {
+        const vec = switch (elem) {
+            0 => scale_x, // m0: scale_x for all 8 matrices
+            1 => zero, // m1: 0
+            2 => zero, // m2: 0
+            3 => zero, // m3: 0
+            4 => zero, // m4: 0
+            5 => scale_y, // m5: scale_y for all 8 matrices
+            6 => zero, // m6: 0
+            7 => zero, // m7: 0
+            8 => zero, // m8: 0
+            9 => zero, // m9: 0
+            10 => scale_z, // m10: scale_z for all 8 matrices
+            11 => zero, // m11: 0
+            12 => pos_x, // m12: pos_x for all 8 matrices
+            13 => pos_y, // m13: pos_y for all 8 matrices
+            14 => pos_z, // m14: pos_z for all 8 matrices
+            15 => one, // m15: 1
+            else => unreachable,
+        };
+        const arr: [8]f32 = @bitCast(vec);
 
-        // Column 2: [0, 0, scale_z, 0]
-        output[mat_offset + 8] = 0.0;
-        output[mat_offset + 9] = 0.0;
-        output[mat_offset + 10] = @as([8]f32, @bitCast(scale_z))[i];
-        output[mat_offset + 11] = 0.0;
-
-        // Column 3: [pos_x, pos_y, pos_z, 1]
-        output[mat_offset + 12] = @as([8]f32, @bitCast(pos_x))[i];
-        output[mat_offset + 13] = @as([8]f32, @bitCast(pos_y))[i];
-        output[mat_offset + 14] = @as([8]f32, @bitCast(pos_z))[i];
-        output[mat_offset + 15] = 1.0;
+        // Write this element to all 8 matrices
+        comptime var mat: usize = 0;
+        inline while (mat < 8) : (mat += 1) {
+            output[mat * 16 + elem] = arr[mat];
+        }
     }
 }
 
 /// Check if 8 boolean flags are all false (returns true if all false)
 pub inline fn allFalse(flags: [8]bool) bool {
-    return !flags[0] and !flags[1] and !flags[2] and !flags[3] and
-        !flags[4] and !flags[5] and !flags[6] and !flags[7];
+    return @as(u8, @bitCast(flags)) == 0;
 }
 
 // ============================================================================

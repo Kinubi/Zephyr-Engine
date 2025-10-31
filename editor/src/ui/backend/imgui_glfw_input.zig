@@ -1,11 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_VULKAN", "1");
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cInclude("GLFW/glfw3.h");
-    @cInclude("dcimgui.h");
-});
+const c = @import("imgui_c.zig").c;
 
 /// Minimal GLFW input handler for ImGui - optimized for performance
 /// Only updates what ImGui actually needs

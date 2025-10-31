@@ -234,8 +234,8 @@ pub const RenderSystem = struct {
         entities: []const EntityId,
         start_idx: usize,
         end_idx: usize,
+        // Per-worker results buffer (allocated by parent) to avoid locking
         results: *std.ArrayList(RenderableEntity),
-        mutex: *std.Thread.Mutex,
         completion: *std.atomic.Value(usize),
     };
 
@@ -244,9 +244,8 @@ pub const RenderSystem = struct {
         const ctx = @as(*ExtractionWorkContext, @ptrCast(@alignCast(context)));
         _ = work_item;
 
-        // Extract renderables for this chunk
-        var local_results = std.ArrayList(RenderableEntity){};
-        defer local_results.deinit(ctx.system.allocator);
+        // Extract renderables for this chunk into the per-worker results buffer
+        const out = ctx.results; // preallocated per-worker buffer
 
         for (ctx.entities[ctx.start_idx..ctx.end_idx]) |entity| {
             // Check if entity has MeshRenderer
@@ -261,8 +260,8 @@ pub const RenderSystem = struct {
             const transform = ctx.world.get(Transform, entity);
             const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
 
-            // Create renderable entry
-            local_results.append(ctx.system.allocator, RenderableEntity{
+            // Create renderable entry directly into worker-local buffer
+            out.append(ctx.system.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_asset = renderer.material_asset,
                 .texture_asset = renderer.getTextureAsset(),
@@ -272,18 +271,6 @@ pub const RenderSystem = struct {
                 .receives_shadows = renderer.receives_shadows,
             }) catch |err| {
                 std.log.err("Failed to append renderable in worker: {}", .{err});
-                _ = ctx.completion.fetchSub(1, .release);
-                return;
-            };
-        }
-
-        // Merge results with mutex protection
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
-
-        for (local_results.items) |item| {
-            ctx.results.append(ctx.system.allocator, item) catch |err| {
-                std.log.err("Failed to merge worker results: {}", .{err});
                 _ = ctx.completion.fetchSub(1, .release);
                 return;
             };
@@ -317,9 +304,17 @@ pub const RenderSystem = struct {
 
         log(.DEBUG, "render_system", "Parallel extraction: {} entities, {} workers, {} chunk size", .{ all_entities.len, worker_count, chunk_size });
 
-        // Create mutex for result merging and atomic completion counter
-        var mutex = std.Thread.Mutex{};
+        // Create atomic completion counter and per-worker result buffers
         var completion = std.atomic.Value(usize).init(worker_count);
+
+        // Allocate per-worker result buffers (worker-local ArrayList) to avoid locking
+        var worker_results = try self.allocator.alloc(std.ArrayList(RenderableEntity), worker_count);
+        defer self.allocator.free(worker_results);
+
+        // Initialize each worker's local results list
+        for (0..worker_count) |wi| {
+            worker_results[wi] = std.ArrayList(RenderableEntity){};
+        }
 
         // Submit work for each chunk
         var contexts = try self.allocator.alloc(ExtractionWorkContext, worker_count);
@@ -337,8 +332,8 @@ pub const RenderSystem = struct {
                 .entities = all_entities,
                 .start_idx = start_idx,
                 .end_idx = end_idx,
-                .results = renderables,
-                .mutex = &mutex,
+                // Give each worker its own results buffer
+                .results = &worker_results[i],
                 .completion = &completion,
             };
 
@@ -361,6 +356,19 @@ pub const RenderSystem = struct {
         // Wait for all workers to complete
         while (completion.load(.acquire) > 0) {
             std.Thread.yield() catch {};
+        }
+
+        // Merge per-worker results serially into the shared renderables list
+        for (0..submitted_count) |i| {
+            const wr = &worker_results[i];
+            for (wr.items) |item| {
+                renderables.append(self.allocator, item) catch |err| {
+                    std.log.err("Failed to merge worker results (post): {}", .{err});
+                    // continue merging remaining items
+                };
+            }
+            // Deinit worker-local list (free its backing memory)
+            wr.deinit(self.allocator);
         }
     }
 
@@ -862,8 +870,6 @@ pub const RenderSystem = struct {
         } else if (total_time_ms > budget_ms * 0.8) {
             // Warn at 80% of budget
             log(.INFO, "render_system", "Approaching frame budget: {d:.2}ms / {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, budget_ms, extraction_time_ms, cache_build_time_ms });
-        } else {
-            log(.DEBUG, "render_system", "Rebuild complete: {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, extraction_time_ms, cache_build_time_ms });
         }
 
         // Clear dirty flags only for renderable entities (not lights, cameras, etc.)
