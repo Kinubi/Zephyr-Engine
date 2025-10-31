@@ -219,6 +219,37 @@ pub fn build(b: *std.Build) !void {
     const run_editor_tests = b.addRunArtifact(editor_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_editor_tests.step);
+
+    // StatePool unit tests (engine/src/scripting/state_pool.zig contains tests)
+    const state_pool_test_mod = b.createModule(.{
+        .root_source_file = b.path("engine/src/scripting/state_pool.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const state_pool_tests = b.addTest(.{
+        .root_module = state_pool_test_mod,
+    });
+    const run_state_pool_tests = b.addRunArtifact(state_pool_tests);
+    run_state_pool_tests.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&run_state_pool_tests.step);
+
+    // ScriptRunner integration test (needs engine/zephyr import and Lua linkage)
+    const script_integration_mod = b.createModule(.{
+        .root_source_file = b.path("engine/src/scripting/script_runner_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const script_integration_tests = b.addTest(.{
+        .root_module = script_integration_mod,
+    });
+    script_integration_tests.root_module.addImport("zephyr", engine_mod);
+    // Link Lua C library for the integration test
+    script_integration_tests.linkSystemLibrary("lua");
+    script_integration_tests.linkLibC();
+
+    const run_script_integration = b.addRunArtifact(script_integration_tests);
+    run_script_integration.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&run_script_integration.step);
 }
 
 // Helper function to add SPIRV-Cross to a compile step

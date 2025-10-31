@@ -1,3 +1,88 @@
+# Scripting subsystem (notes & non-engine tasks)
+
+This document summarizes the current scripting subsystem state (Lua + ScriptRunner + StatePool) and lists non-engine tasks to finish before full engine integration.
+
+## Current state (feature branch)
+
+- ScriptRunner: enqueues scripts and submits WorkItems to the engine `ThreadPool`.
+- StatePool: generic pool for leasing per-job resources (used for `lua_State`).
+- Lua bindings: `engine/src/scripting/lua_bindings.zig` wraps create/destroy/execute and returns allocator-owned messages for errors/return values.
+- ActionQueue: thread-safe queue for main-thread delivery of results (owners must free message slices on pop).
+- Examples:
+  - `examples/script_demo.zig` — demonstrates state persistence across two calls using a StatePool size of 1.
+  - `examples/script_multi_demo.zig` — enqueues multiple concurrent jobs to stress the pool and ThreadPool integration.
+- Tests:
+  - `engine/src/scripting/state_pool.zig` contains unit tests for acquire/release, tryAcquire, and acquireTimeout.
+  - `engine/src/scripting/script_runner_integration_test.zig` is an integration test that exercises ScriptRunner + StatePool end-to-end.
+  - Both tests are wired into `zig build test` via `build.zig`.
+
+## Contracts & ownership notes
+
+- `executeLuaBuffer(allocator, state, buf)` allocates an error or return-message using the provided allocator; callers are responsible for freeing the returned `[]u8` slice exactly once (main thread consumer or callback).
+- `Action.message` is `?[]u8` and is owned by the queue consumer; they must free it via the same allocator that created it (usually `page_allocator` in examples).
+- `StatePool.acquire()` returns an exclusive `*anyopaque` resource that must be returned via `release()`.
+
+## Non-engine tasks (recommended, prioritized)
+
+1) Wire up lower-latency waiting for `StatePool.acquire()` (high priority)
+   - Problem: current blocking acquire is implemented with polling + short sleep. This works but causes unnecessary wakeups and millisecond latency.
+   - Options:
+     - Use a condition-variable or native OS semaphore with try-wait semantics to block threads efficiently.
+     - Implement a small wait-notify using `std.Thread.Condition` (if available in the std of the toolchain) or create platform shims.
+   - Deliverable: replace polling loop with a proper wait/notify, preserving tryAcquire/acquireTimeout behavior.
+
+2) Robust timeout/cancellation and error handling (medium priority)
+   - Problem: long-running or stuck Lua scripts can block worker threads or hold a `lua_State` indefinitely.
+   - Options:
+     - Use `acquireTimeout()` to limit how long a job waits for a state and fail-fast with a clear Action error.
+     - Implement cooperative script timeouts via Lua debug hooks (lua_sethook) to periodically check a cancellation flag.
+     - As a last resort, execute scripts in OS threads that can be terminated—this is heavy and platform-dependent.
+   - Deliverable: support configurable script timeouts; have ScriptRunner return timeout errors to ActionQueue.
+
+3) Message lifecycle audits (medium priority)
+   - Problem: allocator/free ownership must be unambiguous across threads.
+   - Action: grep for `allocator.free(...)` across scripting code and examples; ensure only `[]u8` slices (not raw pointers) are passed to `free` and every allocated message has exactly one free path.
+   - Deliverable: short audit commit and small fixes where mismatches are found.
+
+4) Improve tests / add CI step (medium priority)
+   - Current: StatePool unit tests + ScriptRunner integration test are added and runnable with `zig build test` locally.
+   - Action: Add a lightweight CI workflow (GitHub Actions) to run `zig build test` on Linux (and optionally macOS) — ensure environment provides `lua` system library or install Lua as part of the job.
+   - Deliverable: `.github/workflows/ci.yaml` that runs tests.
+
+5) More integration & stress tests (low priority)
+   - Add tests that enqueue many concurrent scripts, test `acquireTimeout` races, and simulate high-throughput ActionQueue usage.
+
+6) Optional optimization: per-worker `lua_State` caching (low priority)
+   - Problem: Central StatePool can be contended under heavy load.
+   - Option: keep a worker-local `lua_State` in each ThreadPool worker (fast path) and use StatePool only as fallback. Requires ThreadPool changes to expose worker-local storage or lifecycle hooks.
+
+7) Documentation & examples (ongoing)
+   - Add docs describing ScriptRunner API, StatePool semantics, ActionQueue ownership, and examples usage (this file is the start).
+
+## How to run the tests/examples locally
+
+Build and run tests:
+
+```fish
+cd /path/to/ZulkanZengine
+zig build test
+```
+
+Run the demo examples:
+
+```fish
+zig build run-script-demo
+zig build run-script-multi
+```
+
+## Next step before engine integration
+
+Complete items 1–3 above (StatePool wait improvements, timeouts/cancellation, message lifecycle audit). These make the scripting subsystem robust enough to be owned by the engine and used by other systems safely.
+
+Once you're ready I can start the engine integration (create `ScriptingSystem`, export `ScriptRunner` in `zephyr.zig`, and wire ActionQueue into the main loop). I'll hold off until you commit the doc changes.
+
+---
+Document last updated: 2025-10-31
 Scripting subsystem design — Lua integration
 
 Goal
