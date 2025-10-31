@@ -19,7 +19,7 @@ const GlobalUbo = zephyr.GlobalUbo;
 const GlobalUboSet = zephyr.GlobalUboSet;
 
 // Scene v2 imports from engine (ECS-based scene system)
-const SceneV2 = zephyr.Scene;
+const Scene = zephyr.Scene;
 const GameObjectV2 = zephyr.GameObject;
 
 // Asset system imports from engine
@@ -123,8 +123,8 @@ pub const App = struct {
     var transform_system: new_ecs.TransformSystem = undefined;
 
     // Scene v2 (ECS-based scene)
-    var scene_v2: SceneV2 = undefined;
-    var scene_v2_enabled: bool = true; // Always enabled now
+    var scene: Scene = undefined;
+    var scene_enabled: bool = true; // Always enabled now
 
     // UI system
     var imgui_context: ImGuiContext = undefined;
@@ -246,7 +246,10 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene_v2 = try SceneV2.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
+        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
+
+        // Register scene pointer in World so systems can access it
+        try new_ecs_world.setUserData("scene", @ptrCast(&scene));
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -268,54 +271,54 @@ pub const App = struct {
         const box_offset_z: f32 = 3.0; // Push box away from camera
 
         // Floor (white)
-        const floor = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const floor = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
         try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
-        const ceiling = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const ceiling = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
         try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
         // Back wall (white)
-        const back_wall = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const back_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
         try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
         // Left wall (red) - using error.png for red color
-        const left_wall = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/error.png");
+        const left_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/error.png");
         try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
-        const right_wall = try scene_v2.spawnProp("assets/models/cube.obj", "assets/textures/default.png");
+        const right_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/default.png");
         try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
         // Second vase (right side) - flat vase
-        const vase2 = try scene_v2.spawnProp("assets/models/flat_vase.obj", "assets/textures/granitesmooth1-albedo.png");
+        const vase2 = try scene.spawnProp("assets/models/flat_vase.obj", "assets/textures/granitesmooth1-albedo.png");
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
 
-        log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene_v2.entities.items.len});
+        log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene.entities.items.len});
 
         // ==================== Add Lights to Scene v2 ====================
         log(.INFO, "app", "Adding lights to scene v2...", .{});
 
-        // Register PointLight component in scene_v2's ECS world
-        try scene_v2.ecs_world.registerComponent(new_ecs.PointLight);
+        // Register PointLight component in scene's ECS world
+        try scene.ecs_world.registerComponent(new_ecs.PointLight);
 
         // Main light (white, center-top)
-        const main_light = try scene_v2.ecs_world.createEntity();
+        const main_light = try scene.ecs_world.createEntity();
         const main_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(0, 1.5, 1.0));
-        try scene_v2.ecs_world.emplace(new_ecs.Transform, main_light, main_light_transform);
-        try scene_v2.ecs_world.emplace(new_ecs.PointLight, main_light, new_ecs.PointLight.initWithRange(
+        try scene.ecs_world.emplace(new_ecs.Transform, main_light, main_light_transform);
+        try scene.ecs_world.emplace(new_ecs.PointLight, main_light, new_ecs.PointLight.initWithRange(
             Math.Vec3.init(1.0, 1.0, 1.0), // White
             3.0, // Intensity
             10.0, // Range
@@ -323,10 +326,10 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Added main light", .{});
 
         // Warm accent light (left side, orange)
-        const warm_light = try scene_v2.ecs_world.createEntity();
+        const warm_light = try scene.ecs_world.createEntity();
         const warm_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0.5, 1.0));
-        try scene_v2.ecs_world.emplace(new_ecs.Transform, warm_light, warm_light_transform);
-        try scene_v2.ecs_world.emplace(new_ecs.PointLight, warm_light, new_ecs.PointLight.initWithRange(
+        try scene.ecs_world.emplace(new_ecs.Transform, warm_light, warm_light_transform);
+        try scene.ecs_world.emplace(new_ecs.PointLight, warm_light, new_ecs.PointLight.initWithRange(
             Math.Vec3.init(1.0, 0.6, 0.2), // Orange
             2.0, // Intensity
             8.0, // Range
@@ -334,10 +337,10 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Added warm accent light", .{});
 
         // Cool accent light (right side, blue)
-        const cool_light = try scene_v2.ecs_world.createEntity();
+        const cool_light = try scene.ecs_world.createEntity();
         const cool_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0.5, 1.0));
-        try scene_v2.ecs_world.emplace(new_ecs.Transform, cool_light, cool_light_transform);
-        try scene_v2.ecs_world.emplace(new_ecs.PointLight, cool_light, new_ecs.PointLight.initWithRange(
+        try scene.ecs_world.emplace(new_ecs.Transform, cool_light, cool_light_transform);
+        try scene.ecs_world.emplace(new_ecs.PointLight, cool_light, new_ecs.PointLight.initWithRange(
             Math.Vec3.init(0.2, 0.5, 1.0), // Blue
             2.0, // Intensity
             8.0, // Range
@@ -347,7 +350,7 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Lights added successfully", .{});
 
         asset_manager.beginFrame();
-        // Initialize RenderGraph for scene_v2
+        // Initialize RenderGraph for scene
         // Get window dimensions for path tracing pass
         var window_width: c_int = 0;
         var window_height: c_int = 0;
@@ -357,7 +360,7 @@ pub const App = struct {
         global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
         global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator);
 
-        try scene_v2.initRenderGraph(
+        try scene.initRenderGraph(
             gc,
             &unified_pipeline_system,
             swapchain.surface_format.format,
@@ -370,7 +373,7 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
 
         // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
-        try scene_v2.addParticleEmitter(
+        try scene.addParticleEmitter(
             vase2.entity_id,
             50.0, // emission_rate: 50 particles per second
             2.5, // particle_lifetime: 2.5 seconds
@@ -395,23 +398,23 @@ pub const App = struct {
         log(.INFO, "app", "ImGui initialized", .{});
 
         // Connect performance monitor to scene
-        if (scene_v2_enabled and performance_monitor != null) {
-            scene_v2.setPerformanceMonitor(performance_monitor);
+        if (scene_enabled and performance_monitor != null) {
+            scene.setPerformanceMonitor(performance_monitor);
         }
 
         // ==================== Add Editor-Specific Layers ====================
         log(.INFO, "app", "Adding editor-specific layers...", .{});
 
         // Create input layer (handles camera movement and input)
-        input_layer = InputLayer.init(window, &camera, &camera_controller, &scene_v2);
+        input_layer = InputLayer.init(window, &camera, &camera_controller, &scene);
         try self.engine.getLayerStack().pushLayer(&input_layer.base);
 
         // Create scene layer (updates scene, ECS systems, UBO)
-        scene_layer = SceneLayer.init(&camera, &scene_v2, global_ubo_set, &transform_system, &new_ecs_world, performance_monitor);
+        scene_layer = SceneLayer.init(&camera, &scene, global_ubo_set, &transform_system, &new_ecs_world, performance_monitor);
         try self.engine.getLayerStack().pushLayer(&scene_layer.base);
 
         // Create UI layer (renders ImGui overlay)
-        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, swapchain, &scene_v2, &camera, &camera_controller);
+        ui_layer = UILayer.init(&imgui_context, &ui_renderer, performance_monitor, swapchain, &scene, &camera, &camera_controller);
         try self.engine.getLayerStack().pushOverlay(&ui_layer.base); // UI is an overlay (always on top)
 
         log(.INFO, "app", "Editor layers added - Total layers: {}", .{self.engine.getLayerStack().count()});
@@ -443,14 +446,14 @@ pub const App = struct {
             if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
                 log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
 
-                var loaded_object = try scene_v2.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
+                var loaded_object = try scene.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
                 try loaded_object.setPosition(scheduled_asset.position);
                 try loaded_object.setScale(scheduled_asset.scale);
 
                 log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
 
                 scheduled_asset.loaded = true;
-                try scene_v2.addParticleEmitter(
+                try scene.addParticleEmitter(
                     loaded_object.entity_id,
                     50.0, // emission_rate: 50 particles per second
                     2.5, // particle_lifetime: 2.5 seconds
@@ -514,8 +517,8 @@ pub const App = struct {
         unified_pipeline_system.deinit();
 
         // Clean up Scene v2
-        if (scene_v2_enabled) {
-            scene_v2.deinit();
+        if (scene_enabled) {
+            scene.deinit();
             log(.INFO, "app", "Scene v2 cleaned up", .{});
         }
 

@@ -9,7 +9,7 @@ const EntityId = ecs.EntityId;
 const Transform = ecs.Transform;
 
 // Forward declaration to avoid circular dependency
-const Scene = @import("scene_v2.zig").Scene;
+const Scene = @import("scene.zig").Scene;
 
 /// GameObject is a lightweight handle to an ECS entity
 /// Provides Unity-like convenience methods

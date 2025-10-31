@@ -8,7 +8,7 @@ const FrameInfo = zephyr.FrameInfo;
 const Window = zephyr.Window;
 const Camera = zephyr.Camera;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
-const SceneV2 = zephyr.Scene;
+const Scene = zephyr.Scene;
 const log = zephyr.log;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
@@ -21,7 +21,7 @@ pub const InputLayer = struct {
     window: *Window,
     camera: *Camera,
     camera_controller: *KeyboardMovementController,
-    scene: *SceneV2,
+    scene: *Scene,
     last_toggle_time: f64 = 0.0,
 
     const TOGGLE_COOLDOWN: f64 = 0.3; // 300ms cooldown
@@ -30,7 +30,7 @@ pub const InputLayer = struct {
         window: *Window,
         camera: *Camera,
         camera_controller: *KeyboardMovementController,
-        scene: *SceneV2,
+        scene: *Scene,
     ) InputLayer {
         return .{
             .base = .{

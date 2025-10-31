@@ -8,7 +8,7 @@ const UIRenderer = @import("../ui/ui_renderer.zig").UIRenderer;
 const RenderStats = @import("../ui/ui_renderer.zig").RenderStats;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 const Swapchain = @import("../core/swapchain.zig").Swapchain;
-const SceneV2 = @import("../scene/scene_v2.zig").Scene;
+const Scene = @import("../scene/scene.zig").Scene;
 const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
@@ -22,7 +22,7 @@ pub const UILayer = struct {
     ui_renderer: *UIRenderer,
     performance_monitor: ?*PerformanceMonitor,
     swapchain: *Swapchain,
-    scene: *SceneV2,
+    scene: *Scene,
     camera_controller: *KeyboardMovementController,
     show_ui: bool = true,
     current_fps: f32 = 0.0,
@@ -32,7 +32,7 @@ pub const UILayer = struct {
         ui_renderer: *UIRenderer,
         performance_monitor: ?*PerformanceMonitor,
         swapchain: *Swapchain,
-        scene: *SceneV2,
+        scene: *Scene,
         camera_controller: *KeyboardMovementController,
     ) UILayer {
         return .{

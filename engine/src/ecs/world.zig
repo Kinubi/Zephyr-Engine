@@ -20,6 +20,7 @@ pub const World = struct {
     storages: std.StringHashMap(*anyopaque),
     storage_metadata: std.StringHashMap(StorageMetadata),
     thread_pool: ?*ThreadPool,
+    userdata: std.StringHashMap(*anyopaque),
 
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !World {
         // Register ecs_update subsystem with thread pool if provided
@@ -33,17 +34,19 @@ pub const World = struct {
             });
             log(.INFO, "ecs", "Registered ecs_update subsystem with thread pool", .{});
         }
-        
+
         return .{
             .allocator = allocator,
             .entity_registry = EntityRegistry.init(allocator),
             .storages = std.StringHashMap(*anyopaque).init(allocator),
             .storage_metadata = std.StringHashMap(StorageMetadata).init(allocator),
             .thread_pool = thread_pool,
+            .userdata = std.StringHashMap(*anyopaque).init(allocator),
         };
     }
 
     pub fn deinit(self: *World) void {
+        self.userdata.deinit();
         var it = self.storages.iterator();
         while (it.next()) |entry| {
             const metadata = self.storage_metadata.get(entry.key_ptr.*).?;
@@ -183,6 +186,16 @@ pub const World = struct {
         while (iter.next()) |item| {
             item.component.render(context);
         }
+    }
+
+    /// Set user data - allows systems to access external context (e.g., Scene pointer)
+    pub fn setUserData(self: *World, key: []const u8, ptr: *anyopaque) !void {
+        try self.userdata.put(key, ptr);
+    }
+
+    /// Get user data - returns null if not found
+    pub fn getUserData(self: *World, key: []const u8) ?*anyopaque {
+        return self.userdata.get(key);
     }
 };
 

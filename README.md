@@ -218,7 +218,7 @@ Zephyr-Engine/
 │   │   ├── components/          # Transform, MeshRenderer, Camera, Light
 │   │   └── systems/             # TransformSystem, RenderSystem
 │   ├── scene/                   # Scene Management ✅
-│   │   ├── scene_v2.zig         # ECS-based scene system
+│   │   ├── scene.zig         # ECS-based scene system
 │   │   └── game_object_v2.zig   # Entity wrapper
 │   ├── assets/                  # Asset Management ✅
 │   │   ├── asset_manager.zig    # Central asset coordination

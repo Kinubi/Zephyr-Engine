@@ -68,7 +68,7 @@ pub const MeshRenderer = @import("ecs/components/mesh_renderer.zig").MeshRendere
 pub const Transform = @import("ecs/components/transform.zig").Transform;
 
 // ========== Scene ==========
-pub const Scene = @import("scene/scene_v2.zig").Scene;
+pub const Scene = @import("scene/scene.zig").Scene;
 pub const GameObject = @import("scene/game_object_v2.zig").GameObject;
 
 // ========== Assets ==========

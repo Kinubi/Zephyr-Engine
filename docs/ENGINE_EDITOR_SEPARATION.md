@@ -345,7 +345,7 @@ pub const World = @import("ecs/world.zig").World;
 pub const Entity = @import("ecs/entity_registry.zig").Entity;
 
 // Scene
-pub const Scene = @import("scene/scene_v2.zig").Scene;
+pub const Scene = @import("scene/scene.zig").Scene;
 pub const GameObject = @import("scene/game_object_v2.zig").GameObject;
 
 // Assets

@@ -410,7 +410,7 @@ pub fn updateState(self: *PathTracingPass, frame_info: *const FrameInfo) !void {
 ### Initialization Order
 
 ```zig
-// In scene_v2.zig or app.zig:
+// In scene.zig or app.zig:
 
 // 1. Create passes
 const lighting_volume_pass = try LightingVolumePass.create(...);

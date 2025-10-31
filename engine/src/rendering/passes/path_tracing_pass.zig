@@ -297,19 +297,50 @@ pub const PathTracingPass = struct {
             },
         };
 
-        // Prepare textures resource
+        // Prepare resources that are shared across all frames
         const textures_resource = if (textures_ready)
             Resource{ .image_array = texture_image_infos }
         else
             null;
 
-        // Update vertex/index buffers and bind them for ALL frames (like rt_renderer does)
+        const output_descriptor = self.output_texture.getDescriptorInfo();
+        const output_resource = Resource{
+            .image = .{
+                .image_view = output_descriptor.image_view,
+                .sampler = output_descriptor.sampler,
+                .layout = output_descriptor.image_layout,
+            },
+        };
+
+        // Bind all resources for all frames in a single loop (better cache locality)
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const target_frame: u32 = @intCast(frame_idx);
             const frame_data = &self.per_frame[frame_idx];
 
             // Update vertex/index buffer info from geometries
             try frame_data.updateFromGeometries(.{ .geometries = rt_data.geometries });
+
+            // Get global UBO buffer for this frame
+            const global_ubo_buffer_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+            const global_resource = Resource{
+                .buffer = .{
+                    .buffer = global_ubo_buffer_info.buffer,
+                    .offset = global_ubo_buffer_info.offset,
+                    .range = global_ubo_buffer_info.range,
+                },
+            };
+
+            // Binding 0: Acceleration Structure (TLAS)
+            if (self.tlas_valid) {
+                const accel_resource = Resource{ .acceleration_structure = self.tlas };
+                try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+            }
+
+            // Binding 1: Output Image (storage image)
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
+
+            // Binding 2: Camera UBO (global uniform buffer)
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
 
             // Binding 3: Vertex buffers
             if (frame_data.vertex_infos.items.len > 0) {
@@ -330,43 +361,7 @@ pub const PathTracingPass = struct {
             if (textures_resource) |res| {
                 try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 6, res, target_frame);
             }
-        }
 
-        // Prepare output image resource for all frames
-        const output_descriptor = self.output_texture.getDescriptorInfo();
-        const output_resource = Resource{
-            .image = .{
-                .image_view = output_descriptor.image_view,
-                .sampler = output_descriptor.sampler,
-                .layout = output_descriptor.image_layout,
-            },
-        };
-
-        // Bind TLAS, output image, and camera UBO for all frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            const target_frame: u32 = @intCast(frame_idx);
-
-            // Get global UBO buffer for this frame
-            const global_ubo_buffer_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
-            const global_resource = Resource{
-                .buffer = .{
-                    .buffer = global_ubo_buffer_info.buffer,
-                    .offset = global_ubo_buffer_info.offset,
-                    .range = global_ubo_buffer_info.range,
-                },
-            };
-
-            // Binding 0: Acceleration Structure (TLAS)
-            // Only bind if TLAS is valid - prevents binding VK_NULL_HANDLE or invalid handles
-            if (self.tlas_valid and self.tlas != vk.AccelerationStructureKHR.null_handle) {
-                const accel_resource = Resource{ .acceleration_structure = self.tlas };
-                try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
-            }
-
-            // Binding 1: Output Image (storage image)
-            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
-            // Binding 2: Camera UBO (global uniform buffer)
-            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
             self.descriptor_dirty_flags[frame_idx] = false;
         }
 
@@ -383,8 +378,7 @@ pub const PathTracingPass = struct {
         const frame_index = frame_info.current_frame;
 
         // Skip if TLAS is not valid (no TLAS built yet - initial state)
-        // We always keep self.tlas in sync with rt_system, so if invalid, there's truly no TLAS
-        if (!self.tlas_valid or self.tlas == vk.AccelerationStructureKHR.null_handle) {
+        if (!self.tlas_valid) {
             return;
         }
 
@@ -668,21 +662,22 @@ pub const PathTracingPass = struct {
         const geometry_changed = self.render_system.raytracing_descriptors_dirty;
 
         // Update BVH using rt_system (handles BLAS/TLAS building)
-        // After this, rt_system.render_tlas is guaranteed stable for the entire frame
+        // After this, rt_system's TLAS registry is guaranteed stable for the entire frame
         const bvh_rebuilt = try self.rt_system.update(self.render_system, frame_info, geometry_changed);
 
-        // Check if render TLAS changed (uses double-buffered render_tlas which is stable per frame)
-        const tlas_handle_changed = self.tlas != self.rt_system.render_tlas;
-        const tlas_changed = self.rt_system.render_tlas_valid and tlas_handle_changed;
+        // Check if TLAS changed (get from registry - atomic, stable per frame)
+        const new_tlas = self.rt_system.getTlas();
+        const tlas_handle_changed = if (new_tlas) |handle| self.tlas != handle else false;
+        const tlas_changed = self.rt_system.isTlasValid() and tlas_handle_changed;
 
-        // Update cached TLAS when rt_system's render_tlas changed
-        // render_tlas is stable for the entire frame, so this is always safe
-        if (tlas_changed) {
-            // Update cached TLAS to the stable render TLAS produced by rt_system.
-            // The render_tlas value is stable for the entire frame, so it's safe
+        // Update cached TLAS when rt_system's registry TLAS changed
+        // Registry TLAS is stable for the entire frame (atomic swap only happens on completion)
+        if (tlas_changed and new_tlas != null) {
+            // Update cached TLAS to the stable TLAS from registry
+            // The registry value is stable for the entire frame, so it's safe
             // to swap it in immediately and mark descriptors dirty.
-            self.tlas = self.rt_system.render_tlas;
-            self.tlas_valid = self.rt_system.render_tlas_valid;
+            self.tlas = new_tlas.?;
+            self.tlas_valid = self.rt_system.isTlasValid();
         }
 
         const needs_update = bvh_rebuilt or

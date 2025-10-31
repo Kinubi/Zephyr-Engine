@@ -34,6 +34,7 @@ pub const BlasResult = struct {
     buffer: Buffer,
     device_address: vk.DeviceAddress,
     geometry_id: u32,
+    mesh_ptr: ?*const anyopaque, // For verifying correct BLAS (same geometry_id can have different meshes)
     build_time_ns: u64,
 };
 
@@ -57,12 +58,6 @@ pub const TlasResult = struct {
     build_time_ns: u64,
 };
 
-/// Wrapper for storing both callback function and context
-const CallbackWrapper = struct {
-    callback_fn: *const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
-    callback_context: *anyopaque,
-};
-
 /// BVH building work item data
 pub const BvhWorkData = struct {
     work_type: BvhWorkType,
@@ -71,6 +66,11 @@ pub const BvhWorkData = struct {
     completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void,
     callback_context: ?*anyopaque,
     work_id: u64,
+
+    // Optional TlasJob for per-job BLAS tracking
+    // If set, BLAS completion will fill the slot at geometry_index
+    tlas_job: ?*@import("tlas_worker.zig").TlasJob = null,
+    geometry_index: u32 = 0, // Which slot in the job's blas_buffer to fill
 };
 
 pub const BvhWorkType = enum {
@@ -85,18 +85,27 @@ pub const BvhBuildResult = union(BvhWorkType) {
     update_tlas: TlasResult,
 };
 
+/// Node for lock-free linked list of old BLAS waiting for destruction
+const BlasDestructionNode = struct {
+    blas: BlasResult,
+    next: ?*BlasDestructionNode,
+};
+
 /// Thread-safe BVH builder with async capabilities
 pub const MultithreadedBvhBuilder = struct {
     gc: *GraphicsContext,
     thread_pool: *ThreadPool,
     allocator: std.mem.Allocator,
 
-    // Thread-safe collections for results
-    completed_blas: std.ArrayList(BlasResult),
-    completed_tlas: ?TlasResult,
-    blas_mutex: std.Thread.Mutex,
-    tlas_mutex: std.Thread.Mutex,
-    queue_mutex: std.Thread.Mutex,
+    // Lock-free collections for results
+    completed_tlas: std.atomic.Value(?*TlasResult),
+    old_blas_head: std.atomic.Value(?*BlasDestructionNode), // Lock-free linked list head
+
+    // Lock-free BLAS registry: array indexed by geometry_id with atomic pointers
+    // Each slot holds an atomic pointer to a heap-allocated BlasResult
+    // null = BLAS not built yet, non-null = BLAS available
+    blas_registry: []std.atomic.Value(?*BlasResult),
+    max_geometry_id: u32,
 
     // Persistent geometry data for async work (using pointers to avoid copies)
     persistent_geometry: std.ArrayList(GeometryData),
@@ -121,18 +130,22 @@ pub const MultithreadedBvhBuilder = struct {
         });
         log(.INFO, "bvh_builder", "Registered bvh_building subsystem with thread pool", .{});
 
-        var completed_blas = std.ArrayList(BlasResult){};
-        try completed_blas.ensureTotalCapacity(allocator, 8);
+        // Allocate lock-free BLAS registry
+        // Start with 256 geometry slots (can grow if needed)
+        const max_geom = 256;
+        const registry = try allocator.alloc(std.atomic.Value(?*BlasResult), max_geom);
+        for (registry) |*slot| {
+            slot.* = std.atomic.Value(?*BlasResult).init(null);
+        }
 
         return MultithreadedBvhBuilder{
             .gc = gc,
             .thread_pool = thread_pool,
             .allocator = allocator,
-            .completed_blas = completed_blas,
-            .completed_tlas = null,
-            .blas_mutex = .{},
-            .tlas_mutex = .{},
-            .queue_mutex = .{},
+            .completed_tlas = std.atomic.Value(?*TlasResult).init(null),
+            .old_blas_head = std.atomic.Value(?*BlasDestructionNode).init(null),
+            .blas_registry = registry,
+            .max_geometry_id = max_geom,
             .persistent_geometry = std.ArrayList(GeometryData){},
             .geometry_mutex = .{},
             .next_work_id = std.atomic.Value(u64).init(1),
@@ -143,187 +156,50 @@ pub const MultithreadedBvhBuilder = struct {
     }
 
     pub fn deinit(self: *MultithreadedBvhBuilder) void {
-        // Clean up all BLAS results
-        self.blas_mutex.lock();
-        defer self.blas_mutex.unlock();
+        // Clean up old BLAS waiting for destruction (lock-free linked list)
+        var count: usize = 0;
+        var current = self.old_blas_head.swap(null, .acquire);
+        while (current) |node| {
+            count += 1;
+            var blas_result = node.blas;
+            blas_result.buffer.deinit();
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_result.acceleration_structure, null);
+            const next = node.next;
+            self.allocator.destroy(node);
+            current = next;
+        }
+        if (count > 0) {
+            log(.WARN, "bvh_builder", "Deinit: cleaned up {} old BLAS waiting for destruction", .{count});
+        }
 
-        // NOTE: If there are unconsumed BLAS results, it means the caller (RaytracingSystem)
-        // never called takeCompletedBlas(). This can happen if path tracing is never enabled.
-        // We need to clean up these buffers/AS properly to avoid memory leaks.
-        if (self.completed_blas.items.len > 0) {
-            log(.WARN, "bvh_builder", "Deinit: {} unconsumed BLAS results - cleaning up", .{self.completed_blas.items.len});
-            for (self.completed_blas.items) |*blas_result| {
-                blas_result.buffer.deinit();
-                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_result.acceleration_structure, null);
+        // Clean up lock-free BLAS registry
+        // No lock needed - called during shutdown when no workers are active
+        var registry_count: u32 = 0;
+        for (self.blas_registry) |*slot| {
+            if (slot.load(.acquire)) |blas_ptr| {
+                registry_count += 1;
+                blas_ptr.buffer.deinit();
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_ptr.acceleration_structure, null);
+                self.allocator.destroy(blas_ptr);
             }
         }
-        self.completed_blas.deinit(self.allocator);
+        if (registry_count > 0) {
+            log(.INFO, "bvh_builder", "Deinit: cleaned up {} BLAS from registry", .{registry_count});
+        }
+        self.allocator.free(self.blas_registry);
 
         // Clean up persistent geometry data
         self.geometry_mutex.lock();
         defer self.geometry_mutex.unlock();
         self.persistent_geometry.deinit(self.allocator);
 
-        // Clean up TLAS if it exists
-        // NOTE: Same as BLAS - if unconsumed, we need to clean it up
-        if (self.completed_tlas) |*tlas_result| {
+        // Clean up TLAS if it exists (atomically take ownership)
+        if (self.completed_tlas.swap(null, .acquire)) |tlas_ptr| {
             log(.WARN, "bvh_builder", "Deinit: unconsumed TLAS result - cleaning up", .{});
-            tlas_result.buffer.deinit();
-            tlas_result.instance_buffer.deinit();
-            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, tlas_result.acceleration_structure, null);
-        }
-    }
-
-    /// Submit BLAS building work to thread pool
-    pub fn buildBlasAsync(
-        self: *MultithreadedBvhBuilder,
-        geometry: *const GeometryData,
-        priority: WorkPriority,
-        completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void,
-        callback_context: ?*anyopaque,
-    ) !u64 {
-        const work_id = self.next_work_id.fetchAdd(1, .monotonic);
-        _ = self.pending_work.fetchAdd(1, .monotonic);
-
-        // Create work data on heap for persistent access by worker thread
-        const work_data = try self.allocator.create(BvhWorkData);
-        work_data.* = BvhWorkData{
-            .work_type = .build_blas,
-            .geometry_data = @constCast(geometry),
-            .instance_data = null,
-            .completion_callback = completion_callback,
-            .callback_context = callback_context,
-            .work_id = work_id,
-        };
-
-        // Submit work item
-        const work_item = createBvhBuildingWork(
-            work_id,
-            .blas,
-            @ptrCast(work_data),
-            .full_rebuild,
-            priority,
-            bvhWorkerFunction,
-            self,
-        );
-
-        try self.thread_pool.submitWork(work_item);
-        return work_id;
-    }
-
-    /// Submit TLAS building work to thread pool
-    pub fn buildTlasAsync(
-        self: *MultithreadedBvhBuilder,
-        instances: []const InstanceData,
-        priority: WorkPriority,
-        completion_callback: ?*const fn (*anyopaque, BvhBuildResult) void,
-        callback_context: ?*anyopaque,
-    ) !u64 {
-        const work_id = self.next_work_id.fetchAdd(1, .monotonic);
-        _ = self.pending_work.fetchAdd(1, .monotonic);
-
-        // Make a heap-allocated copy of instances for persistent access by worker thread
-        const instances_copy = try self.allocator.alloc(InstanceData, instances.len);
-        @memcpy(instances_copy, instances);
-
-        // Create work data on heap for persistent access by worker thread
-        const work_data = try self.allocator.create(BvhWorkData);
-        work_data.* = BvhWorkData{
-            .work_type = .build_tlas,
-            .geometry_data = null,
-            .instance_data = instances_copy,
-            .completion_callback = completion_callback,
-            .callback_context = callback_context,
-            .work_id = work_id,
-        };
-
-        // Submit work item
-        const work_item = createBvhBuildingWork(
-            work_id,
-            .tlas,
-            @ptrCast(work_data),
-            .full_rebuild,
-            priority,
-            bvhWorkerFunction,
-            self,
-        );
-
-        try self.thread_pool.submitWork(work_item);
-        return work_id;
-    }
-
-    /// Build BVH structures asynchronously using pre-computed raytracing data
-    pub fn buildRtDataBvhAsync(
-        self: *MultithreadedBvhBuilder,
-        rt_data: RaytracingData,
-        completion_callback: ?*const fn (*anyopaque, []const BlasResult, ?TlasResult) void,
-        callback_context: ?*anyopaque,
-    ) !void {
-        // Use the RT geometries directly for worker item creation - extract mesh data on main thread
-        for (rt_data.geometries, 0..) |rt_geometry, geom_idx| {
-            const mesh = rt_geometry.mesh_ptr;
-
-            // Skip meshes without valid buffers (already filtered by SceneBridge)
-            if (mesh.vertex_buffer == null or mesh.index_buffer == null) {
-                log(.WARN, "bvh_builder", "Geometry {}: Skipping - missing vertex/index buffers", .{geom_idx});
-                continue;
-            }
-
-            const material_id = mesh.material_id;
-
-            // Create GeometryData with extracted data (no mesh pointer access needed on worker thread)
-            // Create GeometryData for the mesh
-            const geometry_data = try self.allocator.create(GeometryData);
-            geometry_data.* = GeometryData{
-                .mesh_ptr = mesh,
-                .material_id = material_id,
-                .transform = Math.Mat4.identity(), // Instance transform handled by RTInstance
-                .mesh_id = @intCast(geom_idx),
-            };
-
-            // Create BvhWorkData with callback information
-            const work_data = try self.allocator.create(BvhWorkData);
-            const work_id = self.next_work_id.fetchAdd(1, .monotonic);
-            // Store the original callback in a wrapper structure
-            if (completion_callback != null and callback_context != null) {
-                const wrapper = try self.allocator.create(CallbackWrapper);
-                wrapper.* = CallbackWrapper{
-                    .callback_fn = completion_callback.?,
-                    .callback_context = callback_context.?,
-                };
-
-                work_data.* = BvhWorkData{
-                    .work_type = .build_blas,
-                    .geometry_data = geometry_data,
-                    .instance_data = null,
-                    .completion_callback = blasCallbackWrapper,
-                    .callback_context = wrapper,
-                    .work_id = work_id,
-                };
-            } else {
-                work_data.* = BvhWorkData{
-                    .work_type = .build_blas,
-                    .geometry_data = geometry_data,
-                    .instance_data = null,
-                    .completion_callback = null,
-                    .callback_context = null,
-                    .work_id = work_id,
-                };
-            }
-
-            _ = self.pending_work.fetchAdd(1, .monotonic);
-
-            const work_item = createBvhBuildingWork(
-                work_id,
-                .blas,
-                @ptrCast(work_data),
-                .full_rebuild,
-                .normal,
-                bvhWorkerFunction,
-                self,
-            );
-            _ = self.thread_pool.requestWorkers(.gpu_work, 2);
-            try self.thread_pool.submitWork(work_item);
+            tlas_ptr.buffer.deinit();
+            tlas_ptr.instance_buffer.deinit();
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, tlas_ptr.acceleration_structure, null);
+            self.allocator.destroy(tlas_ptr);
         }
     }
 
@@ -332,28 +208,48 @@ pub const MultithreadedBvhBuilder = struct {
         return self.pending_work.load(.monotonic) == 0;
     }
 
-    /// Take current BLAS results (thread-safe) and clear builder ownership
-    pub fn takeCompletedBlas(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
-        self.blas_mutex.lock();
-        defer self.blas_mutex.unlock();
-        log(.DEBUG, "bvh_builder", "Taking {} completed BLAS results", .{self.completed_blas.items.len});
+    /// Take old BLAS that need deferred destruction (lock-free)
+    pub fn takeOldBlasForDestruction(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
+        // Atomically take the entire linked list
+        const head = self.old_blas_head.swap(null, .acquire);
+        if (head == null) {
+            return &[_]BlasResult{};
+        }
 
-        const results = try allocator.alloc(BlasResult, self.completed_blas.items.len);
-        @memcpy(results, self.completed_blas.items);
-        self.completed_blas.clearRetainingCapacity();
+        // Count nodes and collect into array
+        var count: usize = 0;
+        var current = head;
+        while (current) |node| : (current = node.next) {
+            count += 1;
+        }
+
+        const results = try allocator.alloc(BlasResult, count);
+        current = head;
+        var i: usize = 0;
+        while (current) |node| {
+            results[i] = node.blas;
+            i += 1;
+            const next = node.next;
+            self.allocator.destroy(node);
+            current = next;
+        }
+
         return results;
     }
 
-    /// Take TLAS result if available (thread-safe) and clear builder ownership
-    pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
-        self.tlas_mutex.lock();
-        defer self.tlas_mutex.unlock();
-
-        const result = self.completed_tlas;
-        if (result != null) {
-            self.completed_tlas = null;
+    /// Try to pick up completed TLAS if available (lock-free) and take ownership
+    pub fn tryPickupCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
+        if (self.completed_tlas.swap(null, .acquire)) |tlas_ptr| {
+            const result = tlas_ptr.*;
+            self.allocator.destroy(tlas_ptr);
+            return result;
         }
-        return result;
+        return null;
+    }
+
+    /// Take TLAS result if available (lock-free) and take ownership
+    pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
+        return self.tryPickupCompletedTlas();
     }
 
     /// Get performance metrics
@@ -374,101 +270,150 @@ pub const MultithreadedBvhBuilder = struct {
         };
     }
 
-    /// Clear completed results
-    pub fn clearResults(self: *MultithreadedBvhBuilder) void {
-        self.blas_mutex.lock();
-        defer self.blas_mutex.unlock();
+    /// Register a BLAS in the lock-free registry
+    /// Returns the old BlasResult if one was replaced (should be queued for deferred destruction by caller)
+    /// The old BLAS resources are still in use by GPU, so caller must defer destruction until safe
+    pub fn registerBlas(self: *MultithreadedBvhBuilder, blas: BlasResult) !?BlasResult {
+        if (blas.geometry_id >= self.max_geometry_id) {
+            log(.ERROR, "bvh_builder", "Geometry ID {} exceeds max registry size {}", .{ blas.geometry_id, self.max_geometry_id });
+            return error.GeometryIdOutOfBounds;
+        }
 
-        self.completed_blas.clearRetainingCapacity();
-        self.completed_tlas = null;
+        // Allocate heap copy of the BLAS result
+        const blas_ptr = try self.allocator.create(BlasResult);
+        blas_ptr.* = blas;
+
+        // Atomically install it in the registry slot
+        const slot = &self.blas_registry[blas.geometry_id];
+        const old_ptr = slot.swap(blas_ptr, .acq_rel);
+
+        // Return the old BLAS if there was one - caller is responsible for deferred destruction
+        if (old_ptr) |old_blas| {
+            const old_result = old_blas.*;
+            self.allocator.destroy(old_blas); // Free the heap allocation, but return the contents
+            return old_result;
+        }
+
+        return null;
+    }
+
+    /// Lock-free BLAS lookup by geometry_id
+    /// Returns a pointer to the BlasResult in the registry if found AND mesh_ptr matches, null otherwise
+    /// WARNING: The returned pointer remains valid until the BLAS is replaced in the registry
+    pub fn lookupBlasPtr(self: *MultithreadedBvhBuilder, geometry_id: u32, mesh_ptr: ?*const anyopaque) ?*BlasResult {
+        if (geometry_id >= self.max_geometry_id) {
+            return null;
+        }
+
+        const slot = &self.blas_registry[geometry_id];
+        const result_ptr = slot.load(.acquire);
+        if (result_ptr) |ptr| {
+            // Validate that the mesh_ptr matches
+            if (ptr.mesh_ptr == mesh_ptr) {
+                return ptr;
+            }
+        }
+        return null;
+    }
+
+    /// Lock-free BLAS lookup by geometry_id with mesh_ptr validation
+    /// Returns a copy of the BlasResult if found AND mesh_ptr matches, null otherwise
+    pub fn lookupBlas(self: *MultithreadedBvhBuilder, geometry_id: u32, mesh_ptr: ?*const anyopaque) ?BlasResult {
+        if (geometry_id >= self.max_geometry_id) {
+            return null;
+        }
+
+        const slot = &self.blas_registry[geometry_id];
+        if (slot.load(.acquire)) |blas_ptr| {
+            // Validate that the mesh_ptr matches
+            if (blas_ptr.mesh_ptr == mesh_ptr) {
+                return blas_ptr.*; // Return a copy
+            }
+        }
+        return null;
     }
 };
 
-/// Unified worker function for BVH building (both BLAS and TLAS)
-fn bvhWorkerFunction(context: *anyopaque, work_item: WorkItem) void {
+/// BLAS worker function - can be called directly from TLAS worker
+pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
     const builder = @as(*MultithreadedBvhBuilder, @ptrCast(@alignCast(context)));
     const start_time = std.time.nanoTimestamp();
 
-    switch (work_item.data.bvh_building.as_type) {
-        .blas => {
-            const work_data = @as(*BvhWorkData, @ptrCast(@alignCast(work_item.data.bvh_building.work_data)));
-            defer {
-                // Clean up heap-allocated work data
-                if (work_data.geometry_data) |geom_data| {
-                    builder.allocator.destroy(geom_data);
-                }
-                builder.allocator.destroy(work_data);
+    const work_data = @as(*BvhWorkData, @ptrCast(@alignCast(work_item.data.bvh_building.work_data)));
+    defer {
+        // Clean up heap-allocated work data
+        if (work_data.geometry_data) |geom_data| {
+            builder.allocator.destroy(geom_data);
+        }
+        builder.allocator.destroy(work_data);
+    }
+
+    const result = buildBlasSynchronous(builder, work_data.geometry_data.?) catch |err| {
+        log(.ERROR, "bvh_builder", "BLAS build failed: {}", .{err});
+        _ = builder.pending_work.fetchSub(1, .monotonic);
+        return;
+    };
+
+    const build_time = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
+    var final_result = result;
+    final_result.build_time_ns = build_time;
+
+    // Update metrics
+    _ = builder.total_blas_built.fetchAdd(1, .monotonic);
+    _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
+    _ = builder.pending_work.fetchSub(1, .monotonic);
+
+    // ALWAYS register BLAS in the lock-free registry for future lookups
+    // If an old BLAS is replaced, queue it for deferred destruction (still in use by GPU)
+    const old_blas_opt = builder.registerBlas(final_result) catch |err| {
+        log(.ERROR, "bvh_builder", "Failed to register BLAS in registry: {}", .{err});
+        return;
+    };
+
+    if (old_blas_opt) |old_blas| {
+        // Old BLAS was replaced - queue for deferred destruction using lock-free list
+        // Can't destroy immediately because:
+        // 1. GPU commands may still be using it (secondary command buffers not yet executed)
+        // 2. Old TLAS may still reference it
+        // The raytracing_system will pick these up and add to per-frame destruction queues
+        const node = builder.allocator.create(BlasDestructionNode) catch |err| {
+            log(.ERROR, "bvh_builder", "Failed to allocate destruction node: {}", .{err});
+            // Last resort: destroy immediately (may cause validation errors)
+            var old_buffer = old_blas.buffer;
+            old_buffer.deinit();
+            builder.gc.vkd.destroyAccelerationStructureKHR(builder.gc.dev, old_blas.acceleration_structure, null);
+            return;
+        };
+        node.blas = old_blas;
+
+        // Lock-free push to head of linked list
+        var current_head = builder.old_blas_head.load(.acquire);
+        while (true) {
+            node.next = current_head;
+            if (builder.old_blas_head.cmpxchgWeak(current_head, node, .release, .acquire)) |new_head| {
+                current_head = new_head;
+            } else {
+                break;
             }
+        }
+    }
 
-            const result = buildBlasSynchronous(builder, work_data.geometry_data.?) catch |err| {
-                log(.ERROR, "bvh_builder", "BLAS build failed: {}", .{err});
-                _ = builder.pending_work.fetchSub(1, .monotonic);
-                return;
-            };
+    // If this BLAS is part of a TLAS job, fill the slot in the job's buffer
+    if (work_data.tlas_job) |job| {
+        const tlas_worker = @import("tlas_worker.zig");
 
-            const build_time = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
-            var final_result = result;
-            final_result.build_time_ns = build_time;
+        // Allocate BlasResult on heap for the job's buffer
+        const blas_ptr = builder.allocator.create(BlasResult) catch |err| {
+            log(.ERROR, "bvh_builder", "Failed to allocate BlasResult: {}", .{err});
+            // Still continue - BLAS is registered, just can't notify job
+            return;
+        };
+        blas_ptr.* = final_result;
 
-            // Update metrics
-            _ = builder.total_blas_built.fetchAdd(1, .monotonic);
-            _ = builder.total_build_time_ns.fetchAdd(build_time, .monotonic);
-            _ = builder.pending_work.fetchSub(1, .monotonic);
+        // Fill the appropriate slot in the job's atomic buffer
+        tlas_worker.fillBlasSlot(job, work_data.geometry_index, blas_ptr);
 
-            // If callback provided, call it and transfer ownership to callback
-            // Otherwise, store in completed_blas for later retrieval via takeCompletedBlas()
-            if (work_data.completion_callback) |callback| {
-                if (work_data.callback_context) |cb_context| {
-                    callback(cb_context, .{ .build_blas = final_result });
-                    // Ownership transferred to callback - don't store in completed_blas
-                    return;
-                }
-            }
-
-            // No callback - store result for later retrieval
-            builder.blas_mutex.lock();
-            defer builder.blas_mutex.unlock();
-
-            builder.completed_blas.append(builder.allocator, final_result) catch |err| {
-                log(.ERROR, "bvh_builder", "Failed to store BLAS result: {}", .{err});
-                return;
-            };
-        },
-        .tlas => {
-            const work_data = @as(*BvhWorkData, @ptrCast(@alignCast(work_item.data.bvh_building.work_data)));
-
-            defer {
-                // Free the heap-allocated instances copy
-                if (work_data.instance_data) |instances| {
-                    builder.allocator.free(instances);
-                }
-                builder.allocator.destroy(work_data);
-            }
-
-            const result = buildTlasSynchronous(builder, work_data.instance_data.?) catch |err| {
-                log(.ERROR, "bvh_builder", "TLAS build failed: {}", .{err});
-                _ = builder.pending_work.fetchSub(1, .monotonic);
-                return;
-            };
-
-            const build_time = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
-            var final_result = result;
-            final_result.build_time_ns = build_time;
-
-            // Store result thread-safely
-            builder.tlas_mutex.lock();
-            builder.completed_tlas = final_result;
-            builder.tlas_mutex.unlock();
-
-            _ = builder.pending_work.fetchSub(1, .monotonic);
-
-            // Call completion callback if provided
-            if (work_data.completion_callback) |callback| {
-                if (work_data.callback_context) |cb_context| {
-                    callback(cb_context, .{ .build_tlas = final_result });
-                }
-            }
-        },
+        return; // Don't call callback or store in completed_blas
     }
 }
 
@@ -526,7 +471,8 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
     var build_info = vk.AccelerationStructureBuildGeometryInfoKHR{
         .s_type = vk.StructureType.acceleration_structure_build_geometry_info_khr,
         .type = vk.AccelerationStructureTypeKHR.bottom_level_khr,
-        .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_build_bit_khr = true },
+        // prefer_fast_trace: We trace more often than we rebuild, optimize for traversal performance
+        .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_trace_bit_khr = true },
         .mode = vk.BuildAccelerationStructureModeKHR.build_khr,
         .geometry_count = 1,
         .p_geometries = @ptrCast(&geometry_vk),
@@ -606,12 +552,13 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
         .buffer = blas_buffer,
         .device_address = blas_device_address,
         .geometry_id = geometry.mesh_id,
+        .mesh_ptr = geometry.mesh_ptr,
         .build_time_ns = 0, // Will be set by caller
     };
 }
 
 /// Synchronous TLAS building function
-fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const InstanceData) !TlasResult {
+pub fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const InstanceData) !TlasResult {
     if (instances.len == 0) {
         return error.NoInstances;
     }
@@ -767,34 +714,4 @@ fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []const In
         .instance_count = @intCast(instances.len),
         .build_time_ns = 0, // Will be set by caller
     };
-}
-
-/// Wrapper callback that converts BvhBuildResult to the raytracing system callback format
-fn blasCallbackWrapper(context: *anyopaque, result: BvhBuildResult) void {
-    switch (result) {
-        .build_blas => |blas_result| {
-            // Extract the wrapper from the context
-            const wrapper = @as(*CallbackWrapper, @ptrCast(@alignCast(context)));
-
-            // Create single-item array for the callback
-            const blas_array = [_]BlasResult{blas_result};
-
-            // Call the original raytracing system callback
-            wrapper.callback_fn(wrapper.callback_context, &blas_array, null);
-        },
-        else => {
-            log(.WARN, "bvh_builder", "BLAS wrapper received unexpected result type", .{});
-        },
-    }
-}
-
-/// Callback for scene BLAS build completion
-fn sceneBlasBuildCallback(context: *anyopaque, result: BvhBuildResult) void {
-    _ = context;
-    switch (result) {
-        .build_blas => |blas_result| {
-            _ = blas_result;
-        },
-        else => {},
-    }
 }

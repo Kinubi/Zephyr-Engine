@@ -21,6 +21,18 @@ pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").Parti
 pub const TransformSystem = @import("ecs/systems/transform_system.zig").TransformSystem;
 pub const RenderSystem = @import("ecs/systems/render_system.zig").RenderSystem;
 pub const LightSystem = @import("ecs/systems/light_system.zig").LightSystem;
+pub const ParticleSystem = @import("ecs/systems/particle_system.zig").ParticleSystem;
+
+// System functions for parallel execution
+pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").TransformSystem.updateSystem;
+pub const animateLightsSystem = @import("ecs/systems/light_system.zig").animateLightsSystem;
+pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").updateParticleEmittersSystem;
+
+// Parallel System Execution
+pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;
+pub const SystemStage = @import("ecs/system_scheduler.zig").SystemStage;
+pub const SystemDef = @import("ecs/system_scheduler.zig").SystemDef;
+pub const ComponentAccess = @import("ecs/system_scheduler.zig").ComponentAccess;
 
 // Workflow demonstrations
 test {

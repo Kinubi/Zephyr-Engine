@@ -93,9 +93,10 @@ pub const GraphicsContext = struct {
         self.worker_command_pools = .{};
         self.command_pool_mutex = std.Thread.Mutex{};
 
-        // Initialize secondary command buffer collection
+        // Initialize double-buffered secondary command buffer collection
         if (!secondary_buffers_initialized) {
-            pending_secondary_buffers = std.ArrayList(SecondaryCommandBuffer){};
+            pending_buffers[0] = std.ArrayList(SecondaryCommandBuffer){};
+            pending_buffers[1] = std.ArrayList(SecondaryCommandBuffer){};
             secondary_buffers_initialized = true;
         }
         var glfw_ext_count: u32 = 0;
@@ -214,11 +215,14 @@ pub const GraphicsContext = struct {
 
         log(.INFO, "graphics_context", "Cleaning up pending secondary command buffers", .{});
         if (secondary_buffers_initialized) {
-            log(.INFO, "graphics_context", "Cleaning {} pending buffers", .{pending_secondary_buffers.items.len});
-            for (pending_secondary_buffers.items) |*secondary_buf| {
-                secondary_buf.deinit(self);
+            const total = pending_buffers[0].items.len + pending_buffers[1].items.len;
+            log(.INFO, "graphics_context", "Cleaning {} pending buffers", .{total});
+            for (&pending_buffers) |*buffer| {
+                for (buffer.items) |*secondary_buf| {
+                    secondary_buf.deinit(self);
+                }
+                buffer.deinit(self.allocator);
             }
-            pending_secondary_buffers.deinit(self.allocator);
         }
 
         if (submitted_buffers_initialized) {
@@ -607,15 +611,24 @@ pub const GraphicsContext = struct {
                 }
                 resources.deinit(self.allocator);
             }
-            {
+
+            // IMPORTANT: Do NOT call vkFreeCommandBuffers on worker thread command buffers!
+            // Command pools can only be accessed from the thread that created them.
+            // Worker thread command buffers will be freed when their pools are reset via resetAllWorkerCommandPools()
+            // Only free if this is from the main thread's pool
+            if (self.pool == gc.command_pool) {
                 gc.command_pool_mutex.lock();
                 defer gc.command_pool_mutex.unlock();
                 gc.vkd.freeCommandBuffers(gc.dev, self.pool, 1, @ptrCast(&self.command_buffer));
             }
+            // For worker pools: command buffer will be freed when pool is reset (no explicit free needed)
         }
-    }; // Collection of secondary command buffers to execute at frame end
-    var pending_secondary_buffers: std.ArrayList(SecondaryCommandBuffer) = undefined;
-    var secondary_buffers_mutex: std.Thread.Mutex = std.Thread.Mutex{};
+    };
+
+    // Atomic double-buffer for lock-free secondary command buffer collection
+    var pending_buffers: [2]std.ArrayList(SecondaryCommandBuffer) = undefined;
+    var current_write_index: std.atomic.Value(u8) = std.atomic.Value(u8).init(0);
+    var append_mutex: std.Thread.Mutex = std.Thread.Mutex{}; // Only held during append, not read
     var secondary_buffers_initialized: bool = false;
 
     /// Begin a secondary command buffer for worker thread work (no queue submission)
@@ -682,11 +695,12 @@ pub const GraphicsContext = struct {
         }
         secondary_cmd.is_recording = false;
 
-        // Thread-safely add to pending collection
-        secondary_buffers_mutex.lock();
-        defer secondary_buffers_mutex.unlock();
+        // Append to current write buffer (short lock only for ArrayList append)
+        const write_idx = current_write_index.load(.acquire);
 
-        try pending_secondary_buffers.append(self.allocator, secondary_cmd.*);
+        append_mutex.lock();
+        defer append_mutex.unlock();
+        try pending_buffers[write_idx].append(self.allocator, secondary_cmd.*);
     }
 
     // Storage for secondary command buffers that are submitted but not yet executed
@@ -696,10 +710,11 @@ pub const GraphicsContext = struct {
 
     /// Execute all pending secondary command buffers on main thread
     pub fn executeCollectedSecondaryBuffers(self: *GraphicsContext, primary_cmd: vk.CommandBuffer) !void {
-        secondary_buffers_mutex.lock();
-        defer secondary_buffers_mutex.unlock();
+        // Atomic flip: swap write index and take ownership of read buffer
+        const read_idx = 1 - current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
 
-        if (pending_secondary_buffers.items.len == 0) return;
+        // No lock needed - we own the read buffer
+        if (pending_buffers[read_idx].items.len == 0) return;
 
         // Initialize submitted buffers collection if needed
         if (!submitted_buffers_initialized) {
@@ -708,10 +723,10 @@ pub const GraphicsContext = struct {
         }
 
         // Create array of secondary command buffer handles
-        var secondary_handles = try self.allocator.alloc(vk.CommandBuffer, pending_secondary_buffers.items.len);
+        var secondary_handles = try self.allocator.alloc(vk.CommandBuffer, pending_buffers[read_idx].items.len);
         defer self.allocator.free(secondary_handles);
 
-        for (pending_secondary_buffers.items, 0..) |secondary, i| {
+        for (pending_buffers[read_idx].items, 0..) |secondary, i| {
             secondary_handles[i] = secondary.command_buffer;
         }
 
@@ -722,12 +737,12 @@ pub const GraphicsContext = struct {
         submitted_buffers_mutex.lock();
         defer submitted_buffers_mutex.unlock();
 
-        for (pending_secondary_buffers.items) |secondary| {
+        for (pending_buffers[read_idx].items) |secondary| {
             try submitted_secondary_buffers.append(self.allocator, secondary);
         }
 
-        // Clear the pending collection
-        pending_secondary_buffers.clearRetainingCapacity();
+        // Clear the read buffer for next cycle
+        pending_buffers[read_idx].clearRetainingCapacity();
     }
 
     /// Clear any pending secondary command buffers without executing them
@@ -741,22 +756,21 @@ pub const GraphicsContext = struct {
     ///
     /// WARNING: Only call this when you're certain no workers are using their command pools!
     pub fn clearPendingSecondaryBuffers(self: *GraphicsContext) void {
-        secondary_buffers_mutex.lock();
-        defer secondary_buffers_mutex.unlock(); // Keep locked until after pool reset
-        
-        const count = pending_secondary_buffers.items.len;
+        append_mutex.lock();
+        defer append_mutex.unlock();
 
-        // Just clear the list - don't try to free individual buffers
-        // The worker thread command pools will be reset below
-        pending_secondary_buffers.clearRetainingCapacity();
+        const count0 = pending_buffers[0].items.len;
+        const count1 = pending_buffers[1].items.len;
+        const total = count0 + count1;
+
+        // Clear both buffers
+        pending_buffers[0].clearRetainingCapacity();
+        pending_buffers[1].clearRetainingCapacity();
 
         // Reset all worker command pools to free their command buffers
-        // This properly cleans up the secondary buffers without threading conflicts
-        // IMPORTANT: Must be done while holding mutex to prevent race condition where
-        // another thread submits buffers after we clear the list but before pool reset
         self.resetAllWorkerCommandPools();
 
-        log(.DEBUG, "graphics_context", "Discarded {} pending secondary command buffers and reset worker pools", .{count});
+        log(.DEBUG, "graphics_context", "Discarded {} pending secondary command buffers and reset worker pools", .{total});
     }
 
     /// Clean up submitted secondary command buffers after frame submission completes
