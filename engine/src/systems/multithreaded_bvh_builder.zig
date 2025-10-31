@@ -85,17 +85,21 @@ pub const BvhBuildResult = union(BvhWorkType) {
     update_tlas: TlasResult,
 };
 
+/// Node for lock-free linked list of old BLAS waiting for destruction
+const BlasDestructionNode = struct {
+    blas: BlasResult,
+    next: ?*BlasDestructionNode,
+};
+
 /// Thread-safe BVH builder with async capabilities
 pub const MultithreadedBvhBuilder = struct {
     gc: *GraphicsContext,
     thread_pool: *ThreadPool,
     allocator: std.mem.Allocator,
 
-    // Thread-safe collections for results
-    completed_tlas: ?TlasResult,
-    old_blas_for_destruction: std.ArrayList(BlasResult), // Old BLAS replaced in registry, need deferred destruction
-    blas_mutex: std.Thread.Mutex,
-    tlas_mutex: std.Thread.Mutex,
+    // Lock-free collections for results
+    completed_tlas: std.atomic.Value(?*TlasResult),
+    old_blas_head: std.atomic.Value(?*BlasDestructionNode), // Lock-free linked list head
 
     // Lock-free BLAS registry: array indexed by geometry_id with atomic pointers
     // Each slot holds an atomic pointer to a heap-allocated BlasResult
@@ -126,9 +130,6 @@ pub const MultithreadedBvhBuilder = struct {
         });
         log(.INFO, "bvh_builder", "Registered bvh_building subsystem with thread pool", .{});
 
-        var old_blas_for_destruction = std.ArrayList(BlasResult){};
-        try old_blas_for_destruction.ensureTotalCapacity(allocator, 8);
-
         // Allocate lock-free BLAS registry
         // Start with 256 geometry slots (can grow if needed)
         const max_geom = 256;
@@ -141,10 +142,8 @@ pub const MultithreadedBvhBuilder = struct {
             .gc = gc,
             .thread_pool = thread_pool,
             .allocator = allocator,
-            .completed_tlas = null,
-            .old_blas_for_destruction = old_blas_for_destruction,
-            .blas_mutex = .{},
-            .tlas_mutex = .{},
+            .completed_tlas = std.atomic.Value(?*TlasResult).init(null),
+            .old_blas_head = std.atomic.Value(?*BlasDestructionNode).init(null),
             .blas_registry = registry,
             .max_geometry_id = max_geom,
             .persistent_geometry = std.ArrayList(GeometryData){},
@@ -157,20 +156,21 @@ pub const MultithreadedBvhBuilder = struct {
     }
 
     pub fn deinit(self: *MultithreadedBvhBuilder) void {
-        // Clean up old BLAS waiting for destruction
-        self.blas_mutex.lock();
-        defer self.blas_mutex.unlock();
-
-        // Clean up old BLAS waiting for destruction
-        log(.INFO, "bvh_builder", "Deinit: checking old_blas_for_destruction ({} items)", .{self.old_blas_for_destruction.items.len});
-        if (self.old_blas_for_destruction.items.len > 0) {
-            log(.WARN, "bvh_builder", "Deinit: {} old BLAS waiting for destruction - cleaning up", .{self.old_blas_for_destruction.items.len});
-            for (self.old_blas_for_destruction.items) |*blas_result| {
-                blas_result.buffer.deinit();
-                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_result.acceleration_structure, null);
-            }
+        // Clean up old BLAS waiting for destruction (lock-free linked list)
+        var count: usize = 0;
+        var current = self.old_blas_head.swap(null, .acquire);
+        while (current) |node| {
+            count += 1;
+            var blas_result = node.blas;
+            blas_result.buffer.deinit();
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, blas_result.acceleration_structure, null);
+            const next = node.next;
+            self.allocator.destroy(node);
+            current = next;
         }
-        self.old_blas_for_destruction.deinit(self.allocator);
+        if (count > 0) {
+            log(.WARN, "bvh_builder", "Deinit: cleaned up {} old BLAS waiting for destruction", .{count});
+        }
 
         // Clean up lock-free BLAS registry
         // No lock needed - called during shutdown when no workers are active
@@ -193,14 +193,13 @@ pub const MultithreadedBvhBuilder = struct {
         defer self.geometry_mutex.unlock();
         self.persistent_geometry.deinit(self.allocator);
 
-        // Clean up TLAS if it exists
-        // NOTE: Same as BLAS - if unconsumed, we need to clean it up
-        log(.INFO, "bvh_builder", "Deinit: checking completed_tlas ({})", .{self.completed_tlas != null});
-        if (self.completed_tlas) |*tlas_result| {
+        // Clean up TLAS if it exists (atomically take ownership)
+        if (self.completed_tlas.swap(null, .acquire)) |tlas_ptr| {
             log(.WARN, "bvh_builder", "Deinit: unconsumed TLAS result - cleaning up", .{});
-            tlas_result.buffer.deinit();
-            tlas_result.instance_buffer.deinit();
-            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, tlas_result.acceleration_structure, null);
+            tlas_ptr.buffer.deinit();
+            tlas_ptr.instance_buffer.deinit();
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, tlas_ptr.acceleration_structure, null);
+            self.allocator.destroy(tlas_ptr);
         }
     }
 
@@ -209,39 +208,48 @@ pub const MultithreadedBvhBuilder = struct {
         return self.pending_work.load(.monotonic) == 0;
     }
 
-    /// Take old BLAS that need deferred destruction (thread-safe)
+    /// Take old BLAS that need deferred destruction (lock-free)
     pub fn takeOldBlasForDestruction(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
-        self.blas_mutex.lock();
-        defer self.blas_mutex.unlock();
+        // Atomically take the entire linked list
+        const head = self.old_blas_head.swap(null, .acquire);
+        if (head == null) {
+            return &[_]BlasResult{};
+        }
 
-        const results = try allocator.alloc(BlasResult, self.old_blas_for_destruction.items.len);
-        @memcpy(results, self.old_blas_for_destruction.items);
-        self.old_blas_for_destruction.clearRetainingCapacity();
+        // Count nodes and collect into array
+        var count: usize = 0;
+        var current = head;
+        while (current) |node| : (current = node.next) {
+            count += 1;
+        }
+
+        const results = try allocator.alloc(BlasResult, count);
+        current = head;
+        var i: usize = 0;
+        while (current) |node| {
+            results[i] = node.blas;
+            i += 1;
+            const next = node.next;
+            self.allocator.destroy(node);
+            current = next;
+        }
+
         return results;
     }
 
-    /// Try to pick up completed TLAS if available (thread-safe) and clear builder ownership
+    /// Try to pick up completed TLAS if available (lock-free) and take ownership
     pub fn tryPickupCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
-        self.tlas_mutex.lock();
-        defer self.tlas_mutex.unlock();
-
-        const result = self.completed_tlas;
-        if (result != null) {
-            self.completed_tlas = null;
+        if (self.completed_tlas.swap(null, .acquire)) |tlas_ptr| {
+            const result = tlas_ptr.*;
+            self.allocator.destroy(tlas_ptr);
+            return result;
         }
-        return result;
+        return null;
     }
 
-    /// Take TLAS result if available (thread-safe) and clear builder ownership
+    /// Take TLAS result if available (lock-free) and take ownership
     pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
-        self.tlas_mutex.lock();
-        defer self.tlas_mutex.unlock();
-
-        const result = self.completed_tlas;
-        if (result != null) {
-            self.completed_tlas = null;
-        }
-        return result;
+        return self.tryPickupCompletedTlas();
     }
 
     /// Get performance metrics
@@ -363,20 +371,31 @@ pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
     };
 
     if (old_blas_opt) |old_blas| {
-        // Old BLAS was replaced - queue for deferred destruction
+        // Old BLAS was replaced - queue for deferred destruction using lock-free list
         // Can't destroy immediately because:
         // 1. GPU commands may still be using it (secondary command buffers not yet executed)
         // 2. Old TLAS may still reference it
         // The raytracing_system will pick these up and add to per-frame destruction queues
-        builder.blas_mutex.lock();
-        defer builder.blas_mutex.unlock();
-        builder.old_blas_for_destruction.append(builder.allocator, old_blas) catch |err| {
-            log(.ERROR, "bvh_builder", "Failed to queue old BLAS for destruction: {}", .{err});
+        const node = builder.allocator.create(BlasDestructionNode) catch |err| {
+            log(.ERROR, "bvh_builder", "Failed to allocate destruction node: {}", .{err});
             // Last resort: destroy immediately (may cause validation errors)
             var old_buffer = old_blas.buffer;
             old_buffer.deinit();
             builder.gc.vkd.destroyAccelerationStructureKHR(builder.gc.dev, old_blas.acceleration_structure, null);
+            return;
         };
+        node.blas = old_blas;
+
+        // Lock-free push to head of linked list
+        var current_head = builder.old_blas_head.load(.acquire);
+        while (true) {
+            node.next = current_head;
+            if (builder.old_blas_head.cmpxchgWeak(current_head, node, .release, .acquire)) |new_head| {
+                current_head = new_head;
+            } else {
+                break;
+            }
+        }
     }
 
     // If this BLAS is part of a TLAS job, fill the slot in the job's buffer
@@ -452,7 +471,8 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
     var build_info = vk.AccelerationStructureBuildGeometryInfoKHR{
         .s_type = vk.StructureType.acceleration_structure_build_geometry_info_khr,
         .type = vk.AccelerationStructureTypeKHR.bottom_level_khr,
-        .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_build_bit_khr = true },
+        // prefer_fast_trace: We trace more often than we rebuild, optimize for traversal performance
+        .flags = vk.BuildAccelerationStructureFlagsKHR{ .prefer_fast_trace_bit_khr = true },
         .mode = vk.BuildAccelerationStructureModeKHR.build_khr,
         .geometry_count = 1,
         .p_geometries = @ptrCast(&geometry_vk),

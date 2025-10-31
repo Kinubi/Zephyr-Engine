@@ -297,19 +297,50 @@ pub const PathTracingPass = struct {
             },
         };
 
-        // Prepare textures resource
+        // Prepare resources that are shared across all frames
         const textures_resource = if (textures_ready)
             Resource{ .image_array = texture_image_infos }
         else
             null;
 
-        // Update vertex/index buffers and bind them for ALL frames (like rt_renderer does)
+        const output_descriptor = self.output_texture.getDescriptorInfo();
+        const output_resource = Resource{
+            .image = .{
+                .image_view = output_descriptor.image_view,
+                .sampler = output_descriptor.sampler,
+                .layout = output_descriptor.image_layout,
+            },
+        };
+
+        // Bind all resources for all frames in a single loop (better cache locality)
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const target_frame: u32 = @intCast(frame_idx);
             const frame_data = &self.per_frame[frame_idx];
 
             // Update vertex/index buffer info from geometries
             try frame_data.updateFromGeometries(.{ .geometries = rt_data.geometries });
+
+            // Get global UBO buffer for this frame
+            const global_ubo_buffer_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+            const global_resource = Resource{
+                .buffer = .{
+                    .buffer = global_ubo_buffer_info.buffer,
+                    .offset = global_ubo_buffer_info.offset,
+                    .range = global_ubo_buffer_info.range,
+                },
+            };
+
+            // Binding 0: Acceleration Structure (TLAS)
+            if (self.tlas_valid) {
+                const accel_resource = Resource{ .acceleration_structure = self.tlas };
+                try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+            }
+
+            // Binding 1: Output Image (storage image)
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
+
+            // Binding 2: Camera UBO (global uniform buffer)
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
 
             // Binding 3: Vertex buffers
             if (frame_data.vertex_infos.items.len > 0) {
@@ -330,43 +361,7 @@ pub const PathTracingPass = struct {
             if (textures_resource) |res| {
                 try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 6, res, target_frame);
             }
-        }
 
-        // Prepare output image resource for all frames
-        const output_descriptor = self.output_texture.getDescriptorInfo();
-        const output_resource = Resource{
-            .image = .{
-                .image_view = output_descriptor.image_view,
-                .sampler = output_descriptor.sampler,
-                .layout = output_descriptor.image_layout,
-            },
-        };
-
-        // Bind TLAS, output image, and camera UBO for all frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            const target_frame: u32 = @intCast(frame_idx);
-
-            // Get global UBO buffer for this frame
-            const global_ubo_buffer_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
-            const global_resource = Resource{
-                .buffer = .{
-                    .buffer = global_ubo_buffer_info.buffer,
-                    .offset = global_ubo_buffer_info.offset,
-                    .range = global_ubo_buffer_info.range,
-                },
-            };
-
-            // Binding 0: Acceleration Structure (TLAS)
-            // Only bind if TLAS is valid - prevents binding VK_NULL_HANDLE or invalid handles
-            if (self.tlas_valid and self.tlas != vk.AccelerationStructureKHR.null_handle) {
-                const accel_resource = Resource{ .acceleration_structure = self.tlas };
-                try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
-            }
-
-            // Binding 1: Output Image (storage image)
-            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
-            // Binding 2: Camera UBO (global uniform buffer)
-            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
             self.descriptor_dirty_flags[frame_idx] = false;
         }
 
@@ -383,8 +378,7 @@ pub const PathTracingPass = struct {
         const frame_index = frame_info.current_frame;
 
         // Skip if TLAS is not valid (no TLAS built yet - initial state)
-        // We always keep self.tlas in sync with rt_system, so if invalid, there's truly no TLAS
-        if (!self.tlas_valid or self.tlas == vk.AccelerationStructureKHR.null_handle) {
+        if (!self.tlas_valid) {
             return;
         }
 

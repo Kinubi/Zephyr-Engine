@@ -607,7 +607,7 @@ pub const GraphicsContext = struct {
                 }
                 resources.deinit(self.allocator);
             }
-            
+
             // IMPORTANT: Do NOT call vkFreeCommandBuffers on worker thread command buffers!
             // Command pools can only be accessed from the thread that created them.
             // Worker thread command buffers will be freed when their pools are reset via resetAllWorkerCommandPools()
@@ -749,7 +749,7 @@ pub const GraphicsContext = struct {
     pub fn clearPendingSecondaryBuffers(self: *GraphicsContext) void {
         secondary_buffers_mutex.lock();
         defer secondary_buffers_mutex.unlock(); // Keep locked until after pool reset
-        
+
         const count = pending_secondary_buffers.items.len;
 
         // Just clear the list - don't try to free individual buffers

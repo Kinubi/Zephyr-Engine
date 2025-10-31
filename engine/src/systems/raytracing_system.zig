@@ -275,7 +275,6 @@ pub const RaytracingSystem = struct {
 
                 // Queue old TLAS for destruction (if it existed)
                 if (old_entry) |old| {
-
                     // Queue handle for destruction
                     self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, old.acceleration_structure) catch |err| {
                         log(.ERROR, "raytracing", "Failed to queue old TLAS handle: {}", .{err});
@@ -469,8 +468,6 @@ pub const RaytracingSystem = struct {
 
         // Flush all per-frame destruction queues (old resources queued for deferred destruction)
         log(.INFO, "raytracing", "Deinit: flushing per-frame destruction queues", .{});
-
-        // Flush all per-frame destruction queues (old resources queued for deferred destruction)
         for (&self.per_frame_destroy) |*queue| {
             self.flushDestroyQueue(queue);
         }
@@ -489,44 +486,33 @@ pub const RaytracingSystem = struct {
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
     }
 
-    /// Flush a single destroy queue (used during deinit)
     /// Flush a destruction queue, destroying all queued resources
     /// Called after GPU has finished using resources for a particular frame
     fn flushDestroyQueue(self: *RaytracingSystem, queue: *PerFrameDestroyQueue) void {
-        // Destroy BLAS acceleration structures first, then their backing buffers
+        // Destroy BLAS acceleration structures and their backing buffers
         for (queue.blas_handles.items) |handle| {
-            if (handle != .null_handle) {
-                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-            }
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
         }
         queue.blas_handles.clearRetainingCapacity();
 
         for (queue.blas_buffers.items) |*buf| {
-            if (buf.buffer != .null_handle or buf.memory != .null_handle) {
-                buf.deinit();
-            }
+            buf.deinit();
         }
         queue.blas_buffers.clearRetainingCapacity();
 
-        // Destroy TLAS acceleration structures first, then their backing buffers
+        // Destroy TLAS acceleration structures and their backing buffers
         for (queue.tlas_handles.items) |handle| {
-            if (handle != .null_handle) {
-                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-            }
+            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
         }
         queue.tlas_handles.clearRetainingCapacity();
 
         for (queue.tlas_buffers.items) |*buf| {
-            if (buf.buffer != .null_handle or buf.memory != .null_handle) {
-                buf.deinit();
-            }
+            buf.deinit();
         }
         queue.tlas_buffers.clearRetainingCapacity();
 
         for (queue.tlas_instance_buffers.items) |*buf| {
-            if (buf.buffer != .null_handle or buf.memory != .null_handle) {
-                buf.deinit();
-            }
+            buf.deinit();
         }
         queue.tlas_instance_buffers.clearRetainingCapacity();
     }

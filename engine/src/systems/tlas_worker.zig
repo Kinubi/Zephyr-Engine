@@ -198,11 +198,19 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
     // Note: We use the synchronous buildTlasSynchronous since we're already on a worker thread
     const tlas_result = try buildTlasSynchronous(job.builder, instances_with_blas);
 
-    // Step 6: Store TLAS result in builder (atomic bookkeeping)
+    // Step 6: Store TLAS result in builder (lock-free atomic store)
     // The raytracing_system will pick this up on next frame and swap to render_tlas
-    job.builder.tlas_mutex.lock();
-    job.builder.completed_tlas = tlas_result;
-    job.builder.tlas_mutex.unlock();
+    const tlas_ptr = try job.allocator.create(@import("multithreaded_bvh_builder.zig").TlasResult);
+    tlas_ptr.* = tlas_result;
+
+    // Atomically store the pointer - if there's an old one, free it (shouldn't happen but be safe)
+    if (job.builder.completed_tlas.swap(tlas_ptr, .release)) |old_ptr| {
+        log(.WARN, "tlas_worker", "Overwriting unconsumed TLAS result - freeing old", .{});
+        old_ptr.buffer.deinit();
+        old_ptr.instance_buffer.deinit();
+        job.builder.gc.vkd.destroyAccelerationStructureKHR(job.builder.gc.dev, old_ptr.acceleration_structure, null);
+        job.allocator.destroy(old_ptr);
+    }
 
     return;
 }
@@ -210,16 +218,4 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
 // Error handler wrapping the main implementation
 fn handleError(err: anyerror, job: *TlasJob) void {
     log(.ERROR, "tlas_worker", "TLAS worker failed for job {}: {}", .{ job.job_id, err });
-    // Mark build as no longer in progress so system can retry
-    job.builder.tlas_mutex.lock();
-    // Note: We can't directly access raytracing_system from here
-    // The system will detect failure via timeout or missing completed_tlas
-    job.builder.tlas_mutex.unlock();
 }
-
-// Integration notes:
-// 1. Call tlasWorkerMain() from rt_system.update() as a ThreadPool job
-// 2. BLAS workers call pushBlasResult(job, node) on completion
-// 3. Transform-only TLAS jobs have all BLAS ready immediately
-// 4. New geometry triggers BLAS builds, brief polling until ready
-// 5. TLAS published via double-buffer atomic flip for stability
