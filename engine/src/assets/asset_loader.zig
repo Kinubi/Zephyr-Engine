@@ -258,10 +258,45 @@ pub const AssetLoader = struct {
             std.mem.endsWith(u8, asset_path, ".gltf"))
         {
             try self.loadMeshAsync(asset_id, asset_path, start_time);
+        } else if (std.mem.endsWith(u8, asset_path, ".lua") or
+            std.mem.endsWith(u8, asset_path, ".txt") or
+            std.mem.endsWith(u8, asset_path, ".zs"))
+        {
+            try self.loadScriptAsync(asset_id, asset_path, start_time);
         } else {
             log(.ERROR, "enhanced_asset_loader", "Unknown asset type for path: {s}", .{asset_path});
             return error.UnsupportedAssetType;
         }
+    }
+
+    /// Load script asynchronously (reads file and registers script with AssetManager)
+    fn loadScriptAsync(self: *AssetLoader, asset_id: AssetId, path: []const u8, start_time: i64) !void {
+        const data = std.fs.cwd().readFileAlloc(self.allocator, path, 64 * 1024) catch |err| {
+            log(.ERROR, "enhanced_asset_loader", "Failed to read script file {s}: {}", .{ path, err });
+            return err;
+        };
+
+        const end_time = std.time.microTimestamp();
+        const load_time = if (end_time >= start_time) @as(u64, @intCast(end_time - start_time)) else 0;
+
+        // Add script to AssetManager (it will duplicate into its own allocator)
+        self.asset_manager.addLoadedScript(asset_id, data) catch |err| {
+            log(.ERROR, "enhanced_asset_loader", "Failed to add script asset {}: {}", .{ asset_id.toU64(), err });
+            // Free local buffer
+            self.allocator.free(data);
+            self.registry.markAsFailed(asset_id, @errorName(err));
+            return err;
+        };
+
+        // Free local buffer - AssetManager duplicates the content
+        self.allocator.free(data);
+
+        // Update statistics
+        const current_avg = self.stats.average_load_time_us.load(.acquire);
+        const new_avg = if (current_avg == 0) load_time else (current_avg + load_time) / 2;
+        self.stats.average_load_time_us.store(new_avg, .release);
+
+        log(.INFO, "enhanced_asset_loader", "Loaded script asset {} in {}μs", .{ asset_id.toU64(), load_time });
     }
 
     /// Load texture asynchronously

@@ -1,6 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const zstbi = @import("zstbi");
+pub const zstbi = @import("zstbi");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Buffer = @import("buffer.zig").Buffer;
 const log = @import("../utils/log.zig").log;
@@ -11,7 +11,7 @@ var zstbi_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(fals
 var zstbi_init_mutex: std.Thread.Mutex = .{};
 
 /// Safely initialize zstbi once per application
-fn ensureZstbiInit(allocator: std.mem.Allocator) void {
+pub fn ensureZstbiInit(allocator: std.mem.Allocator) void {
     if (!zstbi_initialized.load(.acquire)) {
         zstbi_init_mutex.lock();
         defer zstbi_init_mutex.unlock();
@@ -548,6 +548,141 @@ pub const Texture = struct {
 
     pub fn getDescriptorInfo(self: *Texture) vk.DescriptorImageInfo {
         return self.descriptor;
+    }
+
+    /// Load texture from raw pixel data using ONLY single-time commands (synchronous)
+    /// Suitable for UI textures that need immediate availability (e.g., ImGui)
+    /// Transitions: undefined -> transfer_dst -> shader_read_only
+    pub fn loadFromMemorySingle(
+        gc: *GraphicsContext,
+        pixels: []const u8,
+        width: u32,
+        height: u32,
+        format: vk.Format,
+    ) !Texture {
+        const extent = vk.Extent3D{
+            .width = width,
+            .height = height,
+            .depth = 1,
+        };
+
+        // Create the texture image
+        var texture = try Texture.init(
+            gc,
+            format,
+            extent,
+            .{ .transfer_dst_bit = true, .sampled_bit = true },
+            .{ .@"1_bit" = true },
+        );
+        errdefer texture.deinit();
+
+        // Transition from undefined to transfer_dst_optimal
+        const transition1_cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            transition1_cmd,
+            texture.image,
+            .undefined,
+            .transfer_dst_optimal,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+        try gc.endSingleTimeCommands(transition1_cmd);
+
+        // Upload pixel data via staging buffer
+        const buffer_size = pixels.len;
+        var staging_buffer = try Buffer.init(
+            gc,
+            buffer_size,
+            1,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        defer staging_buffer.deinit();
+
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(pixels, buffer_size, 0);
+        staging_buffer.unmap();
+
+        // Copy buffer to image
+        const copy_cmd = try gc.beginSingleTimeCommands();
+        const region = vk.BufferImageCopy{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_subresource = .{
+                .aspect_mask = .{ .color_bit = true },
+                .mip_level = 0,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+            .image_extent = .{ .width = width, .height = height, .depth = 1 },
+        };
+        gc.vkd.cmdCopyBufferToImage(
+            copy_cmd,
+            staging_buffer.buffer,
+            texture.image,
+            .transfer_dst_optimal,
+            1,
+            @ptrCast(&region),
+        );
+        try gc.endSingleTimeCommands(copy_cmd);
+
+        // Transition to shader_read_only_optimal
+        const transition2_cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            transition2_cmd,
+            texture.image,
+            .transfer_dst_optimal,
+            .shader_read_only_optimal,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+        try gc.endSingleTimeCommands(transition2_cmd);
+
+        // Update descriptor layout
+        texture.descriptor.image_layout = .shader_read_only_optimal;
+
+        return texture;
+    }
+
+    /// Load texture from file using ONLY single-time commands (synchronous)
+    /// Suitable for UI textures that need immediate availability (e.g., ImGui)
+    /// Automatically decodes image to RGBA8 format
+    pub fn loadFromFileSingle(
+        gc: *GraphicsContext,
+        allocator: std.mem.Allocator,
+        filepath: []const u8,
+    ) !Texture {
+        // Ensure zstbi is initialized
+        ensureZstbiInit(allocator);
+
+        // Load and decode image file
+        const file_data = try std.fs.cwd().readFileAlloc(allocator, filepath, 10 * 1024 * 1024); // 10MB max
+        defer allocator.free(file_data);
+
+        var image = try zstbi.Image.loadFromMemory(file_data, 4); // 4 channels = RGBA
+        defer image.deinit();
+
+        const pixel_data = image.data[0 .. image.width * image.height * 4];
+
+        return loadFromMemorySingle(
+            gc,
+            pixel_data,
+            image.width,
+            image.height,
+            .r8g8b8a8_srgb,
+        );
     }
 
     pub fn deinit(self: *Texture) void {

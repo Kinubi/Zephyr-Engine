@@ -13,6 +13,7 @@ const Math = @import("../../utils/math.zig");
 const Mesh = @import("../../rendering/mesh.zig").Mesh;
 
 const RaytracingData = @import("../../rendering/render_data_types.zig").RaytracingData;
+const tlas_worker = @import("tlas_worker.zig");
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {
@@ -400,7 +401,6 @@ pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
 
     // If this BLAS is part of a TLAS job, fill the slot in the job's buffer
     if (work_data.tlas_job) |job| {
-        const tlas_worker = @import("tlas_worker.zig");
 
         // Allocate BlasResult on heap for the job's buffer
         const blas_ptr = builder.allocator.create(BlasResult) catch |err| {

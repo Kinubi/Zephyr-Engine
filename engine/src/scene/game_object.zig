@@ -10,6 +10,7 @@ const Transform = ecs.Transform;
 
 // Forward declaration to avoid circular dependency
 const Scene = @import("scene.zig").Scene;
+const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 
 /// GameObject is a lightweight handle to an ECS entity
 /// Provides Unity-like convenience methods
@@ -160,7 +161,6 @@ test "GameObject v2: setPosition updates transform" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
     var mock_asset_manager: AssetManager = undefined;
     var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
@@ -187,7 +187,6 @@ test "GameObject v2: translate moves object by offset" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
     var mock_asset_manager: AssetManager = undefined;
     var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();
@@ -216,7 +215,6 @@ test "GameObject v2: setParent creates hierarchy" {
     try world.registerComponent(Transform);
     try world.registerComponent(MeshRenderer);
 
-    const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
     var mock_asset_manager: AssetManager = undefined;
     var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
     defer scene.deinit();

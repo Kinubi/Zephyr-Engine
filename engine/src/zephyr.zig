@@ -30,7 +30,8 @@ pub const GraphicsContext = @import("core/graphics_context.zig").GraphicsContext
 pub const Swapchain = @import("core/swapchain.zig").Swapchain;
 pub const Buffer = @import("core/buffer.zig").Buffer;
 pub const Shader = @import("core/shader.zig").Shader;
-pub const Texture = @import("core/texture.zig").Texture;
+pub const TextureMod = @import("core/texture.zig");
+pub const Texture = TextureMod.Texture;
 pub const Descriptors = @import("core/descriptors.zig");
 
 // ========== Rendering ==========
@@ -77,6 +78,12 @@ pub const AssetRegistry = @import("assets/asset_registry.zig").AssetRegistry;
 pub const AssetLoader = @import("assets/asset_loader.zig").AssetLoader;
 pub const Material = @import("assets/asset_manager.zig").Material;
 pub const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
+
+// Re-export commonly used asset-related types so downstream modules (editor)
+// can reference them via the single `zephyr` module and avoid duplicate imports.
+pub const AssetId = @import("assets/asset_manager.zig").AssetId;
+pub const AssetType = @import("assets/asset_manager.zig").AssetType;
+pub const LoadPriority = @import("assets/asset_manager.zig").LoadPriority;
 
 // ========== Layers (Engine-Provided) ==========
 pub const PerformanceLayer = @import("layers/performance_layer.zig").PerformanceLayer;

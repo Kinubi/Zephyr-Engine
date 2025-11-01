@@ -1,5 +1,6 @@
 const std = @import("std");
 const zephyr = @import("zephyr");
+const log = zephyr.log;
 
 const c = @import("backend/imgui_c.zig").c;
 
@@ -74,7 +75,7 @@ pub const UIRenderer = struct {
 
         // Initialize asset browser by loading initial directory
         renderer.asset_browser_panel.refreshDirectory() catch |err| {
-            std.debug.print("Failed to initialize asset browser: {}\n", .{err});
+            log(.ERROR, "ui", "Failed to initialize asset browser: {}", .{err});
         };
 
         return renderer;

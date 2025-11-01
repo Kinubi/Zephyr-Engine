@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = @import("../utils/log.zig").log;
 const StatePool = @import("state_pool.zig").StatePool;
+const StatePoolMod = @import("state_pool.zig");
 const EntityId = @import("../ecs/entity_registry.zig").EntityId;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const lua = @import("lua_bindings.zig");
@@ -48,7 +49,7 @@ pub const ScriptRunner = struct {
     state_pool: ?*StatePool,
 
     // Optional main-thread action queue for delivering results to the main thread
-    action_queue: ?*@import("action_queue.zig").ActionQueue,
+    action_queue: ?*ActionQueue,
 
     running: std.atomic.Value(bool),
     next_job_id: std.atomic.Value(u64),
@@ -113,7 +114,7 @@ pub const ScriptRunner = struct {
     }
 
     /// Initialize a resource/state pool for leasing per-job state (e.g. lua_State).
-    pub fn setupStatePool(self: *ScriptRunner, initial_capacity: usize, create_fn: @import("state_pool.zig").CreateFn, destroy_fn: @import("state_pool.zig").DestroyFn) !void {
+    pub fn setupStatePool(self: *ScriptRunner, initial_capacity: usize, create_fn: StatePoolMod.CreateFn, destroy_fn: StatePoolMod.DestroyFn) !void {
         // Create pool value then store on heap
         const pool_value = try StatePool.init(self.allocator, initial_capacity, create_fn, destroy_fn);
         const pool_ptr = try self.allocator.create(StatePool);
@@ -182,7 +183,7 @@ pub const ScriptRunner = struct {
 // Placeholder: per-worker teardown (destroy lua_State)
 
 // Worker wrapper invoked by ThreadPool workers. Matches signature: fn (*anyopaque, WorkItem) void
-fn threadPoolWorker(context: *anyopaque, wi: @import("../threading/thread_pool.zig").WorkItem) void {
+fn threadPoolWorker(context: *anyopaque, wi: WorkItem) void {
     const runner = @as(*ScriptRunner, @ptrCast(@alignCast(context)));
 
     log(.DEBUG, "scripting", "ThreadPool worker invoked for job {}", .{wi.id});

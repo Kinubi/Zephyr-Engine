@@ -32,6 +32,8 @@ pub const SceneHierarchyPanel = struct {
     // When true, the inspector will call ImGui_SetWindowFocus() on its next render
     // to ensure keyboard input is directed to the Inspector window.
     request_inspector_focus: bool = false,
+    // When true, applying the script will set it to run every frame
+    script_auto_run: bool = false,
 
     pub fn init() SceneHierarchyPanel {
         var panel = SceneHierarchyPanel{};
@@ -97,6 +99,77 @@ pub const SceneHierarchyPanel = struct {
                 const selected_flag = if (is_selected) c.ImGuiTreeNodeFlags_Selected else 0;
 
                 _ = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags | selected_flag);
+
+                // Accept drag-and-drop onto the entity entry (ASSET_PATH payloads)
+                if (c.ImGui_BeginDragDropTarget()) {
+                    const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+                    if (payload != null) {
+                        if (payload.*.Data) |data_any| {
+                            const data_ptr: [*]const u8 = @ptrCast(data_any);
+                            const data_size: usize = @intCast(payload.*.DataSize);
+
+                            // Copy the dropped path into a temporary buffer
+                            const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                            if (path_opt) |path_buf| {
+                                std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                                path_buf[data_size] = 0;
+                                const path_slice = path_buf[0..data_size];
+
+                                // Determine file type by extension and call Scene helpers accordingly
+                                // Mesh extensions -> update model; Texture extensions -> update texture
+                                if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
+                                    // Update model for the entity (best-effort)
+                                    scene.updateModelForEntity(entity, path_slice) catch {};
+                                } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
+                                    scene.updateTextureForEntity(entity, path_slice) catch {};
+                                } else if (std.mem.endsWith(u8, path_slice, ".lua") or std.mem.endsWith(u8, path_slice, ".txt") or std.mem.endsWith(u8, path_slice, ".zs")) {
+                                    if (std.fs.cwd().openFile(path_slice, .{})) |file| {
+                                        defer file.close();
+                                        const contents = file.readToEndAlloc(scene.allocator, 64 * 1024) catch null;
+                                        if (contents) |cdata| {
+                                            // Register script as an asset (best-effort) so it participates in hot-reload
+                                            const AssetType = zephyr.AssetType;
+                                            const LoadPriority = zephyr.LoadPriority;
+                                            var script_asset_id: ?zephyr.AssetId = null;
+                                            script_asset_id = scene.asset_manager.loadAssetAsync(path_slice, AssetType.script, LoadPriority.high) catch null;
+
+                                            // Replace ScriptComponent on the entity and associate asset if available
+                                            _ = scene.ecs_world.remove(ScriptComponent, entity);
+                                            const slice: []const u8 = cdata;
+                                            if (script_asset_id) |aid| {
+                                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initWithAsset(slice, aid, self.script_auto_run, false)) catch {};
+                                            } else {
+                                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, self.script_auto_run, false)) catch {};
+                                            }
+
+                                            // If this entity is currently selected, mirror into editor buffer
+                                            var was_selected: bool = false;
+                                            for (self.selected_entities.items) |eid| {
+                                                if (eid == entity) {
+                                                    was_selected = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (was_selected) {
+                                                const copy_len = @min(cdata.len, self.script_buffer.len - 1);
+                                                std.mem.copyForwards(u8, self.script_buffer[0..copy_len], cdata[0..copy_len]);
+                                                self.script_buffer[copy_len] = 0;
+                                                self.script_buffer_owner = entity;
+                                            }
+                                        }
+                                    } else |_| {
+                                        // openFile failed; ignore
+                                    }
+                                } else {
+                                    // Unknown extension - try to treat as mesh+texture (best-effort)
+                                    scene.updatePropAssets(entity, path_slice, path_slice) catch {};
+                                }
+
+                                std.heap.page_allocator.free(path_buf);
+                            }
+                        }
+                    }
+                }
 
                 // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
                 if (c.ImGui_IsItemClicked()) {
@@ -170,6 +243,36 @@ pub const SceneHierarchyPanel = struct {
                 if (scene.ecs_world.get(MeshRenderer, entity)) |mesh_renderer| {
                     if (c.ImGui_CollapsingHeader("Mesh Renderer", c.ImGuiTreeNodeFlags_DefaultOpen)) {
                         self.renderMeshRendererInspector(mesh_renderer);
+
+                        // Accept drag-and-drop onto the Mesh Renderer inspector area
+                        if (c.ImGui_BeginDragDropTarget()) {
+                            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+                            if (payload != null) {
+                                if (payload.*.Data) |data_any| {
+                                    const data_ptr: [*]const u8 = @ptrCast(data_any);
+                                    const data_size: usize = @intCast(payload.*.DataSize);
+
+                                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                                    if (path_opt) |path_buf| {
+                                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                                        path_buf[data_size] = 0;
+                                        const path_slice = path_buf[0..data_size];
+
+                                        // Route based on extension
+                                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
+                                            scene.updateModelForEntity(entity, path_slice) catch {};
+                                        } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
+                                            scene.updateTextureForEntity(entity, path_slice) catch {};
+                                        } else {
+                                            // If unknown, try both model+texture update using same path
+                                            scene.updatePropAssets(entity, path_slice, path_slice) catch {};
+                                        }
+
+                                        std.heap.page_allocator.free(path_buf);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -210,6 +313,67 @@ pub const SceneHierarchyPanel = struct {
                         // Multiline text editor. Pass the buffer capacity so ImGui can edit in-place.
                         _ = c.ImGui_InputTextMultiline("##script_editor", &self.script_buffer[0], self.script_buffer.len);
 
+                        // Accept drag-and-drop payloads from the Asset Browser (type: "ASSET_PATH")
+                        if (c.ImGui_BeginDragDropTarget()) {
+                            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+                            if (payload != null) {
+                                // payload->Data is nullable anyopaque; handle safely
+                                if (payload.*.Data) |data_any| {
+                                    const data_ptr: [*]const u8 = @ptrCast(data_any);
+                                    const data_size: usize = @intCast(payload.*.DataSize);
+
+                                    // Copy path string into a temporary page-allocator buffer
+                                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                                    if (path_opt) |path_buf| {
+                                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                                        path_buf[data_size] = 0;
+                                        const path_slice = path_buf[0..data_size];
+
+                                        // Try to open and read the file from the workspace
+                                        if (std.fs.cwd().openFile(path_slice, .{})) |file| {
+                                            defer file.close();
+                                            const contents = file.readToEndAlloc(scene.allocator, 64 * 1024) catch null;
+                                            if (contents) |cdata| {
+                                                // Register script as an asset (best-effort) so it participates in hot-reload
+                                                const AssetType = zephyr.AssetType;
+                                                const LoadPriority = zephyr.LoadPriority;
+                                                var script_asset_id: ?zephyr.AssetId = null;
+                                                script_asset_id = scene.asset_manager.loadAssetAsync(path_slice, AssetType.script, LoadPriority.high) catch null;
+
+                                                // Replace ScriptComponent with the file contents and honor auto-run
+                                                _ = scene.ecs_world.remove(ScriptComponent, entity);
+                                                const slice: []const u8 = cdata;
+                                                if (script_asset_id) |aid| {
+                                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initWithAsset(slice, aid, self.script_auto_run, false)) catch {};
+                                                } else {
+                                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, self.script_auto_run, false)) catch {};
+                                                }
+
+                                                // Mirror editor buffer so the inspector shows loaded text
+                                                const copy_len = @min(cdata.len, self.script_buffer.len - 1);
+                                                std.mem.copyForwards(u8, self.script_buffer[0..copy_len], cdata[0..copy_len]);
+                                                self.script_buffer[copy_len] = 0;
+                                                self.script_buffer_owner = entity;
+                                            } else {
+                                                c.ImGui_Text("Failed to read dropped file");
+                                            }
+                                        } else |_| {
+                                            c.ImGui_Text("Dropped item is not a file: %s", path_slice.ptr);
+                                        }
+
+                                        std.heap.page_allocator.free(path_buf);
+                                    } else {
+                                        c.ImGui_Text("Out of memory copying payload");
+                                    }
+                                } else {
+                                    c.ImGui_Text("Empty payload data");
+                                }
+                            }
+                        }
+
+                        // Auto-run checkbox controls whether Apply enables per-frame execution
+                        _ = c.ImGui_Checkbox("Auto-run every frame", &self.script_auto_run);
+
                         c.ImGui_Spacing();
                         if (c.ImGui_Button("Apply")) {
                             // Determine current script length (up to NUL)
@@ -232,7 +396,12 @@ pub const SceneHierarchyPanel = struct {
                                     // points to the newly allocated script slice.
                                     _ = scene.ecs_world.remove(ScriptComponent, entity);
                                     const slice: []const u8 = dst[0 .. new_len + 1];
-                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, true, false)) catch {};
+                                    // Apply the script. If Auto-run is checked enable per-frame execution
+                                    if (self.script_auto_run) {
+                                        _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, true, false)) catch {};
+                                    } else {
+                                        _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initDefault(slice)) catch {};
+                                    }
                                     // Keep our editor owner as the same entity
                                     self.script_buffer_owner = entity;
                                 } else {
@@ -261,7 +430,8 @@ pub const SceneHierarchyPanel = struct {
                                     // but request a one-shot execution on the next update tick.
                                     _ = scene.ecs_world.remove(ScriptComponent, entity);
                                     const slice: []const u8 = dst[0 .. run_len + 1];
-                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, true, true)) catch {};
+                                    // Replace component and schedule persistent per-frame execution
+                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, true, false)) catch {};
 
                                     // Keep our editor owner as the same entity
                                     self.script_buffer_owner = entity;
@@ -272,6 +442,28 @@ pub const SceneHierarchyPanel = struct {
                         }
 
                         c.ImGui_Spacing();
+                        // Start button: enable script and optionally run every frame depending on auto-run
+                        if (c.ImGui_Button("Start")) {
+                            if (scene.ecs_world.get(ScriptComponent, entity)) |mut_sc| {
+                                mut_sc.enabled = true;
+                                mut_sc.run_on_update = self.script_auto_run;
+                                mut_sc.run_once = false;
+                            }
+                        }
+                        c.ImGui_SameLine();
+                        if (c.ImGui_Button("Stop")) {
+                            if (scene.ecs_world.get(ScriptComponent, entity)) |mut_sc| {
+                                mut_sc.enabled = false;
+                                mut_sc.run_on_update = false;
+                                mut_sc.run_once = false;
+                            }
+                        }
+
+                        // Show script run state in inspector for clarity
+                        if (scene.ecs_world.get(ScriptComponent, entity)) |sc_state| {
+                            const status_text: [*:0]const u8 = if (sc_state.enabled and sc_state.run_on_update) "Running (per-frame)" else if (sc_state.run_once) "Scheduled (one-shot)" else if (sc_state.enabled) "Enabled" else "Disabled";
+                            c.ImGui_Text("Script status: %s", status_text);
+                        }
                     }
                 }
             }
@@ -317,7 +509,20 @@ pub const SceneHierarchyPanel = struct {
         }
         if (world.has(ScriptComponent, entity)) {
             if (has_any) try components.appendSlice(std.heap.page_allocator, ",");
-            try components.appendSlice(std.heap.page_allocator, "S");
+            // Try to inspect state for a richer indicator
+            if (world.get(ScriptComponent, entity)) |sc| {
+                if (sc.enabled and sc.run_on_update) {
+                    try components.appendSlice(std.heap.page_allocator, "S*");
+                } else if (sc.run_once) {
+                    try components.appendSlice(std.heap.page_allocator, "S1");
+                } else if (sc.enabled) {
+                    try components.appendSlice(std.heap.page_allocator, "S");
+                } else {
+                    try components.appendSlice(std.heap.page_allocator, "s");
+                }
+            } else {
+                try components.appendSlice(std.heap.page_allocator, "S");
+            }
             has_any = true;
         }
 

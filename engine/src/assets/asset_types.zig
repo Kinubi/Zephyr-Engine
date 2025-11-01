@@ -36,6 +36,7 @@ pub const AssetType = enum(u8) {
     mesh,
     material,
     shader,
+    script,
     audio,
     scene,
     animation,
@@ -47,6 +48,7 @@ pub const AssetType = enum(u8) {
             .mesh => "mesh",
             .material => "material",
             .shader => "shader",
+            .script => "script",
             .audio => "audio",
             .scene => "scene",
             .animation => "animation",
@@ -221,6 +223,11 @@ pub const ShaderAsset = struct {
     data: []const u8,
 };
 
+pub const ScriptAsset = struct {
+    // Script source text
+    source: []const u8,
+};
+
 pub const AudioAsset = struct {
     // Placeholder for audio data
     data: []const u8,
@@ -242,6 +249,7 @@ pub const AssetData = union(AssetType) {
     mesh: MeshAsset,
     material: MaterialAsset,
     shader: ShaderAsset,
+    script: ScriptAsset,
     audio: AudioAsset,
     scene: SceneAsset,
     animation: AnimationAsset,

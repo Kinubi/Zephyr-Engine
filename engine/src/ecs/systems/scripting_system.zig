@@ -6,6 +6,7 @@ const Scene = @import("../../scene/scene.zig").Scene;
 const ScriptComponent = @import("../components/script.zig").ScriptComponent;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const log = @import("../../utils/log.zig").log;
+const lua = @import("../../scripting/lua_bindings.zig");
 
 pub const ScriptingSystem = struct {
     allocator: std.mem.Allocator,
@@ -91,7 +92,6 @@ pub fn update(world: *World, dt: f32) !void {
     }
 
     // Execute any ScriptComponent that requests per-frame execution
-    const lua = @import("../../scripting/lua_bindings.zig");
     var view = try world.view(ScriptComponent);
     var iter = view.iterator();
     var enqueued_count: usize = 0;

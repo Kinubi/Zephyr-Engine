@@ -5,6 +5,7 @@ const ParticleEmitter = @import("../components/particle_emitter.zig").ParticleEm
 const EntityId = @import("../entity_registry.zig").EntityId;
 const Scene = @import("../../scene/scene.zig").Scene;
 const ParticleComputePass = @import("../../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
+const vertex_formats = @import("../../rendering/vertex_formats.zig");
 
 /// Particle system for managing CPU-side emitter state
 /// GPU compute shader handles actual particle simulation
@@ -76,8 +77,6 @@ pub fn update(world: *World, dt: f32) !void {
         if (scene.render_graph) |*graph| {
             if (graph.getPass("particle_compute_pass")) |pass| {
                 const compute_pass: *ParticleComputePass = @fieldParentPtr("base", pass);
-
-                const vertex_formats = @import("../../rendering/vertex_formats.zig");
 
                 // Update GPU emitter with new position
                 const gpu_emitter = vertex_formats.GPUEmitter{

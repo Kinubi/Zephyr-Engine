@@ -310,8 +310,7 @@ pub const App = struct {
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
         // Attach a small script that moves the vase gradually each frame
-        const move_script = "translate_entity(0.0001, 0.0, 0.0)";
-        try scene.ecs_world.emplace(new_ecs.ScriptComponent, vase2.entity_id, new_ecs.ScriptComponent.init(move_script, true, false));
+
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
 
         log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene.entities.items.len});
@@ -402,6 +401,7 @@ pub const App = struct {
         // ==================== Initialize ImGui ====================
         log(.INFO, "app", "Initializing ImGui...", .{});
         imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, &unified_pipeline_system);
+
         ui_renderer = UIRenderer.init(self.allocator);
         log(.INFO, "app", "ImGui initialized", .{});
 

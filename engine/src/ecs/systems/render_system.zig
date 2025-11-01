@@ -11,11 +11,13 @@ const RaytracingData = render_data_types.RaytracingData;
 const RasterizationData = render_data_types.RasterizationData;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../../assets/asset_manager.zig").AssetId;
+const AssetTypeId = @import("../../assets/asset_types.zig").AssetId;
 const Mesh = @import("../../core/graphics_context.zig").Mesh;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
 const Scene = @import("../../scene/scene.zig").Scene;
+const ecs = @import("../world.zig");
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
@@ -102,9 +104,9 @@ pub const RenderSystem = struct {
 
     /// Combined data from Transform + MeshRenderer
     pub const RenderableEntity = struct {
-        model_asset: @import("../../assets/asset_types.zig").AssetId,
-        material_asset: ?@import("../../assets/asset_types.zig").AssetId,
-        texture_asset: ?@import("../../assets/asset_types.zig").AssetId,
+        model_asset: AssetTypeId,
+        material_asset: ?AssetTypeId,
+        texture_asset: ?AssetTypeId,
         world_matrix: math.Mat4x4,
         layer: u8,
         casts_shadows: bool,
@@ -1330,8 +1332,6 @@ pub fn update(world: *World, dt: f32) !void {
 // ============================================================================
 
 test "RenderSystem: extract empty world" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -1350,8 +1350,6 @@ test "RenderSystem: extract empty world" {
 }
 
 test "RenderSystem: extract single renderable" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -1383,8 +1381,6 @@ test "RenderSystem: extract single renderable" {
 }
 
 test "RenderSystem: disabled renderer not extracted" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -1409,8 +1405,6 @@ test "RenderSystem: disabled renderer not extracted" {
 }
 
 test "RenderSystem: extract primary camera" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -1444,8 +1438,6 @@ test "RenderSystem: extract primary camera" {
 }
 
 test "RenderSystem: sort by layer" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 

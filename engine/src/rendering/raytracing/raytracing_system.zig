@@ -306,7 +306,7 @@ pub const RaytracingSystem = struct {
 
                 // Mark build as no longer in progress
                 self.bvh_build_in_progress = false;
-                
+
                 // Check if force rebuild was requested while this build was in progress
                 if (self.force_rebuild) {
                     // Skip cooldown to allow immediate rebuild

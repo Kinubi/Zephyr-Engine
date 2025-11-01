@@ -15,7 +15,15 @@ const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig"
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
+const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
+
+const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
+const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
+const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
+const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
+const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
+const vertex_formats = @import("../rendering/vertex_formats.zig");
 
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 
@@ -151,6 +159,99 @@ pub const Scene = struct {
         return &self.game_objects.items[last_index];
     }
 
+    /// Update an existing entity's model and texture assets (or add MeshRenderer if missing)
+    /// Loads the model & texture via the AssetManager and creates a material for the texture.
+    /// Marks the entity's Transform as dirty so render systems pick up the change.
+    pub fn updatePropAssets(
+        self: *Scene,
+        entity: EntityId,
+        model_path: []const u8,
+        texture_path: []const u8,
+    ) !void {
+        // Validate entity
+        if (!self.ecs_world.isValid(entity)) return error.InvalidArgument;
+
+        // 1. Request model and texture asynchronously (high priority for immediate updates)
+        const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
+        const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
+
+        // 2. Create a material from the texture (synchronous helper created on AssetManager)
+        const material_id = try self.asset_manager.createMaterial(texture_id);
+
+        // Ensure Transform exists and mark dirty so render/compute systems will update GPU state
+        if (!self.ecs_world.has(Transform, entity)) {
+            const transform = Transform.init();
+            try self.ecs_world.emplace(Transform, entity, transform);
+            try self.entities.append(self.allocator, entity);
+        } else {
+            const transform = self.ecs_world.get(Transform, entity) orelse return error.EntityHasNoTransform;
+            transform.dirty = true;
+        }
+
+        // Update or add MeshRenderer component
+        if (self.ecs_world.has(MeshRenderer, entity)) {
+            const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
+            mr.setModel(model_id);
+            mr.setMaterial(material_id);
+            mr.setTexture(texture_id);
+        } else {
+            const mesh_renderer = MeshRenderer.initWithTexture(model_id, material_id, texture_id);
+            try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
+        }
+
+        log(.INFO, "scene", "Updated assets for entity {} -> model:{s} texture:{s}", .{ @intFromEnum(entity), model_path, texture_path });
+    }
+
+    /// Convenience: update only the model asset for an entity
+    pub fn updateModelForEntity(
+        self: *Scene,
+        entity: EntityId,
+        model_path: []const u8,
+    ) !void {
+        if (!self.ecs_world.isValid(entity)) return error.InvalidArgument;
+        const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
+
+        if (self.ecs_world.has(MeshRenderer, entity)) {
+            const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
+            mr.setModel(model_id);
+        } else {
+            // Create a model-only renderer (material will be provided by material system)
+            const mesh_renderer = MeshRenderer.initModelOnly(model_id);
+            try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
+        }
+
+        if (self.ecs_world.get(Transform, entity)) |transform| {
+            transform.dirty = true;
+        }
+    }
+
+    /// Convenience: update only the texture (and material) for an entity
+    pub fn updateTextureForEntity(
+        self: *Scene,
+        entity: EntityId,
+        texture_path: []const u8,
+    ) !void {
+        if (!self.ecs_world.isValid(entity)) return error.InvalidArgument;
+        const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
+        const material_id = try self.asset_manager.createMaterial(texture_id);
+
+        if (self.ecs_world.has(MeshRenderer, entity)) {
+            const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
+            mr.setMaterial(material_id);
+            mr.setTexture(texture_id);
+        } else {
+            // No renderer present - create default model-only renderer with texture as override
+            // Use a fallback model if none available
+            const fallback_model = self.asset_manager.getFallbackAsset(.default, AssetType.mesh) orelse return error.AssetLoadFailed;
+            const mesh_renderer = MeshRenderer.initWithTexture(fallback_model, material_id, texture_id);
+            try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
+        }
+
+        if (self.ecs_world.get(Transform, entity)) |transform| {
+            transform.dirty = true;
+        }
+    }
+
     /// Spawn a character (currently same as prop, will add physics/AI later)
     pub fn spawnCharacter(
         self: *Scene,
@@ -268,10 +369,7 @@ pub const Scene = struct {
         // Register emitter with GPU if particle compute pass is initialized
         if (self.render_graph) |*graph| {
             if (graph.getPass("particle_compute_pass")) |pass| {
-                const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
                 const compute_pass: *ParticleComputePass = @fieldParentPtr("base", pass);
-
-                const vertex_formats = @import("../rendering/vertex_formats.zig");
 
                 // Create GPU emitter struct
                 const gpu_emitter = vertex_formats.GPUEmitter{
@@ -433,7 +531,6 @@ pub const Scene = struct {
 
             // Set the path tracing pass's internal flag via its setEnabled method
             if (graph.getPass("path_tracing_pass")) |pass| {
-                const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
                 const pt_pass: *PathTracingPass = @fieldParentPtr("base", pass);
                 pt_pass.setEnabled(new_enabled);
             }
@@ -476,16 +573,11 @@ pub const Scene = struct {
         pipeline_system: *UnifiedPipelineSystem,
         swapchain_format: vk.Format,
         swapchain_depth_format: vk.Format,
-        thread_pool: *@import("../threading/thread_pool.zig").ThreadPool,
-        global_ubo_set: *@import("../rendering/ubo_set.zig").GlobalUboSet,
+        thread_pool: *ThreadPool,
+        global_ubo_set: *GlobalUboSet,
         width: u32,
         height: u32,
     ) !void {
-        const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
-        const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
-        const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
-        const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
-        const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
 
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);

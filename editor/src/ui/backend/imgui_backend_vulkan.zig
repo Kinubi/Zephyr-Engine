@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const zephyr = @import("zephyr");
+const log = zephyr.log;
 
 const c = @import("imgui_c.zig").c;
 
@@ -24,8 +25,9 @@ pub const ImGuiVulkanBackend = struct {
     cached_pipeline_handle: vk.Pipeline = .null_handle,
     resource_binder: ResourceBinder,
 
-    // Font texture using engine's Texture class
-    font_texture: ?Texture = null,
+    // Font texture using engine's Texture class (heap-allocated for consistency)
+    font_texture: ?*Texture = null,
+    font_texture_id: c.ImTextureID = 0,
 
     // Dynamic vertex and index buffers using engine's Buffer class
     vertex_buffer: ?Buffer = null,
@@ -38,6 +40,15 @@ pub const ImGuiVulkanBackend = struct {
     // Track if resources need setup
     resources_need_setup: bool = true,
 
+    // Descriptor pool for per-texture descriptor sets
+    descriptor_pool: vk.DescriptorPool = .null_handle,
+    descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
+
+    // Map of texture ID to pre-allocated descriptor sets (one per frame in flight)
+    texture_descriptor_sets: std.AutoHashMap(c.ImTextureID, [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet) = undefined,
+
+    // Map of texture ID to texture objects
+    texture_map: std.AutoHashMap(c.ImTextureID, *Texture) = undefined,
     pub fn init(allocator: std.mem.Allocator, gc: *GraphicsContext, swapchain: *Swapchain, pipeline_system: *UnifiedPipelineSystem) !ImGuiVulkanBackend {
         var self = ImGuiVulkanBackend{
             .allocator = allocator,
@@ -45,12 +56,15 @@ pub const ImGuiVulkanBackend = struct {
             .swapchain_format = swapchain.surface_format.format,
             .pipeline_system = pipeline_system,
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
+            .texture_map = std.AutoHashMap(c.ImTextureID, *Texture).init(allocator),
+            .texture_descriptor_sets = std.AutoHashMap(c.ImTextureID, [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet).init(allocator),
         };
 
+        // Create descriptor pool and layout for our own descriptor sets
+        try self.createDescriptorResources();
+
         // Try to create pipeline - may fail if shaders aren't compiled yet
-        self.createPipeline() catch |err| {
-            std.debug.print("ImGui: Pipeline creation deferred (shaders not ready): {}\n", .{err});
-        };
+        self.createPipeline() catch {};
 
         // Upload fonts to GPU
         try self.uploadFonts();
@@ -69,11 +83,36 @@ pub const ImGuiVulkanBackend = struct {
             ib.deinit();
         }
 
-        if (self.font_texture) |*ft| {
+        if (self.font_texture) |ft| {
             ft.deinit();
+            self.allocator.destroy(ft);
         }
 
+        // Clean up descriptor resources
+        if (self.descriptor_pool != .null_handle) {
+            self.gc.vkd.destroyDescriptorPool(self.gc.dev, self.descriptor_pool, null);
+        }
+        if (self.descriptor_set_layout != .null_handle) {
+            self.gc.vkd.destroyDescriptorSetLayout(self.gc.dev, self.descriptor_set_layout, null);
+        }
+
+        // Clean up maps
+        self.texture_descriptor_sets.deinit();
+        self.texture_map.deinit();
+
         self.resource_binder.deinit();
+    }
+
+    /// Generic texture upload function that works for fonts, icons, etc.
+    /// Uses synchronous single-time commands to ensure immediate availability
+    fn uploadTexture(self: *ImGuiVulkanBackend, pixel_data: []const u8, width: u32, height: u32) !Texture {
+        return Texture.loadFromMemorySingle(
+            self.gc,
+            pixel_data,
+            width,
+            height,
+            .r8g8b8a8_unorm, // Use unorm for UI textures (not srgb)
+        );
     }
 
     fn uploadFonts(self: *ImGuiVulkanBackend) !void {
@@ -87,68 +126,54 @@ pub const ImGuiVulkanBackend = struct {
         const pixel_count = @as(usize, @intCast(width * height * 4));
         const pixel_data: []const u8 = pixels[0..pixel_count];
 
-        // Create texture - Texture.init() will transition to shader_read_only_optimal for sampled-only textures
-        self.font_texture = try Texture.init(
-            self.gc,
-            .r8g8b8a8_unorm, // Use unorm, not srgb for fonts
-            .{ .width = @intCast(width), .height = @intCast(height), .depth = 1 },
-            .{ .sampled_bit = true, .transfer_dst_bit = true },
-            .{ .@"1_bit" = true },
-        );
+        // Allocate font texture on heap (like icon textures)
+        const font_texture = try self.allocator.create(Texture);
+        errdefer self.allocator.destroy(font_texture);
 
-        // Transition to transfer_dst_optimal for upload
-        try self.gc.transitionImageLayoutSingleTime(
-            self.font_texture.?.image,
-            .shader_read_only_optimal,
-            .transfer_dst_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        font_texture.* = try self.uploadTexture(pixel_data, @intCast(width), @intCast(height));
+        font_texture.descriptor.image_layout = .shader_read_only_optimal;
 
-        // Upload pixel data to texture via staging buffer
-        const buffer_size = pixel_count;
-        var staging_buffer = try Buffer.init(
-            self.gc,
-            buffer_size,
-            1,
-            .{ .transfer_src_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        defer staging_buffer.deinit();
+        self.font_texture = font_texture;
 
-        try staging_buffer.map(buffer_size, 0);
-        staging_buffer.writeToBuffer(pixel_data, buffer_size, 0);
-        staging_buffer.unmap();
+        // Register font texture and get its ID
+        self.font_texture_id = try self.addTexture(font_texture);
 
-        // Copy buffer to image
-        try self.gc.copyBufferToImageSingleTime(
-            staging_buffer,
-            self.font_texture.?.image,
-            @intCast(width),
-            @intCast(height),
-        );
+        // Set the font texture ID in ImGui
+        const io_ptr = c.ImGui_GetIO();
+        c.ImFontAtlas_SetTexID(io_ptr.*.Fonts, self.font_texture_id);
+    }
 
-        // Transition to shader read only layout for sampling
-        try self.gc.transitionImageLayoutSingleTime(
-            self.font_texture.?.image,
-            .transfer_dst_optimal,
-            .shader_read_only_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+    fn createDescriptorResources(self: *ImGuiVulkanBackend) !void {
+        // Create descriptor pool for texture descriptor sets
+        const pool_size = vk.DescriptorPoolSize{
+            .type = .combined_image_sampler,
+            .descriptor_count = 1000 * MAX_FRAMES_IN_FLIGHT, // 1000 textures * frames in flight
+        };
 
-        // Update descriptor info with correct layout
-        self.font_texture.?.descriptor.image_layout = .shader_read_only_optimal;
+        const pool_info = vk.DescriptorPoolCreateInfo{
+            .flags = .{ .free_descriptor_set_bit = true },
+            .max_sets = 1000 * MAX_FRAMES_IN_FLIGHT,
+            .pool_size_count = 1,
+            .p_pool_sizes = @ptrCast(&pool_size),
+        };
+
+        self.descriptor_pool = try self.gc.vkd.createDescriptorPool(self.gc.dev, &pool_info, null);
+
+        // Create descriptor set layout matching the pipeline's expected layout
+        const binding = vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_type = .combined_image_sampler,
+            .descriptor_count = 1,
+            .stage_flags = .{ .fragment_bit = true },
+            .p_immutable_samplers = null,
+        };
+
+        const layout_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = 1,
+            .p_bindings = @ptrCast(&binding),
+        };
+
+        self.descriptor_set_layout = try self.gc.vkd.createDescriptorSetLayout(self.gc.dev, &layout_info, null);
     }
 
     fn createPipeline(self: *ImGuiVulkanBackend) !void {
@@ -214,7 +239,7 @@ pub const ImGuiVulkanBackend = struct {
         self.pipeline_id = result.id;
 
         if (!result.success) {
-            std.log.warn("ImGui pipeline creation failed. ImGui rendering will be disabled.", .{});
+            log(.WARN, "imgui", "ImGui pipeline creation failed. ImGui rendering will be disabled.", .{});
             return error.PipelineCreationFailed;
         }
 
@@ -228,12 +253,12 @@ pub const ImGuiVulkanBackend = struct {
         self.resources_need_setup = true;
     }
 
-    /// Bind resources (font texture) for all frames
+    /// Setup initial resources - bind font texture for all frames
     fn setupResources(self: *ImGuiVulkanBackend) !void {
         if (self.pipeline_id == null) return;
         if (self.font_texture == null) return;
 
-        // Bind font texture to descriptor set 0, binding 0 for all frames
+        // Bind font texture to all frames initially
         const font_descriptor = self.font_texture.?.getDescriptorInfo();
         const texture_resource = Resource{
             .image = .{
@@ -325,7 +350,7 @@ pub const ImGuiVulkanBackend = struct {
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
 
         if (pipeline_rebuilt) {
-            std.debug.print("ImGui: Pipeline hot-reloaded, rebinding descriptors\n", .{});
+            // Pipeline was rebuilt; clear cached handle and rebind resources
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.resource_binder.clearPipeline(self.pipeline_id.?);
             self.resources_need_setup = true;
@@ -391,6 +416,9 @@ pub const ImGuiVulkanBackend = struct {
         const clip_off = draw_data.*.DisplayPos;
         const clip_scale = draw_data.*.FramebufferScale;
 
+        // Track last bound texture to avoid redundant binds
+        var last_texture_id: c.ImTextureID = 0;
+
         var n: usize = 0;
         while (n < draw_data.*.CmdListsCount) : (n += 1) {
             const cmd_list = draw_data.*.CmdLists.Data[n];
@@ -402,6 +430,40 @@ pub const ImGuiVulkanBackend = struct {
                 // User callback - skip for now
                 if (pcmd.UserCallback != null) {
                     continue;
+                }
+
+                // Bind the texture for this draw call dynamically
+                var texture_id = pcmd.TexRef._TexID;
+                const tex_data = pcmd.TexRef._TexData;
+
+                // If texture_id is 0 but _TexData is set, this is the font texture!
+                // ImGui uses _TexData internally for fonts, so we need to translate to our font_texture_id
+                if (texture_id == 0 and tex_data != null) {
+                    texture_id = self.font_texture_id;
+                }
+
+                // Only rebind if texture changed (optimization)
+                if (texture_id != last_texture_id and texture_id != 0) {
+                    // Get the pre-allocated descriptor sets for this texture
+                    if (self.texture_descriptor_sets.get(texture_id)) |desc_sets| {
+                        // Bind the descriptor set for the current frame
+                        const desc_set = desc_sets[frame_index];
+
+                        self.gc.vkd.cmdBindDescriptorSets(
+                            cmd,
+                            .graphics,
+                            layout,
+                            0, // First set
+                            1, // Count
+                            @ptrCast(&desc_set),
+                            0,
+                            null,
+                        );
+
+                        last_texture_id = texture_id;
+                    } else {
+                        // No descriptor sets found for this texture ID - nothing to bind
+                    }
                 }
 
                 // Project scissor/clipping rectangles
@@ -448,5 +510,86 @@ pub const ImGuiVulkanBackend = struct {
             vtx_offset += @intCast(cmd_list.*.VtxBuffer.Size);
             idx_offset += @intCast(cmd_list.*.IdxBuffer.Size);
         }
+    }
+
+    /// Add a texture to ImGui for rendering
+    /// Returns a texture ID (ImTextureID = ImU64) that can be used with ImGui::Image()
+    /// Creates pre-allocated descriptor sets (one per frame in flight) for this texture
+    /// NOTE: Texture must already be in shader_read_only_optimal layout before calling this
+    pub fn addTexture(self: *ImGuiVulkanBackend, texture: *Texture) !c.ImTextureID {
+        const descriptor = texture.getDescriptorInfo();
+
+        // Use the image view handle as the texture ID
+        const texture_id = @intFromEnum(descriptor.image_view);
+
+        // Allocate descriptor sets for all frames in flight
+        var desc_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet = undefined;
+
+        const layouts = [_]vk.DescriptorSetLayout{self.descriptor_set_layout} ** MAX_FRAMES_IN_FLIGHT;
+        const alloc_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
+            .p_set_layouts = &layouts,
+        };
+
+        try self.gc.vkd.allocateDescriptorSets(self.gc.dev, &alloc_info, &desc_sets);
+
+        // Update all descriptor sets with the texture info
+        var writes: [MAX_FRAMES_IN_FLIGHT]vk.WriteDescriptorSet = undefined;
+        var image_infos: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorImageInfo = undefined;
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            image_infos[i] = vk.DescriptorImageInfo{
+                .sampler = descriptor.sampler,
+                .image_view = descriptor.image_view,
+                .image_layout = descriptor.image_layout,
+            };
+
+            writes[i] = vk.WriteDescriptorSet{
+                .dst_set = desc_sets[i],
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .combined_image_sampler,
+                .p_image_info = @ptrCast(&image_infos[i]),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            };
+        }
+
+        self.gc.vkd.updateDescriptorSets(self.gc.dev, MAX_FRAMES_IN_FLIGHT, &writes, 0, null);
+
+        // Store the descriptor sets and texture
+        try self.texture_descriptor_sets.put(texture_id, desc_sets);
+        try self.texture_map.put(texture_id, texture);
+
+        return texture_id;
+    }
+
+    /// Create a texture from raw RGBA8 pixel data
+    /// Uses synchronous command execution to ensure texture is ready immediately
+    /// This is the public API for loading textures (icons, images, etc.)
+    pub fn createTextureFromPixels(self: *ImGuiVulkanBackend, pixels: []const u8, width: u32, height: u32) !*Texture {
+        const texture = try self.allocator.create(Texture);
+        errdefer self.allocator.destroy(texture);
+
+        texture.* = try self.uploadTexture(pixels, width, height);
+        return texture;
+    }
+
+    /// Remove a texture created by createTexture
+    pub fn removeTexture(self: *ImGuiVulkanBackend, texture: *Texture) void {
+        texture.deinit();
+        self.allocator.destroy(texture);
+    }
+
+    /// Get the font texture ID for ImGui
+    pub fn getFontTextureID(self: *ImGuiVulkanBackend) ?c.ImTextureID {
+        if (self.font_texture) |font| {
+            const descriptor = font.getDescriptorInfo();
+            // Use the image view handle (converted to integer) as ImGui texture ID
+            return @intFromEnum(descriptor.image_view);
+        }
+        return null;
     }
 };

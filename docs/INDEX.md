@@ -72,6 +72,9 @@ Quick navigation to all documentation. Each system has full docs (📖) and/or q
 - [Threaded Rendering Design](THREADED_RENDERING_DESIGN.md) - Future parallelization
 - [Systems TODO](SYSTEMS_TODO.md) - Documentation priorities
 
+### Editor & UI
+- [Editor UI & Scripting](EDITOR_SCRIPTING_UI.md) - Editor scripting workflow, drag & drop, inspector editor, and icons
+
 ## 📋 Quick References Only
 
 Fast lookups without reading full docs:

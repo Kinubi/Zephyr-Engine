@@ -4,6 +4,7 @@ const View = @import("../view.zig").View;
 const Transform = @import("../components/transform.zig").Transform;
 const simd = @import("../../utils/simd.zig");
 const math = @import("../../utils/math.zig");
+const ecs = @import("../world.zig");
 
 /// TransformSystem handles hierarchical transform updates
 /// Updates child transforms based on parent transforms
@@ -154,8 +155,6 @@ fn processBatch(transforms: []*Transform) void {
 // ============================================================================
 
 test "TransformSystem: basic update" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -181,8 +180,6 @@ test "TransformSystem: basic update" {
 }
 
 test "TransformSystem: parent-child hierarchy" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -221,8 +218,6 @@ test "TransformSystem: parent-child hierarchy" {
 }
 
 test "TransformSystem: SIMD batch processing" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
@@ -273,8 +268,6 @@ test "TransformSystem: SIMD batch processing" {
 }
 
 test "TransformSystem: multiple children" {
-    const ecs = @import("../world.zig");
-
     var world = ecs.World.init(std.testing.allocator, null);
     defer world.deinit();
 
