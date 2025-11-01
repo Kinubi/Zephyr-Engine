@@ -12,6 +12,8 @@ const UIMath = @import("backend/ui_math.zig");
 const Scene = zephyr.Scene;
 const Camera = zephyr.Camera;
 const Math = zephyr.math;
+// Lua bindings (used by the scripting console)
+const lua = zephyr.lua;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic
@@ -36,12 +38,39 @@ pub const UIRenderer = struct {
     // Cached draw list for the viewport window (used for overlays)
     viewport_draw_list: ?*c.ImDrawList = null,
 
+    // Scripting console (simple, fixed-size buffer + small ring history)
+    show_scripting_console: bool = false,
+    scripting_input_buffer: [8192]u8 = undefined,
+    scripting_history_storage: [32][256]u8 = undefined,
+    scripting_history_lens: [32]usize = undefined,
+    scripting_history_head: usize = 0,
+    scripting_history_count: usize = 0,
+
     pub fn init(allocator: std.mem.Allocator) UIRenderer {
         var renderer = UIRenderer{
             .allocator = allocator,
             .hierarchy_panel = SceneHierarchyPanel.init(),
             .asset_browser_panel = AssetBrowserPanel.init(allocator),
         };
+
+        // Zero fixed-size console buffers
+        var i: usize = 0;
+        while (i < renderer.scripting_input_buffer.len) : (i += 1) {
+            renderer.scripting_input_buffer[i] = 0;
+        }
+
+        var ri: usize = 0;
+        while (ri < renderer.scripting_history_storage.len) : (ri += 1) {
+            var cj: usize = 0;
+            while (cj < renderer.scripting_history_storage[ri].len) : (cj += 1) {
+                renderer.scripting_history_storage[ri][cj] = 0;
+            }
+        }
+
+        var li: usize = 0;
+        while (li < renderer.scripting_history_lens.len) : (li += 1) {
+            renderer.scripting_history_lens[li] = 0;
+        }
 
         // Initialize asset browser by loading initial directory
         renderer.asset_browser_panel.refreshDirectory() catch |err| {
@@ -333,6 +362,114 @@ pub const UIRenderer = struct {
             }
             c.ImGui_End();
         }
+    }
+
+    fn renderScriptingConsole(self: *UIRenderer, stats: RenderStats) void {
+        const window_flags = c.ImGuiWindowFlags_None;
+
+        if (!c.ImGui_Begin("Scripting Console", &self.show_scripting_console, window_flags)) {
+            c.ImGui_End();
+            return;
+        }
+
+        // Toggle instructions
+        c.ImGui_Text("Lua scripting console. Runs code synchronously on the main thread when possible.");
+        c.ImGui_Separator();
+
+        // Input text multiline
+        // ImGui expects a NUL-terminated char buffer; we provide a fixed-size buffer.
+        // Multiline input: use minimal signature provided by c-binding
+        _ = c.ImGui_InputTextMultiline("##script_input", &self.scripting_input_buffer[0], self.scripting_input_buffer.len);
+
+        // Buttons: Run (sync) and Clear
+        if (c.ImGui_Button("Run (Sync)")) {
+            // Determine script length (find first NUL)
+            var script_len: usize = 0;
+            while (script_len < self.scripting_input_buffer.len) : (script_len += 1) {
+                if (self.scripting_input_buffer[script_len] == 0) break;
+            }
+
+            if (script_len > 0) {
+                // Ensure we have a Scene to execute against
+                if (stats.scene) |scene_ptr| {
+                    // Try to use the Scene-owned scripting system's lua state pool (synchronous)
+                    const sys = &scene_ptr.scripting_system;
+                    var executed: bool = false;
+                    if (sys.runner.state_pool) |sp| {
+                        const ls = sp.acquire();
+                        // Execute using the lua binding. Use UIRenderer's allocator for temporary allocations.
+                        const buf_slice = self.scripting_input_buffer[0..script_len];
+                        var res = lua.ExecuteResult{ .success = false, .message = "" };
+                        const exec_res = lua.executeLuaBuffer(self.allocator, ls, buf_slice, 0, @ptrCast(scene_ptr)) catch {
+                            // on allocation/other error, append message and release state
+                            self.appendHistory("(execute error)");
+                            sp.release(ls);
+                            executed = true;
+                            return;
+                        };
+                        res = exec_res;
+
+                        // Append result to history (copying up to slot size)
+                        if (res.message.len > 0) {
+                            const copy_len = @min(res.message.len, self.scripting_history_storage[0].len - 1);
+                            std.mem.copyForwards(u8, self.scripting_history_storage[self.scripting_history_head][0..copy_len], res.message[0..copy_len]);
+                            self.scripting_history_storage[self.scripting_history_head][copy_len] = 0;
+                            self.scripting_history_lens[self.scripting_history_head] = copy_len;
+                            self.scripting_history_head = (self.scripting_history_head + 1) % self.scripting_history_storage.len;
+                            if (self.scripting_history_count < self.scripting_history_storage.len) self.scripting_history_count += 1;
+                        } else {
+                            const okmsg = "(ok)";
+                            self.appendHistory(@as([]const u8, okmsg));
+                        }
+
+                        // Release leased state
+                        sp.release(ls);
+                        executed = true;
+                    }
+
+                    if (!executed) {
+                        // Could not execute synchronously (no state pool); inform user
+                        self.appendHistory("(no lua state pool - cannot run synchronously)");
+                    }
+                } else {
+                    self.appendHistory("(no scene available)");
+                }
+            }
+        }
+
+        c.ImGui_SameLine();
+        if (c.ImGui_Button("Clear")) {
+            // NUL the input buffer
+            self.scripting_input_buffer[0] = 0;
+        }
+
+        c.ImGui_Separator();
+
+        // History pane (read-only)
+        const hist_size = c.ImVec2{ .x = 0, .y = 200 };
+        if (c.ImGui_BeginChild("##script_history", hist_size, 0, 0)) {
+            var idx: usize = 0;
+            while (idx < self.scripting_history_count) : (idx += 1) {
+                const pos = (self.scripting_history_head + self.scripting_history_storage.len - self.scripting_history_count + idx) % self.scripting_history_storage.len;
+                const len = self.scripting_history_lens[pos];
+                if (len > 0) {
+                    c.ImGui_Text("%s", &self.scripting_history_storage[pos][0]);
+                }
+            }
+        }
+        // ImGui requires EndChild() to be called after BeginChild() even if BeginChild returned false
+        c.ImGui_EndChild();
+
+        c.ImGui_End();
+    }
+
+    fn appendHistory(self: *UIRenderer, msg: []const u8) void {
+        const copy_len = @min(msg.len, self.scripting_history_storage[0].len - 1);
+        std.mem.copyForwards(u8, self.scripting_history_storage[self.scripting_history_head][0..copy_len], msg[0..copy_len]);
+        self.scripting_history_storage[self.scripting_history_head][copy_len] = 0;
+        self.scripting_history_lens[self.scripting_history_head] = copy_len;
+        self.scripting_history_head = (self.scripting_history_head + 1) % self.scripting_history_storage.len;
+        if (self.scripting_history_count < self.scripting_history_storage.len) self.scripting_history_count += 1;
     }
 };
 

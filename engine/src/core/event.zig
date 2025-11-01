@@ -9,6 +9,7 @@ pub const EventType = enum {
     // Input events
     KeyPressed,
     KeyReleased,
+    KeyTyped,
     MouseButtonPressed,
     MouseButtonReleased,
     MouseMoved,
@@ -40,6 +41,9 @@ pub const EventData = union(EventType) {
         key: i32,
         scancode: i32,
         mods: i32,
+    },
+    KeyTyped: struct {
+        codepoint: u32,
     },
 
     MouseButtonPressed: struct {

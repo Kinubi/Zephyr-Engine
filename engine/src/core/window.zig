@@ -63,6 +63,15 @@ pub const Window = struct {
         }
     }
 
+    // GLFW char callback: forward UTF-8 characters as KeyTyped events on the engine event bus
+    fn charCallback(window: ?*c.GLFWwindow, codepoint: c_uint) callconv(.c) void {
+        const self = getUserPointer(window);
+        if (self.event_bus) |bus| {
+            const event = Event.init(.KeyTyped, .{ .KeyTyped = .{ .codepoint = @as(u32, codepoint) } });
+            bus.queueEvent(event) catch {};
+        }
+    }
+
     fn scrollCallback(window: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.c) void {
         const self = getUserPointer(window);
         if (self.event_bus) |bus| {
@@ -148,6 +157,7 @@ pub const Window = struct {
             _ = c.glfwSetKeyCallback(win, keyCallback);
             _ = c.glfwSetMouseButtonCallback(win, mouseButtonCallback);
             _ = c.glfwSetCursorPosCallback(win, cursorPosCallback);
+            _ = c.glfwSetCharCallback(win, charCallback);
             _ = c.glfwSetScrollCallback(win, scrollCallback);
             _ = c.glfwSetWindowSizeCallback(win, windowSizeCallback);
         }

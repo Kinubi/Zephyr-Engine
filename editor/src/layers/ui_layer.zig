@@ -244,6 +244,37 @@ pub const UILayer = struct {
                     evt.markHandled();
                 }
             },
+            .KeyTyped => {
+                // Forward Unicode codepoint to ImGui as UTF-8 characters
+                const cp = evt.data.KeyTyped.codepoint;
+                var buf: [5]u8 = undefined; // up to 4 bytes + null
+                var len: usize = 0;
+                if (cp <= 0x7F) {
+                    buf[0] = @intCast(cp);
+                    len = 1;
+                } else if (cp <= 0x7FF) {
+                    buf[0] = @intCast(0xC0 | ((cp >> 6) & 0x1F));
+                    buf[1] = @intCast(0x80 | (cp & 0x3F));
+                    len = 2;
+                } else if (cp <= 0xFFFF) {
+                    buf[0] = @intCast(0xE0 | ((cp >> 12) & 0x0F));
+                    buf[1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+                    buf[2] = @intCast(0x80 | (cp & 0x3F));
+                    len = 3;
+                } else {
+                    buf[0] = @intCast(0xF0 | ((cp >> 18) & 0x07));
+                    buf[1] = @intCast(0x80 | ((cp >> 12) & 0x3F));
+                    buf[2] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+                    buf[3] = @intCast(0x80 | (cp & 0x3F));
+                    len = 4;
+                }
+                buf[len] = 0;
+                const io = c.ImGui_GetIO();
+                if (io) |i| {
+                    c.ImGuiIO_AddInputCharactersUTF8(i, buf[0..len].ptr);
+                    evt.markHandled();
+                }
+            },
             else => {},
         }
     }

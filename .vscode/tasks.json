@@ -131,6 +131,145 @@
 				"$gcc"
 			],
 			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "build (zig build)",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
 		}
 	]
 }

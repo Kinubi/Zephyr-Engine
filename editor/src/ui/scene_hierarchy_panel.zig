@@ -11,6 +11,7 @@ const MeshRenderer = ecs.MeshRenderer;
 const Camera = ecs.Camera;
 const PointLight = ecs.PointLight;
 const ParticleEmitter = ecs.ParticleEmitter;
+const ScriptComponent = ecs.ScriptComponent;
 
 const Scene = zephyr.Scene;
 const Math = zephyr.math;
@@ -23,10 +24,20 @@ pub const SceneHierarchyPanel = struct {
 
     // Temp buffer for text input
     temp_buffer: [256]u8 = undefined,
+    // Script editor buffer (fixed capacity). When an entity with a ScriptComponent
+    // is selected, we copy its script into this buffer for editing. We keep the
+    // currently editing entity id so we only reload when selection changes.
+    script_buffer: [4096]u8 = undefined,
+    script_buffer_owner: ?EntityId = null,
+    // When true, the inspector will call ImGui_SetWindowFocus() on its next render
+    // to ensure keyboard input is directed to the Inspector window.
+    request_inspector_focus: bool = false,
 
     pub fn init() SceneHierarchyPanel {
         var panel = SceneHierarchyPanel{};
         panel.selected_entities = std.ArrayList(EntityId){};
+        // Zero script buffer length sentinel (not strictly required)
+        panel.script_buffer[0] = 0;
         return panel;
     }
 
@@ -108,6 +119,10 @@ pub const SceneHierarchyPanel = struct {
                         if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
                         _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
                     }
+                    // Request that the Inspector steals focus on next render so keyboard
+                    // input targets inspector widgets (we call SetWindowFocus from inside
+                    // the Inspector to avoid API differences on the c-binding).
+                    self.request_inspector_focus = true;
                 }
 
                 // Context menu for entity operations
@@ -134,6 +149,11 @@ pub const SceneHierarchyPanel = struct {
         const window_flags = c.ImGuiWindowFlags_NoCollapse;
 
         if (c.ImGui_Begin("Inspector", null, window_flags)) {
+            // If a previous interaction requested inspector focus, perform it here
+            if (self.request_inspector_focus) {
+                c.ImGui_SetWindowFocus();
+                self.request_inspector_focus = false;
+            }
             if (self.selected_entities.items.len > 0) {
                 const entity = self.selected_entities.items[0];
                 c.ImGui_Text("Entity Index: %d (raw=%u)", entity.index(), @intFromEnum(entity));
@@ -171,6 +191,87 @@ pub const SceneHierarchyPanel = struct {
                 if (scene.ecs_world.get(ParticleEmitter, entity)) |emitter| {
                     if (c.ImGui_CollapsingHeader("Particle Emitter", c.ImGuiTreeNodeFlags_DefaultOpen)) {
                         self.renderParticleEmitterInspector(scene.ecs_world, entity, emitter);
+                    }
+                }
+
+                // Script component inspector/editor
+                if (scene.ecs_world.get(ScriptComponent, entity)) |sc| {
+                    if (c.ImGui_CollapsingHeader("Script", c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                        // If we started editing a different entity, load its script into the
+                        // fixed-size buffer so the user can edit it.
+                        if (self.script_buffer_owner == null or self.script_buffer_owner.? != entity) {
+                            // Copy up to capacity-1 bytes and NUL terminate
+                            const copy_len = @min(sc.script.len, self.script_buffer.len - 1);
+                            std.mem.copyForwards(u8, self.script_buffer[0..copy_len], sc.script[0..copy_len]);
+                            self.script_buffer[copy_len] = 0;
+                            self.script_buffer_owner = entity;
+                        }
+
+                        // Multiline text editor. Pass the buffer capacity so ImGui can edit in-place.
+                        _ = c.ImGui_InputTextMultiline("##script_editor", &self.script_buffer[0], self.script_buffer.len);
+
+                        c.ImGui_Spacing();
+                        if (c.ImGui_Button("Apply")) {
+                            // Determine current script length (up to NUL)
+                            var new_len: usize = 0;
+                            while (new_len < self.script_buffer.len) : (new_len += 1) {
+                                if (self.script_buffer[new_len] == 0) break;
+                            }
+
+                            if (new_len > 0) {
+                                // Allocate a persistent buffer from the Scene allocator to store the
+                                // script; ScriptComponent stores a []const u8 so the allocator must
+                                // keep the memory alive while the component exists. Allocation may
+                                // fail; handle gracefully.
+                                const dst_opt = scene.allocator.alloc(u8, new_len + 1) catch null;
+                                if (dst_opt != null) {
+                                    var dst = dst_opt.?;
+                                    std.mem.copyForwards(u8, dst[0..new_len], self.script_buffer[0..new_len]);
+                                    dst[new_len] = 0;
+                                    // Replace component by removing and emplacing new one that
+                                    // points to the newly allocated script slice.
+                                    _ = scene.ecs_world.remove(ScriptComponent, entity);
+                                    const slice: []const u8 = dst[0 .. new_len + 1];
+                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, true, false)) catch {};
+                                    // Keep our editor owner as the same entity
+                                    self.script_buffer_owner = entity;
+                                } else {
+                                    // Allocation failed; show ephemeral message in inspector
+                                    c.ImGui_Text("Failed to allocate script buffer (out of memory)");
+                                }
+                            }
+                        }
+
+                        c.ImGui_SameLine();
+                        if (c.ImGui_Button("Run Next Update")) {
+                            // Determine current buffer length
+                            var run_len: usize = 0;
+                            while (run_len < self.script_buffer.len) : (run_len += 1) {
+                                if (self.script_buffer[run_len] == 0) break;
+                            }
+                            if (run_len > 0) {
+                                // Make a scene-owned copy of the current editor buffer so the
+                                // ScriptComponent can safely reference it.
+                                const dst_opt = scene.allocator.alloc(u8, run_len + 1) catch null;
+                                if (dst_opt) |dst| {
+                                    std.mem.copyForwards(u8, dst[0..run_len], self.script_buffer[0..run_len]);
+                                    dst[run_len] = 0;
+
+                                    // Replace the component (remove+emplace) to mirror Apply semantics
+                                    // but request a one-shot execution on the next update tick.
+                                    _ = scene.ecs_world.remove(ScriptComponent, entity);
+                                    const slice: []const u8 = dst[0 .. run_len + 1];
+                                    _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, true, true)) catch {};
+
+                                    // Keep our editor owner as the same entity
+                                    self.script_buffer_owner = entity;
+                                } else {
+                                    c.ImGui_Text("Failed to allocate script buffer (out of memory)");
+                                }
+                            }
+                        }
+
+                        c.ImGui_Spacing();
                     }
                 }
             }
@@ -212,6 +313,11 @@ pub const SceneHierarchyPanel = struct {
         if (world.has(ParticleEmitter, entity)) {
             if (has_any) try components.appendSlice(std.heap.page_allocator, ",");
             try components.appendSlice(std.heap.page_allocator, "P");
+            has_any = true;
+        }
+        if (world.has(ScriptComponent, entity)) {
+            if (has_any) try components.appendSlice(std.heap.page_allocator, ",");
+            try components.appendSlice(std.heap.page_allocator, "S");
             has_any = true;
         }
 

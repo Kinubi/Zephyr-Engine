@@ -97,3 +97,5 @@ pub const scripting = @import("scripting/script_runner.zig");
 pub const ScriptRunner = scripting.ScriptRunner;
 pub const StatePool = @import("scripting/state_pool.zig").StatePool;
 pub const ActionQueue = @import("scripting/action_queue.zig").ActionQueue;
+// Lua bindings exposed (useful for editor UI and tests)
+pub const lua = @import("scripting/lua_bindings.zig");

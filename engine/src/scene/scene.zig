@@ -431,11 +431,11 @@ pub const Scene = struct {
                 return false;
             }
 
-            // Set the path tracing pass's internal flag
+            // Set the path tracing pass's internal flag via its setEnabled method
             if (graph.getPass("path_tracing_pass")) |pass| {
                 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
                 const pt_pass: *PathTracingPass = @fieldParentPtr("base", pass);
-                pt_pass.enable_path_tracing = new_enabled;
+                pt_pass.setEnabled(new_enabled);
             }
 
             if (new_enabled) {

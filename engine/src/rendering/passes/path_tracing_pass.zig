@@ -218,12 +218,13 @@ pub const PathTracingPass = struct {
             return false;
         };
 
-        self.updateDescriptors() catch |err| {
-            log(.WARN, "path_tracing_pass", "Failed to update descriptors during recovery: {}", .{err});
-            return false;
-        };
+        // Don't update descriptors during recovery either - wait for valid TLAS
+        // Mark all descriptors dirty so they'll be updated on next frame
+        for (&self.descriptor_dirty_flags) |*flag| {
+            flag.* = true;
+        }
 
-        log(.INFO, "path_tracing_pass", "Recovery setup complete", .{});
+        log(.INFO, "path_tracing_pass", "Recovery setup complete, descriptors will update on next frame", .{});
         return true;
     }
 
@@ -253,12 +254,14 @@ pub const PathTracingPass = struct {
 
         // Update shader binding table
         try self.rt_system.updateShaderBindingTable(entry.vulkan_pipeline);
-        try self.updateDescriptors();
+
+        // DON'T call updateDescriptors() here - wait for first update() to build TLAS first
+        // Descriptors will be updated in updateImpl once TLAS is valid
+        // Calling it here during setup can bind to invalid BLAS if RT system hasn't built them yet
     }
 
     /// Update descriptors for all frames (exactly like rt_renderer.update does)
     fn updateDescriptors(self: *PathTracingPass) !void {
-
         // Get raytracing data from render system (already cached)
         const rt_data = try self.render_system.getRaytracingData();
         defer {
@@ -335,6 +338,8 @@ pub const PathTracingPass = struct {
             if (self.tlas_valid) {
                 const accel_resource = Resource{ .acceleration_structure = self.tlas };
                 try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+            } else {
+                log(.WARN, "path_tracing_pass", "updateDescriptors called but TLAS not valid! Skipping TLAS binding for frame {}", .{target_frame});
             }
 
             // Binding 1: Output Image (storage image)
@@ -468,8 +473,13 @@ pub const PathTracingPass = struct {
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.path_tracing_pipeline);
 
-            // Rebind resources after hot reload
-            try self.updateDescriptors();
+            // Mark descriptors dirty instead of immediately updating
+            // They'll be updated in the next update() cycle when it's safe
+            for (&self.descriptor_dirty_flags) |*flag| {
+                flag.* = true;
+            }
+            // Skip dispatch this frame since descriptors aren't bound yet
+            return;
         }
 
         const cmd = frame_info.command_buffer;
@@ -787,10 +797,16 @@ pub const PathTracingPass = struct {
                 // Only rebind the current frame to avoid touching in-flight frames at high FPS
                 try self.updateDescriptorsForFrame(frame_index);
 
-                // Clear transform flags on TLAS changes after a successful per-frame rebind
+                // Clear flags after successful per-frame rebind
                 if (tlas_changed) {
                     self.render_system.renderables_dirty = false;
                     self.render_system.transform_only_change = false;
+                }
+
+                // CRITICAL: Also clear raytracing_descriptors_dirty if we updated for it
+                // Otherwise it leaks into next frame and causes confusion
+                if (geometry_changed) {
+                    self.render_system.raytracing_descriptors_dirty = false;
                 }
 
                 // Mark this frame as completed in the TLAS transition mask
@@ -802,7 +818,13 @@ pub const PathTracingPass = struct {
 
     /// Toggle path tracing on/off (allows switching to raster)
     pub fn setEnabled(self: *PathTracingPass, enabled: bool) void {
+        const was_disabled = !self.enable_path_tracing;
         self.enable_path_tracing = enabled;
+
+        // If we're enabling PT after it was disabled, force a BVH rebuild
+        if (enabled and was_disabled) {
+            self.rt_system.forceRebuild();
+        }
     }
 
     /// Get the path-traced output texture

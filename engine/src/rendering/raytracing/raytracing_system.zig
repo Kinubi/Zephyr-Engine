@@ -75,6 +75,7 @@ pub const RaytracingSystem = struct {
     // Multithreaded BVH system
     bvh_builder: *MultithreadedBvhBuilder = undefined,
     bvh_build_in_progress: bool = false,
+    force_rebuild: bool = false, // Force rebuild on next update (overrides all checks)
     next_tlas_job_id: u64 = 1,
 
     // Shader Binding Table (for raytracing)
@@ -305,8 +306,15 @@ pub const RaytracingSystem = struct {
 
                 // Mark build as no longer in progress
                 self.bvh_build_in_progress = false;
-                // Start cooldown so descriptor sets for all frames can rebind
-                self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT;
+                
+                // Check if force rebuild was requested while this build was in progress
+                if (self.force_rebuild) {
+                    // Skip cooldown to allow immediate rebuild
+                    self.tlas_rebuild_cooldown_frames = 0;
+                } else {
+                    // Start cooldown so descriptor sets for all frames can rebind
+                    self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT;
+                }
 
                 return true;
             }
@@ -350,9 +358,15 @@ pub const RaytracingSystem = struct {
             self.tlas_rebuild_cooldown_frames -= 1;
         }
 
+        // Force rebuild overrides everything (except in-progress builds)
+        const wants_rebuild = self.force_rebuild or is_transform_only or rebuild_needed or geo_changed;
         const can_spawn_new_build = self.tlas_rebuild_cooldown_frames == 0 and !self.bvh_build_in_progress;
 
-        if ((is_transform_only or rebuild_needed or geo_changed) and can_spawn_new_build) {
+        if (wants_rebuild and can_spawn_new_build) {
+            // Clear force flag when we actually start the build
+            if (self.force_rebuild) {
+                self.force_rebuild = false;
+            }
             // Get current raytracing data
             const rt_data = try render_system.getRaytracingData();
             defer {
@@ -533,6 +547,12 @@ pub const RaytracingSystem = struct {
     /// Call this AFTER waiting for that frame's fence to ensure GPU is done
     pub fn flushDeferredFrame(self: *RaytracingSystem, frame_index: u32) void {
         self.flushDestroyQueue(&self.per_frame_destroy[frame_index]);
+    }
+
+    /// Force a rebuild on the next update, overriding all checks
+    /// Call this when enabling PT to ensure fresh BVH
+    pub fn forceRebuild(self: *RaytracingSystem) void {
+        self.force_rebuild = true;
     }
 
     /// Flush ALL pending destruction queues immediately
