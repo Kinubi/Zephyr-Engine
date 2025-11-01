@@ -1,18 +1,18 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Buffer = @import("../core/buffer.zig").Buffer;
-const Vertex = @import("../rendering/mesh.zig").Vertex;
-const Model = @import("../rendering/mesh.zig").Model;
-const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
-const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
-const WorkPriority = @import("../threading/thread_pool.zig").WorkPriority;
-const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhBuildingWork;
-const log = @import("../utils/log.zig").log;
-const Math = @import("../utils/math.zig");
-const Mesh = @import("../rendering/mesh.zig").Mesh;
+const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
+const Buffer = @import("../../core/buffer.zig").Buffer;
+const Vertex = @import("../../rendering/mesh.zig").Vertex;
+const Model = @import("../../rendering/mesh.zig").Model;
+const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
+const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
+const WorkPriority = @import("../../threading/thread_pool.zig").WorkPriority;
+const createBvhBuildingWork = @import("../../threading/thread_pool.zig").createBvhBuildingWork;
+const log = @import("../../utils/log.zig").log;
+const Math = @import("../../utils/math.zig");
+const Mesh = @import("../../rendering/mesh.zig").Mesh;
 
-const RaytracingData = @import("../rendering/render_data_types.zig").RaytracingData;
+const RaytracingData = @import("../../rendering/render_data_types.zig").RaytracingData;
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {

@@ -210,6 +210,7 @@ pub const App = struct {
         try new_ecs_world.registerComponent(new_ecs.Transform);
         try new_ecs_world.registerComponent(new_ecs.MeshRenderer);
         try new_ecs_world.registerComponent(new_ecs.Camera);
+        try new_ecs_world.registerComponent(new_ecs.ScriptComponent);
         log(.INFO, "app", "Registered ECS components: ParticleComponent, ParticleEmitter, Transform, MeshRenderer, Camera", .{});
 
         // Initialize ECS systems
@@ -250,6 +251,10 @@ pub const App = struct {
 
         // Register scene pointer in World so systems can access it
         try new_ecs_world.setUserData("scene", @ptrCast(&scene));
+
+        // Scene owns its local systems (scripting is scene-local). The scheduler looks up
+        // the Scene via userdata and dispatches to the scene-owned scripting system; no
+        // separate scripting_system userdata registration is required.
 
         // Schedule the flat vase to be loaded at frame 1000
         try scheduled_assets.append(self.allocator, ScheduledAsset{
@@ -528,6 +533,8 @@ pub const App = struct {
 
         // Clean up ECS system
         if (new_ecs_enabled) {
+            // No editor-owned scripting userdata to clear; Scene deinit handles system shutdown.
+
             new_ecs_world.deinit();
             log(.INFO, "app", "ECS system cleaned up", .{});
         }

@@ -15,6 +15,7 @@ const Mesh = @import("../../core/graphics_context.zig").Mesh;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
+const Scene = @import("../../scene/scene.zig").Scene;
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
@@ -1197,6 +1198,132 @@ pub const RenderSystem = struct {
         };
     }
 };
+
+/// Free update function for SystemScheduler
+/// Runs RenderSystem change detection and cache rebuilds via the Scene-owned instance.
+pub fn update(world: *World, dt: f32) !void {
+    _ = dt;
+    const scene_ptr = world.getUserData("scene") orelse return;
+    const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
+
+    var self: *RenderSystem = &scene.render_system;
+    const asset_manager = scene.asset_manager;
+
+    // Inline of checkForChanges: lightweight change detection + cache rebuild
+    var current_renderable_count: usize = 0;
+    var current_geometry_count: usize = 0;
+
+    // Quick query to count entities and geometry
+    var mesh_view = try world.view(MeshRenderer);
+    var iter = mesh_view.iterator();
+    while (iter.next()) |entry| {
+        const renderer = entry.component;
+        if (!renderer.hasValidAssets()) continue;
+
+        current_renderable_count += 1;
+
+        if (renderer.model_asset) |model_asset_id| {
+            if (asset_manager.getModel(model_asset_id)) |model| {
+                current_geometry_count += model.meshes.items.len;
+            }
+        }
+    }
+
+    var changes_detected = false;
+    var reason: []const u8 = "";
+
+    // 1) Count changes
+    if (current_renderable_count != self.last_renderable_count or
+        current_geometry_count != self.last_geometry_count)
+    {
+        changes_detected = true;
+        reason = "count_changed";
+    }
+
+    // 2) Cache missing
+    if (!changes_detected) {
+        const active_idx = self.active_cache_index.load(.acquire);
+        if (self.cached_raster_data[active_idx] == null) {
+            changes_detected = true;
+            reason = "cache_missing";
+        }
+    }
+
+    // 3) Asset IDs/mesh pointers changed (async loads)
+    if (!changes_detected) {
+        var current_mesh_asset_ids = std.ArrayList(AssetId){};
+        defer current_mesh_asset_ids.deinit(self.allocator);
+
+        var mesh_view2 = try world.view(MeshRenderer);
+        var iter2 = mesh_view2.iterator();
+        while (iter2.next()) |entry2| {
+            const renderer2 = entry2.component;
+            if (!renderer2.hasValidAssets()) continue;
+            if (renderer2.model_asset) |mid| {
+                try current_mesh_asset_ids.append(self.allocator, mid);
+            }
+        }
+
+        const active_idx2 = self.active_cache_index.load(.acquire);
+        if (self.cached_raytracing_data[active_idx2]) |rt_cache| {
+            if (current_mesh_asset_ids.items.len != rt_cache.geometries.len) {
+                changes_detected = true;
+                reason = "rt_geom_count_mismatch";
+            } else {
+                var geom_idx: usize = 0;
+                for (current_mesh_asset_ids.items) |current_asset_id| {
+                    const model = asset_manager.getModel(current_asset_id) orelse continue;
+                    for (model.meshes.items) |model_mesh| {
+                        if (geom_idx >= rt_cache.geometries.len) {
+                            changes_detected = true;
+                            reason = "rt_geom_overflow";
+                            break;
+                        }
+                        const rt_geom = rt_cache.geometries[geom_idx];
+                        if (rt_geom.model_asset != current_asset_id or rt_geom.mesh_ptr != model_mesh.geometry.mesh) {
+                            changes_detected = true;
+                            reason = "mesh_ptr_changed";
+                            break;
+                        }
+                        geom_idx += 1;
+                    }
+                    if (changes_detected) break;
+                }
+            }
+        }
+    }
+
+    // 4) Transform dirty flags
+    if (!changes_detected) {
+        var transform_view = try world.view(Transform);
+        var titer = transform_view.iterator();
+        while (titer.next()) |tentry| {
+            if (tentry.component.dirty) {
+                const has_mesh = world.has(MeshRenderer, tentry.entity);
+                if (has_mesh) {
+                    changes_detected = true;
+                    reason = "transform_dirty";
+                    break;
+                }
+            }
+        }
+    }
+
+    // Update tracking
+    self.last_renderable_count = current_renderable_count;
+    self.last_geometry_count = current_geometry_count;
+
+    if (changes_detected) {
+        const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
+        self.renderables_dirty = true;
+        self.transform_only_change = is_transform_only;
+        if (!is_transform_only) {
+            self.raster_descriptors_dirty = true;
+            self.raytracing_descriptors_dirty = true;
+        }
+        try self.rebuildCaches(world, asset_manager);
+    }
+}
 
 // ============================================================================
 // Tests

@@ -7,11 +7,13 @@ const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const Camera = @import("../rendering/camera.zig").Camera;
 const Scene = @import("../scene/scene.zig").Scene;
 const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
+const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const TransformSystem = @import("../ecs.zig").TransformSystem;
 const World = @import("../ecs.zig").World;
 const SystemScheduler = @import("../ecs.zig").SystemScheduler;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 const log = @import("../utils/log.zig").log;
+const ecs = @import("../ecs.zig");
 
 /// Scene management layer
 /// Updates scene state, manages ECS systems, handles UBO updates
@@ -25,9 +27,11 @@ pub const SceneLayer = struct {
     performance_monitor: ?*PerformanceMonitor,
     system_scheduler: ?SystemScheduler,
 
-    // Phase 2.1: Cached UBO from prepare() to update()
-    // Main thread populates this in prepare(), render thread uses it in update()
-    prepared_ubo: GlobalUbo = undefined,
+    // Phase 2.1: Double-buffered UBO snapshots per frame-in-flight
+    // Main thread populates prepared_ubo[prepare_idx] in prepare()
+    // Render thread uses prepared_ubo[current_frame] in update()
+    prepared_ubo: [MAX_FRAMES_IN_FLIGHT]GlobalUbo = [_]GlobalUbo{.{}} ** MAX_FRAMES_IN_FLIGHT,
+    prepare_frame_index: usize = 0,
 
     pub fn init(
         camera: *Camera,
@@ -46,14 +50,13 @@ pub const SceneLayer = struct {
             };
 
             if (scheduler) |*sched| {
-                const ecs = @import("../ecs.zig");
 
                 // Stage 1: Light animation (modifies light transforms)
                 const stage1 = &sched.stages.items[0];
 
                 stage1.addSystem(.{
                     .name = "LightAnimationSystem",
-                    .update_fn = ecs.animateLightsSystem,
+                    .update_fn = ecs.updateLightSystem,
                     .access = .{
                         .reads = &[_][]const u8{"PointLight"},
                         .writes = &[_][]const u8{"Transform"},
@@ -62,9 +65,21 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add light animation system: {}", .{err});
                 };
 
+                // Add ScriptingSystem into the SAME stage as LightAnimation to test parallelism
+                stage1.addSystem(.{
+                    .name = "ScriptingSystem",
+                    .update_fn = ecs.updateScriptingSystem,
+                    .access = .{
+                        .reads = &[_][]const u8{},
+                        .writes = &[_][]const u8{"ScriptComponent"},
+                    },
+                }) catch |err| {
+                    log(.WARN, "scene_layer", "Failed to add scripting system: {}", .{err});
+                };
+
                 // Stage 2: Transform updates (processes all transforms including animated lights)
-                if (sched.addStage("TransformUpdates")) |stage2| {
-                    stage2.addSystem(.{
+                if (sched.addStage("TransformUpdates")) |stage3| {
+                    stage3.addSystem(.{
                         .name = "TransformSystem",
                         .update_fn = ecs.updateTransformSystem,
                         .access = .{
@@ -79,8 +94,8 @@ pub const SceneLayer = struct {
                 }
 
                 // Stage 3: Particle emitter updates (reads transforms)
-                if (sched.addStage("ParticleEmitterUpdates")) |stage3| {
-                    stage3.addSystem(.{
+                if (sched.addStage("ParticleEmitterUpdates")) |stage4| {
+                    stage4.addSystem(.{
                         .name = "ParticleEmitterSystem",
                         .update_fn = ecs.updateParticleEmittersSystem,
                         .access = .{
@@ -92,6 +107,22 @@ pub const SceneLayer = struct {
                     };
                 } else |err| {
                     log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
+                }
+
+                // Stage 4: Render system updates (extract render data, build caches)
+                if (sched.addStage("RenderSystemUpdates")) |stage5| {
+                    stage5.addSystem(.{
+                        .name = "RenderSystem",
+                        .update_fn = ecs.updateRenderSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{ "MeshRenderer", "Transform", "Camera" },
+                            .writes = &[_][]const u8{"Transform"}, // clears dirty flags
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add render system: {}", .{err});
+                    };
+                } else |err| {
+                    log(.WARN, "scene_layer", "Failed to add stage 4: {}", .{err});
                 }
             }
         }
@@ -144,15 +175,18 @@ pub const SceneLayer = struct {
         // Update camera projection
         self.camera.updateProjectionMatrix();
 
+        // Select the UBO snapshot for this prepare() frame
+        const prep_idx = self.prepare_frame_index % MAX_FRAMES_IN_FLIGHT;
+
         // Build UBO for scene preparation (includes lights after prepareFrame)
-        self.prepared_ubo = GlobalUbo{
+        self.prepared_ubo[prep_idx] = GlobalUbo{
             .view = self.camera.viewMatrix,
             .projection = self.camera.projectionMatrix,
             .dt = dt,
         };
 
         // Store GlobalUbo pointer in World so systems can access it
-        try self.ecs_world.setUserData("global_ubo", @ptrCast(&self.prepared_ubo));
+        try self.ecs_world.setUserData("global_ubo", @ptrCast(&self.prepared_ubo[prep_idx]));
 
         // Update ECS systems (CPU work, no Vulkan)
         // Use parallel scheduler if available, otherwise fallback to sequential
@@ -162,13 +196,16 @@ pub const SceneLayer = struct {
             try scheduler.execute(self.ecs_world, dt);
         } else {
             // Fallback: Sequential execution
-            try self.transform_system.update(self.ecs_world);
+            try ecs.updateTransformSystem(self.ecs_world, dt);
         }
 
         // Prepare scene (ECS queries, particle spawning, light updates - no Vulkan)
         // NOTE: Light extraction now happens in animateLightsSystem
         // NOTE: Particle GPU updates now happen in updateParticleEmittersSystem
-        try self.scene.prepareFrame(&self.prepared_ubo, dt);
+        try self.scene.prepareFrame(&self.prepared_ubo[prep_idx], dt);
+
+        // Advance prepare frame index for next main-thread prepare()
+        self.prepare_frame_index = (prep_idx + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     fn begin(base: *Layer, frame_info: *const FrameInfo) !void {
@@ -186,17 +223,14 @@ pub const SceneLayer = struct {
         //
         // Here we do Vulkan descriptor updates
 
-        // Use the UBO prepared on main thread (includes light data)
-        // Just update the view/projection in case camera moved (though it should be captured in snapshot)
-        self.prepared_ubo.view = self.camera.viewMatrix;
-        self.prepared_ubo.projection = self.camera.projectionMatrix;
-        self.prepared_ubo.dt = frame_info.dt;
+        // Use the UBO prepared on main thread (immutable snapshot for this frame).
+        // Avoid mutating prepared_ubo here to prevent data races with prepare() on main thread.
 
         // Update Vulkan resources (descriptor updates)
         if (self.performance_monitor) |pm| {
             try pm.beginPass("scene_update", frame_info.current_frame, null);
         }
-        try self.scene.update(frame_info.*, &self.prepared_ubo);
+        try self.scene.update(frame_info.*, &self.prepared_ubo[frame_info.current_frame]);
         if (self.performance_monitor) |pm| {
             try pm.endPass("scene_update", frame_info.current_frame, null);
         }
@@ -205,7 +239,7 @@ pub const SceneLayer = struct {
         if (self.performance_monitor) |pm| {
             try pm.beginPass("ubo_update", frame_info.current_frame, null);
         }
-        self.global_ubo_set.update(frame_info.current_frame, &self.prepared_ubo);
+        self.global_ubo_set.update(frame_info.current_frame, &self.prepared_ubo[frame_info.current_frame]);
         if (self.performance_monitor) |pm| {
             try pm.endPass("ubo_update", frame_info.current_frame, null);
         }

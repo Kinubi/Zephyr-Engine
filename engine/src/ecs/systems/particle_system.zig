@@ -4,6 +4,8 @@ const Transform = @import("../components/transform.zig").Transform;
 const ParticleEmitter = @import("../components/particle_emitter.zig").ParticleEmitter;
 const EntityId = @import("../entity_registry.zig").EntityId;
 const Scene = @import("../../scene/scene.zig").Scene;
+const ParticleComputePass = @import("../../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
+
 /// Particle system for managing CPU-side emitter state
 /// GPU compute shader handles actual particle simulation
 pub const ParticleSystem = struct {
@@ -44,7 +46,8 @@ pub const ParticleSystem = struct {
 
 /// Standalone system function for particle emitter updates (for SystemScheduler)
 /// Updates GPU emitter positions when transforms change
-pub fn updateParticleEmittersSystem(world: *World, dt: f32) !void {
+/// Free update function for particle emitters (SystemScheduler-compatible)
+pub fn update(world: *World, dt: f32) !void {
     _ = dt; // GPU handles all particle updates now
 
     // Get the scene from world userdata
@@ -72,7 +75,6 @@ pub fn updateParticleEmittersSystem(world: *World, dt: f32) !void {
 
         if (scene.render_graph) |*graph| {
             if (graph.getPass("particle_compute_pass")) |pass| {
-                const ParticleComputePass = @import("../../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
                 const compute_pass: *ParticleComputePass = @fieldParentPtr("base", pass);
 
                 const vertex_formats = @import("../../rendering/vertex_formats.zig");

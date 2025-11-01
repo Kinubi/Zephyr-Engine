@@ -11,6 +11,7 @@ pub const World = @import("ecs/world.zig").World;
 
 // Components
 pub const ParticleComponent = @import("ecs/components/particle.zig").ParticleComponent;
+pub const ScriptComponent = @import("ecs/components/script.zig").ScriptComponent;
 pub const Transform = @import("ecs/components/transform.zig").Transform;
 pub const MeshRenderer = @import("ecs/components/mesh_renderer.zig").MeshRenderer;
 pub const Camera = @import("ecs/components/camera.zig").Camera;
@@ -22,11 +23,14 @@ pub const TransformSystem = @import("ecs/systems/transform_system.zig").Transfor
 pub const RenderSystem = @import("ecs/systems/render_system.zig").RenderSystem;
 pub const LightSystem = @import("ecs/systems/light_system.zig").LightSystem;
 pub const ParticleSystem = @import("ecs/systems/particle_system.zig").ParticleSystem;
+pub const ScriptingSystem = @import("ecs/systems/scripting_system.zig").ScriptingSystem;
 
 // System functions for parallel execution
-pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").TransformSystem.updateSystem;
-pub const animateLightsSystem = @import("ecs/systems/light_system.zig").animateLightsSystem;
-pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").updateParticleEmittersSystem;
+pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").update;
+pub const updateLightSystem = @import("ecs/systems/light_system.zig").update;
+pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").update;
+pub const updateScriptingSystem = @import("ecs/systems/scripting_system.zig").update;
+pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
 
 // Parallel System Execution
 pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;

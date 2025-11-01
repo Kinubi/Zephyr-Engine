@@ -1,7 +1,7 @@
 const std = @import("std");
-const log = @import("../utils/log.zig").log;
+const log = @import("../../utils/log.zig").log;
 const vk = @import("vulkan");
-const Math = @import("../utils/math.zig");
+const Math = @import("../../utils/math.zig");
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
 const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
 const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
@@ -9,9 +9,9 @@ const GeometryData = @import("multithreaded_bvh_builder.zig").GeometryData;
 const BvhWorkData = @import("multithreaded_bvh_builder.zig").BvhWorkData;
 const buildTlasSynchronous = @import("multithreaded_bvh_builder.zig").buildTlasSynchronous;
 const blasWorkerFn = @import("multithreaded_bvh_builder.zig").blasWorkerFn;
-const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhBuildingWork;
-const RenderData = @import("../rendering/render_data_types.zig");
-const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
+const createBvhBuildingWork = @import("../../threading/thread_pool.zig").createBvhBuildingWork;
+const RenderData = @import("../../rendering/render_data_types.zig");
+const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 
 // TLAS worker implementation
 // This file implements the per-job atomic BLAS result buffer and the event-driven

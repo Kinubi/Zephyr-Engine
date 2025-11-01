@@ -109,96 +109,159 @@ pub const WorkItem = struct {
     };
 };
 
-/// Thread-safe priority queue for work items
+/// Thread-safe, blocking priority queue backed by ring buffers and a semaphore
 pub const WorkQueue = struct {
-    // Priority queues for different priority levels
-    critical_queue: std.ArrayList(WorkItem),
-    high_queue: std.ArrayList(WorkItem),
-    normal_queue: std.ArrayList(WorkItem),
-    low_queue: std.ArrayList(WorkItem),
+    const Ring = struct {
+        buf: []WorkItem = &[_]WorkItem{},
+        head: usize = 0,
+        tail: usize = 0,
+        count: usize = 0,
+
+        fn init(allocator: std.mem.Allocator, cap_init: usize) !Ring {
+            var r: Ring = .{};
+            r.buf = try allocator.alloc(WorkItem, cap_init);
+            r.head = 0;
+            r.tail = 0;
+            r.count = 0;
+            return r;
+        }
+
+        fn deinit(self: *Ring, allocator: std.mem.Allocator) void {
+            allocator.free(self.buf);
+            self.* = .{};
+        }
+
+        fn capacity(self: *const Ring) usize {
+            return self.buf.len;
+        }
+
+        fn grow(self: *Ring, allocator: std.mem.Allocator) !void {
+            const old_cap = self.buf.len;
+            const new_cap = @max(@as(usize, 16), old_cap * 2);
+            var new_buf = try allocator.alloc(WorkItem, new_cap);
+            // Move existing items in order to new buffer
+            var i: usize = 0;
+            while (i < self.count) : (i += 1) {
+                const idx = (self.head + i) % old_cap;
+                new_buf[i] = self.buf[idx];
+            }
+            allocator.free(self.buf);
+            self.buf = new_buf;
+            self.head = 0;
+            self.tail = self.count;
+        }
+
+        fn push(self: *Ring, allocator: std.mem.Allocator, item: WorkItem) !void {
+            if (self.count == self.capacity()) try self.grow(allocator);
+            self.buf[self.tail] = item;
+            self.tail = (self.tail + 1) % self.capacity();
+            self.count += 1;
+        }
+
+        fn pop(self: *Ring) ?WorkItem {
+            if (self.count == 0) return null;
+            const item = self.buf[self.head];
+            self.head = (self.head + 1) % self.capacity();
+            self.count -= 1;
+            return item;
+        }
+    };
+
+    // One ring per priority level
+    critical_ring: Ring,
+    high_ring: Ring,
+    normal_ring: Ring,
+    low_ring: Ring,
 
     mutex: std.Thread.Mutex = .{},
     total_items: std.atomic.Value(u32),
+    work_available: std.Thread.Semaphore = .{},
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) WorkQueue {
+    pub fn init(allocator: std.mem.Allocator) !WorkQueue {
+        // Default initial capacity per ring
+        const cap: usize = 1024;
         return .{
-            .critical_queue = std.ArrayList(WorkItem){},
-            .high_queue = std.ArrayList(WorkItem){},
-            .normal_queue = std.ArrayList(WorkItem){},
-            .low_queue = std.ArrayList(WorkItem){},
+            .critical_ring = try Ring.init(allocator, cap),
+            .high_ring = try Ring.init(allocator, cap),
+            .normal_ring = try Ring.init(allocator, cap),
+            .low_ring = try Ring.init(allocator, cap),
             .total_items = std.atomic.Value(u32).init(0),
+            .work_available = .{},
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *WorkQueue) void {
-        self.critical_queue.deinit(self.allocator);
-        self.high_queue.deinit(self.allocator);
-        self.normal_queue.deinit(self.allocator);
-        self.low_queue.deinit(self.allocator);
+        self.critical_ring.deinit(self.allocator);
+        self.high_ring.deinit(self.allocator);
+        self.normal_ring.deinit(self.allocator);
+        self.low_ring.deinit(self.allocator);
+    }
+
+    inline fn pickRing(self: *WorkQueue, priority: WorkPriority) *Ring {
+        return switch (priority) {
+            .critical => &self.critical_ring,
+            .high => &self.high_ring,
+            .normal => &self.normal_ring,
+            .low => &self.low_ring,
+        };
     }
 
     pub fn push(self: *WorkQueue, item: WorkItem) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const queue = switch (item.priority) {
-            .critical => &self.critical_queue,
-            .high => &self.high_queue,
-            .normal => &self.normal_queue,
-            .low => &self.low_queue,
-        };
-
-        try queue.append(self.allocator, item);
+        try self.pickRing(item.priority).push(self.allocator, item);
         _ = self.total_items.fetchAdd(1, .monotonic);
+        // Signal one waiting worker
+        self.work_available.post();
     }
 
+    /// Push a batch of items while holding the lock once; returns number pushed
+    pub fn pushBatch(self: *WorkQueue, items: []const WorkItem) !u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var pushed: u32 = 0;
+        for (items) |it| {
+            try self.pickRing(it.priority).push(self.allocator, it);
+            pushed += 1;
+        }
+        _ = self.total_items.fetchAdd(pushed, .monotonic);
+        // Post once per item (Semaphore has no multi-post API)
+        var i: u32 = 0;
+        while (i < pushed) : (i += 1) self.work_available.post();
+        return pushed;
+    }
+
+    /// Blocking wait for any work to be available
+    pub fn wait(self: *WorkQueue) void {
+        self.work_available.wait();
+    }
+
+    /// Non-blocking pop in priority order; returns null if empty
     pub fn pop(self: *WorkQueue) ?WorkItem {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         // Try critical first, then high, normal, low
-        const queues = [_]*std.ArrayList(WorkItem){
-            &self.critical_queue,
-            &self.high_queue,
-            &self.normal_queue,
-            &self.low_queue,
-        };
-
-        for (queues) |queue| {
-            if (queue.items.len > 0) {
-                const item = queue.orderedRemove(0);
-                _ = self.total_items.fetchSub(1, .monotonic);
-                return item;
-            }
+        if (self.critical_ring.pop()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
         }
-
-        return null;
-    }
-
-    pub fn popIf(self: *WorkQueue, context: anytype) ?WorkItem {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Try critical first, then high, normal, low
-        const queues = [_]*std.ArrayList(WorkItem){
-            &self.critical_queue,
-            &self.high_queue,
-            &self.normal_queue,
-            &self.low_queue,
-        };
-
-        for (queues) |queue| {
-            for (queue.items, 0..) |*item, i| {
-                if (context.canProcess(item)) {
-                    const work_item = queue.orderedRemove(i);
-                    _ = self.total_items.fetchSub(1, .monotonic);
-                    return work_item;
-                }
-            }
+        if (self.high_ring.pop()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
         }
-
+        if (self.normal_ring.pop()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
+        }
+        if (self.low_ring.pop()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
+        }
         return null;
     }
 
@@ -279,6 +342,7 @@ pub const ThreadPool = struct {
     subsystem_demands: std.HashMap(WorkItemType, u32, std.hash_map.AutoContext(WorkItemType), 80), // Current demand per subsystem
     active_workers_per_subsystem: std.HashMap(WorkItemType, u32, std.hash_map.AutoContext(WorkItemType), 80), // Currently active workers per subsystem
     subsystems_mutex: std.Thread.Mutex = .{}, // Protects HashMap operations
+    track_active_per_subsystem: bool = false, // Optional: disable to remove per-job lock overhead
 
     // Statistics and monitoring
     stats: PoolStatistics,
@@ -327,8 +391,8 @@ pub const ThreadPool = struct {
             worker.* = WorkerInfo.init(@intCast(i), undefined); // Will set pool pointer after struct creation
         }
 
-        const work_queue = try allocator.create(WorkQueue);
-        work_queue.* = WorkQueue.init(allocator);
+    const work_queue = try allocator.create(WorkQueue);
+    work_queue.* = try WorkQueue.init(allocator);
 
         const pool = ThreadPool{
             .allocator = allocator,
@@ -436,9 +500,16 @@ pub const ThreadPool = struct {
 
         try self.work_queue.push(work_item);
         self.stats.current_queue_size.store(self.work_queue.size(), .release);
+        // Scaling is handled elsewhere; no busy waits here.
+    }
 
-        // Check if we need to scale up
-        //self.checkScaling();
+    /// Submit a batch of work items to the pool
+    pub fn submitBatch(self: *ThreadPool, items: []const WorkItem) !void {
+        if (!self.running) {
+            return error.ThreadPoolNotRunning;
+        }
+        _ = try self.work_queue.pushBatch(items);
+        self.stats.current_queue_size.store(self.work_queue.size(), .release);
     }
 
     /// Check if a subsystem can accept another worker
@@ -452,16 +523,9 @@ pub const ThreadPool = struct {
         return active_workers < config.max_workers;
     }
 
-    /// Get work from the queue (called by worker threads)
+    /// Get work from the queue (called by worker threads). Non-blocking.
     pub fn getWork(self: *ThreadPool) ?WorkItem {
-        // Try to get work that can be processed by available subsystem workers
-        return self.work_queue.popIf(struct {
-            pool: *ThreadPool,
-
-            pub fn canProcess(ctx: @This(), work_item: *const WorkItem) bool {
-                return ctx.pool.canSubsystemAcceptWorker(work_item.item_type);
-            }
-        }{ .pool = self });
+        return self.work_queue.pop();
     }
 
     /// Worker thread main loop
@@ -470,17 +534,18 @@ pub const ThreadPool = struct {
         worker_info.state.store(.idle, .release);
 
         while (pool.running) {
+            // Block until work is available
+            pool.work_queue.wait();
+
             // Try to get work
             if (pool.getWork()) |work_item| {
                 worker_info.state.store(.working, .release);
 
-                // Increment active worker count for this subsystem
-                {
+                if (pool.track_active_per_subsystem) {
                     pool.subsystems_mutex.lock();
-                    defer pool.subsystems_mutex.unlock();
-
                     const current_workers = pool.active_workers_per_subsystem.get(work_item.item_type) orelse 0;
                     pool.active_workers_per_subsystem.put(work_item.item_type, current_workers + 1) catch {};
+                    pool.subsystems_mutex.unlock();
                 }
 
                 const start_time = std.time.microTimestamp();
@@ -496,15 +561,13 @@ pub const ThreadPool = struct {
                 _ = pool.stats.total_work_items_processed.fetchAdd(1, .monotonic);
                 worker_info.last_work_time.store(std.time.milliTimestamp(), .release);
 
-                // Decrement active worker count for this subsystem
-                {
+                if (pool.track_active_per_subsystem) {
                     pool.subsystems_mutex.lock();
-                    defer pool.subsystems_mutex.unlock();
-
                     const current_workers = pool.active_workers_per_subsystem.get(work_item.item_type) orelse 0;
                     if (current_workers > 0) {
                         pool.active_workers_per_subsystem.put(work_item.item_type, current_workers - 1) catch {};
                     }
+                    pool.subsystems_mutex.unlock();
                 }
 
                 // Update average work time (simple moving average)
@@ -514,16 +577,8 @@ pub const ThreadPool = struct {
 
                 worker_info.state.store(.idle, .release);
             } else {
-                // No work available, sleep briefly
+                // Spurious wake or race: no item popped, continue waiting
                 worker_info.state.store(.idle, .release);
-                std.Thread.sleep(std.time.ns_per_ms * 1); // 1ms
-
-                // Check if we should shut down due to being idle too long (only when no work available)
-                if (pool.shouldShutdownWorker(worker_info)) {
-                    // Decrement the worker count since this worker is shutting down
-                    _ = pool.current_worker_count.fetchSub(1, .acq_rel);
-                    break;
-                }
             }
         }
 
@@ -665,8 +720,13 @@ pub const ThreadPool = struct {
         self.shutting_down.store(true, .release);
         self.running = false;
 
-        // Wait for all active workers to finish
+        // Wake all workers so they can exit their wait
         const current_count = self.current_worker_count.load(.acquire);
+        var i_post: u32 = 0;
+        while (i_post < current_count) : (i_post += 1) {
+            self.work_queue.work_available.post();
+        }
+        // Wait for all active workers to finish
         for (0..current_count) |i| {
             if (self.workers[i].thread) |thread| {
                 thread.join();

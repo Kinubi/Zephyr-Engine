@@ -20,166 +20,134 @@ pub const TransformSystem = struct {
     pub fn deinit(self: *TransformSystem) void {
         _ = self;
     }
-
-    /// Static wrapper for use with SystemScheduler
-    /// This allows TransformSystem.update to be called without needing self
-    pub fn updateSystem(world: *World, dt: f32) !void {
-        _ = dt;
-        // Create a temporary system instance just for the update
-        // (TransformSystem doesn't actually use any instance state)
-        var temp_system = TransformSystem{ .allocator = undefined };
-        try temp_system.update(world);
-    }
-
-    /// Update all transforms in the world
-    /// This updates local-to-world matrices for transforms with parents
-    /// Uses SIMD batch processing for transforms without parents (8 at a time)
-    pub fn update(self: *TransformSystem, world: *World) !void {
-        _ = self;
-
-        // Get a view of all entities with Transform component
-        var view = try world.view(Transform);
-
-        // First pass: batch update all transforms that are dirty and have no parent
-        // We can process these in batches of 8 using SIMD
-        try updateDirtyTransformsSIMD(&view);
-
-        // Second pass: propagate parent transforms to children (sequential)
-        // This must be sequential due to dependencies
-        var iter = view.iterator();
-        while (iter.next()) |entry| {
-            const transform = entry.component;
-            if (transform.parent) |parent_id| {
-                // Try to get parent transform
-                if (world.get(Transform, parent_id)) |parent_transform| {
-                    // Update child's world matrix based on parent
-                    const local_matrix = transform.getLocalMatrix();
-                    transform.world_matrix = parent_transform.world_matrix.mul(local_matrix);
-                    transform.dirty = false;
-                }
-            }
-        }
-    }
-
-    /// SIMD-optimized batch update for transforms without parents
-    fn updateDirtyTransformsSIMD(view: *View(Transform)) !void {
-        // Collect transforms that need updating (dirty, no parent)
-        var batch_buffer: [8]*Transform = undefined;
-        var batch_count: usize = 0;
-
-        var iter = view.iterator();
-        while (iter.next()) |entry| {
-            const transform = entry.component;
-
-            // Skip if not dirty or has parent (parent transforms handled separately)
-            if (!transform.dirty or transform.parent != null) {
-                continue;
-            }
-
-            // Add to batch
-            batch_buffer[batch_count] = transform;
-            batch_count += 1;
-
-            // Process batch when full
-            if (batch_count == 8) {
-                processBatch(batch_buffer[0..8]);
-                batch_count = 0;
-            }
-        }
-
-        // Process remaining transforms in batch (if any)
-        if (batch_count > 0) {
-            // Process the partial batch (some lanes will be wasted but that's ok)
-            processBatch(batch_buffer[0..batch_count]);
-        }
-    }
-
-    /// Process a batch of up to 8 transforms
-    /// Uses optimized SIMD path for non-rotated transforms, falls back to scalar for rotated ones
-    fn processBatch(transforms: []*Transform) void {
-        const batch_size = transforms.len;
-        if (batch_size == 0) return;
-
-        // Check if any transform in the batch has rotation
-        var has_rotation = false;
-        for (transforms[0..batch_size]) |t| {
-            if (t.rotation.x != 0 or t.rotation.y != 0 or t.rotation.z != 0) {
-                has_rotation = true;
-                break;
-            }
-        }
-
-        // If any transform has rotation, use scalar path for all (simpler, still fast enough)
-        if (has_rotation) {
-            for (transforms[0..batch_size]) |t| {
-                t.updateWorldMatrix();
-            }
-            return;
-        }
-
-        // Fast path: SIMD for non-rotated transforms
-        var pos_x_data: [8]f32 = undefined;
-        var pos_y_data: [8]f32 = undefined;
-        var pos_z_data: [8]f32 = undefined;
-        var scale_x_data: [8]f32 = undefined;
-        var scale_y_data: [8]f32 = undefined;
-        var scale_z_data: [8]f32 = undefined;
-
-        // Fill vectors (pad with identity transforms for unused lanes)
-        var i: usize = 0;
-        while (i < 8) : (i += 1) {
-            if (i < batch_size) {
-                const t = transforms[i];
-                pos_x_data[i] = t.position.x;
-                pos_y_data[i] = t.position.y;
-                pos_z_data[i] = t.position.z;
-                scale_x_data[i] = t.scale.x;
-                scale_y_data[i] = t.scale.y;
-                scale_z_data[i] = t.scale.z;
-            } else {
-                // Identity transform for padding
-                pos_x_data[i] = 0.0;
-                pos_y_data[i] = 0.0;
-                pos_z_data[i] = 0.0;
-                scale_x_data[i] = 1.0;
-                scale_y_data[i] = 1.0;
-                scale_z_data[i] = 1.0;
-            }
-        }
-
-        // Load into SIMD vectors
-        const pos_x: simd.F32x8 = @bitCast(pos_x_data);
-        const pos_y: simd.F32x8 = @bitCast(pos_y_data);
-        const pos_z: simd.F32x8 = @bitCast(pos_z_data);
-        const scale_x: simd.F32x8 = @bitCast(scale_x_data);
-        const scale_y: simd.F32x8 = @bitCast(scale_y_data);
-        const scale_z: simd.F32x8 = @bitCast(scale_z_data);
-
-        // Build 8 TRS matrices in one go using SIMD
-        var matrix_buffer: [128]f32 = undefined; // 8 matrices * 16 floats
-        simd.batchBuildTRSMatrices(
-            pos_x,
-            pos_y,
-            pos_z,
-            scale_x,
-            scale_y,
-            scale_z,
-            matrix_buffer[0..],
-        );
-
-        // Copy results back to transform world matrices
-        i = 0;
-        while (i < batch_size) : (i += 1) {
-            const mat_offset = i * 16;
-            const matrix_data = matrix_buffer[mat_offset .. mat_offset + 16];
-
-            // Copy to transform's world_matrix
-            @memcpy(transforms[i].world_matrix.data[0..16], matrix_data);
-
-            // Note: Don't clear dirty flag - RenderSystem clears it after cache rebuild
-        }
-    }
 };
+
+/// Free update function for SystemScheduler
+/// Updates all transforms in the world
+pub fn update(world: *World, dt: f32) !void {
+    _ = dt;
+    // Get a view of all entities with Transform component
+    var view = try world.view(Transform);
+
+    // First pass: batch update all transforms that are dirty and have no parent
+    try updateDirtyTransformsSIMD(&view);
+
+    // Second pass: propagate parent transforms to children (sequential)
+    var iter = view.iterator();
+    while (iter.next()) |entry| {
+        const transform = entry.component;
+        if (transform.parent) |parent_id| {
+            if (world.get(Transform, parent_id)) |parent_transform| {
+                const local_matrix = transform.getLocalMatrix();
+                transform.world_matrix = parent_transform.world_matrix.mul(local_matrix);
+                transform.dirty = false;
+            }
+        }
+    }
+}
+
+/// SIMD-optimized batch update for transforms without parents
+fn updateDirtyTransformsSIMD(view: *View(Transform)) !void {
+    // Collect transforms that need updating (dirty, no parent)
+    var batch_buffer: [8]*Transform = undefined;
+    var batch_count: usize = 0;
+
+    var iter = view.iterator();
+    while (iter.next()) |entry| {
+        const transform = entry.component;
+
+        if (!transform.dirty or transform.parent != null) {
+            continue;
+        }
+
+        batch_buffer[batch_count] = transform;
+        batch_count += 1;
+
+        if (batch_count == 8) {
+            processBatch(batch_buffer[0..8]);
+            batch_count = 0;
+        }
+    }
+
+    if (batch_count > 0) {
+        processBatch(batch_buffer[0..batch_count]);
+    }
+}
+
+/// Process a batch of up to 8 transforms
+/// Uses optimized SIMD path for non-rotated transforms, falls back to scalar for rotated ones
+fn processBatch(transforms: []*Transform) void {
+    const batch_size = transforms.len;
+    if (batch_size == 0) return;
+
+    var has_rotation = false;
+    for (transforms[0..batch_size]) |t| {
+        if (t.rotation.x != 0 or t.rotation.y != 0 or t.rotation.z != 0) {
+            has_rotation = true;
+            break;
+        }
+    }
+
+    if (has_rotation) {
+        for (transforms[0..batch_size]) |t| {
+            t.updateWorldMatrix();
+        }
+        return;
+    }
+
+    var pos_x_data: [8]f32 = undefined;
+    var pos_y_data: [8]f32 = undefined;
+    var pos_z_data: [8]f32 = undefined;
+    var scale_x_data: [8]f32 = undefined;
+    var scale_y_data: [8]f32 = undefined;
+    var scale_z_data: [8]f32 = undefined;
+
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        if (i < batch_size) {
+            const t = transforms[i];
+            pos_x_data[i] = t.position.x;
+            pos_y_data[i] = t.position.y;
+            pos_z_data[i] = t.position.z;
+            scale_x_data[i] = t.scale.x;
+            scale_y_data[i] = t.scale.y;
+            scale_z_data[i] = t.scale.z;
+        } else {
+            pos_x_data[i] = 0.0;
+            pos_y_data[i] = 0.0;
+            pos_z_data[i] = 0.0;
+            scale_x_data[i] = 1.0;
+            scale_y_data[i] = 1.0;
+            scale_z_data[i] = 1.0;
+        }
+    }
+
+    const pos_x: simd.F32x8 = @bitCast(pos_x_data);
+    const pos_y: simd.F32x8 = @bitCast(pos_y_data);
+    const pos_z: simd.F32x8 = @bitCast(pos_z_data);
+    const scale_x: simd.F32x8 = @bitCast(scale_x_data);
+    const scale_y: simd.F32x8 = @bitCast(scale_y_data);
+    const scale_z: simd.F32x8 = @bitCast(scale_z_data);
+
+    var matrix_buffer: [128]f32 = undefined; // 8 matrices * 16 floats
+    simd.batchBuildTRSMatrices(
+        pos_x,
+        pos_y,
+        pos_z,
+        scale_x,
+        scale_y,
+        scale_z,
+        matrix_buffer[0..],
+    );
+
+    i = 0;
+    while (i < batch_size) : (i += 1) {
+        const mat_offset = i * 16;
+        const matrix_data = matrix_buffer[mat_offset .. mat_offset + 16];
+        @memcpy(transforms[i].world_matrix.data[0..16], matrix_data);
+        // Note: Don't clear dirty flag - RenderSystem clears it after cache rebuild
+    }
+}
 
 // ============================================================================
 // Tests

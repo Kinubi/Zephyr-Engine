@@ -5,7 +5,10 @@ const Math = @import("../utils/math.zig");
 const Vec3 = Math.Vec3;
 const Mat4x4 = Math.Mat4x4;
 
-const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
+const AssetManagerMod = @import("../assets/asset_manager.zig");
+const AssetManager = AssetManagerMod.AssetManager;
+const AssetType = AssetManagerMod.AssetType;
+const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
@@ -13,6 +16,8 @@ const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
+
+const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 
 // ECS imports
 const ecs = @import("../ecs.zig");
@@ -22,7 +27,7 @@ const Transform = ecs.Transform;
 const MeshRenderer = ecs.MeshRenderer;
 const Camera = ecs.Camera;
 
-const GameObject = @import("game_object_v2.zig").GameObject;
+const GameObject = @import("game_object.zig").GameObject;
 
 /// Scene represents a game level/map
 /// Provides high-level API for creating game objects backed by ECS
@@ -59,6 +64,9 @@ pub const Scene = struct {
     // Shared render system for both raster and ray tracing passes
     render_system: ecs.RenderSystem,
 
+    // Scripting system (owned by the Scene)
+    scripting_system: ecs.ScriptingSystem,
+
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
 
@@ -71,7 +79,7 @@ pub const Scene = struct {
         allocator: std.mem.Allocator,
         ecs_world: *World,
         asset_manager: *AssetManager,
-        thread_pool: ?*@import("../threading/thread_pool.zig").ThreadPool,
+        thread_pool: *ThreadPool,
         name: []const u8,
     ) !Scene {
         log(.INFO, "scene", "Creating scene: {s}", .{name});
@@ -91,8 +99,8 @@ pub const Scene = struct {
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
             .render_system = try ecs.RenderSystem.init(allocator, thread_pool),
+            .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
         };
-
         return scene;
     }
 
@@ -107,10 +115,6 @@ pub const Scene = struct {
         model_path: []const u8,
         texture_path: []const u8,
     ) !*GameObject {
-
-        // Load assets asynchronously using the correct API
-        const AssetType = @import("../assets/asset_types.zig").AssetType;
-        const LoadPriority = @import("../assets/asset_manager.zig").LoadPriority;
 
         // 1. Load model mesh
         const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
@@ -388,6 +392,9 @@ pub const Scene = struct {
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
         self.emitter_to_gpu_id.deinit();
+        // Deinit scripting system
+        self.scripting_system.deinit();
+
         self.light_system.deinit();
         self.render_system.deinit();
         log(.INFO, "scene", "Scene destroyed: {s}", .{self.name});
@@ -614,16 +621,6 @@ pub const Scene = struct {
         // Cache view-projection matrix for particle world-to-screen projection
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
-        // NOTE: Light animation and extraction now handled by animateLightsSystem
-        // NOTE: Particle GPU updates now handled by updateParticleEmittersSystem
-
-        // Check for geometry/asset changes every frame (lightweight, sets dirty flags)
-        // This queries the ECS World and MUST be on main thread
-        try self.render_system.checkForChanges(self.ecs_world, self.asset_manager);
-
-        // Phase 2.1: Allow passes to do CPU-side preparation (ECS queries, sorting, culling)
-        // Most passes won't need this since checkForChanges() above handles the main ECS queries
-        // But this allows for pass-specific preparation work on the main thread
         if (self.render_graph) |*graph| {
             // Create minimal frame_info for prepareExecute (no Vulkan resources needed yet)
             const prep_frame_info = FrameInfo{
@@ -638,9 +635,6 @@ pub const Scene = struct {
             };
             try graph.prepareExecute(&prep_frame_info);
         }
-
-        // Run ECS systems (transforms, physics, etc.)
-        // try self.ecs_world.update(dt);
     }
 
     /// Update scene state (Vulkan descriptor updates)
@@ -667,7 +661,15 @@ test "Scene v2: init creates empty scene" {
     try world.registerComponent(MeshRenderer);
 
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
+    // Create a small ThreadPool for the test (required by Scene.init)
+    var tp_ptr = try testing.allocator.create(ThreadPool);
+    tp_ptr.* = try ThreadPool.init(testing.allocator, 1);
+    defer {
+        tp_ptr.deinit();
+        testing.allocator.destroy(tp_ptr);
+    }
+
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, "test_scene");
     defer scene.deinit();
 
     try testing.expectEqual(@as(usize, 0), scene.entities.items.len);
@@ -683,7 +685,14 @@ test "Scene v2: spawnEmpty creates entity with Transform" {
     try world.registerComponent(MeshRenderer);
 
     var mock_asset_manager: AssetManager = undefined;
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, null, "test_scene");
+    var tp_ptr = try testing.allocator.create(ThreadPool);
+    tp_ptr.* = try ThreadPool.init(testing.allocator, 1);
+    defer {
+        tp_ptr.deinit();
+        testing.allocator.destroy(tp_ptr);
+    }
+
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, "test_scene");
     defer scene.deinit();
 
     const obj = try scene.spawnEmpty("empty_object");

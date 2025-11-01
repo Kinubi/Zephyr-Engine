@@ -1,12 +1,14 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Buffer = @import("../core/buffer.zig").Buffer;
-const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
-const log = @import("../utils/log.zig").log;
-const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
-const RenderData = @import("../rendering/render_data_types.zig");
-const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
+const Buffer = @import("../../core/buffer.zig").Buffer;
+const FrameInfo = @import("../../rendering/frameinfo.zig").FrameInfo;
+const log = @import("../../utils/log.zig").log;
+const ThreadPoolMod = @import("../../threading/thread_pool.zig");
+
+const RenderData = @import("../../rendering/render_data_types.zig");
+const RenderSystem = @import("../../ecs/systems/render_system.zig").RenderSystem;
+const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 // Import the new multithreaded BVH builder
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
 const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
@@ -15,6 +17,7 @@ const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
 const BvhBuildResult = @import("multithreaded_bvh_builder.zig").BvhBuildResult;
 const TlasWorker = @import("tlas_worker.zig");
 const TlasJob = TlasWorker.TlasJob;
+const ThreadPool = ThreadPoolMod.ThreadPool;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
@@ -249,7 +252,7 @@ pub const RaytracingSystem = struct {
     /// Update BVH state using data from RenderSystem (for modern ECS-based rendering)
     pub fn update(
         self: *RaytracingSystem,
-        render_system: *@import("../ecs/systems/render_system.zig").RenderSystem,
+        render_system: *RenderSystem,
         frame_info: *const FrameInfo,
         geo_changed: bool,
     ) !bool {
@@ -415,7 +418,7 @@ pub const RaytracingSystem = struct {
         // Spawn TLAS worker asynchronously via ThreadPool
         // Create work item for TLAS building
         const work_id = job.job_id;
-        const thread_pool = @import("../threading/thread_pool.zig");
+        const thread_pool = ThreadPoolMod;
 
         // Use createBvhBuildingWork for TLAS with job as work_data
         const work_item = thread_pool.createBvhBuildingWork(

@@ -63,6 +63,8 @@ pub fn build(b: *std.Build) !void {
     // Link system libraries needed by engine
     editor.linkSystemLibrary("glfw");
     editor.linkSystemLibrary("x11");
+    // Link Lua runtime for scripting support in the editor
+    editor.linkSystemLibrary("lua");
     editor.linkSystemLibrary("shaderc");
     editor.linkSystemLibrary("pthread");
     editor.linkLibC();

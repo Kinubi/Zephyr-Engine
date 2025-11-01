@@ -1,6 +1,7 @@
 const std = @import("std");
 const World = @import("world.zig").World;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
 const log = @import("../utils/log.zig").log;
 
 /// Component types that systems can read/write
@@ -28,19 +29,26 @@ pub const SystemStage = struct {
     name: []const u8,
     systems: std.ArrayList(SystemDef),
     completion: std.atomic.Value(usize),
+    // Last-worker completion semaphore: posted exactly once when all jobs finish
+    done_sem: std.Thread.Semaphore,
     allocator: std.mem.Allocator,
+    // Reusable storage to avoid per-frame allocations for work items
+    items_cache: std.ArrayList(WorkItem),
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) SystemStage {
         return .{
             .name = name,
             .systems = std.ArrayList(SystemDef){},
             .completion = std.atomic.Value(usize).init(0),
+            .done_sem = .{},
             .allocator = allocator,
+            .items_cache = std.ArrayList(WorkItem){},
         };
     }
 
     pub fn deinit(self: *SystemStage) void {
         self.systems.deinit(self.allocator);
+        self.items_cache.deinit(self.allocator);
     }
 
     /// Add a system to this stage
@@ -50,17 +58,18 @@ pub const SystemStage = struct {
 
     /// Execute all systems in this stage in parallel
     pub fn execute(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
+        // Quick timing instrumentation to compare sequential vs parallel execution
+        const start_us = std.time.microTimestamp();
+        const mode: []const u8 = "parallel";
+        defer {
+            const elapsed = std.time.microTimestamp() - start_us;
+            log(.INFO, "system_scheduler", "Stage '{s}' executed in {} us (mode={s})", .{ self.name, elapsed, mode });
+        }
         const system_count = self.systems.items.len;
         if (system_count == 0) return;
 
-        // Single system - no parallelization needed
-        if (system_count == 1) {
-            try self.systems.items[0].update_fn(world, dt);
-            return;
-        }
-
-        // No thread pool - fallback to sequential execution
-        if (thread_pool == null) {
+        // Small-stage fast path: sequential is cheaper than dispatch
+        if (system_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 try system.update_fn(world, dt);
             }
@@ -69,67 +78,61 @@ pub const SystemStage = struct {
 
         const pool = thread_pool.?;
 
-        // Reset completion counter
+        // Initialize completion counter
         self.completion.store(system_count, .release);
 
-        // Submit all systems as work items
-        for (self.systems.items) |system| {
-            const work_context = try pool.allocator.create(SystemWorkContext);
-            work_context.* = .{
-                .world = world,
-                .dt = dt,
-                .update_fn = system.update_fn,
-                .completion = &self.completion,
-                .system_name = system.name,
-                .allocator = pool.allocator,
-            };
+        // Build a stage-scoped immutable context and dispatch one job per system
+        var stage_ctx = StageContext{
+            .world = world,
+            .dt = dt,
+            .systems = self.systems.items,
+            .completion = &self.completion,
+            .done_sem = &self.done_sem,
+        };
 
-            try pool.submitWork(.{
+        // Prepare/reuse batch of work items to reduce submit overhead and allocations
+        try self.items_cache.ensureTotalCapacity(self.allocator, system_count);
+        self.items_cache.clearRetainingCapacity();
+
+        var i: usize = 0;
+        while (i < system_count) : (i += 1) {
+            self.items_cache.appendAssumeCapacity(.{
                 .id = work_id_counter.fetchAdd(1, .monotonic),
                 .item_type = .ecs_update,
                 .priority = .high, // System updates are frame-critical
-                .data = .{
-                    .ecs_update = .{
-                        .stage_index = 0,
-                        .job_index = 0,
-                    },
-                },
+                .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(i) } },
                 .worker_fn = systemWorker,
-                .context = work_context,
+                .context = &stage_ctx,
             });
         }
+        try pool.submitBatch(self.items_cache.items);
 
-        // Wait for all systems to complete
-        while (self.completion.load(.acquire) > 0) {
-            std.Thread.yield() catch {};
-        }
+        // Wait exactly once for stage completion: last worker posts
+        self.done_sem.wait();
     }
 };
 
-/// Context for system worker thread
-const SystemWorkContext = struct {
+/// Immutable, stage-scoped context shared by all system jobs in a stage
+const StageContext = struct {
     world: *World,
     dt: f32,
-    update_fn: SystemFn,
+    systems: []const SystemDef,
     completion: *std.atomic.Value(usize),
-    system_name: []const u8,
-    allocator: std.mem.Allocator,
+    done_sem: *std.Thread.Semaphore,
 };
 
 /// Worker function for parallel system execution
 fn systemWorker(context: *anyopaque, work_item: @import("../threading/thread_pool.zig").WorkItem) void {
-    _ = work_item;
-    const ctx = @as(*SystemWorkContext, @ptrCast(@alignCast(context)));
+    const ctx = @as(*StageContext, @ptrCast(@alignCast(context)));
+    const job_index: usize = @intCast(work_item.data.ecs_update.job_index);
     defer {
-        _ = ctx.completion.fetchSub(1, .release);
-        // Free the work context allocated for this job
-        ctx.allocator.destroy(ctx);
+        const prev = ctx.completion.fetchSub(1, .release);
+        if (prev == 1) ctx.done_sem.post();
     }
 
-    ctx.update_fn(ctx.world, ctx.dt) catch |err| {
-        // Use correct string placeholder for system_name and keep error formatting
-        log(.ERROR, "system_scheduler", "System '{s}' failed with error: {}", .{ ctx.system_name, err });
-        // System failure doesn't crash the frame - log and continue
+    const sys = ctx.systems[job_index];
+    sys.update_fn(ctx.world, ctx.dt) catch |err| {
+        log(.ERROR, "system_scheduler", "System '{s}' failed with error: {}", .{ sys.name, err });
     };
 }
 
