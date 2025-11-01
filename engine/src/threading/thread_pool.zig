@@ -391,8 +391,8 @@ pub const ThreadPool = struct {
             worker.* = WorkerInfo.init(@intCast(i), undefined); // Will set pool pointer after struct creation
         }
 
-    const work_queue = try allocator.create(WorkQueue);
-    work_queue.* = try WorkQueue.init(allocator);
+        const work_queue = try allocator.create(WorkQueue);
+        work_queue.* = try WorkQueue.init(allocator);
 
         const pool = ThreadPool{
             .allocator = allocator,

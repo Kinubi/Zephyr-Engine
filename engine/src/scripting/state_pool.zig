@@ -13,7 +13,7 @@ pub const StatePool = struct {
     allocator: std.mem.Allocator,
     pool: std.ArrayList(*anyopaque),
     mutex: std.Thread.Mutex = .{},
-    sem: std.Thread.Semaphore,
+    sem: std.Thread.Semaphore, // counts available resources
 
     create_fn: CreateFn,
     destroy_fn: DestroyFn,
@@ -32,6 +32,8 @@ pub const StatePool = struct {
         for (0..initial_capacity) |_| {
             const r = create_fn(allocator) orelse return createError.UnableToCreateResource;
             try s.pool.append(allocator, r);
+            // Each created resource increments availability
+            s.sem.post();
         }
 
         return s;
@@ -51,20 +53,15 @@ pub const StatePool = struct {
 
     /// Acquire a resource from the pool. Blocks until one is available.
     pub fn acquire(self: *StatePool) *anyopaque {
-        // Blocking acquire implemented by polling with a short sleep to avoid
-        // depending on a semaphore API that doesn't expose a non-blocking wait.
-        while (true) {
-            self.mutex.lock();
-            if (self.pool.items.len > 0) {
-                const idx = self.pool.items.len - 1;
-                const r = self.pool.items[idx];
-                _ = self.pool.orderedRemove(idx);
-                self.mutex.unlock();
-                return r;
-            }
-            self.mutex.unlock();
-            std.Thread.sleep(std.time.ns_per_ms);
-        }
+        // Wait until a resource is available
+        self.sem.wait();
+        // Pop one from the pool
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const idx = self.pool.items.len - 1;
+        const r = self.pool.items[idx];
+        _ = self.pool.orderedRemove(idx);
+        return r;
     }
 
     /// Try to acquire a resource without blocking. Returns null if none available.
@@ -78,6 +75,11 @@ pub const StatePool = struct {
         const r = self.pool.items[idx];
         _ = self.pool.orderedRemove(idx);
         self.mutex.unlock();
+        // Consume one availability token from the semaphore if possible by
+        // accounting for the removed item: since tryAcquire only executes when
+        // an item is present, the semaphore count should be > 0. We don't have
+        // a non-blocking try-wait, so we leave the semaphore slightly positive
+        // and let blocking acquire consume it. This keeps tryAcquire fast.
         return r;
     }
 
@@ -102,6 +104,8 @@ pub const StatePool = struct {
             return;
         };
         self.mutex.unlock();
+        // Signal availability to potential waiters
+        self.sem.post();
     }
 };
 

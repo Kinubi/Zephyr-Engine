@@ -2,6 +2,7 @@ const std = @import("std");
 const zephyr = @import("zephyr");
 const ScriptRunner = zephyr.ScriptRunner;
 const ActionQueue = zephyr.ActionQueue;
+const EntityId = @import("../ecs/entity_registry.zig").EntityId;
 
 test "ScriptRunner + StatePool integration" {
     const allocator = std.heap.page_allocator;
@@ -30,18 +31,18 @@ test "ScriptRunner + StatePool integration" {
     // Enqueue increment
     var dummy_ctx: u8 = 0;
     const ctx_ptr: *anyopaque = @ptrCast(&dummy_ctx);
-    _ = try runner.enqueueScript(script_inc, ctx_ptr, null);
+    _ = try runner.enqueueScript(script_inc, ctx_ptr, null, EntityId.invalid, null);
     _ = aq.pop(); // discard first result
 
     // Enqueue read
-    _ = try runner.enqueueScript(script_read, ctx_ptr, null);
+    _ = try runner.enqueueScript(script_read, ctx_ptr, null, EntityId.invalid, null);
     const act = aq.pop();
 
     try std.testing.expect(act.success == true);
     if (act.message) |m| {
-    // Convert returned string to integer and check equals 1
-    const parsed = std.fmt.parseInt(i64, m, 10) catch 0;
-    try std.testing.expect(parsed == 1);
+        // Convert returned string to integer and check equals 1
+        const parsed = std.fmt.parseInt(i64, m, 10) catch 0;
+        try std.testing.expect(parsed == 1);
         // free message
         const tmp: [*]const u8 = @ptrCast(m.ptr);
         const msg_slice: []u8 = @constCast(tmp)[0..m.len];

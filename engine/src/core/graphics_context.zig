@@ -710,8 +710,10 @@ pub const GraphicsContext = struct {
 
     /// Execute all pending secondary command buffers on main thread
     pub fn executeCollectedSecondaryBuffers(self: *GraphicsContext, primary_cmd: vk.CommandBuffer) !void {
-        // Atomic flip: swap write index and take ownership of read buffer
-        const read_idx = 1 - current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
+        // Atomic flip: swap write index and take ownership of the PREVIOUS write buffer as our read buffer.
+        // The swap returns the old write index, which is exactly the buffer we should now read and execute.
+        const prev_write_idx = current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
+        const read_idx = prev_write_idx;
 
         // No lock needed - we own the read buffer
         if (pending_buffers[read_idx].items.len == 0) return;

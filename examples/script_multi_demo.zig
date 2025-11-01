@@ -36,7 +36,7 @@ pub fn main() !void {
         const script_buf = try std.fmt.allocPrint(allocator, "print(\"Hello from Lua job {d}\")\nreturn {d}", .{ i, i });
         const ctx_ptr: *anyopaque = @ptrCast(&ctxs[i]);
 
-        _ = try runner.enqueueScript(script_buf, ctx_ptr, null);
+        _ = try runner.enqueueScript(script_buf, ctx_ptr, null, zephyr.Entity.invalid, null);
 
         // Free the temporary script buffer we allocated for formatting; ScriptRunner copies it
         allocator.free(script_buf);

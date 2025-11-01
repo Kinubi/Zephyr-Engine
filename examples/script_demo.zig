@@ -37,7 +37,7 @@ pub fn main() !void {
     const ctx_ptr: *anyopaque = @ptrCast(&dummy);
 
     // Enqueue first script to increment x
-    _ = try runner.enqueueScript(script_inc, ctx_ptr, null);
+    _ = try runner.enqueueScript(script_inc, ctx_ptr, null, zephyr.Entity.invalid, null);
     const act1 = aq.pop();
     std.debug.print("Script 1 finished: id={} success={}\n", .{ act1.id, act1.success });
     if (act1.message) |m| {
@@ -48,7 +48,7 @@ pub fn main() !void {
     }
 
     // Enqueue second script that returns x
-    _ = try runner.enqueueScript(script_read, ctx_ptr, null);
+    _ = try runner.enqueueScript(script_read, ctx_ptr, null, zephyr.Entity.invalid, null);
     const act2 = aq.pop();
     std.debug.print("Script 2 finished: id={} success={}\n", .{ act2.id, act2.success });
     if (act2.message) |m| {

@@ -12,9 +12,7 @@ const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_F
 // Import the new multithreaded BVH builder
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
 const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
-const TlasResult = @import("multithreaded_bvh_builder.zig").TlasResult;
 const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
-const BvhBuildResult = @import("multithreaded_bvh_builder.zig").BvhBuildResult;
 const TlasWorker = @import("tlas_worker.zig");
 const TlasJob = TlasWorker.TlasJob;
 const ThreadPool = ThreadPoolMod.ThreadPool;
@@ -90,6 +88,10 @@ pub const RaytracingSystem = struct {
     per_frame_destroy: [MAX_FRAMES_IN_FLIGHT]PerFrameDestroyQueue = undefined,
 
     allocator: std.mem.Allocator = undefined,
+
+    /// Cooldown frames after a TLAS pickup to allow all frames-in-flight to
+    /// rebind their descriptor sets before spawning another TLAS build.
+    tlas_rebuild_cooldown_frames: u32 = 0,
 
     /// Enhanced init with multithreaded BVH support
     pub fn init(
@@ -303,6 +305,10 @@ pub const RaytracingSystem = struct {
 
                 // Mark build as no longer in progress
                 self.bvh_build_in_progress = false;
+                // Start cooldown so descriptor sets for all frames can rebind
+                self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT;
+
+                return true;
             }
         }
 
@@ -339,7 +345,14 @@ pub const RaytracingSystem = struct {
         const is_transform_only = render_system.transform_only_change and render_system.renderables_dirty;
         const rebuild_needed = try render_system.checkBvhRebuildNeeded();
 
-        if ((is_transform_only or rebuild_needed or geo_changed) and !self.bvh_build_in_progress) {
+        // Decrement cooldown if active
+        if (self.tlas_rebuild_cooldown_frames > 0) {
+            self.tlas_rebuild_cooldown_frames -= 1;
+        }
+
+        const can_spawn_new_build = self.tlas_rebuild_cooldown_frames == 0 and !self.bvh_build_in_progress;
+
+        if ((is_transform_only or rebuild_needed or geo_changed) and can_spawn_new_build) {
             // Get current raytracing data
             const rt_data = try render_system.getRaytracingData();
             defer {
@@ -355,12 +368,7 @@ pub const RaytracingSystem = struct {
             // When it completes, registry will handle the swap automatically
             try self.spawnTlasWorker(rt_data);
 
-            // Clear dirty flags
-            render_system.renderables_dirty = false;
-            render_system.transform_only_change = false;
-            render_system.raytracing_descriptors_dirty = false;
-
-            return true;
+            return false;
         }
 
         return false; // No rebuild needed or already in progress

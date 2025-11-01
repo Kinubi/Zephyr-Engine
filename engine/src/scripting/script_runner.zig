@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = @import("../utils/log.zig").log;
 const StatePool = @import("state_pool.zig").StatePool;
+const EntityId = @import("../ecs/entity_registry.zig").EntityId;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const lua = @import("lua_bindings.zig");
 const ActionQueue = @import("action_queue.zig").ActionQueue;
@@ -21,6 +22,10 @@ pub const ScriptJob = struct {
     script: []u8,
     // Opaque user context
     context: *anyopaque,
+    // Owning entity (invalid == no owner)
+    owner: EntityId,
+    // Optional user context passed through to Lua (e.g., Scene pointer)
+    user_ctx: ?*anyopaque,
     // Optional callback executed when job finishes (executed on worker thread)
     // Signature: fn(job_id: u64, ctx: *anyopaque, success: bool, message: []const u8) void
     callback: ?*const fn (u64, *anyopaque, bool, []const u8) void,
@@ -122,7 +127,7 @@ pub const ScriptRunner = struct {
         try self.setupStatePool(initial_capacity, &lua.createLuaState, &lua.destroyLuaState);
     }
 
-    pub fn enqueueScript(self: *ScriptRunner, script_str: []const u8, ctx: *anyopaque, callback: ?*const fn (u64, *anyopaque, bool, []const u8) void) !u64 {
+    pub fn enqueueScript(self: *ScriptRunner, script_str: []const u8, ctx: *anyopaque, callback: ?*const fn (u64, *anyopaque, bool, []const u8) void, owner: EntityId, user_ctx: ?*anyopaque) !u64 {
         // Copy script into allocator-owned buffer
         const n = script_str.len;
         const buf = try self.allocator.alloc(u8, n);
@@ -133,6 +138,8 @@ pub const ScriptRunner = struct {
             .id = self.next_job_id.fetchAdd(1, .monotonic),
             .script = buf,
             .context = ctx,
+            .owner = owner,
+            .user_ctx = user_ctx,
             .callback = callback,
             .allocator = self.allocator,
         };
@@ -200,7 +207,8 @@ fn threadPoolWorker(context: *anyopaque, wi: @import("../threading/thread_pool.z
     }
 
     var res = lua.ExecuteResult{ .success = false, .message = "" };
-    if (lua.executeLuaBuffer(runner.allocator, leased_state.?, job.script)) |v| {
+    const owner_u32 = @intFromEnum(job.owner);
+    if (lua.executeLuaBuffer(runner.allocator, leased_state.?, job.script, owner_u32, job.user_ctx)) |v| {
         res = v;
     } else |err| {
         log(.WARN, "scripting", "executeLuaBuffer failed: {}", .{err});

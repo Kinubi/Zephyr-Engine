@@ -6,7 +6,6 @@ const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
 const FrameInfo = @import("../frameinfo.zig").FrameInfo;
-const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
 const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedPipelineSystem;
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
@@ -111,6 +110,8 @@ pub const PathTracingPass = struct {
     // Acceleration structure tracking
     tlas: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
     tlas_valid: bool = false,
+    // TLAS transition control: block dispatch until all frames rebind to new TLAS
+    tlas_transition_pending_mask: u8 = 0,
 
     // Per-frame descriptor tracking
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
@@ -373,6 +374,81 @@ pub const PathTracingPass = struct {
         // They'll be flushed during deinit when GPU is idle
     }
 
+    /// Update descriptors only for the current frame to avoid churn on in-flight frames
+    fn updateDescriptorsForFrame(self: *PathTracingPass, target_frame: u32) !void {
+        const frame_idx: usize = @intCast(target_frame);
+
+        // Material buffer (no need to query rt_data here)
+        const material_info = if (self.asset_manager.material_buffer) |buffer|
+            buffer.descriptor_info
+        else
+            vk.DescriptorBufferInfo{ .buffer = vk.Buffer.null_handle, .offset = 0, .range = 0 };
+
+        const material_resource = Resource{ .buffer = .{
+            .buffer = material_info.buffer,
+            .offset = material_info.offset,
+            .range = material_info.range,
+        } };
+
+        // Textures array
+        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
+        const textures_ready = blk: {
+            if (texture_image_infos.len == 0) break :blk false;
+            for (texture_image_infos) |info| {
+                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) break :blk false;
+            }
+            break :blk true;
+        };
+        const textures_resource = if (textures_ready)
+            Resource{ .image_array = texture_image_infos }
+        else
+            null;
+
+        // Output image
+        const output_descriptor = self.output_texture.getDescriptorInfo();
+        const output_resource = Resource{ .image = .{
+            .image_view = output_descriptor.image_view,
+            .sampler = output_descriptor.sampler,
+            .layout = output_descriptor.image_layout,
+        } };
+
+        // Per-frame geometry buffers: reuse existing arrays; they are rebuilt on geometry changes via full updateDescriptors()
+        const frame_data = &self.per_frame[frame_idx];
+
+        // Global UBO for this frame
+        const global_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+        const global_resource = Resource{ .buffer = .{
+            .buffer = global_info.buffer,
+            .offset = global_info.offset,
+            .range = global_info.range,
+        } };
+
+        // Bind resources for this frame only
+        if (self.tlas_valid) {
+            const accel_resource = Resource{ .acceleration_structure = self.tlas };
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+        }
+        try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
+        try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
+
+        if (frame_data.vertex_infos.items.len > 0) {
+            const vertices_resource = Resource{ .buffer_array = frame_data.vertex_infos.items };
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 3, vertices_resource, target_frame);
+        }
+        if (frame_data.index_infos.items.len > 0) {
+            const indices_resource = Resource{ .buffer_array = frame_data.index_infos.items };
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 4, indices_resource, target_frame);
+        }
+        try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 5, material_resource, target_frame);
+        if (textures_resource) |res| {
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 6, res, target_frame);
+        }
+
+        // Mark cleaned and push descriptor updates for this frame only
+        self.descriptor_dirty_flags[frame_idx] = false;
+        try self.resource_binder.updateFrame(self.path_tracing_pipeline, target_frame);
+    }
+
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
         const frame_index = frame_info.current_frame;
@@ -398,11 +474,16 @@ pub const PathTracingPass = struct {
 
         const cmd = frame_info.command_buffer;
 
-        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
-        // Dispatch rays
-        try self.dispatchRays(cmd, self.rt_system.shader_binding_table);
+        var did_dispatch = false;
 
-        // Copy output to swapchain image
+        // Only dispatch when TLAS transition is complete and this frame's descriptors are valid
+        if (self.tlas_transition_pending_mask == 0 and !self.descriptor_dirty_flags[frame_index]) {
+            try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
+            try self.dispatchRays(cmd, self.rt_system.shader_binding_table);
+            did_dispatch = true;
+        }
+
+        // Always copy to swapchain so we present the last valid output, even if we skipped dispatch this frame
         try self.copyOutputToSwapchain(cmd, frame_info.color_image);
     }
     fn teardownImpl(base: *RenderPass) void {
@@ -442,6 +523,13 @@ pub const PathTracingPass = struct {
             for (&self.descriptor_dirty_flags) |*dirty| {
                 dirty.* = true;
             }
+
+            // Start TLAS transition: require all frames to rebind before dispatch resumes
+            var mask: u8 = 0;
+            inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+                mask |= (@as(u8, 1) << @intCast(i));
+            }
+            self.tlas_transition_pending_mask = mask;
         }
     }
 
@@ -673,11 +761,8 @@ pub const PathTracingPass = struct {
         // Update cached TLAS when rt_system's registry TLAS changed
         // Registry TLAS is stable for the entire frame (atomic swap only happens on completion)
         if (tlas_changed and new_tlas != null) {
-            // Update cached TLAS to the stable TLAS from registry
-            // The registry value is stable for the entire frame, so it's safe
-            // to swap it in immediately and mark descriptors dirty.
-            self.tlas = new_tlas.?;
-            self.tlas_valid = self.rt_system.isTlasValid();
+            // Use helper to update TLAS and mark all frames' descriptors dirty
+            self.updateTLAS(new_tlas.?);
         }
 
         const needs_update = bvh_rebuilt or
@@ -690,13 +775,27 @@ pub const PathTracingPass = struct {
         // Update descriptors when needed and TLAS is valid
         // Safe to update immediately because render_tlas is stable for the entire frame
         if (needs_update and self.tlas_valid) {
-            try self.updateDescriptors();
-
-            // Clear dirty flags ONLY after successful descriptor update
-            if (geometry_changed or tlas_changed) {
+            // If geometry/material/texture changed, do a full rebind for all frames to rebuild geometry arrays
+            if (geometry_changed or materials_dirty or textures_dirty) {
+                try self.updateDescriptors();
                 self.render_system.raytracing_descriptors_dirty = false;
                 self.render_system.renderables_dirty = false;
                 self.render_system.transform_only_change = false;
+                // Full rebind covers all frames; clear TLAS transition mask
+                self.tlas_transition_pending_mask = 0;
+            } else {
+                // Only rebind the current frame to avoid touching in-flight frames at high FPS
+                try self.updateDescriptorsForFrame(frame_index);
+
+                // Clear transform flags on TLAS changes after a successful per-frame rebind
+                if (tlas_changed) {
+                    self.render_system.renderables_dirty = false;
+                    self.render_system.transform_only_change = false;
+                }
+
+                // Mark this frame as completed in the TLAS transition mask
+                const mask_bit: u8 = (@as(u8, 1) << @intCast(frame_index));
+                self.tlas_transition_pending_mask &= ~mask_bit;
             }
         }
     }

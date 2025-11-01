@@ -39,8 +39,8 @@ pub const ScriptingSystem = struct {
 
     /// Enqueue a script to be executed on the thread pool. ctx is an opaque pointer
     /// that will be delivered with the Action; use null if not needed.
-    pub fn runScript(self: *ScriptingSystem, script: []const u8, ctx: *anyopaque) !u64 {
-        return self.runner.enqueueScript(script, ctx, null);
+    pub fn runScript(self: *ScriptingSystem, script: []const u8, ctx: *anyopaque, owner: @import("../entity_registry.zig").EntityId, scene_ptr: *anyopaque) !u64 {
+        return self.runner.enqueueScript(script, ctx, null, owner, scene_ptr);
     }
 
     // NOTE: The ScriptingSystem instance is owned by the Scene. Call the instance
@@ -91,6 +91,7 @@ pub fn update(world: *World, dt: f32) !void {
     }
 
     // Execute any ScriptComponent that requests per-frame execution
+    const lua = @import("../../scripting/lua_bindings.zig");
     var view = try world.view(ScriptComponent);
     var iter = view.iterator();
     var enqueued_count: usize = 0;
@@ -99,9 +100,29 @@ pub fn update(world: *World, dt: f32) !void {
         if (!sc.enabled) continue;
         if (!sc.run_on_update) continue;
 
-        // Enqueue the script on the scripting runner via the instance helper
-        _ = sys.runScript(sc.script, @ptrCast(sc)) catch {};
-        enqueued_count += 1;
+        // If we have a state pool available, execute the script synchronously on
+        // the main thread to allow scripts to safely mutate scene/ECS state.
+        if (sys.runner.state_pool) |sp| {
+            // Acquire a lua_State from the pool (blocks until available)
+            const leased = sp.acquire();
+            const owner_u32 = @intFromEnum(entry.entity);
+            // Execute on main thread; pass scene pointer as user_ctx so bindings can access it
+            var res: lua.ExecuteResult = lua.ExecuteResult{ .success = false, .message = "" };
+            if (lua.executeLuaBuffer(sys.runner.allocator, leased, sc.script, owner_u32, @ptrCast(scene))) |v| {
+                res = v;
+            } else |err| {
+                // Log and continue
+                log(.WARN, "scripting", "synchronous executeLuaBuffer failed: {}", .{err});
+            }
+
+            // Release leased state
+            sp.release(leased);
+            enqueued_count += 1;
+        } else {
+            // Fallback to async enqueue if no state pool is available
+            _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch {};
+            enqueued_count += 1;
+        }
 
         if (sc.run_once) sc.enabled = false;
     }

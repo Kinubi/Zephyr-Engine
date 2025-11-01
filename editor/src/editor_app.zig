@@ -309,6 +309,9 @@ pub const App = struct {
         const vase2 = try scene.spawnProp("assets/models/flat_vase.obj", "assets/textures/granitesmooth1-albedo.png");
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
+        // Attach a small script that moves the vase gradually each frame
+        const move_script = "translate_entity(0.0001, 0.0, 0.0)";
+        try scene.ecs_world.emplace(new_ecs.ScriptComponent, vase2.entity_id, new_ecs.ScriptComponent.init(move_script, true, false));
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
 
         log(.INFO, "app", "Scene v2 Cornell Box complete with {} entities!", .{scene.entities.items.len});
@@ -454,6 +457,10 @@ pub const App = struct {
                 var loaded_object = try scene.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
                 try loaded_object.setPosition(scheduled_asset.position);
                 try loaded_object.setScale(scheduled_asset.scale);
+
+                // If this is the first vase (or any scheduled prop), attach the moving script
+                const move_script_sched = "translate_entity(0.01, 0.0, 0.0)";
+                try scene.ecs_world.emplace(new_ecs.ScriptComponent, loaded_object.entity_id, new_ecs.ScriptComponent.init(move_script_sched, true, false));
 
                 log(.INFO, "app", "Note: Asset loading is asynchronous - the actual model and texture will appear once background loading completes", .{});
 

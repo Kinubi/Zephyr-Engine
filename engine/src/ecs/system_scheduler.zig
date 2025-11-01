@@ -58,18 +58,11 @@ pub const SystemStage = struct {
 
     /// Execute all systems in this stage in parallel
     pub fn execute(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
-        // Quick timing instrumentation to compare sequential vs parallel execution
-        const start_us = std.time.microTimestamp();
-        const mode: []const u8 = "parallel";
-        defer {
-            const elapsed = std.time.microTimestamp() - start_us;
-            log(.INFO, "system_scheduler", "Stage '{s}' executed in {} us (mode={s})", .{ self.name, elapsed, mode });
-        }
         const system_count = self.systems.items.len;
         if (system_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (system_count <= 2 or thread_pool == null) {
+        if (system_count < 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 try system.update_fn(world, dt);
             }
