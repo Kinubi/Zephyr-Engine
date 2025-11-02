@@ -301,21 +301,6 @@ pub const GeometryPass = struct {
             return;
         }
 
-        // Transition swapchain image from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.color_image,
-            .undefined,
-            .color_attachment_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
-
         // Setup dynamic rendering with helper
         const rendering = DynamicRenderingHelper.init(
             frame_info.color_image_view,
@@ -363,20 +348,9 @@ pub const GeometryPass = struct {
         // End rendering
         rendering.end(self.graphics_context, cmd);
 
-        // Transition swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.color_image,
-            .color_attachment_optimal,
-            .present_src_khr,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // Leave color image in COLOR_ATTACHMENT_OPTIMAL; swapchain.endFrame will transition
+        // the swapchain image to PRESENT, and offscreen viewport images should remain in
+        // a layout suitable for their next consumer.
     }
 
     fn teardownImpl(base: *RenderPass) void {

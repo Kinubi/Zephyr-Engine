@@ -494,7 +494,7 @@ pub const PathTracingPass = struct {
         }
 
         // Always copy to swapchain so we present the last valid output, even if we skipped dispatch this frame
-        try self.copyOutputToSwapchain(cmd, frame_info.color_image);
+        try self.copyOutputToFrameImage(cmd, frame_info.color_image);
     }
     fn teardownImpl(base: *RenderPass) void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
@@ -623,18 +623,18 @@ pub const PathTracingPass = struct {
         );
     }
 
-    fn copyOutputToSwapchain(self: *PathTracingPass, command_buffer: vk.CommandBuffer, swapchain_image: vk.Image) !void {
+    fn copyOutputToFrameImage(self: *PathTracingPass, command_buffer: vk.CommandBuffer, frame_image: vk.Image) !void {
         const gc = self.graphics_context;
 
         // OPTIMIZATION: Keep output texture in GENERAL layout (supports all operations including transfer)
         // This eliminates 2 image transitions per frame (GENERAL→TRANSFER_SRC→GENERAL)
-        // Only transition the swapchain image (required for presentation)
+        // Only transition the frame image (required for presentation)
 
-        // Transition swapchain image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
+        // Transition frame image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
         gc.transitionImageLayout(
             command_buffer,
-            swapchain_image,
-            vk.ImageLayout.present_src_khr,
+            frame_image,
+            vk.ImageLayout.color_attachment_optimal,
             vk.ImageLayout.transfer_dst_optimal,
             .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
@@ -673,7 +673,7 @@ pub const PathTracingPass = struct {
             command_buffer,
             self.output_texture.image,
             vk.ImageLayout.general, // Source stays in GENERAL
-            swapchain_image,
+            frame_image,
             vk.ImageLayout.transfer_dst_optimal,
             1,
             @ptrCast(&copy_info),
@@ -682,9 +682,9 @@ pub const PathTracingPass = struct {
         // Transition swapchain image back to PRESENT_SRC
         gc.transitionImageLayout(
             command_buffer,
-            swapchain_image,
+            frame_image,
             vk.ImageLayout.transfer_dst_optimal,
-            vk.ImageLayout.present_src_khr,
+            vk.ImageLayout.color_attachment_optimal,
             .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
                 .base_mip_level = 0,

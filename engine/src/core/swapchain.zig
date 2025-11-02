@@ -508,6 +508,23 @@ pub const Swapchain = struct {
         const begin_info = vk.CommandBufferBeginInfo{};
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
 
+        // Ensure the current swapchain image is ready for rendering as a color attachment.
+        // We don't need previous content at frame start, so we can use UNDEFINED as old layout.
+        const current_image = self.swap_images[self.image_index].image;
+        self.gc.transitionImageLayout(
+            frame_info.command_buffer,
+            current_image,
+            .undefined,
+            .color_attachment_optimal,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+
         // Also begin compute buffer (if compute is enabled)
         if (self.compute) {
             try self.gc.vkd.resetFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[frame_info.current_frame]));
@@ -531,23 +548,21 @@ pub const Swapchain = struct {
         // Execute all pending secondary command buffers from worker threads
         try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
 
-        // Ensure swapchain image is in the correct layout for presentation
-        // This is important when no render pass has been executed or when layers
-        // don't explicitly manage the layout
-        // const current_image = self.swap_images[self.image_index].image;
-        // self.gc.transitionImageLayout(
-        //     frame_info.command_buffer,
-        //     current_image,
-        //     .undefined, // Old layout - conservative assumption
-        //     .present_src_khr, // Required for presentation
-        //     .{
-        //         .aspect_mask = .{ .color_bit = true },
-        //         .base_mip_level = 0,
-        //         .level_count = 1,
-        //         .base_array_layer = 0,
-        //         .layer_count = 1,
-        //     },
-        // );
+        // Ensure swapchain image is transitioned to PRESENT before presenting
+        const current_image = self.swap_images[self.image_index].image;
+        self.gc.transitionImageLayout(
+            frame_info.command_buffer,
+            current_image,
+            .color_attachment_optimal,
+            .present_src_khr,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
 
         // End graphics buffer
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {

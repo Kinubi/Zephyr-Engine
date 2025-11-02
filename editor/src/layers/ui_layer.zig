@@ -97,21 +97,7 @@ pub const UILayer = struct {
 
         if (!self.show_ui) return;
 
-        // Transition swapchain image from PRESENT_SRC_KHR to COLOR_ATTACHMENT_OPTIMAL for ImGui
-        const gc = self.swapchain.gc;
-        gc.transitionImageLayout(
-            frame_info.command_buffer,
-            frame_info.color_image,
-            .present_src_khr,
-            .color_attachment_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+    // Swapchain image transitions are handled centrally in swapchain.beginFrame/endFrame.
 
         // Begin new ImGui frame
         self.imgui_context.newFrame();
@@ -196,20 +182,7 @@ pub const UILayer = struct {
             try pm.endPass("imgui", frame_info.current_frame, frame_info.command_buffer);
         }
 
-        // Transition swapchain image back from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
-        gc.transitionImageLayout(
-            frame_info.command_buffer,
-            frame_info.color_image,
-            .color_attachment_optimal,
-            .present_src_khr,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // Present transition is handled in swapchain.endFrame.
     }
 
     fn end(base: *Layer, frame_info: *FrameInfo) !void {
