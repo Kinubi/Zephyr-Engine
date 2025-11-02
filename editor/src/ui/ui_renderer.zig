@@ -91,6 +91,14 @@ pub const UIRenderer = struct {
         // Note: Dockspace disabled - requires ImGui docking branch
         // For now, windows will be regular floating windows
 
+        // Ensure non-viewport panels are fully opaque (no subtle transparency)
+        // We'll keep the viewport window transparent (NoBackground flag) separately.
+        const style = c.ImGui_GetStyle();
+        if (style) |s| {
+            // Force WindowBg alpha to 1.0 every frame (harmless if already 1.0)
+            s.*.Colors[c.ImGuiCol_WindowBg].w = 1.0;
+        }
+
         const viewport = c.ImGui_GetMainViewport();
         c.ImGui_SetNextWindowPos(viewport.*.Pos, c.ImGuiCond_Always);
         c.ImGui_SetNextWindowSize(viewport.*.Size, c.ImGuiCond_Always);
@@ -168,6 +176,11 @@ pub const UIRenderer = struct {
         if (self.viewport_size[0] < 1.0 or self.viewport_size[1] < 1.0) return false;
 
         const draw_list = self.viewport_draw_list.?;
+        // Clip all overlay drawing to the viewport content region so it doesn't
+        // spill over into other panels when geometry projects outside the view.
+        const clip_min = c.ImVec2{ .x = self.viewport_pos[0], .y = self.viewport_pos[1] };
+        const clip_max = c.ImVec2{ .x = self.viewport_pos[0] + self.viewport_size[0], .y = self.viewport_pos[1] + self.viewport_size[1] };
+        c.ImDrawList_PushClipRect(draw_list, clip_min, clip_max, true);
         var sel_count: usize = 0;
         var last_aabb: ?ViewportPicker.AxisAlignedBoundingBox = null;
         for (selected) |entity| {
@@ -183,10 +196,13 @@ pub const UIRenderer = struct {
             if (last_aabb) |aabb| {
                 const center = Math.Vec3.init((aabb.min.x + aabb.max.x) * 0.5, (aabb.min.y + aabb.max.y) * 0.5, (aabb.min.z + aabb.max.z) * 0.5);
                 // Pass the scene and aabb center so the gizmo can perform interactive transforms
-                return Gizmo.process(draw_list, self.viewport_size, camera, center, scene, selected[0]);
+                const consumed = Gizmo.process(draw_list, self.viewport_size, camera, center, scene, selected[0]);
+                c.ImDrawList_PopClipRect(draw_list);
+                return consumed;
             }
         }
 
+        c.ImDrawList_PopClipRect(draw_list);
         return false;
     }
 

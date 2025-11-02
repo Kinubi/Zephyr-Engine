@@ -270,6 +270,36 @@
 			"type": "shell",
 			"command": "zig build",
 			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
+		},
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "zig build",
+			"group": "build"
 		}
 	]
 }

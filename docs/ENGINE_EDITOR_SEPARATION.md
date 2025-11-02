@@ -668,15 +668,15 @@ touch engine/src/core/engine.zig
   - [ ] Console Panel - Logging output
   
 - [ ] **Selection & Manipulation (IN PROGRESS):**
-  - [ ] Entity Selection - Mouse picking in viewport
-  - [ ] Selection Highlight - Visual feedback in viewport
+  - [x] Entity Selection - Mouse picking in viewport
+  - [x] Selection Highlight - Visual feedback in viewport
   - [ ] Hierarchy Selection - Click entity in hierarchy to select
-  - [ ] Inspector Integration - Show selected entity properties
-  - [ ] Transform Gizmos - Visual move/rotate/scale tools
-  - [ ] Gizmo Interaction - Mouse drag to transform
+  - [x] Inspector Integration - Show selected entity properties
+  - [x] Transform Gizmos - Visual move/rotate/scale tools
+  - [x] Gizmo Interaction - Mouse drag to transform
   
 - [ ] **Advanced Panels:**
-  - [ ] Asset Browser - File system view and import
+  - [x] Asset Browser - File system view and import
   - [ ] Console Panel - Logging with filters
   - [ ] Material Editor - Visual material creation
   - [ ] Lighting Tools - Visual light placement
@@ -686,14 +686,14 @@ touch engine/src/core/engine.zig
   - [x] ImGui integration and rendering
   - [x] UI Layer with stats windows
   - [x] Keyboard camera controller
-  - [ ] Selection system (entity picking)
+  - [x] Selection system (entity picking)
   - [ ] Undo/redo system
   - [ ] Play mode (runtime testing)
   
 - [ ] **Editor Tools:**
   - [x] Asset browser panel (file system view) ✅ COMPLETE
-  - [ ] Transform gizmos (move/rotate/scale) ⬅️ NEXT
-  - [ ] Asset importer (drag-and-drop)
+  - [x] Transform gizmos (move/rotate/scale) ✅ COMPLETE
+  - [x] Asset importer (drag-and-drop)
   - [ ] Scene serialization (save/load)
   - [ ] Grid and snapping
 
