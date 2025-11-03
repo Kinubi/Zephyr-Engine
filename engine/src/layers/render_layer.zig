@@ -47,6 +47,9 @@ pub const RenderLayer = struct {
 
         // Begin frame - starts both graphics and compute command buffers
         try self.swapchain.beginFrame(frame_info.*);
+        if (self.swapchain.use_viewport_texture) {
+            return;
+        }
 
         // Populate image views for dynamic rendering (swapchain images are now ready)
         const swap_image = self.swapchain.currentSwapImage();

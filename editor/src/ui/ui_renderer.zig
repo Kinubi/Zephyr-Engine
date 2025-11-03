@@ -39,6 +39,9 @@ pub const UIRenderer = struct {
     // Cached draw list for the viewport window (used for overlays)
     viewport_draw_list: ?*c.ImDrawList = null,
 
+    // Viewport texture (offscreen render target) to display inside the Viewport window
+    viewport_texture_id: ?c.ImTextureID = null,
+
     // Scripting console (simple, fixed-size buffer + small ring history)
     show_scripting_console: bool = false,
     scripting_input_buffer: [8192]u8 = undefined,
@@ -142,7 +145,17 @@ pub const UIRenderer = struct {
         self.viewport_size = .{ content_region_max.x - content_region_min.x, content_region_max.y - content_region_min.y };
         self.viewport_draw_list = c.ImGui_GetWindowDrawList();
 
-        c.ImGui_Text("3D Viewport");
+        // Draw the viewport image if available
+        if (self.viewport_texture_id) |tid| {
+            // Guard against degenerate sizes
+            if (self.viewport_size[0] >= 1.0 and self.viewport_size[1] >= 1.0) {
+                const tex_ref = c.ImTextureRef{ ._TexData = null, ._TexID = tid };
+                const size = c.ImVec2{ .x = self.viewport_size[0], .y = self.viewport_size[1] };
+                c.ImGui_Image(tex_ref, size);
+            }
+        } else {
+            c.ImGui_Text("3D Viewport");
+        }
         c.ImGui_End();
 
         if (self.show_stats_window) {

@@ -16,7 +16,7 @@
  */
 
 RaytracingAccelerationStructure rs : register(t0);
-[[vk::image_format("rgb10a2")]] RWTexture2D<float4> image : register(u1);
+[[vk::image_format("rgba16f")]] RWTexture2D<float4> image : register(u1);
 struct PointLight {
     float4 position;
     float4 color;
@@ -33,7 +33,7 @@ cbuffer cam : register(b2) { CameraProperties cam; };
 
 struct Payload
 {
-[[vk::location(0)]] float3 hitValue;
+[[vk::location(0)]] float4 hitValue;
 };
 
 float4x4 inverse(float4x4 m) {
@@ -96,5 +96,5 @@ void main()
     Payload payload;
     TraceRay(rs, RAY_FLAG_FORCE_OPAQUE, 0xff, 0, 0, 0, rayDesc, payload);
 
-    image[int2(LaunchID.xy)] = float4(payload.hitValue, 0.0);
+    image[int2(LaunchID.xy)] = float4(payload.hitValue);
 }

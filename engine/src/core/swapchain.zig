@@ -31,6 +31,7 @@ pub const Swapchain = struct {
 
     swap_images: []SwapImage,
     image_index: u32 = 0,
+    use_viewport_texture: bool = false,
     compute: bool = false, // Whether to use compute shaders in the swapchain
     pub fn init(gc: *GraphicsContext, allocator: Allocator, extent: vk.Extent2D) !Swapchain {
         var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
@@ -601,6 +602,10 @@ pub const Swapchain = struct {
             .p_signal_semaphores = @ptrCast(&self.compute_finished[current_frame]),
         }}, self.compute_fence[current_frame]);
     }
+
+    pub fn enableViewportTexture(self: *Swapchain, enable: bool) void {
+        self.use_viewport_texture = enable;
+    }
 };
 
 const SwapImage = struct {
@@ -701,11 +706,18 @@ fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, f
 }
 
 fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.SurfaceFormatKHR {
-    const preferred = vk.SurfaceFormatKHR{
-        // .format = .b8g8r8a8_srgb,
-        // .color_space = .srgb_nonlinear_khr,
-        .format = .a2b10g10r10_unorm_pack32,
-        .color_space = .hdr10_hlg_ext,
+    // Rank desired formats/colorspaces in preference order.
+    // We will pick the first exact match found; otherwise fall back to a reasonable default.
+    const prefs = [_]vk.SurfaceFormatKHR{
+        // HDR10 (HLG)
+        .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .hdr10_hlg_ext },
+        // HDR10 (PQ)
+        .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .hdr10_st2084_ext },
+        // Wide-gamut linear options
+        .{ .format = .r16g16b16a16_sfloat, .color_space = .extended_srgb_linear_ext },
+        .{ .format = .r16g16b16a16_sfloat, .color_space = .bt709_linear_ext },
+        // Standard sRGB
+        .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
     };
 
     var count: u32 = undefined;
@@ -714,13 +726,27 @@ fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.Surfa
     defer allocator.free(surface_formats);
     _ = try gc.vki.getPhysicalDeviceSurfaceFormatsKHR(gc.pdev, gc.surface, &count, surface_formats.ptr);
 
-    for (surface_formats) |sfmt| {
-        if (std.meta.eql(sfmt, preferred)) {
-            return preferred;
+    // Try to find an exact match to our preference list
+    for (prefs) |pref| {
+        for (surface_formats) |sfmt| {
+            if (sfmt.format == pref.format and sfmt.color_space == pref.color_space) {
+                return sfmt;
+            }
         }
     }
 
-    return surface_formats[0]; // There must always be at least one supported surface format
+    // If no exact match, try to choose by preferred format regardless of color space
+    for (prefs) |pref| {
+        for (surface_formats) |sfmt| {
+            if (sfmt.format == pref.format) {
+                return sfmt;
+            }
+        }
+    }
+
+    // Absolute fallback: first supported format
+    log(.DEBUG, "swapchain", "Selected first supported surface format: format={} color_space={}", .{ surface_formats[0].format, surface_formats[0].color_space });
+    return surface_formats[0];
 }
 
 fn findPresentMode(gc: *const GraphicsContext, allocator: Allocator) !vk.PresentModeKHR {

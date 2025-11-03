@@ -368,10 +368,12 @@ pub const ImGuiVulkanBackend = struct {
         if (self.vertex_buffer == null or self.index_buffer == null) return;
 
         // Setup dynamic rendering with load operation (preserve existing framebuffer)
-        const rendering = DynamicRenderingHelper.initLoad(
+        const rendering = DynamicRenderingHelper.init(
             swapchain.swap_images[swapchain.image_index].view,
-            null, // No depth for ImGui
+            swapchain.swap_images[swapchain.image_index].depth_image_view,
             swapchain.extent,
+            .{ 0.0, 0.0, 0.0, 1.0 },
+            0.0,
         );
 
         // Begin rendering (also sets viewport and scissor)
@@ -563,6 +565,55 @@ pub const ImGuiVulkanBackend = struct {
         try self.texture_descriptor_sets.put(texture_id, desc_sets);
         try self.texture_map.put(texture_id, texture);
 
+        return texture_id;
+    }
+
+    /// Preferred API: add per-frame textures (uses each Texture's own sampler and layout)
+    pub fn addPerFrameTextures(
+        self: *ImGuiVulkanBackend,
+        textures: [MAX_FRAMES_IN_FLIGHT]*Texture,
+    ) !c.ImTextureID {
+        // Use the first texture's image view as the stable texture ID
+        const first_desc = textures[0].getDescriptorInfo();
+        const texture_id: c.ImTextureID = @intFromEnum(first_desc.image_view);
+
+        // Allocate descriptor sets for each frame-in-flight
+        var desc_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet = undefined;
+        const layouts = [_]vk.DescriptorSetLayout{self.descriptor_set_layout} ** MAX_FRAMES_IN_FLIGHT;
+        const alloc_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
+            .p_set_layouts = &layouts,
+        };
+        try self.gc.vkd.allocateDescriptorSets(self.gc.dev, &alloc_info, &desc_sets);
+
+        // Write each descriptor set with its corresponding per-frame texture info
+        var writes: [MAX_FRAMES_IN_FLIGHT]vk.WriteDescriptorSet = undefined;
+        var image_infos: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorImageInfo = undefined;
+        inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            const di = textures[i].getDescriptorInfo();
+            image_infos[i] = vk.DescriptorImageInfo{
+                .sampler = di.sampler,
+                .image_view = di.image_view,
+                // Combined image samplers must use a read-only or general layout in descriptors
+                .image_layout = vk.ImageLayout.shader_read_only_optimal,
+            };
+            writes[i] = vk.WriteDescriptorSet{
+                .dst_set = desc_sets[i],
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .combined_image_sampler,
+                .p_image_info = @ptrCast(&image_infos[i]),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            };
+        }
+        self.gc.vkd.updateDescriptorSets(self.gc.dev, MAX_FRAMES_IN_FLIGHT, &writes, 0, null);
+
+        try self.texture_descriptor_sets.put(texture_id, desc_sets);
+        // Optionally track the first texture pointer under the ID for lookup consistency
+        try self.texture_map.put(texture_id, textures[0]);
         return texture_id;
     }
 

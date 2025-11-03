@@ -56,12 +56,21 @@ pub const Texture = struct {
         var aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
         var image_layout: vk.ImageLayout = undefined;
 
+        // Helper to detect if a depth format has a stencil component
+        const formatHasStencil = switch (format) {
+            .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d16_unorm_s8_uint => true,
+            else => false,
+        };
+
         // Determine appropriate layout based on usage flags
         if (usage.color_attachment_bit) {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
             image_layout = vk.ImageLayout.color_attachment_optimal;
         } else if (usage.depth_stencil_attachment_bit) {
-            aspect_mask = vk.ImageAspectFlags{ .depth_bit = true };
+            aspect_mask = if (formatHasStencil)
+                (vk.ImageAspectFlags{ .depth_bit = true, .stencil_bit = true })
+            else
+                (vk.ImageAspectFlags{ .depth_bit = true });
             image_layout = vk.ImageLayout.depth_stencil_attachment_optimal;
         } else if (usage.storage_bit) {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };

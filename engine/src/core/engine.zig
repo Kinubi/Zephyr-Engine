@@ -12,6 +12,7 @@ const RenderLayer = @import("../layers/render_layer.zig").RenderLayer;
 const PerformanceLayer = @import("../layers/performance_layer.zig").PerformanceLayer;
 const RenderThreadContext = @import("../threading/render_thread.zig").RenderThreadContext;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const log = @import("../utils/log.zig").log;
 const startRenderThread = @import("../threading/render_thread.zig").startRenderThread;
 const stopRenderThread = @import("../threading/render_thread.zig").stopRenderThread;
 const c = @cImport({
@@ -151,9 +152,9 @@ pub const Engine = struct {
         engine.use_render_thread = config.enable_render_thread;
         engine.render_thread_context = null; // Explicitly initialize to null
         if (config.enable_render_thread) {
-            std.log.info("Render thread ENABLED in config", .{});
+            log(.INFO, "render_thread", "Render thread ENABLED in config", .{});
             if (config.thread_pool == null) {
-                std.log.err("Render thread enabled but no thread pool provided in config", .{});
+                log(.ERROR, "render_thread", "Render thread enabled but no thread pool provided in config", .{});
                 return error.MissingThreadPool;
             }
 
@@ -169,9 +170,9 @@ pub const Engine = struct {
             engine.render_thread_context.?.setEngine(engine);
 
             try startRenderThread(&engine.render_thread_context.?);
-            std.log.info("Render thread started successfully", .{});
+            log(.INFO, "render_thread", "Render thread started successfully", .{});
         } else {
-            std.log.info("Render thread DISABLED in config", .{});
+            log(.INFO, "render_thread", "Render thread DISABLED in config", .{});
         }
 
         // 10. Initialize frame info
@@ -201,7 +202,7 @@ pub const Engine = struct {
             stopRenderThread(ctx);
             ctx.deinit();
         } else {
-            std.log.info("No render thread to stop (was not enabled)", .{});
+            log(.INFO, "render_thread", "No render thread to stop (was not enabled)", .{});
         }
 
         // Asset manager (if initialized by application)

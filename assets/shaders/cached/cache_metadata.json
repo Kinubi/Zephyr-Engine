@@ -3,9 +3,9 @@
   "entries": {
     "assets/shaders/RayTracingTriangle.rgen.hlsl": {
       "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rgen.hlsl.spv",
-      "file_hash": "9832006727252917180",
+      "file_hash": "10272834657836244884",
       "options_hash": "13509613240315378116",
-      "compile_time": 1761379426
+      "compile_time": 1762143808
     },
     "assets/shaders/point_light.vert": {
       "cached_spirv_path": "assets/shaders/cached/point_light.vert.spv",
@@ -33,9 +33,9 @@
     },
     "assets/shaders/RayTracingTriangle.rchit.hlsl": {
       "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rchit.hlsl.spv",
-      "file_hash": "13094439608886470466",
+      "file_hash": "4264767961274390658",
       "options_hash": "13509613240315378116",
-      "compile_time": 1761391361
+      "compile_time": 1762143808
     },
     "assets/shaders/particles.vert": {
       "cached_spirv_path": "assets/shaders/cached/particles.vert.spv",
@@ -57,9 +57,9 @@
     },
     "assets/shaders/RayTracingTriangle.rmiss.hlsl": {
       "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rmiss.hlsl.spv",
-      "file_hash": "17177285097276015363",
+      "file_hash": "14911948285004227738",
       "options_hash": "13509613240315378116",
-      "compile_time": 1761379426
+      "compile_time": 1762143808
     },
     "assets/shaders/textured.frag": {
       "cached_spirv_path": "assets/shaders/cached/textured.frag.spv",

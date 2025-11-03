@@ -173,7 +173,7 @@ pub const SceneLayer = struct {
         // Note: No performance monitoring here - this runs on main thread without frame context
 
         // Update camera projection
-        self.camera.updateProjectionMatrix();
+        //self.camera.updateProjectionMatrix();
 
         // Select the UBO snapshot for this prepare() frame
         const prep_idx = self.prepare_frame_index % MAX_FRAMES_IN_FLIGHT;

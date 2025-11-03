@@ -139,10 +139,12 @@ pub const PathTracingPass = struct {
         const rt_system = try allocator.create(RaytracingSystem);
         rt_system.* = try RaytracingSystem.init(graphics_context, allocator, thread_pool);
 
-        // Use swapchain format for output texture (with special case for packed formats)
         var output_format = swapchain_format;
         if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
             output_format = vk.Format.a2b10g10r10_unorm_pack32;
+        } else if (output_format == vk.Format.r16g16b16a16_sfloat) {
+            // Storage image must exactly match shader's OpTypeImage (Rgba16 => UNORM)
+            output_format = vk.Format.r16g16b16a16_sfloat;
         }
 
         // Create output texture for path-traced results
@@ -157,6 +159,19 @@ pub const PathTracingPass = struct {
                 .sampled_bit = true,
             },
             vk.SampleCountFlags{ .@"1_bit" = true },
+        );
+
+        _ = try graphics_context.transitionImageLayoutSingleTime(
+            output_texture.image,
+            .undefined,
+            .general,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
         );
 
         // Initialize per-frame descriptor data
@@ -696,12 +711,10 @@ pub const PathTracingPass = struct {
     }
 
     /// Resize the output texture when swapchain is recreated
-    pub fn resize(self: *PathTracingPass, new_width: u32, new_height: u32) !void {
+    pub fn resize(self: *PathTracingPass, new_width: u32, new_height: u32, command_buffer: vk.CommandBuffer) !void {
         if (self.width == new_width and self.height == new_height) {
             return; // No change needed
         }
-
-        log(.INFO, "path_tracing_pass", "Resizing output texture: {}x{} -> {}x{}", .{ self.width, self.height, new_width, new_height });
 
         // Destroy old texture
         self.output_texture.deinit();
@@ -710,6 +723,9 @@ pub const PathTracingPass = struct {
         var output_format = self.swapchain_format;
         if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
             output_format = vk.Format.a2b10g10r10_unorm_pack32;
+        } else if (output_format == vk.Format.r16g16b16a16_sfloat) {
+            // Storage image must exactly match shader's OpTypeImage (Rgba16 => UNORM)
+            output_format = vk.Format.r16g16b16a16_sfloat;
         }
 
         // Create new output texture with new dimensions
@@ -726,6 +742,20 @@ pub const PathTracingPass = struct {
             vk.SampleCountFlags{ .@"1_bit" = true },
         );
 
+        self.graphics_context.transitionImageLayout(
+            command_buffer,
+            self.output_texture.image,
+            .undefined,
+            .general,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+
         // Update dimensions
         self.width = new_width;
         self.height = new_height;
@@ -734,8 +764,6 @@ pub const PathTracingPass = struct {
         for (&self.descriptor_dirty_flags) |*flag| {
             flag.* = true;
         }
-
-        log(.INFO, "path_tracing_pass", "Output texture resized successfully", .{});
     }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
@@ -744,7 +772,7 @@ pub const PathTracingPass = struct {
 
         // Check if window was resized and recreate output texture if needed
         if (self.width != frame_info.extent.width or self.height != frame_info.extent.height) {
-            try self.resize(frame_info.extent.width, frame_info.extent.height);
+            try self.resize(frame_info.extent.width, frame_info.extent.height, frame_info.command_buffer);
         }
 
         // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago

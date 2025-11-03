@@ -370,7 +370,7 @@ pub const App = struct {
         try scene.initRenderGraph(
             gc,
             &unified_pipeline_system,
-            swapchain.surface_format.format,
+            vk.Format.r16g16b16a16_sfloat,
             try swapchain.depthFormat(),
             thread_pool,
             global_ubo_set,
