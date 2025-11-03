@@ -282,7 +282,7 @@ pub const LightVolumePass = struct {
 
         // Setup dynamic rendering with load operations (don't clear, render on top of geometry)
         const helper = DynamicRenderingHelper.initLoad(
-            frame_info.color_image_view,
+            frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
         );

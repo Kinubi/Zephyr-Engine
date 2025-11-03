@@ -509,7 +509,7 @@ pub const PathTracingPass = struct {
         }
 
         // Always copy to swapchain so we present the last valid output, even if we skipped dispatch this frame
-        try self.copyOutputToFrameImage(cmd, frame_info.color_image);
+        try self.copyOutputToFrameImage(cmd, frame_info.hdr_texture.?.image);
     }
     fn teardownImpl(base: *RenderPass) void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);

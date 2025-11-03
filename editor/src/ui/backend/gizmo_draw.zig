@@ -13,9 +13,11 @@ fn hoveredIndexEquals(hovered: i32, idx: usize) bool {
     };
 }
 
-pub fn drawTranslate(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, hovered_axis_index: i32, hovered_kind: u8) void {
-    // Project center
-    const center = UIMath.project(camera, viewport_size, world_pos) orelse return;
+pub fn drawTranslate(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, hovered_axis_index: i32, hovered_kind: u8) void {
+    // Project center (returns viewport-relative coordinates)
+    const center_vp = UIMath.project(camera, viewport_size, world_pos) orelse return;
+    // Convert to window coordinates for ImGui drawing
+    const center = .{ center_vp[0] + viewport_pos[0], center_vp[1] + viewport_pos[1] };
 
     // Compute a gizmo length in world-space proportional to distance from camera
     const inv_view = &camera.inverseViewMatrix;
@@ -30,7 +32,9 @@ pub fn drawTranslate(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *z
     while (i < axes.len) : (i += 1) {
         const axis = axes[i];
         const end_world = Math.Vec3.add(world_pos, Math.Vec3.scale(axis, world_len));
-        if (UIMath.project(camera, viewport_size, end_world)) |end_screen| {
+        if (UIMath.project(camera, viewport_size, end_world)) |end_vp| {
+            // Convert to window coordinates for ImGui drawing
+            const end_screen = .{ end_vp[0] + viewport_pos[0], end_vp[1] + viewport_pos[1] };
             const a = .{ center[0], center[1] };
             const b = .{ end_screen[0], end_screen[1] };
             var color = colors[i];
@@ -68,7 +72,7 @@ pub fn drawTranslate(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *z
     }
 }
 
-pub fn drawRotationRings(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, hovered_axis_index: i32, hovered_kind: u8) void {
+pub fn drawRotationRings(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, hovered_axis_index: i32, hovered_kind: u8) void {
     // Compute world-space radius for the rings
     const inv_view = &camera.inverseViewMatrix;
     const cam_pos = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
@@ -93,7 +97,9 @@ pub fn drawRotationRings(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera
             const z = @sin(angle) * world_radius;
             const world_point = Math.Vec3.init(world_pos.x, world_pos.y + y, world_pos.z + z);
 
-            if (UIMath.project(camera, viewport_size, world_point)) |screen| {
+            if (UIMath.project(camera, viewport_size, world_point)) |screen_vp| {
+                // Convert to window coordinates for ImGui drawing
+                const screen = .{ screen_vp[0] + viewport_pos[0], screen_vp[1] + viewport_pos[1] };
                 if (prev_screen) |prev| {
                     c.ImDrawList_AddLine(draw_list, .{ .x = prev[0], .y = prev[1] }, .{ .x = screen[0], .y = screen[1] }, col);
                 }
@@ -119,7 +125,9 @@ pub fn drawRotationRings(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera
             const z = @sin(angle) * world_radius;
             const world_point = Math.Vec3.init(world_pos.x + x, world_pos.y, world_pos.z + z);
 
-            if (UIMath.project(camera, viewport_size, world_point)) |screen| {
+            if (UIMath.project(camera, viewport_size, world_point)) |screen_vp| {
+                // Convert to window coordinates for ImGui drawing
+                const screen = .{ screen_vp[0] + viewport_pos[0], screen_vp[1] + viewport_pos[1] };
                 if (prev_screen) |prev| {
                     c.ImDrawList_AddLine(draw_list, .{ .x = prev[0], .y = prev[1] }, .{ .x = screen[0], .y = screen[1] }, col);
                 }
@@ -145,7 +153,9 @@ pub fn drawRotationRings(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera
             const y = @sin(angle) * world_radius;
             const world_point = Math.Vec3.init(world_pos.x + x, world_pos.y + y, world_pos.z);
 
-            if (UIMath.project(camera, viewport_size, world_point)) |screen| {
+            if (UIMath.project(camera, viewport_size, world_point)) |screen_vp| {
+                // Convert to window coordinates for ImGui drawing
+                const screen = .{ screen_vp[0] + viewport_pos[0], screen_vp[1] + viewport_pos[1] };
                 if (prev_screen) |prev| {
                     c.ImDrawList_AddLine(draw_list, .{ .x = prev[0], .y = prev[1] }, .{ .x = screen[0], .y = screen[1] }, col);
                 }
@@ -157,9 +167,11 @@ pub fn drawRotationRings(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera
     }
 }
 
-pub fn drawScale(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, hovered_axis_index: i32, hovered_kind: u8) void {
-    // Project center
-    const center = UIMath.project(camera, viewport_size, world_pos) orelse return;
+pub fn drawScale(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, hovered_axis_index: i32, hovered_kind: u8) void {
+    // Project center (returns viewport-relative coordinates)
+    const center_vp = UIMath.project(camera, viewport_size, world_pos) orelse return;
+    // Convert to window coordinates for ImGui drawing
+    const center = .{ center_vp[0] + viewport_pos[0], center_vp[1] + viewport_pos[1] };
 
     // Compute a gizmo length in world-space proportional to distance from camera
     const inv_view = &camera.inverseViewMatrix;
@@ -174,7 +186,9 @@ pub fn drawScale(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *zephy
     while (i < axes.len) : (i += 1) {
         const axis = axes[i];
         const end_world = Math.Vec3.add(world_pos, Math.Vec3.scale(axis, world_len));
-        if (UIMath.project(camera, viewport_size, end_world)) |end_screen| {
+        if (UIMath.project(camera, viewport_size, end_world)) |end_vp| {
+            // Convert to window coordinates for ImGui drawing
+            const end_screen = .{ end_vp[0] + viewport_pos[0], end_vp[1] + viewport_pos[1] };
             const a = .{ center[0], center[1] };
             const b = .{ end_screen[0], end_screen[1] };
             var color = colors[i];

@@ -36,9 +36,8 @@ pub const UILayer = struct {
     show_ui: bool = true,
     current_fps: f32 = 0.0,
 
-    // Offscreen viewport render targets (per-frame)
-    viewport_color: [MAX_FRAMES_IN_FLIGHT]?Texture = [_]?Texture{null} ** MAX_FRAMES_IN_FLIGHT,
-    viewport_depth: [MAX_FRAMES_IN_FLIGHT]?Texture = [_]?Texture{null} ** MAX_FRAMES_IN_FLIGHT,
+    // LDR tonemapped viewport texture for UI display (per-frame)
+    viewport_ldr: [MAX_FRAMES_IN_FLIGHT]?Texture = [_]?Texture{null} ** MAX_FRAMES_IN_FLIGHT,
     viewport_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     viewport_imgui_id: c.ImTextureID = 0,
     viewport_sampler: vk.Sampler = .null_handle,
@@ -86,15 +85,11 @@ pub const UILayer = struct {
 
     fn detach(base: *Layer) void {
         const self: *UILayer = @fieldParentPtr("base", base);
-        // Destroy per-frame viewport textures
+        // Destroy per-frame viewport LDR textures
         inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (self.viewport_color[i]) |*tex| {
-                tex.deinit();
-                self.viewport_color[i] = null;
-            }
-            if (self.viewport_depth[i]) |*dtex| {
-                dtex.deinit();
-                self.viewport_depth[i] = null;
+            if (self.viewport_ldr[i]) |*ldrt| {
+                ldrt.deinit();
+                self.viewport_ldr[i] = null;
             }
         }
         // Destroy viewport sampler if created
@@ -108,21 +103,23 @@ pub const UILayer = struct {
         const self: *UILayer = @fieldParentPtr("base", base);
 
         // Ensure viewport render targets exist and match current extent
-        try ensureViewportTargets(self, frame_info);
+        // Returns true if textures were just recreated (already in color_attachment_optimal)
+        _ = try ensureViewportTargets(self, frame_info);
 
-        // Write the current frame's attachments into frame_info so render passes render into viewport
-        const frame_index = frame_info.current_frame;
-        if (self.viewport_color[frame_index]) |*color_tex| {
-            const mutable_frame_info: *FrameInfo = @constCast(frame_info);
-            // Only override extent if we have a valid non-zero viewport extent
-            if (self.viewport_extent.width > 0 and self.viewport_extent.height > 0) {
-                mutable_frame_info.extent = self.viewport_extent;
-            }
-            mutable_frame_info.color_image = color_tex.image;
-            mutable_frame_info.color_image_view = color_tex.image_view;
-            if (self.viewport_depth[frame_index]) |*depth_tex| {
-                mutable_frame_info.depth_image_view = depth_tex.image_view;
-            }
+        // Update frame_info to point to the current HDR texture (in case it was recreated)
+        const mutable_frame_info: *FrameInfo = @constCast(frame_info);
+        const hdr_texture = self.swapchain.currentHdrTexture();
+        mutable_frame_info.hdr_texture = hdr_texture;
+
+        // DON'T clear or transition HDR here - let geometry pass handle it
+        // HDR will be in color_attachment_optimal (from ensureViewportTargets or previous frame)
+
+        // Set frame_info to use LDR viewport texture as render target
+        if (self.viewport_ldr[frame_info.current_frame]) |*ldr_tex| {
+            mutable_frame_info.color_image = ldr_tex.image;
+            mutable_frame_info.color_image_view = ldr_tex.image_view;
+            mutable_frame_info.extent = self.viewport_extent; // Use viewport extent, not swapchain extent
+
         }
 
         // Expose ImGui texture ID to UIRenderer so it can draw the viewport
@@ -199,7 +196,11 @@ pub const UILayer = struct {
                 // We check viewport bounds instead of WantCaptureMouse because the viewport window
                 // itself is an ImGui window, so ImGui always wants to capture mouse over it
                 if (in_viewport) {
-                    if (ViewportPicker.pickScene(self.scene, self.camera, mouse_x, mouse_y, vp_size)) |res| {
+                    // Convert mouse position from window space to viewport space
+                    const viewport_mouse_x = mouse_x - vp_pos[0];
+                    const viewport_mouse_y = mouse_y - vp_pos[1];
+
+                    if (ViewportPicker.pickScene(self.scene, self.camera, viewport_mouse_x, viewport_mouse_y, vp_size)) |res| {
                         // Single-select the hit entity
                         if (self.ui_renderer.hierarchy_panel.selected_entities.items.len > 0) {
                             self.ui_renderer.hierarchy_panel.selected_entities.clearRetainingCapacity();
@@ -217,25 +218,6 @@ pub const UILayer = struct {
 
         self.ui_renderer.renderHierarchy(self.scene);
 
-        // Before rendering ImGui, transition the viewport color image so it can be sampled by ImGui::Image
-        if (self.viewport_color[frame_info.current_frame]) |*tex| {
-            const subres = vk.ImageSubresourceRange{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            };
-            const gc: *GraphicsContext = self.swapchain.gc;
-            gc.transitionImageLayout(
-                frame_info.command_buffer,
-                tex.image,
-                .color_attachment_optimal,
-                .shader_read_only_optimal,
-                subres,
-            );
-        }
-
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {
             try pm.beginPass("imgui", frame_info.current_frame, frame_info.command_buffer);
@@ -244,46 +226,19 @@ pub const UILayer = struct {
         // Render ImGui to command buffer
         try self.imgui_context.render(frame_info.command_buffer, self.swapchain, frame_info.current_frame);
 
-        // After ImGui draw, clear the viewport color image for the next frame
-        if (self.viewport_color[frame_info.current_frame]) |*tex| {
-            const subres = vk.ImageSubresourceRange{
+        self.swapchain.gc.transitionImageLayout(
+            frame_info.command_buffer,
+            frame_info.color_image,
+            .shader_read_only_optimal,
+            .color_attachment_optimal,
+            .{
                 .aspect_mask = .{ .color_bit = true },
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
                 .layer_count = 1,
-            };
-            const gc: *GraphicsContext = self.swapchain.gc;
-
-            // Transition to TRANSFER_DST for clear
-            gc.transitionImageLayout(
-                frame_info.command_buffer,
-                tex.image,
-                .shader_read_only_optimal,
-                .transfer_dst_optimal,
-                subres,
-            );
-
-            // Clear to transparent black
-            const clear_color = vk.ClearColorValue{ .float_32 = .{ 0.0, 0.0, 0.0, 0.0 } };
-            gc.vkd.cmdClearColorImage(
-                frame_info.command_buffer,
-                tex.image,
-                .transfer_dst_optimal,
-                @ptrCast(&clear_color),
-                1,
-                @ptrCast(&subres),
-            );
-
-            // Transition back to COLOR_ATTACHMENT for next frame's rendering
-            gc.transitionImageLayout(
-                frame_info.command_buffer,
-                tex.image,
-                .transfer_dst_optimal,
-                .color_attachment_optimal,
-                subres,
-            );
-        }
+            },
+        );
 
         // End GPU timing
         if (self.performance_monitor) |pm| {
@@ -373,34 +328,8 @@ fn findDepthHasStencil(format: vk.Format) bool {
     };
 }
 
-fn ensureSampler(self: *UILayer) void {
-    if (self.viewport_sampler != .null_handle) return;
-    var sampler_info = vk.SamplerCreateInfo{
-        .s_type = vk.StructureType.sampler_create_info,
-        .mag_filter = vk.Filter.linear,
-        .min_filter = vk.Filter.linear,
-        .mipmap_mode = vk.SamplerMipmapMode.linear,
-        .address_mode_u = vk.SamplerAddressMode.clamp_to_edge,
-        .address_mode_v = vk.SamplerAddressMode.clamp_to_edge,
-        .address_mode_w = vk.SamplerAddressMode.clamp_to_edge,
-        .mip_lod_bias = 0.0,
-        .max_anisotropy = 1.0,
-        .min_lod = 0.0,
-        .max_lod = 1.0,
-        .border_color = vk.BorderColor.float_opaque_black,
-        .flags = .{},
-        .p_next = null,
-        .unnormalized_coordinates = .false,
-        .compare_enable = .false,
-        .compare_op = vk.CompareOp.always,
-        .anisotropy_enable = .false,
-    };
-    self.viewport_sampler = self.swapchain.gc.vkd.createSampler(self.swapchain.gc.dev, &sampler_info, null) catch blk: {
-        break :blk vk.Sampler.null_handle;
-    };
-}
-
-fn ensureViewportTargets(self: *UILayer, frame_info: *const FrameInfo) !void {
+fn ensureViewportTargets(self: *UILayer, frame_info: *const FrameInfo) !bool {
+    // Returns true if textures were recreated, false if already up to date
     // Compute desired extent from ImGui viewport size with guards and fallback to swapchain
     const vp_w_f = self.ui_renderer.viewport_size[0];
     const vp_h_f = self.ui_renderer.viewport_size[1];
@@ -409,43 +338,37 @@ fn ensureViewportTargets(self: *UILayer, frame_info: *const FrameInfo) !void {
     const desired_h: u32 = if (has_valid_vp) @intFromFloat(@floor(vp_h_f)) else self.swapchain.extent.height;
     const desired_extent: vk.Extent2D = .{ .width = if (desired_w == 0) 1 else desired_w, .height = if (desired_h == 0) 1 else desired_h };
 
-    if (self.viewport_extent.width == desired_extent.width and self.viewport_extent.height == desired_extent.height and self.viewport_color[0] != null and self.viewport_depth[0] != null) {
-        return; // Up to date
+    if (self.viewport_extent.width == desired_extent.width and self.viewport_extent.height == desired_extent.height and self.viewport_ldr[0] != null) {
+        return false; // Up to date
     }
 
-    // Destroy old
+    // Destroy old LDR textures
     inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        if (self.viewport_color[i]) |*tex| {
-            tex.deinit();
-            self.viewport_color[i] = null;
-        }
-        if (self.viewport_depth[i]) |*dtex| {
-            dtex.deinit();
-            self.viewport_depth[i] = null;
+        if (self.viewport_ldr[i]) |*ldrt| {
+            ldrt.deinit();
+            self.viewport_ldr[i] = null;
         }
     }
 
-    // Create new per-frame targets
-    const gc: *GraphicsContext = self.swapchain.gc;
-
-    const depth_format: vk.Format = try self.swapchain.depthFormat();
-    const extent3d = makeExtent3D(desired_extent);
-
-    var textures: [MAX_FRAMES_IN_FLIGHT]*Texture = undefined;
-
-    inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        const color_tex = try Texture.init(
-            gc,
-            // Use UNORM to match PathTracing storage image format for vkCmdCopyImage compat
-            .r16g16b16a16_sfloat,
-            extent3d,
-            .{ .color_attachment_bit = true, .sampled_bit = true, .transfer_dst_bit = true },
+    // Destroy and recreate HDR textures in swapchain at viewport size
+    for (self.swapchain.swap_images) |*swap_img| {
+        swap_img.hdr_texture.deinit();
+        swap_img.hdr_texture = try Texture.init(
+            self.swapchain.gc,
+            self.swapchain.hdr_format,
+            makeExtent3D(desired_extent),
+            .{
+                .color_attachment_bit = true,
+                .sampled_bit = true,
+                .transfer_dst_bit = true,
+            },
             .{ .@"1_bit" = true },
         );
-        // First-use transition to COLOR_ATTACHMENT_OPTIMAL on the frame's primary cmd buffer
-        gc.transitionImageLayout(
+
+        // Transition newly created HDR texture from undefined to color_attachment_optimal
+        self.swapchain.gc.transitionImageLayout(
             frame_info.command_buffer,
-            color_tex.image,
+            swap_img.hdr_texture.image,
             .undefined,
             .color_attachment_optimal,
             .{
@@ -456,35 +379,42 @@ fn ensureViewportTargets(self: *UILayer, frame_info: *const FrameInfo) !void {
                 .layer_count = 1,
             },
         );
+    }
 
-        self.viewport_color[i] = color_tex;
-        textures[i] = &self.viewport_color[i].?;
-
-        const depth_tex = try Texture.init(
+    // Create new per-frame LDR targets
+    const gc: *GraphicsContext = self.swapchain.gc;
+    const extent3d = makeExtent3D(desired_extent);
+    var textures_ldr: [MAX_FRAMES_IN_FLIGHT]*Texture = undefined;
+    inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        // Create LDR tonemap destination (sampled by ImGui)
+        const ldr_tex = try Texture.init(
             gc,
-            depth_format,
+            // Use the swapchain's surface format for the LDR viewport texture
+            self.swapchain.surface_format.format,
             extent3d,
-            .{ .depth_stencil_attachment_bit = true },
+            .{ .color_attachment_bit = true, .sampled_bit = true },
             .{ .@"1_bit" = true },
         );
+
         gc.transitionImageLayout(
             frame_info.command_buffer,
-            depth_tex.image,
+            ldr_tex.image,
             .undefined,
-            .depth_stencil_attachment_optimal,
+            .color_attachment_optimal,
             .{
-                .aspect_mask = vk.ImageAspectFlags{ .depth_bit = true, .stencil_bit = true },
+                .aspect_mask = .{ .color_bit = true },
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
                 .layer_count = 1,
             },
         );
-        self.viewport_depth[i] = depth_tex;
+        self.viewport_ldr[i] = ldr_tex;
+        textures_ldr[i] = &self.viewport_ldr[i].?;
     }
 
-    // Register per-frame textures with ImGui backend and get a single texture ID
-    self.viewport_imgui_id = try self.imgui_context.vulkan_backend.addPerFrameTextures(textures);
+    // Register per-frame LDR textures with ImGui backend and get a single texture ID
+    self.viewport_imgui_id = try self.imgui_context.vulkan_backend.addPerFrameTextures(textures_ldr);
 
     // Record extent and publish ID to UI renderer
     self.viewport_extent = desired_extent;
@@ -493,5 +423,6 @@ fn ensureViewportTargets(self: *UILayer, frame_info: *const FrameInfo) !void {
     // Update camera aspect
     const aspect: f32 = @as(f32, @floatFromInt(self.viewport_extent.width)) / @as(f32, @floatFromInt(self.viewport_extent.height));
     self.camera.setPerspectiveProjection(zephyr.math.radians(self.camera.fov), aspect, self.camera.nearPlane, self.camera.farPlane);
-    self.swapchain.enableViewportTexture(true);
+
+    return true; // Textures were recreated
 }

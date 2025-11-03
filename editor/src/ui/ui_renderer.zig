@@ -209,7 +209,7 @@ pub const UIRenderer = struct {
             if (last_aabb) |aabb| {
                 const center = Math.Vec3.init((aabb.min.x + aabb.max.x) * 0.5, (aabb.min.y + aabb.max.y) * 0.5, (aabb.min.z + aabb.max.z) * 0.5);
                 // Pass the scene and aabb center so the gizmo can perform interactive transforms
-                const consumed = Gizmo.process(draw_list, self.viewport_size, camera, center, scene, selected[0]);
+                const consumed = Gizmo.process(draw_list, self.viewport_pos, self.viewport_size, camera, center, scene, selected[0]);
                 c.ImDrawList_PopClipRect(draw_list);
                 return consumed;
             }
@@ -236,8 +236,9 @@ pub const UIRenderer = struct {
         var projected: [8][2]f32 = undefined;
         var i: usize = 0;
         while (i < corners.len) : (i += 1) {
-            if (UIMath.project(camera, self.viewport_size, corners[i])) |screen_pos| {
-                projected[i] = screen_pos;
+            if (UIMath.project(camera, self.viewport_size, corners[i])) |viewport_pos| {
+                // Convert viewport-relative coordinates to window coordinates for ImGui drawing
+                projected[i] = .{ viewport_pos[0] + self.viewport_pos[0], viewport_pos[1] + self.viewport_pos[1] };
             } else {
                 return; // Skip drawing if any corner cannot be projected (behind camera or degenerate)
             }

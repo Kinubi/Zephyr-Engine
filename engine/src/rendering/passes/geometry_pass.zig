@@ -303,7 +303,7 @@ pub const GeometryPass = struct {
 
         // Setup dynamic rendering with helper
         const rendering = DynamicRenderingHelper.init(
-            frame_info.color_image_view,
+            frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
             .{ 0.01, 0.01, 0.01, 1.0 }, // clear color (dark gray)

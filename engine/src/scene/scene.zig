@@ -23,6 +23,7 @@ const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPa
 const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
 const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
+const TonemapPass = @import("../rendering/passes/tonemap_pass.zig").TonemapPass;
 const vertex_formats = @import("../rendering/vertex_formats.zig");
 
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
@@ -571,7 +572,8 @@ pub const Scene = struct {
         self: *Scene,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
-        swapchain_format: vk.Format,
+        hdr_color_format: vk.Format,
+        ldr_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
         thread_pool: *ThreadPool,
         global_ubo_set: *GlobalUboSet,
@@ -609,7 +611,7 @@ pub const Scene = struct {
             self.asset_manager,
             self.ecs_world,
             global_ubo_set,
-            swapchain_format,
+            hdr_color_format,
             swapchain_depth_format,
             &self.render_system,
         ) catch |err| blk: {
@@ -631,7 +633,7 @@ pub const Scene = struct {
             self.ecs_world,
             self.asset_manager,
             &self.render_system,
-            swapchain_format,
+            hdr_color_format,
             width,
             height,
         ) catch |err| blk: {
@@ -651,7 +653,7 @@ pub const Scene = struct {
             pipeline_system,
             self.ecs_world,
             global_ubo_set,
-            swapchain_format,
+            hdr_color_format,
             swapchain_depth_format,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create LightVolumePass: {}. Point light rendering disabled.", .{err});
@@ -668,7 +670,7 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             global_ubo_set,
-            swapchain_format,
+            hdr_color_format,
             swapchain_depth_format,
             10000, // Max 10,000 particles
         ) catch |err| blk: {
@@ -682,6 +684,21 @@ pub const Scene = struct {
             if (particle_compute_pass) |compute_pass| {
                 pass.setComputePass(compute_pass);
             }
+        }
+
+        // Final tonemap pass to convert HDR backbuffer to LDR swapchain image
+        const tonemap_pass = TonemapPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            ldr_color_format,
+        ) catch |err| blk: {
+            log(.WARN, "scene", "Failed to create TonemapPass: {}. Final tonemapping disabled.", .{err});
+            break :blk null;
+        };
+
+        if (tonemap_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
         }
 
         // Compile the graph (setup passes, validate dependencies)

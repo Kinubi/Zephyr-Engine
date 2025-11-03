@@ -224,7 +224,7 @@ pub const ParticlePass = struct {
         // Setup dynamic rendering with helper (render on top of existing scene)
         // Use initLoad to preserve existing color and depth
         const rendering = DynamicRenderingHelper.initLoad(
-            frame_info.color_image_view,
+            frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
         );

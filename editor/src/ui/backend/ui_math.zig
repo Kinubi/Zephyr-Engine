@@ -13,8 +13,6 @@ pub fn transformVec4Row(m: *Math.Mat4x4, v: Math.Vec4) Math.Vec4 {
 }
 
 pub fn project(camera: *zephyr.Camera, vp_size: [2]f32, point: Math.Vec3) ?[2]f32 {
-    _ = vp_size;
-
     const point4 = Math.Vec4.init(point.x, point.y, point.z, 1.0);
 
     // Transform to view space
@@ -35,20 +33,14 @@ pub fn project(camera: *zephyr.Camera, vp_size: [2]f32, point: Math.Vec3) ?[2]f3
     if (ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0 or ndc_z < 0.0 or ndc_z > 1.0)
         return null;
 
-    // Convert NDC to window coordinates using ImGui main viewport
-    const main_viewport = c.ImGui_GetMainViewport();
-    const window_origin_x = main_viewport.*.Pos.x;
-    const window_origin_y = main_viewport.*.Pos.y;
-    const window_width = main_viewport.*.Size.x;
-    const window_height = main_viewport.*.Size.y;
-
-    if (window_width <= 0.0 or window_height <= 0.0)
+    // Convert NDC to viewport-relative coordinates
+    if (vp_size[0] <= 0.0 or vp_size[1] <= 0.0)
         return null;
 
-    const window_x = window_origin_x + ((ndc_x + 1.0) * 0.5) * window_width;
-    const window_y = window_origin_y + ((ndc_y + 1.0) * 0.5) * window_height;
+    const viewport_x = ((ndc_x + 1.0) * 0.5) * vp_size[0];
+    const viewport_y = ((ndc_y + 1.0) * 0.5) * vp_size[1];
 
-    return .{ window_x, window_y };
+    return .{ viewport_x, viewport_y };
 }
 
 pub fn closestPointOnLine(line_origin: Math.Vec3, line_dir: Math.Vec3, ray_orig: Math.Vec3, ray_dir: Math.Vec3) Math.Vec3 {

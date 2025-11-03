@@ -370,7 +370,8 @@ pub const App = struct {
         try scene.initRenderGraph(
             gc,
             &unified_pipeline_system,
-            vk.Format.r16g16b16a16_sfloat,
+            swapchain.hdr_format, // HDR color format for render passes
+            swapchain.surface_format.format, // LDR color format (swapchain format) for tonemap
             try swapchain.depthFormat(),
             thread_pool,
             global_ubo_set,

@@ -3,6 +3,7 @@ const vk = @import("vulkan");
 const Camera = @import("camera.zig").Camera;
 const Math = @import("../utils/math.zig");
 const PerformanceMonitor = @import("performance_monitor.zig").PerformanceMonitor;
+const Texture = @import("../core/texture.zig").Texture;
 
 const MAX_LIGHTS: usize = 16;
 
@@ -34,6 +35,10 @@ pub const FrameInfo = struct {
     color_image: vk.Image = .null_handle,
     color_image_view: vk.ImageView = .null_handle,
     depth_image_view: vk.ImageView = .null_handle,
+
+    // HDR backbuffer (owned by Swapchain). Passes render into this.
+    // Final tonemap step will read from this and write into the LDR swap image or viewport LDR.
+    hdr_texture: ?*Texture = null,
 
     // Performance monitoring (optional)
     performance_monitor: ?*PerformanceMonitor = null,

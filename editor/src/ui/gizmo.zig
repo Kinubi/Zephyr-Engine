@@ -40,8 +40,8 @@ pub const Gizmo = struct {
         state.active_axis = .None;
     }
 
-    pub fn process(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *Camera, world_pos: Math.Vec3, scene: *Scene, selected: zephyr.Entity) bool {
-        return GizmoProcess.process(&state, draw_list, viewport_size, camera, world_pos, scene, selected);
+    pub fn process(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_size: [2]f32, camera: *Camera, world_pos: Math.Vec3, scene: *Scene, selected: zephyr.Entity) bool {
+        return GizmoProcess.process(&state, draw_list, viewport_pos, viewport_size, camera, world_pos, scene, selected);
     }
 };
 
@@ -71,7 +71,7 @@ fn axisToIndex(a: Gizmo.Axis) i32 {
 
 // Drawing helpers live in `gizmo_draw.zig` (imported as GizmoDraw). Call those directly from drawBase.
 
-pub fn drawBase(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *Camera, world_pos: Math.Vec3, hovered_axis: Gizmo.Axis, hovered_kind: Gizmo.PickKind, tool: Gizmo.Tool) void {
+pub fn drawBase(draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_size: [2]f32, camera: *Camera, world_pos: Math.Vec3, hovered_axis: Gizmo.Axis, hovered_kind: Gizmo.PickKind, tool: Gizmo.Tool) void {
     // Draw only the gizmo for the current tool
     switch (tool) {
         .Translate => {
@@ -82,7 +82,7 @@ pub fn drawBase(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *Camera
                 .Axis => 1,
                 .Ring => 2,
             };
-            GizmoDraw.drawTranslate(draw_list, viewport_size, camera, world_pos, hovered_idx, hovered_kind_u8);
+            GizmoDraw.drawTranslate(draw_list, viewport_pos, viewport_size, camera, world_pos, hovered_idx, hovered_kind_u8);
         },
         .Rotate => {
             // Draw 3D rotation rings (circles perpendicular to each axis)
@@ -92,7 +92,7 @@ pub fn drawBase(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *Camera
                 .Axis => 1,
                 .Ring => 2,
             };
-            GizmoDraw.drawRotationRings(draw_list, viewport_size, camera, world_pos, hovered_idx, hovered_kind_u8);
+            GizmoDraw.drawRotationRings(draw_list, viewport_pos, viewport_size, camera, world_pos, hovered_idx, hovered_kind_u8);
         },
         .Scale => {
             // Draw scale handles (axis lines with cubes at the end)
@@ -102,7 +102,7 @@ pub fn drawBase(draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *Camera
                 .Axis => 1,
                 .Ring => 2,
             };
-            GizmoDraw.drawScale(draw_list, viewport_size, camera, world_pos, hovered_idx, hovered_kind_u8);
+            GizmoDraw.drawScale(draw_list, viewport_pos, viewport_size, camera, world_pos, hovered_idx, hovered_kind_u8);
         },
     }
 }

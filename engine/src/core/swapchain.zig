@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
+const Texture = @import("texture.zig").Texture;
 const Allocator = std.mem.Allocator;
 const glfw = @import("glfw");
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
@@ -18,6 +19,8 @@ pub const Swapchain = struct {
     allocator: Allocator,
 
     surface_format: vk.SurfaceFormatKHR,
+    // HDR rendering format used for intermediate backbuffers
+    hdr_format: vk.Format = .r16g16b16a16_sfloat,
     present_mode: vk.PresentModeKHR,
     extent: vk.Extent2D,
     handle: vk.SwapchainKHR,
@@ -101,7 +104,7 @@ pub const Swapchain = struct {
             .image_color_space = surface_format.color_space,
             .image_extent = actual_extent,
             .image_array_layers = 1,
-            .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
+            .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
             .image_sharing_mode = sharing_mode,
             .queue_family_index_count = qfi.len,
             .p_queue_family_indices = &qfi,
@@ -118,7 +121,7 @@ pub const Swapchain = struct {
             gc.vkd.destroySwapchainKHR(gc.dev, old_handle, null);
         }
 
-        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, extent);
+        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, extent, .r16g16b16a16_sfloat);
         errdefer for (swap_images) |si| si.deinit(gc);
 
         // var next_image_acquired = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
@@ -134,6 +137,7 @@ pub const Swapchain = struct {
             .gc = gc,
             .allocator = allocator,
             .surface_format = surface_format,
+            .hdr_format = .r16g16b16a16_sfloat,
             .present_mode = present_mode,
             .extent = actual_extent,
             .handle = handle,
@@ -199,7 +203,6 @@ pub const Swapchain = struct {
         self.*.compute_finished = old_compute_finished;
         self.*.compute_fence = old_compute_fence;
         self.*.compute = old_compute;
-        try self.createRenderPass();
     }
 
     pub fn currentImage(self: Swapchain) vk.Image {
@@ -208,6 +211,10 @@ pub const Swapchain = struct {
 
     pub fn currentSwapImage(self: Swapchain) *const SwapImage {
         return &self.swap_images[self.image_index];
+    }
+
+    pub fn currentHdrTexture(self: *Swapchain) *Texture {
+        return &self.swap_images[self.image_index].hdr_texture;
     }
 
     pub fn depthFormat(self: Swapchain) !vk.Format {
@@ -510,7 +517,7 @@ pub const Swapchain = struct {
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
 
         // Ensure the current swapchain image is ready for rendering as a color attachment.
-        // We don't need previous content at frame start, so we can use UNDEFINED as old layout.
+        // Use UNDEFINED as old layout to be valid on first use after swapchain creation.
         const current_image = self.swap_images[self.image_index].image;
         self.gc.transitionImageLayout(
             frame_info.command_buffer,
@@ -565,6 +572,9 @@ pub const Swapchain = struct {
             },
         );
 
+        // HDR texture transition is now handled by UI layer's begin() function
+        // which clears and transitions it to color_attachment_optimal
+
         // End graphics buffer
         self.gc.vkd.endCommandBuffer(frame_info.command_buffer) catch |err| {
             log(.ERROR, "swapchain", "Error ending command buffer: {any}", .{err});
@@ -611,11 +621,13 @@ pub const Swapchain = struct {
 const SwapImage = struct {
     image: vk.Image,
     view: vk.ImageView,
+    // Per-swap image HDR render target as Texture (includes sampler, descriptor)
+    hdr_texture: Texture,
     depth_image: vk.Image,
     depth_image_view: vk.ImageView,
     depth_image_memory: vk.DeviceMemory,
 
-    fn init(gc: *const GraphicsContext, image: vk.Image, format: vk.Format, extent: vk.Extent2D) !SwapImage {
+    fn init(gc: *const GraphicsContext, image: vk.Image, format: vk.Format, extent: vk.Extent2D, hdr_format: vk.Format) !SwapImage {
         const view = try gc.vkd.createImageView(gc.dev, &.{
             .flags = .{},
             .image = image,
@@ -631,6 +643,19 @@ const SwapImage = struct {
             },
         }, null);
         errdefer gc.vkd.destroyImageView(gc.dev, view, null);
+
+        // Create per-frame HDR color attachment as Texture (color attachment + sampled + transfer_src)
+        const hdr_texture = try Texture.initSingleTime(
+            @constCast(gc),
+            hdr_format,
+            .{ .width = extent.width, .height = extent.height, .depth = 1 },
+            .{
+                .color_attachment_bit = true,
+                .sampled_bit = true,
+                .transfer_dst_bit = true,
+            },
+            .{ .@"1_bit" = true },
+        );
 
         const depth_image = try gc.vkd.createImage(gc.dev, &.{
             .image_type = .@"2d",
@@ -670,13 +695,15 @@ const SwapImage = struct {
         return SwapImage{
             .image = image,
             .view = view,
+            .hdr_texture = hdr_texture,
             .depth_image = depth_image,
             .depth_image_view = depth_image_view,
             .depth_image_memory = depth_image_memory,
         };
     }
 
-    fn deinit(self: SwapImage, gc: *const GraphicsContext) void {
+    fn deinit(self: *SwapImage, gc: *const GraphicsContext) void {
+        self.hdr_texture.deinit();
         gc.vkd.destroyImageView(gc.dev, self.depth_image_view, null);
         gc.vkd.freeMemory(gc.dev, self.depth_image_memory, null);
         gc.vkd.destroyImage(gc.dev, self.depth_image, null);
@@ -684,7 +711,7 @@ const SwapImage = struct {
     }
 };
 
-fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator, extent: vk.Extent2D) ![]SwapImage {
+fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator, extent: vk.Extent2D, hdr_format: vk.Format) ![]SwapImage {
     var count: u32 = undefined;
     _ = try gc.vkd.getSwapchainImagesKHR(gc.dev, swapchain, &count, null);
     const images = try allocator.alloc(vk.Image, count);
@@ -695,10 +722,10 @@ fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, f
     errdefer allocator.free(swap_images);
 
     var i: usize = 0;
-    errdefer for (swap_images[0..i]) |si| si.deinit(gc);
+    errdefer for (swap_images[0..i]) |*si| si.deinit(gc);
 
     for (images) |image| {
-        swap_images[i] = try SwapImage.init(gc, image, format, extent);
+        swap_images[i] = try SwapImage.init(gc, image, format, extent, hdr_format);
         i += 1;
     }
 
