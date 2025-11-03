@@ -39,6 +39,14 @@ Quick navigation to all documentation. Each system has full docs (📖) and/or q
 | **Camera** | [📖](CAMERA_SYSTEM.md) | [⚡](CAMERA_SYSTEM_QUICK_REF.md) | Camera and movement controller |
 | **Scene** | ⏳ | ⏳ | Scene v2 and GameObject v2 *(needs docs)* |
 
+### Editor & UI
+
+| System | Full Docs | Quick Ref | Description |
+|--------|-----------|-----------|-------------|
+| **Viewport System** | [📖](VIEWPORT_SYSTEM.md) | ⏳ | HDR viewport, coordinate systems, overlays |
+| **Editor Scripting** | [📖](EDITOR_SCRIPTING_UI.md) | ⏳ | Console, drag & drop, inspector |
+| **Layer System** | [📖](LAYER_EVENT_SYSTEM.md) | [⚡](LAYER_SYSTEM_QUICK_REF.md) | Event-driven layer stack |
+
 ### Infrastructure (Needs Documentation)
 
 | System | Status | Description |
@@ -73,7 +81,10 @@ Quick navigation to all documentation. Each system has full docs (📖) and/or q
 - [Systems TODO](SYSTEMS_TODO.md) - Documentation priorities
 
 ### Editor & UI
+- [Viewport System](VIEWPORT_SYSTEM.md) - HDR rendering pipeline and coordinate systems
 - [Editor UI & Scripting](EDITOR_SCRIPTING_UI.md) - Editor scripting workflow, drag & drop, inspector editor, and icons
+- [Layer System](LAYER_EVENT_SYSTEM.md) - Event-driven layer architecture
+- [Console & CVARs](CONSOLE_CVAR_TODO.md) - Console variables system (TODO)
 
 ## 📋 Quick References Only
 
@@ -114,6 +125,13 @@ docs/
 ├── Camera & Scene
 │   ├── CAMERA_SYSTEM.md                   ✨ NEW
 │   └── CAMERA_SYSTEM_QUICK_REF.md         ✨ NEW
+│
+├── Editor & UI
+│   ├── VIEWPORT_SYSTEM.md                 ✨ NEW
+│   ├── EDITOR_SCRIPTING_UI.md
+│   ├── LAYER_EVENT_SYSTEM.md
+│   ├── LAYER_SYSTEM_QUICK_REF.md
+│   └── CONSOLE_CVAR_TODO.md               ✨ NEW
 │
 └── archive/                               ← Old/outdated docs
 ```

@@ -130,31 +130,28 @@ pub const UIRenderer = struct {
 
         self.viewport_draw_list = null;
 
-        // Transparent viewport window in the center
+        // Borderless, transparent 3D viewport window
         const viewport_flags = c.ImGuiWindowFlags_NoBackground |
             c.ImGuiWindowFlags_NoScrollbar |
             c.ImGuiWindowFlags_NoTitleBar;
 
-        // Remove border from viewport window
         c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowBorderSize, 0.0);
         c.ImGui_PushStyleVarImVec2(c.ImGuiStyleVar_WindowPadding, .{ .x = 0, .y = 0 });
 
         _ = c.ImGui_Begin("Viewport", null, viewport_flags);
-        // Record viewport position/size so other layers (picking, overlays) can use it
-        // IMPORTANT: Use content region (excludes title bar) for accurate mouse picking
+
+        // Capture viewport position/size for mouse picking and overlays
+        // Use content region (excludes decorations) for accurate coordinate mapping
         const win_pos = c.ImGui_GetWindowPos();
         const content_region_min = c.ImGui_GetWindowContentRegionMin();
         const content_region_max = c.ImGui_GetWindowContentRegionMax();
 
-        // Calculate actual content region position and size
-        // Content region min/max are relative to window position
         self.viewport_pos = .{ win_pos.x + content_region_min.x, win_pos.y + content_region_min.y };
         self.viewport_size = .{ content_region_max.x - content_region_min.x, content_region_max.y - content_region_min.y };
         self.viewport_draw_list = c.ImGui_GetWindowDrawList();
 
-        // Draw the viewport image if available
+        // Display LDR-tonemapped scene texture
         if (self.viewport_texture_id) |tid| {
-            // Guard against degenerate sizes
             if (self.viewport_size[0] >= 1.0 and self.viewport_size[1] >= 1.0) {
                 const tex_ref = c.ImTextureRef{ ._TexData = null, ._TexID = tid };
                 const size = c.ImVec2{ .x = self.viewport_size[0], .y = self.viewport_size[1] };
@@ -163,9 +160,8 @@ pub const UIRenderer = struct {
         } else {
             c.ImGui_Text("3D Viewport");
         }
-        c.ImGui_End();
 
-        // Pop style variables
+        c.ImGui_End();
         c.ImGui_PopStyleVar();
         c.ImGui_PopStyleVar();
     }
