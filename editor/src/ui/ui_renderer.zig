@@ -49,6 +49,12 @@ pub const UIRenderer = struct {
     scripting_history_lens: [32]usize = undefined,
     scripting_history_head: usize = 0,
     scripting_history_count: usize = 0,
+    // Console log viewer filters
+    log_filter_trace: bool = false,
+    log_filter_debug: bool = true,
+    log_filter_info: bool = true,
+    log_filter_warn: bool = true,
+    log_filter_error: bool = true,
 
     pub fn init(allocator: std.mem.Allocator) UIRenderer {
         var renderer = UIRenderer{
@@ -80,6 +86,10 @@ pub const UIRenderer = struct {
         renderer.asset_browser_panel.refreshDirectory() catch |err| {
             log(.ERROR, "ui", "Failed to initialize asset browser: {}", .{err});
         };
+
+        // Initialize in-memory log buffer used by the editor console
+        // This is optional and low-cost; safe to call multiple times.
+        zephyr.initLogRingBuffer();
 
         return renderer;
     }
@@ -183,6 +193,11 @@ pub const UIRenderer = struct {
 
         if (self.show_asset_browser) {
             self.asset_browser_panel.render();
+        }
+
+        // Scripting console is a panel and should be rendered with other panels
+        if (self.show_scripting_console) {
+            self.renderScriptingConsole(stats);
         }
     }
 
@@ -498,6 +513,58 @@ pub const UIRenderer = struct {
             }
         }
         // ImGui requires EndChild() to be called after BeginChild() even if BeginChild returned false
+        c.ImGui_EndChild();
+
+        // --- Console: engine logs viewer ---
+        c.ImGui_Separator();
+        c.ImGui_Text("Engine Logs:");
+
+        // Log level filters and clear button (simple inline controls)
+        _ = c.ImGui_Checkbox("Trace", &self.log_filter_trace);
+        c.ImGui_SameLine();
+        _ = c.ImGui_Checkbox("Debug", &self.log_filter_debug);
+        c.ImGui_SameLine();
+        _ = c.ImGui_Checkbox("Info", &self.log_filter_info);
+        c.ImGui_SameLine();
+        _ = c.ImGui_Checkbox("Warn", &self.log_filter_warn);
+        c.ImGui_SameLine();
+        _ = c.ImGui_Checkbox("Error", &self.log_filter_error);
+        c.ImGui_SameLine();
+        if (c.ImGui_Button("Clear Logs")) {
+            zephyr.clearLogs();
+        }
+
+        const logs_child_size = c.ImVec2{ .x = 0, .y = 200 };
+        if (c.ImGui_BeginChild("##console_logs", logs_child_size, 0, 0)) {
+            // Fetch recent logs (up to a reasonable cap)
+            var entries: [256]zephyr.LogOut = undefined;
+            const n = zephyr.fetchLogs(entries[0..]);
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const e = entries[i];
+                // Filter by selected levels
+                const show = switch (e.level) {
+                    .TRACE => self.log_filter_trace,
+                    .DEBUG => self.log_filter_debug,
+                    .INFO => self.log_filter_info,
+                    .WARN => self.log_filter_warn,
+                    .ERROR => self.log_filter_error,
+                };
+                if (!show) continue;
+
+                // Choose color per level
+                const col = switch (e.level) {
+                    .TRACE => c.ImVec4{ .x = 0.6, .y = 0.6, .z = 0.6, .w = 1.0 },
+                    .DEBUG => c.ImVec4{ .x = 0.0, .y = 0.8, .z = 0.8, .w = 1.0 },
+                    .INFO => c.ImVec4{ .x = 1.0, .y = 1.0, .z = 1.0, .w = 1.0 },
+                    .WARN => c.ImVec4{ .x = 1.0, .y = 0.9, .z = 0.0, .w = 1.0 },
+                    .ERROR => c.ImVec4{ .x = 1.0, .y = 0.2, .z = 0.2, .w = 1.0 },
+                };
+
+                // Print: [SECTION] message (timestamp available in e.timestamp)
+                c.ImGui_TextColored(col, "%s: %s", &e.section[0], &e.message[0]);
+            }
+        }
         c.ImGui_EndChild();
 
         c.ImGui_End();

@@ -566,9 +566,8 @@ pub const ParticleComputePass = struct {
     fn spawnParticlesForEmitter(self: *ParticleComputePass, emitter_id: u32, new_particles: []const vertex_formats.Particle) !void {
         // Calculate particle range for this emitter
         const particles_per_emitter = self.max_particles / self.max_emitters;
-        const emitter_start_slot = emitter_id * particles_per_emitter;
         const range_size = particles_per_emitter * @sizeOf(vertex_formats.Particle);
-        const range_offset = emitter_start_slot * @sizeOf(vertex_formats.Particle);
+        const range_offset = @as(vk.DeviceSize, emitter_id) * @as(vk.DeviceSize, particles_per_emitter) * @as(vk.DeviceSize, @sizeOf(vertex_formats.Particle));
 
         // Prepare particles for this emitter's range only
         const particles_to_write = try self.allocator.alloc(vertex_formats.Particle, particles_per_emitter);
@@ -612,30 +611,26 @@ pub const ParticleComputePass = struct {
         staging_write.writeToBuffer(particle_bytes, range_size, 0);
 
         // Copy only this emitter's range to all frame buffers (IN and OUT)
-        // Use immediate command buffer for the copy
-        const cmd_buffer = try self.graphics_context.beginSingleTimeCommands();
-        defer self.graphics_context.endSingleTimeCommands(cmd_buffer) catch {};
-
-        const copy_region = vk.BufferCopy{
-            .src_offset = 0,
-            .dst_offset = range_offset,
-            .size = range_size,
-        };
-
+        // Use the helper copyBuffer which chooses a worker-safe path when called from
+        // a worker thread. This avoids allocating primary command buffers from the
+        // main thread's command pool (which caused concurrent access validation errors).
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            self.graphics_context.vkd.cmdCopyBuffer(
-                cmd_buffer,
-                staging_write.buffer,
+            // copy to IN buffer at the correct offset
+            try self.graphics_context.copyBufferWithOffset(
                 self.particle_buffers[frame_idx].particle_buffer_in.buffer,
-                1,
-                @ptrCast(&copy_region),
-            );
-            self.graphics_context.vkd.cmdCopyBuffer(
-                cmd_buffer,
                 staging_write.buffer,
+                @as(vk.DeviceSize, range_size),
+                range_offset,
+                0,
+            );
+
+            // copy to OUT buffer at the correct offset
+            try self.graphics_context.copyBufferWithOffset(
                 self.particle_buffers[frame_idx].particle_buffer_out.buffer,
-                1,
-                @ptrCast(&copy_region),
+                staging_write.buffer,
+                @as(vk.DeviceSize, range_size),
+                range_offset,
+                0,
             );
         }
 
@@ -649,9 +644,8 @@ pub const ParticleComputePass = struct {
 
         // Calculate particle range for this emitter
         const particles_per_emitter = self.max_particles / self.max_emitters;
-        const emitter_start_slot = emitter_id * particles_per_emitter;
         const range_size = particles_per_emitter * @sizeOf(vertex_formats.Particle);
-        const range_offset = emitter_start_slot * @sizeOf(vertex_formats.Particle);
+        const range_offset = @as(vk.DeviceSize, emitter_id) * @as(vk.DeviceSize, particles_per_emitter) * @as(vk.DeviceSize, @sizeOf(vertex_formats.Particle));
 
         // Read only this emitter's particle range
         var staging_buffer = try Buffer.init(
@@ -663,25 +657,15 @@ pub const ParticleComputePass = struct {
         );
         defer staging_buffer.deinit();
 
-        // Use immediate command for reading
-        {
-            const cmd_buffer = try self.graphics_context.beginSingleTimeCommands();
-            defer self.graphics_context.endSingleTimeCommands(cmd_buffer) catch {};
-
-            const read_region = vk.BufferCopy{
-                .src_offset = range_offset,
-                .dst_offset = 0,
-                .size = range_size,
-            };
-
-            self.graphics_context.vkd.cmdCopyBuffer(
-                cmd_buffer,
-                self.particle_buffers[last_frame].particle_buffer_out.buffer,
-                staging_buffer.buffer,
-                1,
-                @ptrCast(&read_region),
-            );
-        }
+        // Read the emitter range into the staging buffer. Use copyBuffer helper so
+        // it chooses a worker-safe path when called from a worker thread.
+        try self.graphics_context.copyBufferWithOffset(
+            staging_buffer.buffer,
+            self.particle_buffers[last_frame].particle_buffer_out.buffer,
+            @as(vk.DeviceSize, range_size),
+            0,
+            range_offset,
+        );
 
         try staging_buffer.map(range_size, 0);
         defer staging_buffer.unmap();
@@ -694,30 +678,22 @@ pub const ParticleComputePass = struct {
             particle.color[3] = 0.0; // Set alpha to 0
         }
 
-        // Write back only this emitter's range to all frame buffers
-        const cmd_buffer = try self.graphics_context.beginSingleTimeCommands();
-        defer self.graphics_context.endSingleTimeCommands(cmd_buffer) catch {};
-
-        const write_region = vk.BufferCopy{
-            .src_offset = 0,
-            .dst_offset = range_offset,
-            .size = range_size,
-        };
-
+        // Write back only this emitter's range to all frame buffers. Use helper so
+        // the copy is done via a worker-safe path when appropriate.
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            self.graphics_context.vkd.cmdCopyBuffer(
-                cmd_buffer,
-                staging_buffer.buffer,
+            try self.graphics_context.copyBufferWithOffset(
                 self.particle_buffers[frame_idx].particle_buffer_in.buffer,
-                1,
-                @ptrCast(&write_region),
-            );
-            self.graphics_context.vkd.cmdCopyBuffer(
-                cmd_buffer,
                 staging_buffer.buffer,
+                @as(vk.DeviceSize, range_size),
+                range_offset,
+                0,
+            );
+            try self.graphics_context.copyBufferWithOffset(
                 self.particle_buffers[frame_idx].particle_buffer_out.buffer,
-                1,
-                @ptrCast(&write_region),
+                staging_buffer.buffer,
+                @as(vk.DeviceSize, range_size),
+                range_offset,
+                0,
             );
         }
     }

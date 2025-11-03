@@ -263,6 +263,10 @@ pub const UILayer = struct {
                 if (evt.data.KeyPressed.key == c.GLFW_KEY_F1) {
                     self.show_ui_panels = !self.show_ui_panels;
                     evt.markHandled();
+                } else if (evt.data.KeyPressed.key == c.GLFW_KEY_GRAVE_ACCENT) {
+                    // Toggle scripting console with ` (backtick/tilde) key
+                    self.ui_renderer.show_scripting_console = !self.ui_renderer.show_scripting_console;
+                    evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_F2) {
                     // Toggle performance graphs
                     self.ui_renderer.show_performance_graphs = !self.ui_renderer.show_performance_graphs;
