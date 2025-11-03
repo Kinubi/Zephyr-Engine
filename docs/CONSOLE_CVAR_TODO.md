@@ -5,7 +5,7 @@
 Implement a developer console with integrated CVAR (Console Variable) system for runtime configuration and debugging. The console provides a Lua-based REPL with command history, auto-completion, and direct access to engine CVARs.
 
 **Priority**: High  
-**Status**: Not Started  
+**Status**: In Progress — Phase 0 (UI + log integration) completed
 **Target**: Sprint 4
 
 ---
@@ -26,17 +26,20 @@ Implement a developer console with integrated CVAR (Console Variable) system for
 ### Phase 0: Console UI Implementation (Week 1)
 
 #### Task 0.1: Basic Console Window
-- [ ] Create `ConsolePanel` struct in `editor/src/ui/panels/console_panel.zig`
-- [ ] Implement ImGui window with dockable support
-- [ ] Add input text field with enter key handling
-- [ ] Add scrollable output area with text coloring
-- [ ] Toggle visibility with ` (backtick/tilde) key
-- [ ] Support Ctrl+L to clear output
-- [ ] **Integrate with engine log system** - Display std.log output in console
-- [ ] Add log level filtering (debug, info, warning, error)
-- [ ] Add timestamp display for log messages
-- [ ] Color-code log messages by severity
-- [ ] Add search/filter functionality for log messages
+
+- [x] Create `ConsolePanel` struct in `editor/src/ui/panels/console_panel.zig`
+- [x] Implement ImGui window with dockable support
+- [x] Add input text field with enter key handling
+- [x] Add scrollable output area with text coloring
+- [x] Toggle visibility with ` (backtick/tilde) key
+- [x] Support Ctrl+L to clear output
+- [x] **Integrate with engine log system** - Display std.log output in console
+- [x] Add log level filtering (debug, info, warning, error)
+- [x] Add timestamp display for log messages
+ - [ ] Color-code log messages by severity
+ - [x] Add search/filter functionality for log messages
+
+> Note: Search implemented in the editor as a lightweight ASCII case-insensitive substring search (see `editor/src/ui/ui_renderer.zig`). This can be extended later to full Unicode or regex search.
 
 **File**: `editor/src/ui/panels/console_panel.zig`
 

@@ -96,6 +96,7 @@ pub const SceneLayer = @import("layers/scene_layer.zig").SceneLayer;
 // ========== Utils ==========
 pub const math = @import("utils/math.zig");
 pub const log = @import("utils/log.zig").log;
+pub const time_format = @import("utils/time_format.zig");
 // Expose in-memory log buffer API for editor tooling (console viewer)
 pub const LogOut = @import("utils/log.zig").LogOut;
 pub const initLogRingBuffer = @import("utils/log.zig").initLogRingBuffer;

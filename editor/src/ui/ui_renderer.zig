@@ -49,12 +49,17 @@ pub const UIRenderer = struct {
     scripting_history_lens: [32]usize = undefined,
     scripting_history_head: usize = 0,
     scripting_history_count: usize = 0,
+    scripting_history_nav_pos: ?usize = null,
     // Console log viewer filters
     log_filter_trace: bool = false,
     log_filter_debug: bool = true,
     log_filter_info: bool = true,
     log_filter_warn: bool = true,
     log_filter_error: bool = true,
+    // Search/filter text for logs (case-insensitive ASCII search)
+    log_search_buffer: [256]u8 = undefined,
+    // Auto-scroll logs to bottom when new entries arrive
+    log_auto_scroll: bool = true,
 
     pub fn init(allocator: std.mem.Allocator) UIRenderer {
         var renderer = UIRenderer{
@@ -81,6 +86,10 @@ pub const UIRenderer = struct {
         while (li < renderer.scripting_history_lens.len) : (li += 1) {
             renderer.scripting_history_lens[li] = 0;
         }
+
+        // Zero log search buffer
+        var sbi: usize = 0;
+        while (sbi < renderer.log_search_buffer.len) : (sbi += 1) renderer.log_search_buffer[sbi] = 0;
 
         // Initialize asset browser by loading initial directory
         renderer.asset_browser_panel.refreshDirectory() catch |err| {
@@ -427,99 +436,17 @@ pub const UIRenderer = struct {
             return;
         }
 
-        // Toggle instructions
-        c.ImGui_Text("Lua scripting console. Runs code synchronously on the main thread when possible.");
+    // Brief instructions
+    c.ImGui_Text("Developer console — logs above, enter commands below.");
         c.ImGui_Separator();
 
-        // Input text multiline
-        // ImGui expects a NUL-terminated char buffer; we provide a fixed-size buffer.
-        // Multiline input: use minimal signature provided by c-binding
-        _ = c.ImGui_InputTextMultiline("##script_input", &self.scripting_input_buffer[0], self.scripting_input_buffer.len);
-
-        // Buttons: Run (sync) and Clear
-        if (c.ImGui_Button("Run (Sync)")) {
-            // Determine script length (find first NUL)
-            var script_len: usize = 0;
-            while (script_len < self.scripting_input_buffer.len) : (script_len += 1) {
-                if (self.scripting_input_buffer[script_len] == 0) break;
-            }
-
-            if (script_len > 0) {
-                // Ensure we have a Scene to execute against
-                if (stats.scene) |scene_ptr| {
-                    // Try to use the Scene-owned scripting system's lua state pool (synchronous)
-                    const sys = &scene_ptr.scripting_system;
-                    var executed: bool = false;
-                    if (sys.runner.state_pool) |sp| {
-                        const ls = sp.acquire();
-                        // Execute using the lua binding. Use UIRenderer's allocator for temporary allocations.
-                        const buf_slice = self.scripting_input_buffer[0..script_len];
-                        var res = lua.ExecuteResult{ .success = false, .message = "" };
-                        const exec_res = lua.executeLuaBuffer(self.allocator, ls, buf_slice, 0, @ptrCast(scene_ptr)) catch {
-                            // on allocation/other error, append message and release state
-                            self.appendHistory("(execute error)");
-                            sp.release(ls);
-                            executed = true;
-                            return;
-                        };
-                        res = exec_res;
-
-                        // Append result to history (copying up to slot size)
-                        if (res.message.len > 0) {
-                            const copy_len = @min(res.message.len, self.scripting_history_storage[0].len - 1);
-                            std.mem.copyForwards(u8, self.scripting_history_storage[self.scripting_history_head][0..copy_len], res.message[0..copy_len]);
-                            self.scripting_history_storage[self.scripting_history_head][copy_len] = 0;
-                            self.scripting_history_lens[self.scripting_history_head] = copy_len;
-                            self.scripting_history_head = (self.scripting_history_head + 1) % self.scripting_history_storage.len;
-                            if (self.scripting_history_count < self.scripting_history_storage.len) self.scripting_history_count += 1;
-                        } else {
-                            const okmsg = "(ok)";
-                            self.appendHistory(@as([]const u8, okmsg));
-                        }
-
-                        // Release leased state
-                        sp.release(ls);
-                        executed = true;
-                    }
-
-                    if (!executed) {
-                        // Could not execute synchronously (no state pool); inform user
-                        self.appendHistory("(no lua state pool - cannot run synchronously)");
-                    }
-                } else {
-                    self.appendHistory("(no scene available)");
-                }
-            }
-        }
-
-        c.ImGui_SameLine();
-        if (c.ImGui_Button("Clear")) {
-            // NUL the input buffer
-            self.scripting_input_buffer[0] = 0;
-        }
-
-        c.ImGui_Separator();
-
-        // History pane (read-only)
-        const hist_size = c.ImVec2{ .x = 0, .y = 200 };
-        if (c.ImGui_BeginChild("##script_history", hist_size, 0, 0)) {
-            var idx: usize = 0;
-            while (idx < self.scripting_history_count) : (idx += 1) {
-                const pos = (self.scripting_history_head + self.scripting_history_storage.len - self.scripting_history_count + idx) % self.scripting_history_storage.len;
-                const len = self.scripting_history_lens[pos];
-                if (len > 0) {
-                    c.ImGui_Text("%s", &self.scripting_history_storage[pos][0]);
-                }
-            }
-        }
-        // ImGui requires EndChild() to be called after BeginChild() even if BeginChild returned false
-        c.ImGui_EndChild();
-
-        // --- Console: engine logs viewer ---
-        c.ImGui_Separator();
-        c.ImGui_Text("Engine Logs:");
-
-        // Log level filters and clear button (simple inline controls)
+        // --- Console: engine logs viewer (large area) ---
+        // Log level filters and clear button (inline controls)
+    // Search box for filtering logs (case-insensitive ASCII substring)
+    c.ImGui_Text("Search:");
+    c.ImGui_SameLine();
+    _ = c.ImGui_InputText("##console_search", &self.log_search_buffer[0], self.log_search_buffer.len, 0);
+    c.ImGui_SameLine();
         _ = c.ImGui_Checkbox("Trace", &self.log_filter_trace);
         c.ImGui_SameLine();
         _ = c.ImGui_Checkbox("Debug", &self.log_filter_debug);
@@ -534,7 +461,8 @@ pub const UIRenderer = struct {
             zephyr.clearLogs();
         }
 
-        const logs_child_size = c.ImVec2{ .x = 0, .y = 200 };
+        // Big logs child area (where the 'blank space' in your sketch appears)
+        const logs_child_size = c.ImVec2{ .x = 0, .y = 300 };
         if (c.ImGui_BeginChild("##console_logs", logs_child_size, 0, 0)) {
             // Fetch recent logs (up to a reasonable cap)
             var entries: [256]zephyr.LogOut = undefined;
@@ -561,11 +489,145 @@ pub const UIRenderer = struct {
                     .ERROR => c.ImVec4{ .x = 1.0, .y = 0.2, .z = 0.2, .w = 1.0 },
                 };
 
+                // Basic search filtering (case-insensitive ASCII) using search buffer
+                var search_len: usize = 0;
+                while (search_len < self.log_search_buffer.len) : (search_len += 1) {
+                    if (self.log_search_buffer[search_len] == 0) break;
+                }
+                if (search_len > 0) {
+                    const search_slice = self.log_search_buffer[0..search_len];
+                    // Helper function declared at file scope: asciiContainsIgnoreCase
+
+                    const sec_slice = e.section[0..e.section_len];
+                    const msg_slice = e.message[0..e.message_len];
+                    if (!asciiContainsIgnoreCase(sec_slice, search_slice) and !asciiContainsIgnoreCase(msg_slice, search_slice)) continue;
+                }
+
                 // Print: [SECTION] message (timestamp available in e.timestamp)
-                c.ImGui_TextColored(col, "%s: %s", &e.section[0], &e.message[0]);
+                var ts_buf: [64]u8 = undefined;
+                var ts_slice: []const u8 = "";
+                if (zephyr.time_format.formatTimestampBuf(&ts_buf, e.timestamp)) |ts| {
+                    ts_slice = ts;
+                } else |_| {
+                    // Fallback to raw milliseconds if formatting fails
+                    ts_slice = std.fmt.bufPrint(&ts_buf, "{d}ms", .{ e.timestamp }) catch "";
+                }
+                // Ensure NUL-termination
+                if (ts_slice.len < ts_buf.len) ts_buf[ts_slice.len] = 0 else ts_buf[ts_buf.len - 1] = 0;
+
+                // Use the ImGui_TextColored shortcut which pushes the text color, prints, then pops.
+                // Signature: void ImGui_TextColored(ImVec4 col, const char* fmt, ...)
+                c.ImGui_TextColored(col, "[%s] [%s] %s", &ts_buf[0], &e.section[0], &e.message[0]);
+            }
+            // Auto-scroll to bottom when enabled
+            if (self.log_auto_scroll) {
+                c.ImGui_SetScrollHereY(1.0);
             }
         }
         c.ImGui_EndChild();
+
+        // Input area (single-line) at the bottom
+        c.ImGui_Separator();
+        // Single-line input occupying most of the row
+        const input_buf_ptr = &self.scripting_input_buffer[0];
+        // Input field: Enter returns true. Also accept raw Enter/KeypadEnter presses as a fallback.
+        const input_returned = c.ImGui_InputText("##console_input", input_buf_ptr, self.scripting_input_buffer.len, c.ImGuiInputTextFlags_EnterReturnsTrue);
+        const enter_pressed = c.ImGui_IsItemActive() and (c.ImGui_IsKeyPressed(c.ImGuiKey_Enter) or c.ImGui_IsKeyPressed(c.ImGuiKey_KeypadEnter));
+        const input_submitted = input_returned or enter_pressed;
+
+        // Handle Up/Down navigation when the input is active
+        if (c.ImGui_IsItemActive()) {
+            // Up arrow
+            if (c.ImGui_IsKeyPressed(c.ImGuiKey_UpArrow)) {
+                if (self.scripting_history_count > 0) {
+                    const buf_len = self.scripting_history_storage.len;
+                    const start_pos = (self.scripting_history_head + buf_len - self.scripting_history_count) % buf_len;
+                    const end_pos = (self.scripting_history_head + buf_len - 1) % buf_len;
+                    if (self.scripting_history_nav_pos) |pos| {
+                        const new_pos: usize = if (pos == start_pos) end_pos else (pos + buf_len - 1) % buf_len;
+                        self.scripting_history_nav_pos = new_pos;
+                    } else {
+                        self.scripting_history_nav_pos = end_pos;
+                    }
+                    // Load history entry into input buffer
+                    if (self.scripting_history_nav_pos) |p| {
+                        const len = self.scripting_history_lens[p];
+                        std.mem.copyForwards(u8, self.scripting_input_buffer[0..len], self.scripting_history_storage[p][0..len]);
+                        if (len < self.scripting_input_buffer.len) self.scripting_input_buffer[len] = 0;
+                    }
+                }
+            }
+
+            // Down arrow
+            if (c.ImGui_IsKeyPressed(c.ImGuiKey_DownArrow)) {
+                if (self.scripting_history_nav_pos) |pos| {
+                    const buf_len = self.scripting_history_storage.len;
+                    const end_pos = (self.scripting_history_head + buf_len - 1) % buf_len;
+                    if (pos == end_pos) {
+                        // Clear navigation and input
+                        self.scripting_history_nav_pos = null;
+                        self.scripting_input_buffer[0] = 0;
+                    } else {
+                        const new_pos = (pos + 1) % buf_len;
+                        self.scripting_history_nav_pos = new_pos;
+                        const len = self.scripting_history_lens[new_pos];
+                        std.mem.copyForwards(u8, self.scripting_input_buffer[0..len], self.scripting_history_storage[new_pos][0..len]);
+                        if (len < self.scripting_input_buffer.len) self.scripting_input_buffer[len] = 0;
+                    }
+                }
+            }
+        }
+
+        var did_submit: bool = false;
+        if (input_submitted) did_submit = true;
+        c.ImGui_SameLine();
+        if (c.ImGui_Button("Run")) did_submit = true;
+        c.ImGui_SameLine();
+        if (c.ImGui_Button("Clear")) {
+            self.scripting_input_buffer[0] = 0;
+            self.scripting_history_nav_pos = null;
+        }
+
+        if (did_submit) {
+            // Determine input length
+            var script_len: usize = 0;
+            while (script_len < self.scripting_input_buffer.len) : (script_len += 1) {
+                if (self.scripting_input_buffer[script_len] == 0) break;
+            }
+            if (script_len > 0) {
+                const cmd = self.scripting_input_buffer[0..script_len];
+                // Append to history and reset nav
+                self.appendHistory(cmd);
+                self.scripting_history_nav_pos = null;
+
+                // Also log the command into the engine logs so it appears in the logs area
+                zephyr.log(.INFO, "console", "{s}", .{cmd});
+
+                // Execute via Lua if available
+                if (stats.scene) |scene_ptr| {
+                    const sys = &scene_ptr.scripting_system;
+                    if (sys.runner.state_pool) |sp| {
+                        const ls = sp.acquire();
+                        const exec_res = lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr)) catch {
+                            self.appendHistory("(execute error)");
+                            sp.release(ls);
+                            return;
+                        };
+                        if (exec_res.message.len > 0) {
+                            self.appendHistory(exec_res.message);
+                        }
+                        sp.release(ls);
+                    } else {
+                        self.appendHistory("(no lua state pool - cannot run synchronously)");
+                    }
+                } else {
+                    self.appendHistory("(no scene available)");
+                }
+
+                // Clear input buffer after running
+                self.scripting_input_buffer[0] = 0;
+            }
+        }
 
         c.ImGui_End();
     }
@@ -579,6 +641,26 @@ pub const UIRenderer = struct {
         if (self.scripting_history_count < self.scripting_history_storage.len) self.scripting_history_count += 1;
     }
 };
+
+// File-scope helper: ASCII-only case-insensitive substring search.
+fn asciiContainsIgnoreCase(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > hay.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        var ok = true;
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            const a = hay[i + j];
+            const b = needle[j];
+            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+            const bl = if (b >= 'A' and b <= 'Z') b + 32 else b;
+            if (al != bl) { ok = false; break; }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
 
 /// Stats passed from main application to UI
 pub const RenderStats = struct {

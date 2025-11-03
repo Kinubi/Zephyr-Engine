@@ -284,7 +284,51 @@ pub const UILayer = struct {
                     Gizmo.cancelDrag();
                     evt.markHandled();
                 }
+
+                // Forward key down to ImGui so ImGui_IsKeyPressed and InputText flags work
+                const io = c.ImGui_GetIO();
+                if (io) |i| {
+                    var maybe_key: ?c.ImGuiKey = null;
+                    switch (evt.data.KeyPressed.key) {
+                        c.GLFW_KEY_ENTER => maybe_key = c.ImGuiKey_Enter,
+                        c.GLFW_KEY_KP_ENTER => maybe_key = c.ImGuiKey_KeypadEnter,
+                        c.GLFW_KEY_UP => maybe_key = c.ImGuiKey_UpArrow,
+                        c.GLFW_KEY_DOWN => maybe_key = c.ImGuiKey_DownArrow,
+                        c.GLFW_KEY_LEFT => maybe_key = c.ImGuiKey_LeftArrow,
+                        c.GLFW_KEY_RIGHT => maybe_key = c.ImGuiKey_RightArrow,
+                        c.GLFW_KEY_TAB => maybe_key = c.ImGuiKey_Tab,
+                        c.GLFW_KEY_BACKSPACE => maybe_key = c.ImGuiKey_Backspace,
+                        c.GLFW_KEY_DELETE => maybe_key = c.ImGuiKey_Delete,
+                        else => maybe_key = null,
+                    }
+                    if (maybe_key) |mk| {
+                        c.ImGuiIO_AddKeyEvent(i, mk, true);
+                    }
+                }
             },
+            .KeyReleased => {
+                // Forward key up events to ImGui
+                const io = c.ImGui_GetIO();
+                if (io) |i| {
+                    var maybe_key: ?c.ImGuiKey = null;
+                    switch (evt.data.KeyReleased.key) {
+                        c.GLFW_KEY_ENTER => maybe_key = c.ImGuiKey_Enter,
+                        c.GLFW_KEY_KP_ENTER => maybe_key = c.ImGuiKey_KeypadEnter,
+                        c.GLFW_KEY_UP => maybe_key = c.ImGuiKey_UpArrow,
+                        c.GLFW_KEY_DOWN => maybe_key = c.ImGuiKey_DownArrow,
+                        c.GLFW_KEY_LEFT => maybe_key = c.ImGuiKey_LeftArrow,
+                        c.GLFW_KEY_RIGHT => maybe_key = c.ImGuiKey_RightArrow,
+                        c.GLFW_KEY_TAB => maybe_key = c.ImGuiKey_Tab,
+                        c.GLFW_KEY_BACKSPACE => maybe_key = c.ImGuiKey_Backspace,
+                        c.GLFW_KEY_DELETE => maybe_key = c.ImGuiKey_Delete,
+                        else => maybe_key = null,
+                    }
+                    if (maybe_key) |mk| {
+                        c.ImGuiIO_AddKeyEvent(i, mk, false);
+                    }
+                }
+            },
+
             .KeyTyped => {
                 // Forward Unicode codepoint to ImGui as UTF-8 characters
                 const cp = evt.data.KeyTyped.codepoint;

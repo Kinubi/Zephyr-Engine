@@ -164,8 +164,8 @@ pub const App = struct {
         log(.INFO, "app", "Initializing engine core systems...", .{});
         self.engine = try zephyr.Engine.init(self.allocator, .{
             .window = .{
-                .width = 1280,
-                .height = 720,
+                .width = 2560,
+                .height = 1440,
                 .title = "Zephyr Editor",
             },
             .enable_validation = false,
