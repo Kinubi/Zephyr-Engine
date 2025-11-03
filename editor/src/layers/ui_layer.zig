@@ -34,6 +34,7 @@ pub const UILayer = struct {
     camera: *Camera,
     camera_controller: *KeyboardMovementController,
     show_ui: bool = true,
+    show_ui_panels: bool = true, // Hide all panels except viewport when false
     current_fps: f32 = 0.0,
 
     // LDR tonemapped viewport texture for UI display (per-frame)
@@ -167,8 +168,13 @@ pub const UILayer = struct {
             .scene = self.scene,
         };
 
-        // Render UI widgets (except scene hierarchy)
-        self.ui_renderer.render(stats);
+        // Render UI viewport (always visible)
+        self.ui_renderer.render();
+
+        // Render UI panels (conditionally hidden with F1)
+        if (self.show_ui_panels) {
+            self.ui_renderer.renderPanels(stats);
+        }
 
         // Draw overlays (gizmo) and give the gizmo a chance to consume mouse clicks
         const gizmo_consumed: bool = self.ui_renderer.renderSelectionOverlay(self.scene, self.camera);
@@ -215,8 +221,9 @@ pub const UILayer = struct {
         }
 
         // Now render the scene hierarchy so the new selection is visible immediately
-
-        self.ui_renderer.renderHierarchy(self.scene);
+        if (self.show_ui_panels) {
+            self.ui_renderer.renderHierarchy(self.scene);
+        }
 
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {
@@ -260,7 +267,7 @@ pub const UILayer = struct {
             .KeyPressed => {
                 // Use glfw key constants from imgui_c (c.GLFW_KEY_*) for clarity
                 if (evt.data.KeyPressed.key == c.GLFW_KEY_F1) {
-                    self.show_ui = !self.show_ui;
+                    self.show_ui_panels = !self.show_ui_panels;
                     evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_F2) {
                     // Toggle performance graphs

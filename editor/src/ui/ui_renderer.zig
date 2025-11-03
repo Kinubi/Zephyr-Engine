@@ -90,7 +90,7 @@ pub const UIRenderer = struct {
     }
 
     /// Render all UI windows
-    pub fn render(self: *UIRenderer, stats: RenderStats) void {
+    pub fn render(self: *UIRenderer) void {
         // Note: Dockspace disabled - requires ImGui docking branch
         // For now, windows will be regular floating windows
 
@@ -131,7 +131,14 @@ pub const UIRenderer = struct {
         self.viewport_draw_list = null;
 
         // Transparent viewport window in the center
-        const viewport_flags = c.ImGuiWindowFlags_NoBackground | c.ImGuiWindowFlags_NoScrollbar;
+        const viewport_flags = c.ImGuiWindowFlags_NoBackground |
+            c.ImGuiWindowFlags_NoScrollbar |
+            c.ImGuiWindowFlags_NoTitleBar;
+
+        // Remove border from viewport window
+        c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowBorderSize, 0.0);
+        c.ImGui_PushStyleVarImVec2(c.ImGuiStyleVar_WindowPadding, .{ .x = 0, .y = 0 });
+
         _ = c.ImGui_Begin("Viewport", null, viewport_flags);
         // Record viewport position/size so other layers (picking, overlays) can use it
         // IMPORTANT: Use content region (excludes title bar) for accurate mouse picking
@@ -158,6 +165,14 @@ pub const UIRenderer = struct {
         }
         c.ImGui_End();
 
+        // Pop style variables
+        c.ImGui_PopStyleVar();
+        c.ImGui_PopStyleVar();
+    }
+
+    /// Render UI panels (stats, camera, performance, asset browser)
+    /// Separated so it can be conditionally hidden with F1
+    pub fn renderPanels(self: *UIRenderer, stats: RenderStats) void {
         if (self.show_stats_window) {
             self.renderStatsWindow(stats);
         }
@@ -173,8 +188,6 @@ pub const UIRenderer = struct {
         if (self.show_asset_browser) {
             self.asset_browser_panel.render();
         }
-
-        // NOTE: scene hierarchy is rendered by the caller after any picking logic
     }
 
     /// Render only the scene hierarchy (used by caller to render after picking)
