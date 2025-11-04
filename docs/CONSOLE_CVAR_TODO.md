@@ -77,11 +77,17 @@ pub const ConsolePanel = struct {
 ```
 
 #### Task 0.2: Command History
-- [ ] Implement circular buffer for command history (64 commands)
-- [ ] Up/Down arrow keys to navigate history
-- [ ] Persistent history saved to `console_history.txt`
-- [ ] Duplicate commands not added consecutively
-- [ ] Ctrl+R for reverse search in history
+ - [x] Implement circular buffer for command history (fixed-size ring)
+ - [x] Up/Down arrow keys to navigate history
+ - [x] Persistent history saved to `cache/console_history.txt`
+ - [x] Duplicate commands not added consecutively
+ - [ ] Ctrl+R for reverse search in history
+
+> Note: Ctrl+R reverse-search implemented. On some platforms GLFW may not report modifier bits reliably; the editor now falls back to ImGui's KeyCtrl state to trigger reverse-search when the scripting console is open.
+
+ - [x] Ctrl+R for reverse search in history (fallback to ImGui.KeyCtrl when GLFW mods unreliable)
+
+> Implementation notes: History is implemented in `editor/src/ui/ui_renderer.zig` using a fixed-size ring buffer (32 entries). History is loaded from `cache/console_history.txt` on init and written back on deinit. Up/Down navigation, duplicate suppression, and a focus fix so the input keeps focus while navigating have been implemented.
 
 ```zig
 pub const CommandHistory = struct {
@@ -100,10 +106,10 @@ pub const CommandHistory = struct {
 ```
 
 #### Task 0.3: Lua REPL Integration
-- [ ] Pass commands to Lua interpreter
-- [ ] Capture stdout/stderr from Lua execution
+- [x] Pass commands to Lua interpreter
+- [x] Capture stdout/stderr from Lua execution
 - [ ] Pretty-print Lua results (tables, functions, etc.)
-- [ ] Handle Lua errors gracefully with stack traces
+- [x] Handle Lua errors gracefully with stack traces
 - [ ] Support multi-line input (shift+enter)
 
 ```zig
@@ -115,19 +121,12 @@ pub fn executeLuaCommand(self: *ConsolePanel, lua_state: *lua.State, command: []
 ```
 
 #### Task 0.4: Output Formatting
-- [ ] Color-coded messages (info=white, warning=yellow, error=red, command=green)
-- [ ] Optional timestamps for each message
 - [ ] Word wrap for long lines
 - [ ] Clickable file:line links (for errors)
 - [ ] Collapsible multi-line output
 - [ ] Copy output to clipboard
 
-#### Task 0.5: Console Integration with UIRenderer
-- [ ] Add `ConsolePanel` to `UIRenderer`
-- [ ] Toggle with ` key (backtick/tilde)
-- [ ] Render as overlay or dockable panel
-- [ ] Focus input when opened
-- [ ] Capture keyboard input when active
+
 
 **File**: `editor/src/ui/ui_renderer.zig`
 

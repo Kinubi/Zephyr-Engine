@@ -28,6 +28,10 @@ pub const ImGuiContext = struct {
         io.*.ConfigFlags |= c.ImGuiConfigFlags_NavEnableKeyboard;
         // Note: Docking may not be available in all ImGui builds
         io.*.ConfigFlags |= c.ImGuiConfigFlags_DockingEnable;
+        // Only allow moving windows from their title bar to avoid dragging panels from content areas
+        io.*.ConfigWindowsMoveFromTitleBarOnly = true;
+        // Require holding SHIFT to start docking/undocking, avoids accidental drags from content
+        io.*.ConfigDockingWithShift = true;
 
         // Setup Dear ImGui style
         c.ImGui_StyleColorsDark(null);

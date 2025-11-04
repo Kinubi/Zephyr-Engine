@@ -17,7 +17,7 @@ const GraphicsContext = zephyr.GraphicsContext;
 const vk = @import("vulkan");
 const Scene = zephyr.Scene;
 const Camera = zephyr.Camera;
-const KeyboardMovementController = @import("../keyboard_movement_controller.zig").KeyboardMovementController;
+const CameraController = zephyr.CameraController;
 const c = @import("../ui/backend/imgui_c.zig").c;
 const Gizmo = @import("../ui/gizmo.zig").Gizmo;
 const MAX_FRAMES_IN_FLIGHT = zephyr.MAX_FRAMES_IN_FLIGHT;
@@ -32,7 +32,7 @@ pub const UILayer = struct {
     swapchain: *Swapchain,
     scene: *Scene,
     camera: *Camera,
-    camera_controller: *KeyboardMovementController,
+    camera_controller: *CameraController,
     show_ui: bool = true,
     show_ui_panels: bool = true, // Hide all panels except viewport when false
     current_fps: f32 = 0.0,
@@ -50,7 +50,7 @@ pub const UILayer = struct {
         swapchain: *Swapchain,
         scene: *Scene,
         camera: *Camera,
-        camera_controller: *KeyboardMovementController,
+        camera_controller: *CameraController,
     ) UILayer {
         return .{
             .base = .{
@@ -165,6 +165,17 @@ pub const UILayer = struct {
         // Render UI viewport (always visible)
         self.ui_renderer.render();
 
+        // Publish UI capture state for engine layers (base→overlays dispatch means
+        // SceneLayer has already seen events this frame; still, this keeps a stable
+        // per-frame signal for gating scene input like toggles and camera control).
+        const io_after = c.ImGui_GetIO();
+        var want_kb_after: bool = false;
+        var want_mouse_after: bool = false;
+        if (io_after) |i| {
+            want_kb_after = i.*.WantCaptureKeyboard;
+            want_mouse_after = i.*.WantCaptureMouse;
+        }
+
         // Render UI panels (conditionally hidden with F1)
         if (self.show_ui_panels) {
             self.ui_renderer.renderPanels(stats);
@@ -259,34 +270,61 @@ pub const UILayer = struct {
 
         switch (evt.event_type) {
             .KeyPressed => {
+                // Determine whether UI panels should consume keyboard input.
+                // We prefer the engine to receive input when the viewport is focused.
+                const io = c.ImGui_GetIO();
+                var want_kb: bool = false;
+                if (io) |i| want_kb = i.*.WantCaptureKeyboard else want_kb = false;
+                // Prefer explicit console focus; fall back to ImGui's global capture flag when
+                // the viewport is not focused. This avoids a 1-frame delay when focus changes.
+                const panels_consumes = self.ui_renderer.console_input_active or (want_kb and !self.ui_renderer.viewport_focused);
+
                 // Use glfw key constants from imgui_c (c.GLFW_KEY_*) for clarity
                 if (evt.data.KeyPressed.key == c.GLFW_KEY_F1) {
                     self.show_ui_panels = !self.show_ui_panels;
+                    // Always handle the F1 toggle (global UI toggle)
                     evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_GRAVE_ACCENT) {
                     // Toggle scripting console with ` (backtick/tilde) key
                     self.ui_renderer.show_scripting_console = !self.ui_renderer.show_scripting_console;
+                    // Always handle console toggle
                     evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_F2) {
                     // Toggle performance graphs
                     self.ui_renderer.show_performance_graphs = !self.ui_renderer.show_performance_graphs;
-                    evt.markHandled();
+                    if (panels_consumes) evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_G) {
                     Gizmo.setTool(Gizmo.Tool.Translate);
-                    evt.markHandled();
+                    if (panels_consumes) evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_R) {
-                    Gizmo.setTool(Gizmo.Tool.Rotate);
-                    evt.markHandled();
+                    // Check modifiers and ImGui's KeyCtrl as a fallback so Ctrl+R
+                    // triggers reverse-search even on platforms where GLFW mods
+                    // may be unreliable.
+                    const mods = evt.data.KeyPressed.mods;
+                    var key_ctrl: bool = false;
+                    if (io) |i| key_ctrl = i.*.KeyCtrl else key_ctrl = false;
+
+                    if ((mods & c.GLFW_MOD_CONTROL) != 0 and self.ui_renderer.show_scripting_console) {
+                        self.ui_renderer.reverse_search_requested = true;
+                        if (panels_consumes) evt.markHandled();
+                    } else if (key_ctrl and self.ui_renderer.show_scripting_console) {
+                        // Some platforms/input methods may not set the GLFW mods
+                        // bitmask reliably; fall back to ImGui's KeyCtrl state.
+                        self.ui_renderer.reverse_search_requested = true;
+                        if (panels_consumes) evt.markHandled();
+                    } else {
+                        Gizmo.setTool(Gizmo.Tool.Rotate);
+                        if (panels_consumes) evt.markHandled();
+                    }
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_S) {
                     Gizmo.setTool(Gizmo.Tool.Scale);
-                    evt.markHandled();
+                    if (panels_consumes) evt.markHandled();
                 } else if (evt.data.KeyPressed.key == c.GLFW_KEY_ESCAPE) {
                     Gizmo.cancelDrag();
-                    evt.markHandled();
+                    if (panels_consumes) evt.markHandled();
                 }
 
                 // Forward key down to ImGui so ImGui_IsKeyPressed and InputText flags work
-                const io = c.ImGui_GetIO();
                 if (io) |i| {
                     var maybe_key: ?c.ImGuiKey = null;
                     switch (evt.data.KeyPressed.key) {
@@ -304,11 +342,16 @@ pub const UILayer = struct {
                     if (maybe_key) |mk| {
                         c.ImGuiIO_AddKeyEvent(i, mk, true);
                     }
+                    // If panels (e.g., console) are focused, consume all key presses
+                    if (panels_consumes) evt.markHandled();
                 }
             },
             .KeyReleased => {
-                // Forward key up events to ImGui
+                // Forward key up events to ImGui and consume if panels are focused
                 const io = c.ImGui_GetIO();
+                var want_kb: bool = false;
+                if (io) |i| want_kb = i.*.WantCaptureKeyboard else want_kb = false;
+                const panels_consumes = self.ui_renderer.console_input_active or (want_kb and !self.ui_renderer.viewport_focused);
                 if (io) |i| {
                     var maybe_key: ?c.ImGuiKey = null;
                     switch (evt.data.KeyReleased.key) {
@@ -326,11 +369,20 @@ pub const UILayer = struct {
                     if (maybe_key) |mk| {
                         c.ImGuiIO_AddKeyEvent(i, mk, false);
                     }
+                    if (panels_consumes) evt.markHandled();
                 }
             },
-
             .KeyTyped => {
-                // Forward Unicode codepoint to ImGui as UTF-8 characters
+                // Forward character input to ImGui
+                const io = c.ImGui_GetIO();
+                var want_kb: bool = false;
+                if (io) |i| want_kb = i.*.WantCaptureKeyboard else want_kb = false;
+                const panels_consumes = self.ui_renderer.console_input_active or (want_kb and !self.ui_renderer.viewport_focused);
+
+                // Forward Unicode codepoint to ImGui as UTF-8 characters. Only
+                // mark the event handled if UI panels are the active focus so
+                // typing in the viewport doesn't block engine input.
+
                 const cp = evt.data.KeyTyped.codepoint;
                 var buf: [5]u8 = undefined; // up to 4 bytes + null
                 var len: usize = 0;
@@ -354,11 +406,21 @@ pub const UILayer = struct {
                     len = 4;
                 }
                 buf[len] = 0;
-                const io = c.ImGui_GetIO();
+
                 if (io) |i| {
                     c.ImGuiIO_AddInputCharactersUTF8(i, buf[0..len].ptr);
-                    evt.markHandled();
+                    if (panels_consumes) evt.markHandled();
                 }
+            },
+
+            .MouseButtonPressed, .MouseButtonReleased, .MouseMoved, .MouseScrolled => {
+                // When panels (e.g., console) are focused, consume mouse events so the
+                // camera/controller doesn't activate mouselook or scroll zoom.
+                const io = c.ImGui_GetIO();
+                var want_mouse: bool = false;
+                if (io) |i| want_mouse = i.*.WantCaptureMouse else want_mouse = false;
+                const panels_consumes = want_mouse and !self.ui_renderer.viewport_focused;
+                if (panels_consumes) evt.markHandled();
             },
             else => {},
         }

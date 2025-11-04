@@ -36,6 +36,7 @@ pub const Descriptors = @import("core/descriptors.zig");
 
 // ========== Rendering ==========
 pub const Camera = @import("rendering/camera.zig").Camera;
+pub const CameraController = @import("input/camera_controller.zig").CameraController;
 pub const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
 pub const GlobalUbo = FrameInfo.GlobalUbo;
 pub const GlobalUboSet = @import("rendering/ubo_set.zig").GlobalUboSet;

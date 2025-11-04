@@ -74,6 +74,9 @@ pub fn executeLuaBuffer(allocator: std.mem.Allocator, state: *anyopaque, buf: []
         var msg_len: usize = 0;
         const msg = c.lua_tolstring(L, -1, &msg_len);
         if (msg == null) {
+            // Clear any leftover stack items to avoid leaking errors into
+            // subsequent executions.
+            _ = c.lua_settop(L, 0);
             return ExecuteResult{ .success = false, .message = "" };
         }
         // allocate +1 so we can NUL-terminate the copied message for safety
@@ -81,6 +84,9 @@ pub fn executeLuaBuffer(allocator: std.mem.Allocator, state: *anyopaque, buf: []
         const msg_ptr: [*]const u8 = @ptrCast(msg);
         std.mem.copyForwards(u8, out[0..msg_len], msg_ptr[0..msg_len]);
         out[msg_len] = 0;
+        // Pop the error message from the stack so it doesn't remain for
+        // subsequent calls.
+        _ = c.lua_settop(L, 0);
         return ExecuteResult{ .success = false, .message = out[0..msg_len] };
     }
 
@@ -90,12 +96,15 @@ pub fn executeLuaBuffer(allocator: std.mem.Allocator, state: *anyopaque, buf: []
         var msg_len2: usize = 0;
         const msg = c.lua_tolstring(L, -1, &msg_len2);
         if (msg == null) {
+            _ = c.lua_settop(L, 0);
             return ExecuteResult{ .success = false, .message = "" };
         }
         const out = try allocator.alloc(u8, msg_len2 + 1);
         const msg_ptr2: [*]const u8 = @ptrCast(msg);
         std.mem.copyForwards(u8, out[0..msg_len2], msg_ptr2[0..msg_len2]);
         out[msg_len2] = 0;
+        // Clear the stack so the error string doesn't persist.
+        _ = c.lua_settop(L, 0);
         return ExecuteResult{ .success = false, .message = out[0..msg_len2] };
     }
 
@@ -106,12 +115,15 @@ pub fn executeLuaBuffer(allocator: std.mem.Allocator, state: *anyopaque, buf: []
         var msg_len3: usize = 0;
         const msg = c.lua_tolstring(L, -1, &msg_len3);
         if (msg == null) {
+            _ = c.lua_settop(L, 0);
             return ExecuteResult{ .success = true, .message = "" };
         }
         const out = try allocator.alloc(u8, msg_len3 + 1);
         const msg_ptr3: [*]const u8 = @ptrCast(msg);
         std.mem.copyForwards(u8, out[0..msg_len3], msg_ptr3[0..msg_len3]);
         out[msg_len3] = 0;
+        // Pop any return values to leave the lua_State clean for the next call.
+        _ = c.lua_settop(L, 0);
         return ExecuteResult{ .success = true, .message = out[0..msg_len3] };
     }
 
@@ -165,33 +177,6 @@ fn l_translate_entity(L: ?*c.lua_State) callconv(.c) c_int {
     }
 
     return 0; // no return values
-}
-
-// Create a light-weight Lua userdata type for engine entities with methods
-fn l_entity_translate_method(L: ?*c.lua_State) callconv(.c) c_int {
-    const Lnon = L orelse return 0;
-    // Expect: self (userdata), dx, dy, dz
-    const ud = c.luaL_checkudata(Lnon, 1, "ZephyrEntity");
-    if (ud == null) return 0;
-    const ent_ptr: *u32 = @ptrCast(@alignCast(ud));
-    const ent_u32: u32 = ent_ptr.*;
-    const dx = c.luaL_checknumber(Lnon, 2);
-    const dy = c.luaL_checknumber(Lnon, 3);
-    const dz = c.luaL_checknumber(Lnon, 4);
-
-    // Get scene pointer from global
-    _ = c.lua_getglobal(Lnon, "zephyr_user_ctx");
-    const scene_ptr_any = c.lua_touserdata(Lnon, -1);
-    if (scene_ptr_any == null) return 0;
-    const scene: *Scene = @ptrCast(@alignCast(scene_ptr_any.?));
-
-    const ent: EntityId = @enumFromInt(ent_u32);
-    if (scene.ecs_world.get(Transform, ent)) |t| {
-        const delta = Vec3.init(@floatCast(dx), @floatCast(dy), @floatCast(dz));
-        t.translate(delta);
-    }
-
-    return 0;
 }
 
 fn l_engine_entity(L: ?*c.lua_State) callconv(.c) c_int {
