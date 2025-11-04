@@ -214,7 +214,7 @@ pub const UIRenderer = struct {
             c.ImGuiWindowFlags_NoTitleBar | c.ImGuiWindowFlags_NoCollapse |
             c.ImGuiWindowFlags_NoResize | c.ImGuiWindowFlags_NoMove |
             c.ImGuiWindowFlags_NoBringToFrontOnFocus | c.ImGuiWindowFlags_NoNavFocus |
-            c.ImGuiWindowFlags_NoBackground; // Transparent background for dockspace host
+            c.ImGuiWindowFlags_NoBackground;
 
         c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowRounding, 0.0);
         c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowBorderSize, 0.0);
@@ -235,10 +235,7 @@ pub const UIRenderer = struct {
 
         // Borderless, transparent 3D viewport window
         const viewport_flags = c.ImGuiWindowFlags_NoBackground |
-            c.ImGuiWindowFlags_NoScrollbar |
-            c.ImGuiWindowFlags_NoTitleBar |
-            c.ImGuiWindowFlags_NoMove;
-
+            c.ImGuiWindowFlags_NoScrollbar;
         c.ImGui_PushStyleVar(c.ImGuiStyleVar_WindowBorderSize, 0.0);
         c.ImGui_PushStyleVarImVec2(c.ImGuiStyleVar_WindowPadding, .{ .x = 0, .y = 0 });
 
@@ -783,49 +780,64 @@ pub const UIRenderer = struct {
                 // Also log the command into the engine logs so it appears in the logs area
                 log(.INFO, "console", "{s}", .{cmd});
 
-                // Execute via Lua if available
-                if (stats.scene) |scene_ptr| {
-                    const sys = &scene_ptr.scripting_system;
-                    if (sys.runner.state_pool) |sp| {
-                        const ls = sp.acquire();
-                        const exec_res = lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr)) catch {
-                            // Execution failed at the API level (allocation etc.). Log
-                            // an error to the engine console but do not store this in
-                            // the command history.
-                            log(.ERROR, "console", "(execute error)", .{});
-                            sp.release(ls);
-                            return;
-                        };
-                        if (exec_res.message.len > 0) {
-                            // Log Lua return values or error messages to the engine
-                            // console so they're visible in the logs, but avoid
-                            // duplicating messages that were already emitted by
-                            // the Lua `print` override (which logs with section
-                            // "lua"). If the most recent log is from "lua" and
-                            // has the same message contents, skip echoing it here.
-                            var skip_log: bool = false;
-                            var recent: [8]zephyr.LogOut = undefined;
-                            const recent_n = zephyr.fetchLogs(recent[0..]);
-                            if (recent_n > 0) {
-                                const last = recent[recent_n - 1];
-                                // Compare section == "lua" and message contents
-                                const lua_sec = "lua";
-                                if (last.section_len == lua_sec.len and std.mem.eql(u8, last.section[0..last.section_len], lua_sec)) {
-                                    if (last.message_len == exec_res.message.len and std.mem.eql(u8, last.message[0..last.message_len], exec_res.message)) {
-                                        skip_log = true;
+                // Execute via Lua if available. Special-case a small runtime
+                // test command `test_input_capture` which verifies whether
+                // the console currently has focus and whether ImGui wants
+                // to capture keyboard input. This helps validate that the
+                // UI is correctly consuming keyboard events when the
+                // console is active.
+                if (std.mem.eql(u8, cmd, "test_input_capture")) {
+                    const io = c.ImGui_GetIO();
+                    var want_cap = false;
+                    if (io) |io_ptr| want_cap = io_ptr.*.WantCaptureKeyboard;
+                    log(.INFO, "console", "test_input_capture: console_input_active={s} want_capture_keyboard={s}", .{
+                        if (self.console_input_active) "true" else "false",
+                        if (want_cap) "true" else "false",
+                    });
+                } else {
+                    if (stats.scene) |scene_ptr| {
+                        const sys = &scene_ptr.scripting_system;
+                        if (sys.runner.state_pool) |sp| {
+                            const ls = sp.acquire();
+                            const exec_res = lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr)) catch {
+                                // Execution failed at the API level (allocation etc.). Log
+                                // an error to the engine console but do not store this in
+                                // the command history.
+                                log(.ERROR, "console", "(execute error)", .{});
+                                sp.release(ls);
+                                return;
+                            };
+                            if (exec_res.message.len > 0) {
+                                // Log Lua return values or error messages to the engine
+                                // console so they're visible in the logs, but avoid
+                                // duplicating messages that were already emitted by
+                                // the Lua `print` override (which logs with section
+                                // "lua"). If the most recent log is from "lua" and
+                                // has the same message contents, skip echoing it here.
+                                var skip_log: bool = false;
+                                var recent: [8]zephyr.LogOut = undefined;
+                                const recent_n = zephyr.fetchLogs(recent[0..]);
+                                if (recent_n > 0) {
+                                    const last = recent[recent_n - 1];
+                                    // Compare section == "lua" and message contents
+                                    const lua_sec = "lua";
+                                    if (last.section_len == lua_sec.len and std.mem.eql(u8, last.section[0..last.section_len], lua_sec)) {
+                                        if (last.message_len == exec_res.message.len and std.mem.eql(u8, last.message[0..last.message_len], exec_res.message)) {
+                                            skip_log = true;
+                                        }
                                     }
                                 }
+                                if (!skip_log) {
+                                    log(.INFO, "console", "{s}", .{exec_res.message});
+                                }
                             }
-                            if (!skip_log) {
-                                log(.INFO, "console", "{s}", .{exec_res.message});
-                            }
+                            sp.release(ls);
+                        } else {
+                            log(.WARN, "console", "(no lua state pool - cannot run synchronously)", .{});
                         }
-                        sp.release(ls);
                     } else {
-                        log(.WARN, "console", "(no lua state pool - cannot run synchronously)", .{});
+                        log(.WARN, "console", "(no scene available)", .{});
                     }
-                } else {
-                    log(.WARN, "console", "(no scene available)", .{});
                 }
 
                 // Clear input buffer after running
