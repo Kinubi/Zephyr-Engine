@@ -22,6 +22,10 @@ const LightSystem = ecs.LightSystem;
 
 const MAX_LIGHTS = 16;
 
+// TODO: SIMPLIFY RENDER PASS - Remove texture/buffer update checks
+// TODO: Move resource management logic to ResourceBinder
+// TODO: Use named resource binding: bindBuffer("LightBuffer", light_buffer)
+
 /// Shader-compatible point light structure
 pub const ShaderPointLight = extern struct {
     position: [4]f32 = [4]f32{ 0, 0, 0, 1 },

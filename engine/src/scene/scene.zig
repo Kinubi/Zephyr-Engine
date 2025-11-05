@@ -273,7 +273,19 @@ pub const Scene = struct {
         } else {
             log(.INFO, "scene", "Spawning empty object", .{});
         }
-        // TODO: Store name in a Name component
+        // TODO(MAINTENANCE): Store name in Name component - LOW PRIORITY
+        // Currently scene.entities ArrayList stores entity IDs separately from ECS
+        // This is inconsistent with ECS architecture.
+        //
+        // Required changes:
+        // - Add engine/src/ecs/components/name.zig with Name component
+        // - Remove scene.entities ArrayList
+        // - Query Name component for entity lookups
+        // - Export Name component in engine/src/ecs.zig
+        //
+        // Benefits: More consistent ECS architecture, easier entity queries by name
+        // Complexity: LOW - simple component addition
+        // Branch: maintenance (simple refactor)
 
         const entity = try self.ecs_world.createEntity();
         try self.entities.append(self.allocator, entity);
@@ -330,16 +342,30 @@ pub const Scene = struct {
         return &self.game_objects.items[last_index];
     }
 
-    /// Spawn a point light (as empty object for now, will add Light component later)
+    /// Spawn a point light
     pub fn spawnLight(
         self: *Scene,
-        _: Vec3, // color - reserved for future Light component
-        _: f32, // intensity - reserved for future Light component
+        color: Vec3,
+        intensity: f32,
     ) !*GameObject {
-        log(.INFO, "scene", "Spawning light (Light component not yet implemented)", .{});
+        log(.INFO, "scene", "Spawning point light", .{});
 
-        // For now, just create an empty object with Transform
-        // TODO: Add Light component when implemented
+        // TODO(MAINTENANCE): USE PointLight COMPONENT - MEDIUM PRIORITY
+        // PointLight component already exists (engine/src/ecs/components/point_light.zig)
+        // This function should create entity with (Transform + PointLight) components
+        // Currently just creates empty object - needs to actually add PointLight component
+        //
+        // Required changes:
+        // - Import PointLight from engine/src/ecs/components/point_light.zig
+        // - Create PointLight component with provided color and intensity
+        // - Call ecs_world.emplace(PointLight, entity, point_light)
+        // - Ensure PointLight is exported in engine/src/ecs.zig
+        //
+        // Benefits: Lights properly integrated in ECS, can be queried by systems
+        // Complexity: LOW - just add component instantiation
+        // Branch: maintenance
+        _ = color;
+        _ = intensity;
         const light_obj = try self.spawnEmpty("light");
         return light_obj;
     }

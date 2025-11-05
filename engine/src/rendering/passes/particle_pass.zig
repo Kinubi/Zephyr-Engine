@@ -28,6 +28,9 @@ const ParticleComponent = ecs.ParticleComponent;
 // Global UBO
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update checks
+// TODO: Use named resource binding: bindStorageBuffer("ParticleData", particle_buffer)
+
 /// Particle rendering pass
 /// Renders particles computed by ParticleComputePass
 pub const ParticlePass = struct {

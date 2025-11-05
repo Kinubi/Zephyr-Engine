@@ -6,6 +6,12 @@ const glsl_compiler = @import("glsl_compiler.zig");
 // Native shader compiler using SPIRV-Cross
 // Supports GLSL -> SPIR-V and HLSL -> SPIR-V compilation with reflection
 
+// TODO(FEATURE): AUTOMATIC SHADER VARIANT GENERATION - MEDIUM PRIORITY
+// Currently: monolithic shaders with runtime branches (slow), duplicated code for variants
+// Required: Add permutation system (#pragma variant SHADOWS (ON,OFF)), auto-generate 2^N variants
+// Files: shader_compiler.zig (permutation gen), unified_pipeline_system.zig (variant selection)
+// Branch: features/shader-variants
+
 pub const ShaderStage = enum {
     vertex,
     fragment,

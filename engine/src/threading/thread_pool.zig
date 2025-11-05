@@ -323,6 +323,51 @@ pub const SubsystemConfig = struct {
 };
 
 /// Enhanced ThreadPool with dynamic worker allocation
+///
+/// TODO(FEATURE): WORK-STEALING JOB QUEUE - MEDIUM PRIORITY
+/// Current ThreadPool uses mutex-based priority queues. Add work-stealing for better load balancing.
+///
+/// Current issues:
+/// - Mutex contention on queue push/pop (bottleneck at high concurrency)
+/// - Uneven work distribution (some workers idle while others busy)
+/// - Priority inversion (high-priority work stuck behind mutex)
+///
+/// Work-stealing design:
+/// - Per-worker deque (double-ended queue)
+/// - Owner pushes/pops from tail (lock-free)
+/// - Stealers pop from head (lock-free CAS)
+/// - Idle workers steal from random busy workers
+///
+/// Required changes:
+/// - Add engine/src/threading/work_stealing_queue.zig
+/// - Replace WorkQueue with per-worker deques in ThreadPool
+/// - Update worker loop to check local queue first, then steal
+///
+/// Benefits: Lower contention, better load balancing, higher throughput
+/// Complexity: MEDIUM - lock-free data structures + steal logic
+/// Branch: features/work-stealing
+///
+/// TODO(FEATURE): FIBER-BASED JOB SYSTEM - LOW PRIORITY
+/// Add fiber support for lightweight tasks and cooperative scheduling.
+///
+/// Current issues:
+/// - Thread pool workers block on sync primitives (wasted CPU)
+/// - Cannot suspend job mid-execution (e.g., wait for asset)
+/// - Limited parallelism (8 workers max)
+///
+/// Fiber features:
+/// - Lightweight context switching (no kernel involvement)
+/// - Suspend on resource wait, resume when ready
+/// - Thousands of fibers per worker thread
+///
+/// Required changes:
+/// - Add engine/src/threading/fiber.zig
+/// - Add fiber scheduler to ThreadPool
+/// - Update async operations to use fibers
+///
+/// Benefits: Higher CPU utilization, more parallelism, simpler async code
+/// Complexity: HIGH - assembly for context switching + scheduler
+/// Branch: features/fiber-system
 pub const ThreadPool = struct {
     // Core configuration
     allocator: std.mem.Allocator,

@@ -178,6 +178,49 @@ pub const FallbackAssets = struct {
 };
 
 /// Enhanced Asset Manager with priority-based loading and improved thread pool integration
+///
+/// TODO(FEATURE): IMPLEMENT ASSET STREAMING SYSTEM - HIGH PRIORITY
+/// Currently all assets loaded at scene start (blocking). Need progressive streaming.
+///
+/// Required features:
+/// 1. Distance-based prioritization (load near objects first)
+/// 2. LOD chain loading (low-res placeholder → medium → high-res)
+/// 3. Memory budget enforcement with LRU eviction (evict distant assets)
+/// 4. Frame time budgeting (max 2ms loading per frame)
+/// 5. Persistent cache across runs (serialize loaded assets)
+///
+/// Required changes:
+/// - Add streaming scheduler (queries camera position, calculates priorities)
+/// - Add asset eviction system (LRU cache, tracks access times)
+/// - Modify asset_loader.zig for progressive loading states
+/// - Add scene.zig integration (query visible entities by distance)
+///
+/// Benefits: Faster startup, large worlds, predictable memory, no hitches
+/// Complexity: HIGH - new subsystems + asset pipeline changes
+/// Branch: features/asset-streaming
+///
+/// TODO(MAINTENANCE): COMPREHENSIVE ASSET VALIDATION - MEDIUM PRIORITY
+/// Add validation pipeline to catch corrupted assets early.
+///
+/// Validation checks:
+/// - Meshes: NaN vertices, degenerate triangles, index bounds
+/// - Textures: Format support, dimension limits, mip chain consistency
+/// - Materials: Missing textures, invalid parameters
+/// - Shaders: SPIR-V validation, reflection data
+///
+/// Error recovery:
+/// - Use fallback assets for invalid data
+/// - Log detailed error reports (path, failure reason)
+/// - Add CVars: r.validateAssets, r.strictValidation
+///
+/// Required changes:
+/// - Add engine/src/assets/asset_validator.zig
+/// - Integrate validation in asset_loader.zig
+/// - Update mesh.zig, texture.zig with validation
+///
+/// Benefits: Fewer crashes, better error messages, easier debugging
+/// Complexity: MEDIUM - add validation hooks to existing loaders
+/// Branch: maintenance (can be done incrementally)
 pub const AssetManager = struct {
     // Core components
     registry: *AssetRegistry,

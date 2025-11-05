@@ -28,6 +28,9 @@ const LightSystem = ecs.LightSystem;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update checks
+// TODO: Use named resource binding: bindStorageBuffer("LightVolumes", light_volume_buffer)
+
 /// Light volume data for SSBO (matches shader struct)
 const LightVolumeData = extern struct {
     position: [4]f32,

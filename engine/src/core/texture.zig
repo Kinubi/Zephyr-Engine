@@ -6,6 +6,12 @@ const Buffer = @import("buffer.zig").Buffer;
 const log = @import("../utils/log.zig").log;
 const LogLevel = @import("../utils/log.zig").LogLevel;
 
+// TODO(FEATURE): ASYNC TEXTURE COMPRESSION & MIP GENERATION - MEDIUM PRIORITY
+// Currently: textures loaded without mipmaps, no compression, synchronous mip gen blocks loading
+// Required: Generate mipmaps on worker thread, BC7/BC5/BC4 compression, stream mips progressively
+// Files: texture.zig (async mip gen), asset_loader.zig (queue jobs), texture_compressor.zig (new)
+// Branch: features/texture-compression
+
 // Global ZSTBI state management
 var zstbi_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var zstbi_init_mutex: std.Thread.Mutex = .{};

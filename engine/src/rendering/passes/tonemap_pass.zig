@@ -15,6 +15,9 @@ const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update/check logic
+// TODO: Use named resource binding: bindTexture("HDRInput", hdr_texture)
+
 /// Final fullscreen tone mapping pass
 /// Reads HDR RGBA16F and writes the tone-mapped result into the LDR swapchain image
 pub const TonemapPass = struct {

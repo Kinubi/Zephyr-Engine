@@ -434,6 +434,26 @@ pub const RenderSystem = struct {
 
     /// Build caches from snapshot entities (single-threaded)
     /// Builds caches in the WRITE buffer at write_idx
+    ///
+    /// TODO(MAINTENANCE): IMPLEMENT MESH DEDUPLICATION FOR INSTANCING - HIGH PRIORITY
+    /// Currently creates one cache entry per mesh instance (no deduplication).
+    ///
+    /// Problem: 1000 identical trees = 1000 separate RasterizationData.RenderableObject entries
+    /// Solution: Group identical meshes, store instance data separately
+    ///
+    /// Required changes:
+    /// 1. Use HashMap to track unique mesh_ptr values
+    /// 2. For each unique mesh, build instance buffer (transforms + material_indices)
+    /// 3. Store in cache as: { mesh_ptr, instance_count, instance_buffer_offset }
+    /// 4. GeometryPass uses this to make single instanced draw call per unique mesh
+    ///
+    /// Data structure change:
+    /// Old: RenderableObject { transform, mesh_ptr, material_index } x 1000
+    /// New: InstancedRenderBatch { mesh_ptr, instance_count, instance_data_buffer } x 1
+    ///      where instance_data_buffer = [InstanceData { transform, material_index }] x 1000
+    ///
+    /// Complexity: HIGH - requires cache structure refactor + shader changes
+    /// Branch recommended: features/instanced-rendering (coordinate with geometry_pass.zig changes)
     fn buildCachesFromSnapshotSingleThreaded(
         self: *RenderSystem,
         entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
@@ -441,6 +461,7 @@ pub const RenderSystem = struct {
         write_idx: u8,
     ) !void {
         // Count total meshes
+        // TODO(INSTANCING): This will count unique meshes after deduplication
         var total_meshes: usize = 0;
         for (entities) |entity_data| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
@@ -448,6 +469,7 @@ pub const RenderSystem = struct {
         }
 
         // Allocate output arrays
+        // TODO(INSTANCING): Change RenderableObject to InstancedRenderBatch
         const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
         const geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
         const instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);

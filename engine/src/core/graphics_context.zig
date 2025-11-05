@@ -144,6 +144,11 @@ pub const GraphicsContext = struct {
                 }
             }
         }
+        // TODO(MAINTENANCE): ADD VULKAN VALIDATION ERROR HANDLING - MEDIUM PRIORITY
+        // Currently: validation layer enabled but errors only logged to console (easy to miss)
+        // Required: Add debug messenger callback, show errors in ImGui panel (red banner), CVar: r.breakOnValidationError
+        // Files: graphics_context.zig (debug messenger), editor UI (error panel)
+        // Branch: maintenance
         const instance_layers = &[_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
 
         var layer_count: u32 = 0;
@@ -365,7 +370,7 @@ pub const GraphicsContext = struct {
         // Also cleanup transfer pool
         self.transfer_pool_mutex.lock();
         defer self.transfer_pool_mutex.unlock();
-        
+
         index = 0;
         while (index < self.transfer_command_pools.items.len) : (index += 1) {
             if (self.transfer_command_pools.items[index].id == thread_id) {
@@ -439,7 +444,7 @@ pub const GraphicsContext = struct {
         self.vkd.cmdCopyBuffer(command_buffer, staging_buffer.buffer, dst, 1, @ptrCast(&region));
         // Submit and wait for transfer to complete
         try self.endTransferCommandBuffer(command_buffer);
-        
+
         // Now safe to deinit staging buffer since transfer queue has finished
         staging_buffer.deinit();
     }
@@ -1215,14 +1220,14 @@ fn createSurface(instance: vk.Instance, window: *c.GLFWwindow) !vk.SurfaceKHR {
 
 fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: DeviceCandidate) !vk.Device {
     const priority = [_]f32{1};
-    
+
     // Build queue create infos, accounting for potential aliasing
     var queue_create_infos = std.ArrayList(vk.DeviceQueueCreateInfo){};
     defer queue_create_infos.deinit(allocator);
-    
+
     var unique_families = std.ArrayList(u32){};
     defer unique_families.deinit(allocator);
-    
+
     // Collect unique queue families
     const all_families = [_]u32{
         candidate.queues.graphics_family,
@@ -1230,7 +1235,7 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         candidate.queues.compute_family,
         candidate.queues.transfer_family,
     };
-    
+
     for (all_families) |family| {
         var is_unique = true;
         for (unique_families.items) |existing| {
@@ -1243,7 +1248,7 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
             try unique_families.append(allocator, family);
         }
     }
-    
+
     // Create queue create info for each unique family
     for (unique_families.items) |family| {
         // Graphics family gets 2 queues if possible, others get 1

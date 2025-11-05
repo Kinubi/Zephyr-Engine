@@ -131,7 +131,14 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             const geom_data = try job.allocator.create(GeometryData);
             geom_data.* = .{
                 .mesh_ptr = job.geometries[geom_index].mesh_ptr,
-                .material_id = 0, // TODO: Get from instance or geometry
+                // TODO(ARCHITECTURE): REMOVE material_id FROM GeometryData - MEDIUM PRIORITY
+                // Problem: GeometryData.material_id is per-geometry, but material should be per-instance
+                // Reality: Different instances of same geometry can have different materials
+                // Solution: Material ID stored in InstanceData.custom_index (already exists!)
+                // Refactor: Remove material_id from GeometryData, use only InstanceData.custom_index
+                // Impact: BLAS doesn't need material info (geometry only), TLAS instances have material
+                // Branch: features/raytracing-architecture
+                .material_id = 0, // Placeholder - should be removed from GeometryData entirely
                 .transform = Math.Mat4.identity(), // Identity transform for BLAS (transforms applied at TLAS level)
                 .mesh_id = geom_id,
             };

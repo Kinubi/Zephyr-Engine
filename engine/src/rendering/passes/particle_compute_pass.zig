@@ -22,6 +22,9 @@ const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const ParticleComponent = ecs.ParticleComponent;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update checks
+// TODO: Use named resource binding: bindStorageBuffer("ParticleBufferIn", particle_in)
+
 /// Compute shader uniform buffer
 const ComputeUniformBuffer = extern struct {
     delta_time: f32,

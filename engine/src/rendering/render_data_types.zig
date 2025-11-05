@@ -7,6 +7,12 @@ const AssetId = @import("../assets/asset_types.zig").AssetId;
 /// These types are used by render_system, raytracing_system, and rendering passes
 /// Rasterization-specific scene data
 pub const RasterizationData = struct {
+    /// TODO(FEATURE): ADD SORTING KEY FOR STATE-CHANGE MINIMIZATION - MEDIUM PRIORITY
+    /// Currently: RenderableObject has no sorting key, objects drawn in ECS iteration order
+    /// Required: Add sort_key: u64 = (pipeline_id << 48 | material_id << 32 | mesh_id)
+    /// Usage: Sort objects before draw loop in geometry_pass.zig
+    /// Benefits: Reduce pipeline/descriptor binding overhead, better GPU cache coherency
+    /// Branch: features/draw-call-sorting
     pub const RenderableObject = struct {
         pub const MeshHandle = struct {
             mesh_ptr: *const Mesh,
@@ -49,6 +55,13 @@ pub const RaytracingData = struct {
 
     pub const RTGeometry = struct {
         mesh_ptr: *Mesh,
+        // TODO(FEATURE): MOVE BLAS OWNERSHIP HERE - HIGH PRIORITY
+        // Currently: blas field is optional and populated from global registry
+        // Problem: Global registry causes redundant rebuilds when mesh_ptr changes
+        // Solution: BLAS should be owned by Mesh (via mesh_ptr), not stored here or in registry
+        // After refactor: Remove this field, access via mesh_ptr.getBlas()
+        // Related: See geometry.zig, multithreaded_bvh_builder.zig TODOs
+        // Branch: features/blas-ownership
         blas: ?vk.AccelerationStructureKHR = null,
         model_asset: AssetId, // Track which asset this geometry came from
 

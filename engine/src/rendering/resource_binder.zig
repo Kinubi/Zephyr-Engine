@@ -7,6 +7,44 @@ const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const log = @import("../utils/log.zig").log;
 
+// ============================================================================
+// TODO: MAJOR REFACTOR - NAMED RESOURCE BINDING & CENTRALIZED MANAGEMENT
+// ============================================================================
+//
+// GOAL: Simplify render passes by moving resource management here
+//
+// 1. NAMED RESOURCE BINDING API
+//    Replace numeric binding indices with descriptive names:
+//
+//    Before:
+//      resource_binder.bindUniformBuffer(pipeline, 0, 2, light_buffer, ...);
+//
+//    After:
+//      resource_binder.bindBuffer("LightBuffer", light_buffer);
+//      resource_binder.bindTexture("AlbedoMap", albedo_texture);
+//      resource_binder.bindStorageBuffer("ParticleData", particle_buffer);
+//
+//    Implementation:
+//    - Add StringHashMap([]const u8, BindingLocation) for name->binding lookup
+//    - Cache string hashes for performance
+//    - Load binding names from shader reflection or config file
+//
+// 2. CENTRALIZED RESOURCE MANAGEMENT
+//    Move resource lifetime tracking OUT of render passes:
+//    - Track texture updates/invalidation
+//    - Track buffer recreation/resizing
+//    - Automatically rebind resources when pipelines change
+//    - Handle descriptor set invalidation
+//
+//    Render passes should ONLY contain rendering logic, not resource checks!
+//
+// 3. AUTOMATIC RESOURCE VALIDATION
+//    - Warn if binding name doesn't exist in shader
+//    - Error if required binding is missing before draw
+//    - Track which resources are "dirty" and need rebinding
+//
+// ============================================================================
+
 /// High-level resource binding abstraction for the unified pipeline system
 ///
 /// This provides a convenient interface for binding common resources like

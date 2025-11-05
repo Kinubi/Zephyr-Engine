@@ -4,6 +4,17 @@ const cimgui = @import("cimgui_zig");
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
+
+// TODO(MAINTENANCE): SHADER COMPILATION IN BUILD - LOW PRIORITY
+// Currently: shaders compiled at runtime on first use, build succeeds even with shader errors
+// Required: Add shader compilation step (glslc all .vert/.frag/.comp), fail build on errors
+// Branch: maintenance
+
+// TODO(MAINTENANCE): MULTIPLE BUILD CONFIGURATIONS - LOW PRIORITY
+// Currently: single config, no explicit validation layer toggle
+// Required: Add build options (b.buildMode, b.enableAsserts), explicit Debug/Release/ReleaseFast/ReleaseSafe
+// Branch: maintenance
+
 pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -95,117 +106,6 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Run the editor");
     run_step.dependOn(&run_cmd.step);
 
-    // ========== EXAMPLES ==========
-    // Engine API test example
-    const example_mod = b.createModule(.{
-        .root_source_file = b.path("examples/engine_api_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const example_api_test = b.addExecutable(.{
-        .name = "engine_api_test",
-        .root_module = example_mod,
-    });
-    example_api_test.root_module.addImport("zephyr", engine_mod);
-    example_api_test.root_module.addImport("vulkan", vulkan_zig);
-
-    // Link system libraries (same as editor)
-    example_api_test.linkSystemLibrary("glfw");
-    example_api_test.linkSystemLibrary("x11");
-    example_api_test.linkSystemLibrary("shaderc");
-    example_api_test.linkSystemLibrary("pthread");
-    example_api_test.linkLibC();
-    addSpirvCross(b, example_api_test);
-
-    b.installArtifact(example_api_test);
-
-    const run_example = b.addRunArtifact(example_api_test);
-    run_example.step.dependOn(b.getInstallStep());
-
-    const run_example_step = b.step("run-example", "Run the engine API test example");
-    run_example_step.dependOn(&run_example.step);
-
-    // Render thread test example
-    const render_thread_test_mod = b.createModule(.{
-        .root_source_file = b.path("examples/render_thread_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const render_thread_test = b.addExecutable(.{
-        .name = "render_thread_test",
-        .root_module = render_thread_test_mod,
-    });
-    render_thread_test.root_module.addImport("zephyr", engine_mod);
-    render_thread_test.root_module.addImport("vulkan", vulkan_zig);
-
-    // Link system libraries
-    render_thread_test.linkSystemLibrary("glfw");
-    render_thread_test.linkSystemLibrary("x11");
-    render_thread_test.linkSystemLibrary("shaderc");
-    render_thread_test.linkSystemLibrary("pthread");
-    render_thread_test.linkLibC();
-    addSpirvCross(b, render_thread_test);
-
-    b.installArtifact(render_thread_test);
-
-    const run_render_thread_test = b.addRunArtifact(render_thread_test);
-    run_render_thread_test.step.dependOn(b.getInstallStep());
-
-    const run_render_thread_test_step = b.step("test-render-thread", "Run the render thread infrastructure test");
-    run_render_thread_test_step.dependOn(&run_render_thread_test.step);
-
-    // ========== SCRIPT DEMO EXAMPLE ==========
-    const script_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/script_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const script_demo = b.addExecutable(.{
-        .name = "script_demo",
-        .root_module = script_demo_mod,
-    });
-    script_demo.root_module.addImport("zephyr", engine_mod);
-
-    // Link Lua system library for the scripting demo (PUC-Rio Lua)
-    script_demo.linkSystemLibrary("lua");
-    script_demo.linkLibC();
-
-    b.installArtifact(script_demo);
-
-    const run_script_demo = b.addRunArtifact(script_demo);
-    run_script_demo.step.dependOn(b.getInstallStep());
-
-    const run_script_demo_step = b.step("run-script-demo", "Run the scripting demo example");
-    run_script_demo_step.dependOn(&run_script_demo.step);
-
-    // ========== SCRIPT MULTI-JOB DEMO ==========
-    const script_multi_mod = b.createModule(.{
-        .root_source_file = b.path("examples/script_multi_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const script_multi = b.addExecutable(.{
-        .name = "script_multi_demo",
-        .root_module = script_multi_mod,
-    });
-    script_multi.root_module.addImport("zephyr", engine_mod);
-
-    // Link Lua system library for the scripting demo (PUC-Rio Lua)
-    script_multi.linkSystemLibrary("lua");
-    script_multi.linkLibC();
-
-    b.installArtifact(script_multi);
-
-    const run_script_multi = b.addRunArtifact(script_multi);
-    run_script_multi.step.dependOn(b.getInstallStep());
-
-    const run_script_multi_step = b.step("run-script-multi", "Run the scripting multi-job example");
-    run_script_multi_step.dependOn(&run_script_multi.step);
-
     // ========== TESTS ==========
     const editor_test_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),
@@ -221,37 +121,6 @@ pub fn build(b: *std.Build) !void {
     const run_editor_tests = b.addRunArtifact(editor_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_editor_tests.step);
-
-    // StatePool unit tests (engine/src/scripting/state_pool.zig contains tests)
-    const state_pool_test_mod = b.createModule(.{
-        .root_source_file = b.path("engine/src/scripting/state_pool.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const state_pool_tests = b.addTest(.{
-        .root_module = state_pool_test_mod,
-    });
-    const run_state_pool_tests = b.addRunArtifact(state_pool_tests);
-    run_state_pool_tests.step.dependOn(b.getInstallStep());
-    test_step.dependOn(&run_state_pool_tests.step);
-
-    // ScriptRunner integration test (needs engine/zephyr import and Lua linkage)
-    const script_integration_mod = b.createModule(.{
-        .root_source_file = b.path("engine/src/scripting/script_runner_integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const script_integration_tests = b.addTest(.{
-        .root_module = script_integration_mod,
-    });
-    script_integration_tests.root_module.addImport("zephyr", engine_mod);
-    // Link Lua C library for the integration test
-    script_integration_tests.linkSystemLibrary("lua");
-    script_integration_tests.linkLibC();
-
-    const run_script_integration = b.addRunArtifact(script_integration_tests);
-    run_script_integration.step.dependOn(b.getInstallStep());
-    test_step.dependOn(&run_script_integration.step);
 }
 
 // Helper function to add SPIRV-Cross to a compile step

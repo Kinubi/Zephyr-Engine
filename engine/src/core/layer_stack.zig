@@ -90,9 +90,11 @@ pub const LayerStack = struct {
     /// Events are dispatched top-down (overlays first). A
     /// layer may mark the event handled to stop further propagation.
     pub fn dispatchEvent(self: *LayerStack, event: *Event) void {
-        // Process in forward order (bottom layers first)
-        var i: usize = 0;
-        while (i < self.layers.items.len) : (i += 1) {
+        // Process in reverse order (top layers first)
+        // Top layers can "consume" events to prevent propagation
+        var i = self.layers.items.len;
+        while (i > 0) {
+            i -= 1;
             self.layers.items[i].handleEvent(event);
             if (event.handled) break;
         }

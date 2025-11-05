@@ -138,8 +138,11 @@ pub fn captureSnapshot(
     }
     snapshot.entity_count = entity_index;
 
-    // TODO: Extract light data when PointLight component exists
-    // For now, allocate empty light array
+    // TODO: Extract light data from PointLight components - MEDIUM PRIORITY
+    // PointLight component exists (engine/src/ecs/components/point_light.zig)
+    // Need to query entities with PointLight component and extract to snapshot
+    // Required: Iterate over entities with (Transform, PointLight), populate point_lights array
+    // Branch: features/light-snapshot-extraction
     snapshot.point_lights = try allocator.alloc(GameStateSnapshot.PointLightData, 0);
     snapshot.point_light_count = 0;
 

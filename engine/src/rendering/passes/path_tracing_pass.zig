@@ -25,6 +25,12 @@ const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update/check logic
+// TODO: Use named resource binding for clarity:
+//       - bindStorageBuffer("VertexBuffers", vertex_buffer_array)
+//       - bindStorageBuffer("IndexBuffers", index_buffer_array)
+//       - bindAccelerationStructure("TLAS", tlas)
+
 /// Per-frame descriptor data for vertex/index buffers
 const PerFrameDescriptorData = struct {
     vertex_infos: std.ArrayList(vk.DescriptorBufferInfo),

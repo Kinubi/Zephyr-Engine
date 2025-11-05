@@ -14,6 +14,53 @@ const StorageMetadata = struct {
 };
 
 /// World is the central ECS registry
+///
+/// TODO(FEATURE): ARCHETYPE-BASED STORAGE OPTIMIZATION - MEDIUM PRIORITY
+/// Current ECS uses per-component storage (DenseSet). Components scattered in memory.
+/// Add archetype optimization for better cache performance.
+///
+/// Current issues:
+/// - Components scattered in memory (cache misses on iteration)
+/// - Queries require multiple indirections
+/// - Adding/removing components fast but iteration slow
+///
+/// Archetype design:
+/// - Group entities by component signature ([Transform, MeshRenderer, Camera])
+/// - Store components in contiguous arrays per archetype
+/// - Use archetype edges for fast add/remove component
+/// - Chunk iteration (16KB chunks) for SIMD-friendly processing
+///
+/// Required changes:
+/// - Add engine/src/ecs/archetype.zig
+/// - Add archetype storage alongside DenseSet in World
+/// - Optimize View iteration using archetype chunks
+///
+/// Migration strategy:
+/// - Keep DenseSet as fallback
+/// - Add opt-in: world.setArchetypeMode(true)
+/// - Benchmark both approaches
+///
+/// Benefits: 2-4x faster iteration, better cache, enables SIMD
+/// Complexity: HIGH - new storage model + query optimization
+/// Branch: features/ecs-archetype
+///
+/// TODO(MAINTENANCE): CHANGE DETECTION - LOW PRIORITY
+/// Add change detection to avoid unnecessary system updates.
+///
+/// Current issues:
+/// - TransformSystem updates all transforms every frame (even static)
+/// - RenderSystem extracts all entities (even if nothing changed)
+/// - No way to detect "dirty" components
+///
+/// Required changes:
+/// - Add version counter per component in dense_set.zig
+/// - Track component modifications in World
+/// - Add world.changed(Transform) query API
+/// - Update transform_system.zig, render_system.zig to skip unchanged
+///
+/// Benefits: Lower CPU for static scenes, enables reactive patterns
+/// Complexity: MEDIUM - add versioning to component storage
+/// Branch: maintenance (can be done incrementally)
 pub const World = struct {
     allocator: std.mem.Allocator,
     entity_registry: EntityRegistry,
