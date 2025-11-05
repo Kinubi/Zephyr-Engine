@@ -68,6 +68,8 @@ pub const World = struct {
     storage_metadata: std.StringHashMap(StorageMetadata),
     thread_pool: ?*ThreadPool,
     userdata: std.StringHashMap(*anyopaque),
+    // Configurable chunk size for parallel dispatch
+    chunk_size: usize,
 
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !World {
         // Register ecs_update subsystem with thread pool if provided
@@ -89,6 +91,7 @@ pub const World = struct {
             .storage_metadata = std.StringHashMap(StorageMetadata).init(allocator),
             .thread_pool = thread_pool,
             .userdata = std.StringHashMap(*anyopaque).init(allocator),
+            .chunk_size = 256,
         };
     }
 
@@ -204,7 +207,7 @@ pub const World = struct {
 
         // Use parallel dispatch if thread_pool is available
         if (self.thread_pool) |_| {
-            const chunk_size = 256; // TODO: Make this configurable
+            const chunk_size = self.chunk_size;
             try v.each_parallel(chunk_size, struct {
                 fn updateChunk(entities: []EntityId, components: []T, delta: f32) void {
                     _ = entities; // EntityId not needed for simple update

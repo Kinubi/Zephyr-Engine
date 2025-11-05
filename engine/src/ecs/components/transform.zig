@@ -14,8 +14,8 @@ pub const Transform = struct {
     /// Local position relative to parent (or world if no parent)
     position: math.Vec3,
 
-    /// Local rotation (Euler angles in radians)
-    rotation: math.Vec3,
+    /// Local rotation stored as quaternion
+    rotation: math.Quat,
 
     /// Local scale
     scale: math.Vec3,
@@ -33,7 +33,7 @@ pub const Transform = struct {
     pub fn init() Transform {
         return .{
             .position = math.Vec3.init(0, 0, 0),
-            .rotation = math.Vec3.init(0, 0, 0),
+            .rotation = math.Quat.fromEuler(0, 0, 0),
             .scale = math.Vec3.init(1, 1, 1),
             .parent = null,
             .world_matrix = math.Mat4.identity(),
@@ -52,7 +52,19 @@ pub const Transform = struct {
     pub fn initFull(pos: math.Vec3, rot: math.Vec3, scl: math.Vec3) Transform {
         return .{
             .position = pos,
-            .rotation = rot,
+            .rotation = math.Quat.fromEuler(rot.x, rot.y, rot.z),
+            .scale = scl,
+            .parent = null,
+            .world_matrix = math.Mat4.identity(),
+            .dirty = true,
+        };
+    }
+
+    /// Create a Transform with quaternion rotation
+    pub fn initFullQuat(pos: math.Vec3, rot: math.Quat, scl: math.Vec3) Transform {
+        return .{
+            .position = pos,
+            .rotation = rot.normalize(),
             .scale = scl,
             .parent = null,
             .world_matrix = math.Mat4.identity(),
@@ -64,44 +76,24 @@ pub const Transform = struct {
     pub fn getLocalMatrix(self: *const Transform) math.Mat4 {
         // Build TRS matrix: Translation * Rotation * Scale
 
-        // 1. Create rotation matrix from Euler angles (XYZ order)
-        const cx = @cos(self.rotation.x);
-        const sx = @sin(self.rotation.x);
-        const cy = @cos(self.rotation.y);
-        const sy = @sin(self.rotation.y);
-        const cz = @cos(self.rotation.z);
-        const sz = @sin(self.rotation.z);
+        // Use quaternion->matrix conversion for rotation
+        var mat = self.rotation.toMat4();
 
-        // Rotation matrix for Euler XYZ order: Rz * Ry * Rx
-        var mat = math.Mat4.identity();
-
-        // Combined rotation matrix elements
-        mat.data[0] = cy * cz;
-        mat.data[1] = cy * sz;
-        mat.data[2] = -sy;
-
-        mat.data[4] = sx * sy * cz - cx * sz;
-        mat.data[5] = sx * sy * sz + cx * cz;
-        mat.data[6] = sx * cy;
-
-        mat.data[8] = cx * sy * cz + sx * sz;
-        mat.data[9] = cx * sy * sz - sx * cz;
-        mat.data[10] = cx * cy;
-
-        // 2. Apply scale to the rotation matrix
+        // Apply scale to the rotation matrix (scale applied per-column)
+        // Column 0
         mat.data[0] *= self.scale.x;
         mat.data[1] *= self.scale.x;
         mat.data[2] *= self.scale.x;
-
+        // Column 1
         mat.data[4] *= self.scale.y;
         mat.data[5] *= self.scale.y;
         mat.data[6] *= self.scale.y;
-
+        // Column 2
         mat.data[8] *= self.scale.z;
         mat.data[9] *= self.scale.z;
         mat.data[10] *= self.scale.z;
 
-        // 3. Apply translation
+        // Apply translation
         mat.data[12] = self.position.x;
         mat.data[13] = self.position.y;
         mat.data[14] = self.position.z;
@@ -133,9 +125,20 @@ pub const Transform = struct {
     }
 
     /// Set rotation and mark dirty only if changed
+    /// Set rotation by Euler angles (keeps compatibility)
     pub fn setRotation(self: *Transform, rot: math.Vec3) void {
-        if (self.rotation.x != rot.x or self.rotation.y != rot.y or self.rotation.z != rot.z) {
-            self.rotation = rot;
+        const q = math.Quat.fromEuler(rot.x, rot.y, rot.z).normalize();
+        if (self.rotation.x != q.x or self.rotation.y != q.y or self.rotation.z != q.z or self.rotation.w != q.w) {
+            self.rotation = q;
+            self.dirty = true;
+        }
+    }
+
+    /// Set rotation directly by quaternion
+    pub fn setRotationQuat(self: *Transform, rot: math.Quat) void {
+        const q = rot.normalize();
+        if (self.rotation.x != q.x or self.rotation.y != q.y or self.rotation.z != q.z or self.rotation.w != q.w) {
+            self.rotation = q;
             self.dirty = true;
         }
     }
@@ -155,8 +158,19 @@ pub const Transform = struct {
     }
 
     /// Rotate by delta (in radians)
+    /// Rotate by Euler delta (adds rotation expressed as Euler angles)
     pub fn rotate(self: *Transform, delta: math.Vec3) void {
-        self.rotation = self.rotation.add(delta);
+        const dq = math.Quat.fromEuler(delta.x, delta.y, delta.z).normalize();
+        self.rotation = dq.mul(self.rotation).normalize();
+        self.dirty = true;
+    }
+
+    /// Rotate by axis/angle (radians)
+    pub fn rotateAxisAngle(self: *Transform, axis: math.Vec3, angle: f32) void {
+        const half = angle * 0.5;
+        const s = @sin(half);
+        const dq = math.Quat.init(axis.x * s, axis.y * s, axis.z * s, @cos(half)).normalize();
+        self.rotation = dq.mul(self.rotation).normalize();
         self.dirty = true;
     }
 
@@ -190,23 +204,18 @@ pub const Transform = struct {
 
     /// Get forward direction vector (local Z-axis after rotation)
     pub fn forward(self: *const Transform) math.Vec3 {
-        _ = self;
-        // TODO: Calculate from rotation when rotation support is added
-        return math.Vec3.init(0, 0, -1);
+        // local -Z is forward
+        return self.rotation.rotateVec(math.Vec3.init(0, 0, -1));
     }
 
     /// Get right direction vector (local X-axis after rotation)
     pub fn right(self: *const Transform) math.Vec3 {
-        _ = self;
-        // TODO: Calculate from rotation when rotation support is added
-        return math.Vec3.init(1, 0, 0);
+        return self.rotation.rotateVec(math.Vec3.init(1, 0, 0));
     }
 
     /// Get up direction vector (local Y-axis after rotation)
     pub fn up(self: *const Transform) math.Vec3 {
-        _ = self;
-        // TODO: Calculate from rotation when rotation support is added
-        return math.Vec3.init(0, 1, 0);
+        return self.rotation.rotateVec(math.Vec3.init(0, 1, 0));
     }
 };
 

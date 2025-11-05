@@ -546,8 +546,9 @@ pub const SceneHierarchyPanel = struct {
             transform.setPosition(Math.Vec3.init(pos[0], pos[1], pos[2]));
         }
 
-        // Rotation
-        var rot = [3]f32{ transform.rotation.x, transform.rotation.y, transform.rotation.z };
+        // Rotation (displayed as Euler angles converted from quaternion)
+        const euler = transform.rotation.toEuler();
+        var rot = [3]f32{ euler.x, euler.y, euler.z };
         if (c.ImGui_DragFloat3("Rotation", &rot)) {
             transform.setRotation(Math.Vec3.init(rot[0], rot[1], rot[2]));
         }

@@ -90,9 +90,6 @@ pub const LoadPriority = @import("assets/asset_manager.zig").LoadPriority;
 pub const PerformanceLayer = @import("layers/performance_layer.zig").PerformanceLayer;
 pub const RenderLayer = @import("layers/render_layer.zig").RenderLayer;
 pub const SceneLayer = @import("layers/scene_layer.zig").SceneLayer;
-// TODO: InputLayer and UILayer have editor dependencies, need refactoring
-// pub const InputLayer = @import("layers/input_layer.zig").InputLayer;
-// pub const UILayer = @import("layers/ui_layer.zig").UILayer;
 
 // ========== Utils ==========
 pub const math = @import("utils/math.zig");

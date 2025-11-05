@@ -5,11 +5,6 @@ const cimgui = @import("cimgui_zig");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 
-// TODO(MAINTENANCE): SHADER COMPILATION IN BUILD - LOW PRIORITY
-// Currently: shaders compiled at runtime on first use, build succeeds even with shader errors
-// Required: Add shader compilation step (glslc all .vert/.frag/.comp), fail build on errors
-// Branch: maintenance
-
 // TODO(MAINTENANCE): MULTIPLE BUILD CONFIGURATIONS - LOW PRIORITY
 // Currently: single config, no explicit validation layer toggle
 // Required: Add build options (b.buildMode, b.enableAsserts), explicit Debug/Release/ReleaseFast/ReleaseSafe

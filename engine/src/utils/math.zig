@@ -229,6 +229,119 @@ pub const Quat = struct {
             .z = cx * cy * sz - sx * sy * cz,
         };
     }
+
+    pub fn identity() Quat {
+        return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    }
+
+    pub fn length(self: Quat) f32 {
+        return @sqrt(self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w);
+    }
+
+    pub fn normalize(self: Quat) Quat {
+        const len = self.length();
+        if (len == 0) return Quat.identity();
+        const inv = 1.0 / len;
+        return Quat{ .x = self.x * inv, .y = self.y * inv, .z = self.z * inv, .w = self.w * inv };
+    }
+
+    pub fn conjugate(self: Quat) Quat {
+        return Quat{ .x = -self.x, .y = -self.y, .z = -self.z, .w = self.w };
+    }
+
+    pub fn mul(self: Quat, other: Quat) Quat {
+        // Quaternion multiplication: self * other
+        return Quat{
+            .w = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z,
+            .x = self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y,
+            .y = self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x,
+            .z = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w,
+        };
+    }
+
+    pub fn rotateVec(self: Quat, v: Vec3) Vec3 {
+        // Rotate vector v by quaternion q: v' = q * v * q_conj
+        const q = self;
+        const qv = Quat{ .x = v.x, .y = v.y, .z = v.z, .w = 0 };
+        const res = q.mul(qv).mul(q.conjugate());
+        return Vec3.init(res.x, res.y, res.z);
+    }
+
+    pub fn toMat4(self: Quat) Mat4 {
+        const q = self.normalize();
+        const x = q.x;
+        const y = q.y;
+        const z = q.z;
+        const w = q.w;
+
+        const xx = x * x;
+        const yy = y * y;
+        const zz = z * z;
+        const xy = x * y;
+        const xz = x * z;
+        const yz = y * z;
+        const wx = w * x;
+        const wy = w * y;
+        const wz = w * z;
+
+        // Build rotation matrix in column-major order
+        var m: [16]f32 = [_]f32{0} ** 16;
+        // column 0
+        m[0] = 1.0 - 2.0 * (yy + zz);
+        m[1] = 2.0 * (xy + wz);
+        m[2] = 2.0 * (xz - wy);
+        m[3] = 0.0;
+        // column 1
+        m[4] = 2.0 * (xy - wz);
+        m[5] = 1.0 - 2.0 * (xx + zz);
+        m[6] = 2.0 * (yz + wx);
+        m[7] = 0.0;
+        // column 2
+        m[8] = 2.0 * (xz + wy);
+        m[9] = 2.0 * (yz - wx);
+        m[10] = 1.0 - 2.0 * (xx + yy);
+        m[11] = 0.0;
+        // column 3
+        m[12] = 0.0;
+        m[13] = 0.0;
+        m[14] = 0.0;
+        m[15] = 1.0;
+
+        return Mat4{ .data = m };
+    }
+
+    /// Convert quaternion to Euler angles (x=pitch, y=yaw, z=roll) in radians.
+    /// Uses the same Tait-Bryan X-Y-Z ordering as Quat.fromEuler.
+    pub fn toEuler(self: Quat) Vec3 {
+        const mat = self.toMat4().data;
+        // Access rotation matrix elements using column-major layout
+        const r00 = mat[0];
+        const r10 = mat[1];
+        const r20 = mat[2];
+        const r01 = mat[4];
+        const r11 = mat[5];
+        const r21 = mat[6];
+        const r22 = mat[10];
+
+        const sy = -r20;
+        var x: f32 = 0;
+        var y: f32 = 0;
+        var z: f32 = 0;
+        const EPS = 1e-6;
+        // Avoid depending on std.math.abs to prevent name-resolution issues; use inline abs
+        const sy_abs = if (sy < 0.0) -sy else sy;
+        if (sy_abs < 1.0 - EPS) {
+            x = std.math.atan2(r21, r22);
+            y = std.math.asin(sy);
+            z = std.math.atan2(r10, r00);
+        } else {
+            // Gimbal lock
+            x = 0.0;
+            y = if (sy > 0.0) PI / 2.0 else -PI / 2.0;
+            z = std.math.atan2(-r01, r11);
+        }
+        return Vec3.init(x, y, z);
+    }
 };
 
 // Math constants
