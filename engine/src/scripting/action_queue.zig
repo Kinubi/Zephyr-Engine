@@ -2,10 +2,20 @@ const std = @import("std");
 
 pub const Action = struct {
     id: u64,
-    ctx: *anyopaque,
+    // Kind indicates what this Action represents so consumers can
+    // interpret ctx/message appropriately.
+    kind: ActionKind,
+    // optional opaque context pointer delivered with the Action
+    ctx: ?*anyopaque,
     success: bool,
     // Owned message slice (allocator-owned). Empty slice means no message.
     message: ?[]u8,
+};
+
+pub const ActionKind = enum(u8) {
+    ScriptResult = 0,
+    CVarLua = 1,
+    CVarNative = 2,
 };
 
 pub const ActionQueue = struct {
@@ -38,13 +48,20 @@ pub const ActionQueue = struct {
             }
         }
         self.mutex.unlock();
-        self.queue.deinit(self.allocator);
+        // Use the global page allocator for the internal array storage since
+        // worker threads may append concurrently. The message buffers
+        // themselves are still allocated/freed via `self.allocator`.
+        self.queue.deinit(std.heap.page_allocator);
     }
 
     pub fn push(self: *ActionQueue, a: Action) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.queue.append(self.allocator, a);
+
+        // Allocate internal list storage from the global page allocator to
+        // avoid depending on the caller-provided allocator being
+        // thread-safe. Message payloads remain owned by `self.allocator`.
+        try self.queue.append(std.heap.page_allocator, a);
         self.sem.post();
     }
 

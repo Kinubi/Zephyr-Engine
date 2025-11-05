@@ -41,6 +41,48 @@ pub const ExecuteResult = struct {
     message: []const u8,
 };
 
+/// Call a named global Lua function (no module lookup) with three string
+/// arguments: (cvar_name, old, new). Allocates an error message via the
+/// provided allocator on failure.
+pub fn callNamedHandler(allocator: std.mem.Allocator, state: *anyopaque, handler: []const u8, name: []const u8, old: []const u8, new: []const u8) !ExecuteResult {
+    const L: *c.lua_State = @ptrCast(state);
+    // push function by global name
+    const h_ptr_tmp: [*]const u8 = @ptrCast(handler.ptr);
+    _ = c.lua_getglobal(L, h_ptr_tmp);
+    // check it's callable
+    if (!c.lua_isfunction(L, -1)) {
+        // pop non-function
+        _ = c.lua_settop(L, 0);
+        return ExecuteResult{ .success = false, .message = "" };
+    }
+
+    // push args as strings
+    const n_ptr_tmp: [*]const u8 = @ptrCast(name.ptr);
+    _ = c.lua_pushlstring(L, n_ptr_tmp, name.len);
+    const o_ptr_tmp: [*]const u8 = @ptrCast(old.ptr);
+    _ = c.lua_pushlstring(L, o_ptr_tmp, old.len);
+    const nn_ptr_tmp: [*]const u8 = @ptrCast(new.ptr);
+    _ = c.lua_pushlstring(L, nn_ptr_tmp, new.len);
+
+    const pcall_res = c.lua_pcallk(L, 3, 0, 0, @as(c.lua_KContext, 0), null);
+    if (pcall_res != 0) {
+        var msg_len: usize = 0;
+        const msg = c.lua_tolstring(L, -1, &msg_len);
+        if (msg == null) {
+            _ = c.lua_settop(L, 0);
+            return ExecuteResult{ .success = false, .message = "" };
+        }
+        const out = try allocator.alloc(u8, msg_len + 1);
+        const msg_ptr2: [*]const u8 = @ptrCast(msg);
+        std.mem.copyForwards(u8, out[0..msg_len], msg_ptr2[0..msg_len]);
+        out[msg_len] = 0;
+        _ = c.lua_settop(L, 0);
+        return ExecuteResult{ .success = false, .message = out[0..msg_len] };
+    }
+
+    return ExecuteResult{ .success = true, .message = "" };
+}
+
 /// Execute a buffer as Lua code on the provided lua_State.
 /// Allocates an error message using the provided allocator when there is an error.
 pub fn executeLuaBuffer(allocator: std.mem.Allocator, state: *anyopaque, buf: []const u8, owner_entity: u32, user_ctx: ?*anyopaque) !ExecuteResult {
@@ -340,10 +382,25 @@ fn registerEngineBindings(L: *c.lua_State) void {
     // `RenderSystem.PathTracing.RayCount` syntax for get/set.
     pushCVarNamespace(L, "RenderSystem");
 
-    // Expose `cvar` helper table with listing functionality
+    // Expose `cvar` helper table with listing and convenience functions
     c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_cvar_get);
+    c.lua_setfield(L, -2, "get");
+    c.lua_pushcfunction(L, l_cvar_set);
+    c.lua_setfield(L, -2, "set");
+    c.lua_pushcfunction(L, l_cvar_toggle);
+    c.lua_setfield(L, -2, "toggle");
+    c.lua_pushcfunction(L, l_cvar_reset);
+    c.lua_setfield(L, -2, "reset");
+    c.lua_pushcfunction(L, l_cvar_help);
+    c.lua_setfield(L, -2, "help");
     c.lua_pushcfunction(L, l_cvar_list);
     c.lua_setfield(L, -2, "list");
+    c.lua_pushcfunction(L, l_cvar_archive);
+    c.lua_setfield(L, -2, "archive");
+    // cvar.on_change(name, handler_name)
+    c.lua_pushcfunction(L, l_cvar_on_change);
+    c.lua_setfield(L, -2, "on_change");
     c.lua_setglobal(L, "cvar");
 }
 
@@ -497,4 +554,164 @@ fn l_cvar_list(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.lua_pushnil(Lnon);
         return 1;
     }
+}
+
+// Lua helper: cvar.get(name)
+fn l_cvar_get(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    var name_len: usize = 0;
+    const name = c.luaL_checklstring(Lnon, 1, &name_len);
+    if (name == null) {
+        _ = c.lua_pushnil(Lnon);
+        return 1;
+    }
+    const name_ptr: [*]const u8 = @ptrCast(name);
+    if (cvar.getGlobal()) |rp| {
+        const reg: *cvar.CVarRegistry = @ptrCast(rp);
+        if (reg.getAsStringAlloc(name_ptr[0..name_len], std.heap.page_allocator)) |v| {
+            const vptr: [*]const u8 = @ptrCast(v);
+            _ = c.lua_pushlstring(Lnon, vptr, v.len);
+            std.heap.page_allocator.free(v);
+            return 1;
+        }
+    }
+    _ = c.lua_pushnil(Lnon);
+    return 1;
+}
+
+// Lua helper: cvar.set(name, value) -> bool
+fn l_cvar_set(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    var name_len: usize = 0;
+    const name = c.luaL_checklstring(Lnon, 1, &name_len);
+    var val_len: usize = 0;
+    const val = c.luaL_checklstring(Lnon, 2, &val_len);
+    if (name == null or val == null) {
+        _ = c.lua_pushboolean(Lnon, 0);
+        return 1;
+    }
+    const name_ptr: [*]const u8 = @ptrCast(name);
+    const val_ptr: [*]const u8 = @ptrCast(val);
+    if (cvar.getGlobal()) |rp| {
+        const reg: *cvar.CVarRegistry = @ptrCast(rp);
+        reg.setFromString(name_ptr[0..name_len], val_ptr[0..val_len]) catch {
+            _ = c.lua_pushboolean(Lnon, 0);
+            return 1;
+        };
+        _ = c.lua_pushboolean(Lnon, 1);
+        return 1;
+    }
+    _ = c.lua_pushboolean(Lnon, 0);
+    return 1;
+}
+
+// Lua helper: cvar.toggle(name) -> new_value_string or nil
+fn l_cvar_toggle(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    var name_len: usize = 0;
+    const name = c.luaL_checklstring(Lnon, 1, &name_len);
+    if (name == null) {
+        _ = c.lua_pushnil(Lnon);
+        return 1;
+    }
+    const name_ptr: [*]const u8 = @ptrCast(name);
+    if (cvar.getGlobal()) |rp| {
+        const reg: *cvar.CVarRegistry = @ptrCast(rp);
+        if (reg.getAsStringAlloc(name_ptr[0..name_len], std.heap.page_allocator)) |v| {
+            var newv: []const u8 = "true";
+            if (std.mem.eql(u8, v, "true")) {
+                newv = "false";
+            } else if (std.mem.eql(u8, v, "false")) {
+                newv = "true";
+            } else {
+                // if not boolean, set to "true"
+                newv = "true";
+            }
+            std.heap.page_allocator.free(v);
+            reg.setFromString(name_ptr[0..name_len], newv) catch {};
+            const nv_ptr: [*]const u8 = @ptrCast(newv);
+            _ = c.lua_pushlstring(Lnon, nv_ptr, newv.len);
+            return 1;
+        }
+    }
+    _ = c.lua_pushnil(Lnon);
+    return 1;
+}
+
+// Lua helper: cvar.reset(name) -> bool
+fn l_cvar_reset(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    var name_len: usize = 0;
+    const name = c.luaL_checklstring(Lnon, 1, &name_len);
+    if (name == null) {
+        _ = c.lua_pushboolean(Lnon, 0);
+        return 1;
+    }
+    const name_ptr: [*]const u8 = @ptrCast(name);
+    if (cvar.getGlobal()) |rp| {
+        const reg: *cvar.CVarRegistry = @ptrCast(rp);
+        const ok = reg.reset(name_ptr[0..name_len]) catch false;
+        _ = c.lua_pushboolean(Lnon, if (ok) 1 else 0);
+        return 1;
+    }
+    _ = c.lua_pushboolean(Lnon, 0);
+    return 1;
+}
+
+// Lua helper: cvar.help(name) -> nil (not implemented yet)
+fn l_cvar_help(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    // We don't have metadata/descriptions yet — return nil
+    _ = c.lua_pushnil(Lnon);
+    return 1;
+}
+
+// Lua helper: cvar.archive(name, bool) -> bool
+fn l_cvar_archive(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    var name_len: usize = 0;
+    const name = c.luaL_checklstring(Lnon, 1, &name_len);
+    if (name == null) {
+        _ = c.lua_pushboolean(Lnon, 0);
+        return 1;
+    }
+    const b = c.lua_toboolean(Lnon, 2);
+    const name_ptr: [*]const u8 = @ptrCast(name);
+    if (cvar.getGlobal()) |rp| {
+        const reg: *cvar.CVarRegistry = @ptrCast(rp);
+        const ok = reg.setArchived(name_ptr[0..name_len], b != 0) catch false;
+        _ = c.lua_pushboolean(Lnon, if (ok) 1 else 0);
+        return 1;
+    }
+    _ = c.lua_pushboolean(Lnon, 0);
+    return 1;
+}
+
+// Lua helper: cvar.on_change(name, handler_name)
+fn l_cvar_on_change(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    var name_len: usize = 0;
+    const name = c.luaL_checklstring(Lnon, 1, &name_len);
+    if (name == null) {
+        c.lua_pushboolean(Lnon, 0);
+        return 1;
+    }
+    var handler_len: usize = 0;
+    const handler = c.luaL_checklstring(Lnon, 2, &handler_len);
+    if (handler == null) {
+        c.lua_pushboolean(Lnon, 0);
+        return 1;
+    }
+
+    const name_ptr: [*]const u8 = @ptrCast(name);
+    const handler_ptr: [*]const u8 = @ptrCast(handler);
+
+    const reg = cvar.getGlobal() orelse {
+        c.lua_pushboolean(Lnon, 0);
+        return 1;
+    };
+
+    const ok = reg.setLuaOnChange(name_ptr[0..name_len], handler_ptr[0..handler_len]) catch false;
+    c.lua_pushboolean(Lnon, if (ok) 1 else 0);
+    return 1;
 }

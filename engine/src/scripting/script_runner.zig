@@ -7,6 +7,7 @@ const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const lua = @import("lua_bindings.zig");
 const ActionQueue = @import("action_queue.zig").ActionQueue;
 const Action = @import("action_queue.zig").Action;
+const ActionKind = @import("action_queue.zig").ActionKind;
 const ThreadPoolMod = @import("../threading/thread_pool.zig");
 const WorkItem = ThreadPoolMod.WorkItem;
 const WorkItemType = ThreadPoolMod.WorkItemType;
@@ -147,6 +148,8 @@ pub const ScriptRunner = struct {
 
         // Submit to ThreadPool as a WorkItem
 
+        const assigned_id = job_ptr.*.id;
+
         const wi = WorkItem{
             .id = job_ptr.*.id,
             .item_type = WorkItemType.custom,
@@ -165,18 +168,17 @@ pub const ScriptRunner = struct {
             log(.WARN, "scripting", "ThreadPool submit failed for job {}: {}", .{ job_ptr.*.id, err });
         };
         if (did_submit) {
-            log(.INFO, "scripting", "submitted job {} to ThreadPool", .{job_ptr.*.id});
-            return job_ptr.*.id;
+            return assigned_id;
         }
 
         // Fallback: enqueue locally (should not be used in the ThreadPool-only mode)
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
         try self.job_queue.append(self.allocator, job_ptr);
-        log(.INFO, "scripting", "enqueued job {} (local fallback)", .{job_ptr.*.id});
+        log(.INFO, "scripting", "enqueued job {} (local fallback)", .{assigned_id});
         self.queue_sem.post();
 
-        return job_ptr.*.id;
+        return assigned_id;
     }
 };
 
@@ -185,8 +187,6 @@ pub const ScriptRunner = struct {
 // Worker wrapper invoked by ThreadPool workers. Matches signature: fn (*anyopaque, WorkItem) void
 fn threadPoolWorker(context: *anyopaque, wi: WorkItem) void {
     const runner = @as(*ScriptRunner, @ptrCast(@alignCast(context)));
-
-    log(.DEBUG, "scripting", "ThreadPool worker invoked for job {}", .{wi.id});
 
     // Extract the job pointer from the work item custom data
     const job_ptr_any: *anyopaque = wi.data.custom.user_data;
@@ -219,19 +219,51 @@ fn threadPoolWorker(context: *anyopaque, wi: WorkItem) void {
     if (runner.action_queue) |aq| {
         var msg_slice: ?[]u8 = null;
         if (res.message.len > 0) {
-            const tmp: [*]const u8 = @ptrCast(res.message.ptr);
-            msg_slice = @constCast(tmp)[0..res.message.len];
+            // Copy message into the action_queue allocator so the consumer
+            // can free it with the same allocator. If allocation fails,
+            // drop the message but still push the action.
+            const out_buf = aq.allocator.alloc(u8, res.message.len) catch null;
+            if (out_buf) |buf| {
+                const tmp: [*]const u8 = @ptrCast(res.message.ptr);
+                std.mem.copyForwards(u8, buf[0..res.message.len], tmp[0..res.message.len]);
+                msg_slice = buf[0..res.message.len];
+            } else {
+                log(.WARN, "scripting", "action_queue allocator failed to allocate message for job {}", .{job.id});
+            }
+            // Free the original message allocated by the runner allocator
+            runner.allocator.free(@constCast(res.message));
         }
-        const act = Action{
+        const act = runner.allocator.create(Action) catch |e| {
+            // Allocation failed: call callback and free any message we allocated
+            log(.WARN, "scripting", "runner allocator failed to create Action for job {}: {}", .{ job.id, e });
+            // Release leased state back to the pool
+            runner.state_pool.?.release(leased_state.?);
+
+            job.allocator.free(job.script);
+            job.allocator.destroy(job);
+            return;
+        };
+        act.* = Action{
             .id = job.id,
+            .kind = ActionKind.ScriptResult,
             .ctx = job.context,
             .success = res.success,
             .message = msg_slice,
         };
-        aq.push(act) catch {
+        aq.push(act.*) catch {
+            // Push failed: call callback and free any message we allocated
             if (job.callback) |cb| cb(job.id, job.context, res.success, res.message);
-            if (msg_slice) |m| if (m.len > 0) runner.allocator.free(m);
+            if (msg_slice) |m| if (m.len > 0) aq.allocator.free(m);
+            // Destroy the temporary Action we created on the runner allocator
+            runner.allocator.destroy(act);
+            // Release leased state back to the pool before returning
+            runner.state_pool.?.release(leased_state.?);
+            job.allocator.free(job.script);
+            job.allocator.destroy(job);
+            return;
         };
+        // Successfully pushed — destroy the temporary Action object
+        runner.allocator.destroy(act);
     } else {
         if (job.callback) |cb| cb(job.id, job.context, res.success, res.message);
         if (res.message.len > 0) runner.allocator.free(@constCast(res.message));

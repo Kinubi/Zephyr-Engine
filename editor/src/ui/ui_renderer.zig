@@ -15,6 +15,7 @@ const Camera = zephyr.Camera;
 const Math = zephyr.math;
 // Lua bindings (used by the scripting console)
 const lua = zephyr.lua;
+const cvar = zephyr.cvar;
 
 /// UI Renderer - manages all ImGui UI rendering
 /// Keeps UI code separate from main app logic
@@ -795,48 +796,174 @@ pub const UIRenderer = struct {
                         if (want_cap) "true" else "false",
                     });
                 } else {
-                    if (stats.scene) |scene_ptr| {
-                        const sys = &scene_ptr.scripting_system;
-                        if (sys.runner.state_pool) |sp| {
-                            const ls = sp.acquire();
-                            const exec_res = lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr)) catch {
-                                // Execution failed at the API level (allocation etc.). Log
-                                // an error to the engine console but do not store this in
-                                // the command history.
-                                log(.ERROR, "console", "(execute error)", .{});
-                                sp.release(ls);
-                                return;
-                            };
-                            if (exec_res.message.len > 0) {
-                                // Log Lua return values or error messages to the engine
-                                // console so they're visible in the logs, but avoid
-                                // duplicating messages that were already emitted by
-                                // the Lua `print` override (which logs with section
-                                // "lua"). If the most recent log is from "lua" and
-                                // has the same message contents, skip echoing it here.
-                                var skip_log: bool = false;
-                                var recent: [8]zephyr.LogOut = undefined;
-                                const recent_n = zephyr.fetchLogs(recent[0..]);
-                                if (recent_n > 0) {
-                                    const last = recent[recent_n - 1];
-                                    // Compare section == "lua" and message contents
-                                    const lua_sec = "lua";
-                                    if (last.section_len == lua_sec.len and std.mem.eql(u8, last.section[0..last.section_len], lua_sec)) {
-                                        if (last.message_len == exec_res.message.len and std.mem.eql(u8, last.message[0..last.message_len], exec_res.message)) {
-                                            skip_log = true;
-                                        }
+                    // Try to handle common console commands locally (avoid spawning Lua when not necessary)
+                    var handled: bool = false;
+                    // Trim leading spaces
+                    var sstart: usize = 0;
+                    while (sstart < cmd.len and (cmd[sstart] == ' ' or cmd[sstart] == '\t')) sstart += 1;
+                    var send: usize = cmd.len;
+                    while (send > sstart and (cmd[send - 1] == ' ' or cmd[send - 1] == '\t')) send -= 1;
+                    const trimmed = cmd[sstart..send];
+                    // Extract first token
+                    var t_end: usize = 0;
+                    while (t_end < trimmed.len and trimmed[t_end] != ' ') t_end += 1;
+                    const verb = trimmed[0..t_end];
+                    // helpers to get remainder
+                    const remainder = if (t_end < trimmed.len) trimmed[t_end + 1 .. trimmed.len] else trimmed[0..0];
+
+                    // Compare verbs
+                    if (std.mem.eql(u8, verb, "get")) {
+                        const name = remainder;
+                        if (name.len > 0) {
+                            if (cvar.getGlobal()) |rp| {
+                                const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                                if (reg.getAsStringAlloc(name, std.heap.page_allocator)) |v| {
+                                    const vptr: [*]const u8 = @ptrCast(v);
+                                    log(.INFO, "console", "{s} = {s}", .{ name, vptr[0..v.len] });
+                                    std.heap.page_allocator.free(v);
+                                } else {
+                                    log(.WARN, "console", "CVar not found: {s}", .{name});
+                                }
+                                handled = true;
+                            }
+                        }
+                    } else if (std.mem.eql(u8, verb, "set")) {
+                        // set <name> <value...>
+                        var space: usize = 0;
+                        var i: usize = 0;
+                        while (i < remainder.len) {
+                            if (remainder[i] == ' ') {
+                                space = i;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        if (space > 0) {
+                            const name = remainder[0..space];
+                            const val = remainder[space + 1 .. remainder.len];
+                            if (cvar.getGlobal()) |rp| {
+                                const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                                _ = reg.setFromString(name, val) catch {
+                                    log(.ERROR, "console", "Failed to set CVar {s}", .{name});
+                                    handled = true;
+                                    return;
+                                };
+                                log(.INFO, "console", "Set {s} = {s}", .{ name, val });
+                            }
+                            handled = true;
+                        }
+                    } else if (std.mem.eql(u8, verb, "toggle")) {
+                        const name = remainder;
+                        if (name.len > 0) {
+                            if (cvar.getGlobal()) |rp| {
+                                const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                                if (reg.getAsStringAlloc(name, std.heap.page_allocator)) |v| {
+                                    var newv: []const u8 = "true";
+                                    if (std.mem.eql(u8, v, "true")) newv = "false";
+                                    std.heap.page_allocator.free(v);
+                                    _ = reg.setFromString(name, newv) catch {};
+                                    log(.INFO, "console", "Toggled {s} -> {s}", .{ name, newv });
+                                } else {
+                                    log(.WARN, "console", "CVar not found: {s}", .{name});
+                                }
+                                handled = true;
+                            }
+                        }
+                    } else if (std.mem.eql(u8, verb, "reset")) {
+                        const name = remainder;
+                        if (name.len > 0) {
+                            if (cvar.getGlobal()) |rp| {
+                                const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                                const ok = reg.reset(name) catch false;
+                                if (ok) {
+                                    log(.INFO, "console", "Reset {s}", .{name});
+                                } else {
+                                    log(.WARN, "console", "CVar not found: {s}", .{name});
+                                }
+                                handled = true;
+                            }
+                        }
+                    } else if (std.mem.eql(u8, verb, "list")) {
+                        const filter = remainder;
+                        if (cvar.getGlobal()) |rp| {
+                            const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                            const list = reg.listAllAlloc(std.heap.page_allocator) catch null;
+                            if (list) |lst| {
+                                var idx: usize = 0;
+                                while (idx < lst.len) : (idx += 1) {
+                                    const s = lst[idx];
+                                    if (filter.len == 0 or std.mem.indexOf(u8, s, filter) != null) {
+                                        const sptr: [*]const u8 = @ptrCast(s.ptr);
+                                        log(.INFO, "console", "{s}", .{sptr[0..s.len]});
                                     }
                                 }
-                                if (!skip_log) {
-                                    log(.INFO, "console", "{s}", .{exec_res.message});
+                                std.heap.page_allocator.free(lst);
+                            }
+                        }
+                        handled = true;
+                    } else if (std.mem.eql(u8, verb, "help")) {
+                        const name = remainder;
+                        if (name.len > 0) {
+                            if (cvar.getGlobal()) |rp| {
+                                const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                                if (reg.getDescriptionAlloc(name, std.heap.page_allocator)) |d| {
+                                    const dptr: [*]const u8 = @ptrCast(d.ptr);
+                                    log(.INFO, "console", "{s}: {s}", .{ name, dptr[0..d.len] });
+                                    std.heap.page_allocator.free(d);
+                                } else {
+                                    log(.INFO, "console", "No help available for {s}", .{name});
+                                }
+                                handled = true;
+                            }
+                        }
+                    } else if (std.mem.eql(u8, verb, "archive")) {
+                        // archive <name> <0|1|true|false>
+                        var space: usize = 0;
+                        var i: usize = 0;
+                        while (i < remainder.len) {
+                            if (remainder[i] == ' ') {
+                                space = i;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        if (space > 0) {
+                            const name = remainder[0..space];
+                            const val = remainder[space + 1 .. remainder.len];
+                            var archive_bool: bool = false;
+                            if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) archive_bool = true;
+                            if (cvar.getGlobal()) |rp| {
+                                const reg: *cvar.CVarRegistry = @ptrCast(rp);
+                                const ok = reg.setArchived(name, archive_bool) catch false;
+                                if (ok) {
+                                    log(.INFO, "console", "Archived {s} = {s}", .{ name, if (archive_bool) "true" else "false" });
+                                } else {
+                                    log(.WARN, "console", "CVar not found: {s}", .{name});
                                 }
                             }
-                            sp.release(ls);
-                        } else {
-                            log(.WARN, "console", "(no lua state pool - cannot run synchronously)", .{});
+                            handled = true;
                         }
-                    } else {
-                        log(.WARN, "console", "(no scene available)", .{});
+                    }
+
+                    if (!handled) {
+                        // Fallback to executing as Lua
+                        if (stats.scene) |scene_ptr| {
+                            const sys = &scene_ptr.scripting_system;
+                            if (sys.runner.state_pool) |sp| {
+                                const ls = sp.acquire();
+                                const exec_res = lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr)) catch {
+                                    log(.ERROR, "console", "(execute error)", .{});
+                                    sp.release(ls);
+                                    return;
+                                };
+                                if (exec_res.message.len > 0) log(.INFO, "console", "{s}", .{exec_res.message});
+                                sp.release(ls);
+                            } else {
+                                log(.WARN, "console", "(no lua state pool - cannot run synchronously)", .{});
+                            }
+                        } else {
+                            log(.WARN, "console", "(no scene available)", .{});
+                        }
                     }
                 }
 
