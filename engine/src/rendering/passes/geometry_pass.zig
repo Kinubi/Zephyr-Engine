@@ -27,6 +27,10 @@ const RenderSystem = ecs.RenderSystem;
 // Global UBO
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
+// TODO: SIMPLIFY RENDER PASS - Remove all texture/material buffer update checks
+// TODO: Move resource lifetime management to ResourceBinder
+// TODO: Passes should only focus on rendering logic, not resource management
+
 /// GeometryPass renders opaque ECS entities using dynamic rendering
 /// Outputs: color target (RGBA16F) + depth buffer (D32)
 pub const GeometryPass = struct {
@@ -301,24 +305,9 @@ pub const GeometryPass = struct {
             return;
         }
 
-        // Transition swapchain image from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.color_image,
-            .undefined,
-            .color_attachment_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
-
         // Setup dynamic rendering with helper
         const rendering = DynamicRenderingHelper.init(
-            frame_info.color_image_view,
+            frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
             .{ 0.01, 0.01, 0.01, 1.0 }, // clear color (dark gray)
@@ -339,6 +328,26 @@ pub const GeometryPass = struct {
         // Render each object (mesh pointers and material indices already resolved in cache)
         // NOTE: All objects in cache are currently visible (visibility culling not yet implemented)
         // When adding visibility culling, filter at cache build time in RenderSystem, not here
+
+        // TODO(MAINTENANCE): IMPLEMENT INSTANCED RENDERING - HIGH PRIORITY
+        // Currently drawing each mesh individually with instance_count=1 (very inefficient!)
+        //
+        // Problem: For a scene with 1000 identical trees, we make 1000 draw calls.
+        // Solution: Group objects by (mesh, material), draw once with instance_count=N.
+        //
+        // Required changes:
+        // 1. RenderSystem: Sort cached objects by mesh_id during extraction
+        // 2. RenderSystem: Build instance data buffer (transforms + material indices)
+        // 3. GeometryPass: Loop over unique meshes, not individual objects
+        // 4. GeometryPass: Use instanced drawing API
+        // 5. Mesh: Add drawInstanced(instance_count, instance_buffer_offset) method
+        // 6. Shaders: Use gl_InstanceIndex to fetch per-instance data
+        //
+        // Expected benefit: 10-100x reduction in draw calls for scenes with repeated assets
+        // (e.g., 1000 trees → 1 draw call, 500 rocks → 1 draw call)
+        //
+        // Complexity: MEDIUM - requires render system refactor + shader changes
+        // Branch recommended: features/instanced-rendering (not a simple maintenance fix)
         for (raster_data.objects) |object| {
             // Push constants (data already resolved in cache)
             const push_constants = GeometryPushConstants{
@@ -357,26 +366,16 @@ pub const GeometryPass = struct {
             );
 
             // Draw mesh (pointer already resolved in cache)
+            // NOTE: instance_count=1 here - no instancing yet!
             object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
         }
 
         // End rendering
         rendering.end(self.graphics_context, cmd);
 
-        // Transition swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.color_image,
-            .color_attachment_optimal,
-            .present_src_khr,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // Leave color image in COLOR_ATTACHMENT_OPTIMAL; swapchain.endFrame will transition
+        // the swapchain image to PRESENT, and offscreen viewport images should remain in
+        // a layout suitable for their next consumer.
     }
 
     fn teardownImpl(base: *RenderPass) void {

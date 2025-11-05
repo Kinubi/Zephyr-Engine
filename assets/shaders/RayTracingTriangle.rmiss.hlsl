@@ -17,11 +17,11 @@
 
 struct Payload
 {
-[[vk::location(0)]] float3 hitValue;
+[[vk::location(0)]] float4 hitValue;
 };
 
 [shader("miss")]
 void main(inout Payload p)
 {
-    p.hitValue = float3(0.0, 0.0, 0.2);
+    p.hitValue = float4(0.0, 0.0, 0.2, 1.0);
 }

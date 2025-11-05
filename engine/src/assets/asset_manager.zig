@@ -34,6 +34,11 @@ pub const Material = struct {
     emissive_color: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 1.0 }, // Matches shader: vec4/float4 emissive_color
 };
 
+/// Holder for script source text owned by AssetManager
+const ScriptHolder = struct {
+    source: []const u8,
+};
+
 /// Enhanced asset loading priority levels
 pub const LoadPriority = enum(u8) {
     critical = 0, // UI textures, fallback assets
@@ -173,6 +178,49 @@ pub const FallbackAssets = struct {
 };
 
 /// Enhanced Asset Manager with priority-based loading and improved thread pool integration
+///
+/// TODO(FEATURE): IMPLEMENT ASSET STREAMING SYSTEM - HIGH PRIORITY
+/// Currently all assets loaded at scene start (blocking). Need progressive streaming.
+///
+/// Required features:
+/// 1. Distance-based prioritization (load near objects first)
+/// 2. LOD chain loading (low-res placeholder → medium → high-res)
+/// 3. Memory budget enforcement with LRU eviction (evict distant assets)
+/// 4. Frame time budgeting (max 2ms loading per frame)
+/// 5. Persistent cache across runs (serialize loaded assets)
+///
+/// Required changes:
+/// - Add streaming scheduler (queries camera position, calculates priorities)
+/// - Add asset eviction system (LRU cache, tracks access times)
+/// - Modify asset_loader.zig for progressive loading states
+/// - Add scene.zig integration (query visible entities by distance)
+///
+/// Benefits: Faster startup, large worlds, predictable memory, no hitches
+/// Complexity: HIGH - new subsystems + asset pipeline changes
+/// Branch: features/asset-streaming
+///
+/// TODO(MAINTENANCE): COMPREHENSIVE ASSET VALIDATION - MEDIUM PRIORITY
+/// Add validation pipeline to catch corrupted assets early.
+///
+/// Validation checks:
+/// - Meshes: NaN vertices, degenerate triangles, index bounds
+/// - Textures: Format support, dimension limits, mip chain consistency
+/// - Materials: Missing textures, invalid parameters
+/// - Shaders: SPIR-V validation, reflection data
+///
+/// Error recovery:
+/// - Use fallback assets for invalid data
+/// - Log detailed error reports (path, failure reason)
+/// - Add CVars: r.validateAssets, r.strictValidation
+///
+/// Required changes:
+/// - Add engine/src/assets/asset_validator.zig
+/// - Integrate validation in asset_loader.zig
+/// - Update mesh.zig, texture.zig with validation
+///
+/// Benefits: Fewer crashes, better error messages, easier debugging
+/// Complexity: MEDIUM - add validation hooks to existing loaders
+/// Branch: maintenance (can be done incrementally)
 pub const AssetManager = struct {
     // Core components
     registry: *AssetRegistry,
@@ -186,6 +234,8 @@ pub const AssetManager = struct {
     loaded_textures: std.ArrayList(*Texture), // Array of loaded texture pointers
     loaded_models: std.ArrayList(*Model), // Array of loaded model pointers
     loaded_materials: std.ArrayList(*Material), // Array of loaded material pointers
+    // Loaded script assets (source text stored in heap-owned buffers)
+    loaded_scripts: std.ArrayList(*ScriptHolder),
     material_buffer: ?Buffer = null, // Optional material buffer created on demand
     material_buffer_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     stale_material_buffers: std.ArrayList(Buffer) = std.ArrayList(Buffer){},
@@ -194,6 +244,7 @@ pub const AssetManager = struct {
     asset_to_texture: std.AutoHashMap(AssetId, usize), // AssetId -> texture array index
     asset_to_model: std.AutoHashMap(AssetId, usize), // AssetId -> model array index
     asset_to_material: std.AutoHashMap(AssetId, usize), // AssetId -> material array index
+    asset_to_script: std.AutoHashMap(AssetId, usize), // AssetId -> script array index
 
     // Enhanced hot reloading (heap allocated to avoid move/copy issues)
     hot_reload_manager: ?*hot_reload_manager.HotReloadManager = null,
@@ -228,6 +279,7 @@ pub const AssetManager = struct {
     // Thread safety for concurrent asset loading
     models_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     textures_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    scripts_mutex: std.Thread.Mutex = std.Thread.Mutex{},
 
     // Performance statistics
     stats: struct {
@@ -254,9 +306,11 @@ pub const AssetManager = struct {
             .loaded_textures = std.ArrayList(*Texture){},
             .loaded_models = std.ArrayList(*Model){},
             .loaded_materials = std.ArrayList(*Material){},
+            .loaded_scripts = std.ArrayList(*ScriptHolder){},
             .asset_to_texture = std.AutoHashMap(AssetId, usize).init(allocator),
             .asset_to_model = std.AutoHashMap(AssetId, usize).init(allocator),
             .asset_to_material = std.AutoHashMap(AssetId, usize).init(allocator),
+            .asset_to_script = std.AutoHashMap(AssetId, usize).init(allocator),
             .pending_requests = std.AutoHashMap(AssetId, LoadRequest).init(allocator),
             .stale_material_buffers = std.ArrayList(Buffer){},
         };
@@ -304,6 +358,39 @@ pub const AssetManager = struct {
         try self.loaded_materials.append(self.allocator, material);
         try self.asset_to_material.put(asset_id, index);
         self.materials_dirty = true; // Mark materials as dirty when added
+    }
+
+    /// Add loaded script source to the manager (called by AssetLoader)
+    pub fn addLoadedScript(self: *AssetManager, asset_id: AssetId, source: []const u8) !void {
+        self.scripts_mutex.lock();
+        defer self.scripts_mutex.unlock();
+
+        // Duplicate the source into the asset manager allocator so lifetime is owned
+        const dup = try self.allocator.dupe(u8, source);
+        const holder = try self.allocator.create(ScriptHolder);
+        holder.* = ScriptHolder{ .source = dup };
+
+        const index = self.loaded_scripts.items.len;
+        try self.loaded_scripts.append(self.allocator, holder);
+        try self.asset_to_script.put(asset_id, index);
+
+        // Mark as loaded in registry and complete pending request
+        const size_u64: u64 = @as(u64, dup.len);
+        self.registry.markAsLoaded(asset_id, size_u64);
+        self.completeRequest(asset_id, true);
+    }
+
+    /// Get script source for an asset ID (returns null if not loaded)
+    pub fn getScript(self: *AssetManager, asset_id: AssetId) ?[]const u8 {
+        self.scripts_mutex.lock();
+        defer self.scripts_mutex.unlock();
+
+        if (self.asset_to_script.get(asset_id)) |index| {
+            if (index < self.loaded_scripts.items.len) {
+                return self.loaded_scripts.items[index].source;
+            }
+        }
+        return null;
     }
 
     /// Create a material asset asynchronously
@@ -368,10 +455,21 @@ pub const AssetManager = struct {
         }
         self.loaded_materials.deinit(self.allocator);
 
+        // Clean up loaded scripts
+        for (self.loaded_scripts.items) |script_holder| {
+            // Free the duplicated source buffer
+            if (script_holder.source.len > 0) {
+                self.allocator.free(script_holder.source);
+            }
+            self.allocator.destroy(script_holder);
+        }
+        self.loaded_scripts.deinit(self.allocator);
+
         // Clean up mappings
         self.asset_to_texture.deinit();
         self.asset_to_model.deinit();
         self.asset_to_material.deinit();
+        self.asset_to_script.deinit();
         self.pending_requests.deinit();
 
         self.flushStaleMaterialBuffers();

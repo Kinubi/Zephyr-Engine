@@ -15,6 +15,25 @@ pub const Vertex = struct {
     uv: [2]f32 align(16) = .{ 0.0, 0.0 },
 };
 
+/// TODO(FEATURE): LOD SYSTEM FOR MESHES - MEDIUM PRIORITY
+/// Add level-of-detail support to reduce geometry complexity based on distance.
+///
+/// Required additions:
+/// - lod_levels: []LodMesh array (each has vertices, indices, transition distance)
+/// - Automatic LOD generation (simplify mesh with quadric error metric)
+/// - Distance-based selection in render_system.zig
+/// - Smooth transitions (fade between LODs with dithering)
+/// - CVar: r.forceLOD for debugging
+///
+/// Required changes:
+/// - Add LOD levels array to Mesh struct
+/// - Modify asset_loader.zig to load LOD meshes from models
+/// - Update render_system.zig to select LOD based on camera distance
+/// - Update geometry_pass.zig to render appropriate LOD
+///
+/// Benefits: Better performance for large scenes, maintain visual quality where it matters
+/// Complexity: MEDIUM - LOD generation + distance-based selection
+/// Branch: features/mesh-lod
 pub const Mesh = struct {
     vertices: std.ArrayList(Vertex),
     indices: std.ArrayList(u32),
@@ -144,6 +163,10 @@ pub const Mesh = struct {
         return bounds;
     }
 
+    /// Draw this mesh (non-instanced, single draw call)
+    /// TODO(MAINTENANCE): ADD drawInstanced() method for instanced rendering
+    /// New signature: pub fn drawInstanced(self: *const Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer, instance_count: u32, first_instance: u32) void
+    /// This will be used by the instanced rendering system (see geometry_pass.zig TODO)
     pub fn draw(self: *const Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
         const offset = [_]vk.DeviceSize{0};
         if (self.vertex_buffer) |buf| {
@@ -151,6 +174,7 @@ pub const Mesh = struct {
         }
         if (self.index_buffer) |buf| {
             gc.vkd.cmdBindIndexBuffer(cmdbuf, buf.buffer, 0, vk.IndexType.uint32);
+            // Note: instance_count=1 hardcoded - no instancing!
             gc.vkd.cmdDrawIndexed(cmdbuf, @intCast(self.indices.items.len), 1, 0, 0, 0);
         } else {
             gc.vkd.cmdDraw(cmdbuf, @intCast(self.vertices.items.len), 1, 0, 0);

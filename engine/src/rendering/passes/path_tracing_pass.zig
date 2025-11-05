@@ -6,7 +6,6 @@ const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
 const FrameInfo = @import("../frameinfo.zig").FrameInfo;
-const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
 const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedPipelineSystem;
 const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
@@ -14,7 +13,7 @@ const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const Texture = @import("../../core/texture.zig").Texture;
-const RaytracingSystem = @import("../../systems/raytracing_system.zig").RaytracingSystem;
+const RaytracingSystem = @import("../raytracing/raytracing_system.zig").RaytracingSystem;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -25,6 +24,12 @@ const Mesh = @import("../mesh.zig").Mesh;
 const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
+
+// TODO: SIMPLIFY RENDER PASS - Remove resource update/check logic
+// TODO: Use named resource binding for clarity:
+//       - bindStorageBuffer("VertexBuffers", vertex_buffer_array)
+//       - bindStorageBuffer("IndexBuffers", index_buffer_array)
+//       - bindAccelerationStructure("TLAS", tlas)
 
 /// Per-frame descriptor data for vertex/index buffers
 const PerFrameDescriptorData = struct {
@@ -111,6 +116,8 @@ pub const PathTracingPass = struct {
     // Acceleration structure tracking
     tlas: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
     tlas_valid: bool = false,
+    // TLAS transition control: block dispatch until all frames rebind to new TLAS
+    tlas_transition_pending_mask: u8 = 0,
 
     // Per-frame descriptor tracking
     descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
@@ -138,10 +145,12 @@ pub const PathTracingPass = struct {
         const rt_system = try allocator.create(RaytracingSystem);
         rt_system.* = try RaytracingSystem.init(graphics_context, allocator, thread_pool);
 
-        // Use swapchain format for output texture (with special case for packed formats)
         var output_format = swapchain_format;
         if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
             output_format = vk.Format.a2b10g10r10_unorm_pack32;
+        } else if (output_format == vk.Format.r16g16b16a16_sfloat) {
+            // Storage image must exactly match shader's OpTypeImage (Rgba16 => UNORM)
+            output_format = vk.Format.r16g16b16a16_sfloat;
         }
 
         // Create output texture for path-traced results
@@ -156,6 +165,19 @@ pub const PathTracingPass = struct {
                 .sampled_bit = true,
             },
             vk.SampleCountFlags{ .@"1_bit" = true },
+        );
+
+        _ = try graphics_context.transitionImageLayoutSingleTime(
+            output_texture.image,
+            .undefined,
+            .general,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
         );
 
         // Initialize per-frame descriptor data
@@ -217,12 +239,13 @@ pub const PathTracingPass = struct {
             return false;
         };
 
-        self.updateDescriptors() catch |err| {
-            log(.WARN, "path_tracing_pass", "Failed to update descriptors during recovery: {}", .{err});
-            return false;
-        };
+        // Don't update descriptors during recovery either - wait for valid TLAS
+        // Mark all descriptors dirty so they'll be updated on next frame
+        for (&self.descriptor_dirty_flags) |*flag| {
+            flag.* = true;
+        }
 
-        log(.INFO, "path_tracing_pass", "Recovery setup complete", .{});
+        log(.INFO, "path_tracing_pass", "Recovery setup complete, descriptors will update on next frame", .{});
         return true;
     }
 
@@ -252,12 +275,14 @@ pub const PathTracingPass = struct {
 
         // Update shader binding table
         try self.rt_system.updateShaderBindingTable(entry.vulkan_pipeline);
-        try self.updateDescriptors();
+
+        // DON'T call updateDescriptors() here - wait for first update() to build TLAS first
+        // Descriptors will be updated in updateImpl once TLAS is valid
+        // Calling it here during setup can bind to invalid BLAS if RT system hasn't built them yet
     }
 
     /// Update descriptors for all frames (exactly like rt_renderer.update does)
     fn updateDescriptors(self: *PathTracingPass) !void {
-
         // Get raytracing data from render system (already cached)
         const rt_data = try self.render_system.getRaytracingData();
         defer {
@@ -334,6 +359,8 @@ pub const PathTracingPass = struct {
             if (self.tlas_valid) {
                 const accel_resource = Resource{ .acceleration_structure = self.tlas };
                 try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+            } else {
+                log(.WARN, "path_tracing_pass", "updateDescriptors called but TLAS not valid! Skipping TLAS binding for frame {}", .{target_frame});
             }
 
             // Binding 1: Output Image (storage image)
@@ -373,6 +400,81 @@ pub const PathTracingPass = struct {
         // They'll be flushed during deinit when GPU is idle
     }
 
+    /// Update descriptors only for the current frame to avoid churn on in-flight frames
+    fn updateDescriptorsForFrame(self: *PathTracingPass, target_frame: u32) !void {
+        const frame_idx: usize = @intCast(target_frame);
+
+        // Material buffer (no need to query rt_data here)
+        const material_info = if (self.asset_manager.material_buffer) |buffer|
+            buffer.descriptor_info
+        else
+            vk.DescriptorBufferInfo{ .buffer = vk.Buffer.null_handle, .offset = 0, .range = 0 };
+
+        const material_resource = Resource{ .buffer = .{
+            .buffer = material_info.buffer,
+            .offset = material_info.offset,
+            .range = material_info.range,
+        } };
+
+        // Textures array
+        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
+        const textures_ready = blk: {
+            if (texture_image_infos.len == 0) break :blk false;
+            for (texture_image_infos) |info| {
+                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) break :blk false;
+            }
+            break :blk true;
+        };
+        const textures_resource = if (textures_ready)
+            Resource{ .image_array = texture_image_infos }
+        else
+            null;
+
+        // Output image
+        const output_descriptor = self.output_texture.getDescriptorInfo();
+        const output_resource = Resource{ .image = .{
+            .image_view = output_descriptor.image_view,
+            .sampler = output_descriptor.sampler,
+            .layout = output_descriptor.image_layout,
+        } };
+
+        // Per-frame geometry buffers: reuse existing arrays; they are rebuilt on geometry changes via full updateDescriptors()
+        const frame_data = &self.per_frame[frame_idx];
+
+        // Global UBO for this frame
+        const global_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+        const global_resource = Resource{ .buffer = .{
+            .buffer = global_info.buffer,
+            .offset = global_info.offset,
+            .range = global_info.range,
+        } };
+
+        // Bind resources for this frame only
+        if (self.tlas_valid) {
+            const accel_resource = Resource{ .acceleration_structure = self.tlas };
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 0, accel_resource, target_frame);
+        }
+        try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 1, output_resource, target_frame);
+        try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 2, global_resource, target_frame);
+
+        if (frame_data.vertex_infos.items.len > 0) {
+            const vertices_resource = Resource{ .buffer_array = frame_data.vertex_infos.items };
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 3, vertices_resource, target_frame);
+        }
+        if (frame_data.index_infos.items.len > 0) {
+            const indices_resource = Resource{ .buffer_array = frame_data.index_infos.items };
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 4, indices_resource, target_frame);
+        }
+        try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 5, material_resource, target_frame);
+        if (textures_resource) |res| {
+            try self.pipeline_system.bindResource(self.path_tracing_pipeline, 0, 6, res, target_frame);
+        }
+
+        // Mark cleaned and push descriptor updates for this frame only
+        self.descriptor_dirty_flags[frame_idx] = false;
+        try self.resource_binder.updateFrame(self.path_tracing_pipeline, target_frame);
+    }
+
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
         const frame_index = frame_info.current_frame;
@@ -392,18 +494,28 @@ pub const PathTracingPass = struct {
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.pipeline_system.markPipelineResourcesDirty(self.path_tracing_pipeline);
 
-            // Rebind resources after hot reload
-            try self.updateDescriptors();
+            // Mark descriptors dirty instead of immediately updating
+            // They'll be updated in the next update() cycle when it's safe
+            for (&self.descriptor_dirty_flags) |*flag| {
+                flag.* = true;
+            }
+            // Skip dispatch this frame since descriptors aren't bound yet
+            return;
         }
 
         const cmd = frame_info.command_buffer;
 
-        try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
-        // Dispatch rays
-        try self.dispatchRays(cmd, self.rt_system.shader_binding_table);
+        var did_dispatch = false;
 
-        // Copy output to swapchain image
-        try self.copyOutputToSwapchain(cmd, frame_info.color_image);
+        // Only dispatch when TLAS transition is complete and this frame's descriptors are valid
+        if (self.tlas_transition_pending_mask == 0 and !self.descriptor_dirty_flags[frame_index]) {
+            try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
+            try self.dispatchRays(cmd, self.rt_system.shader_binding_table);
+            did_dispatch = true;
+        }
+
+        // Always copy to swapchain so we present the last valid output, even if we skipped dispatch this frame
+        try self.copyOutputToFrameImage(cmd, frame_info.hdr_texture.?.image);
     }
     fn teardownImpl(base: *RenderPass) void {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
@@ -442,6 +554,13 @@ pub const PathTracingPass = struct {
             for (&self.descriptor_dirty_flags) |*dirty| {
                 dirty.* = true;
             }
+
+            // Start TLAS transition: require all frames to rebind before dispatch resumes
+            var mask: u8 = 0;
+            inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+                mask |= (@as(u8, 1) << @intCast(i));
+            }
+            self.tlas_transition_pending_mask = mask;
         }
     }
 
@@ -525,18 +644,18 @@ pub const PathTracingPass = struct {
         );
     }
 
-    fn copyOutputToSwapchain(self: *PathTracingPass, command_buffer: vk.CommandBuffer, swapchain_image: vk.Image) !void {
+    fn copyOutputToFrameImage(self: *PathTracingPass, command_buffer: vk.CommandBuffer, frame_image: vk.Image) !void {
         const gc = self.graphics_context;
 
         // OPTIMIZATION: Keep output texture in GENERAL layout (supports all operations including transfer)
         // This eliminates 2 image transitions per frame (GENERAL→TRANSFER_SRC→GENERAL)
-        // Only transition the swapchain image (required for presentation)
+        // Only transition the frame image (required for presentation)
 
-        // Transition swapchain image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
+        // Transition frame image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
         gc.transitionImageLayout(
             command_buffer,
-            swapchain_image,
-            vk.ImageLayout.present_src_khr,
+            frame_image,
+            vk.ImageLayout.color_attachment_optimal,
             vk.ImageLayout.transfer_dst_optimal,
             .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
@@ -575,7 +694,7 @@ pub const PathTracingPass = struct {
             command_buffer,
             self.output_texture.image,
             vk.ImageLayout.general, // Source stays in GENERAL
-            swapchain_image,
+            frame_image,
             vk.ImageLayout.transfer_dst_optimal,
             1,
             @ptrCast(&copy_info),
@@ -584,9 +703,9 @@ pub const PathTracingPass = struct {
         // Transition swapchain image back to PRESENT_SRC
         gc.transitionImageLayout(
             command_buffer,
-            swapchain_image,
+            frame_image,
             vk.ImageLayout.transfer_dst_optimal,
-            vk.ImageLayout.present_src_khr,
+            vk.ImageLayout.color_attachment_optimal,
             .{
                 .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
                 .base_mip_level = 0,
@@ -598,12 +717,10 @@ pub const PathTracingPass = struct {
     }
 
     /// Resize the output texture when swapchain is recreated
-    pub fn resize(self: *PathTracingPass, new_width: u32, new_height: u32) !void {
+    pub fn resize(self: *PathTracingPass, new_width: u32, new_height: u32, command_buffer: vk.CommandBuffer) !void {
         if (self.width == new_width and self.height == new_height) {
             return; // No change needed
         }
-
-        log(.INFO, "path_tracing_pass", "Resizing output texture: {}x{} -> {}x{}", .{ self.width, self.height, new_width, new_height });
 
         // Destroy old texture
         self.output_texture.deinit();
@@ -612,6 +729,9 @@ pub const PathTracingPass = struct {
         var output_format = self.swapchain_format;
         if (output_format == vk.Format.a2r10g10b10_unorm_pack32) {
             output_format = vk.Format.a2b10g10r10_unorm_pack32;
+        } else if (output_format == vk.Format.r16g16b16a16_sfloat) {
+            // Storage image must exactly match shader's OpTypeImage (Rgba16 => UNORM)
+            output_format = vk.Format.r16g16b16a16_sfloat;
         }
 
         // Create new output texture with new dimensions
@@ -628,6 +748,20 @@ pub const PathTracingPass = struct {
             vk.SampleCountFlags{ .@"1_bit" = true },
         );
 
+        self.graphics_context.transitionImageLayout(
+            command_buffer,
+            self.output_texture.image,
+            .undefined,
+            .general,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+
         // Update dimensions
         self.width = new_width;
         self.height = new_height;
@@ -636,8 +770,6 @@ pub const PathTracingPass = struct {
         for (&self.descriptor_dirty_flags) |*flag| {
             flag.* = true;
         }
-
-        log(.INFO, "path_tracing_pass", "Output texture resized successfully", .{});
     }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
@@ -646,7 +778,7 @@ pub const PathTracingPass = struct {
 
         // Check if window was resized and recreate output texture if needed
         if (self.width != frame_info.extent.width or self.height != frame_info.extent.height) {
-            try self.resize(frame_info.extent.width, frame_info.extent.height);
+            try self.resize(frame_info.extent.width, frame_info.extent.height, frame_info.command_buffer);
         }
 
         // Flush deferred resources from MAX_FRAMES_IN_FLIGHT ago
@@ -673,11 +805,8 @@ pub const PathTracingPass = struct {
         // Update cached TLAS when rt_system's registry TLAS changed
         // Registry TLAS is stable for the entire frame (atomic swap only happens on completion)
         if (tlas_changed and new_tlas != null) {
-            // Update cached TLAS to the stable TLAS from registry
-            // The registry value is stable for the entire frame, so it's safe
-            // to swap it in immediately and mark descriptors dirty.
-            self.tlas = new_tlas.?;
-            self.tlas_valid = self.rt_system.isTlasValid();
+            // Use helper to update TLAS and mark all frames' descriptors dirty
+            self.updateTLAS(new_tlas.?);
         }
 
         const needs_update = bvh_rebuilt or
@@ -690,20 +819,46 @@ pub const PathTracingPass = struct {
         // Update descriptors when needed and TLAS is valid
         // Safe to update immediately because render_tlas is stable for the entire frame
         if (needs_update and self.tlas_valid) {
-            try self.updateDescriptors();
-
-            // Clear dirty flags ONLY after successful descriptor update
-            if (geometry_changed or tlas_changed) {
+            // If geometry/material/texture changed, do a full rebind for all frames to rebuild geometry arrays
+            if (geometry_changed or materials_dirty or textures_dirty) {
+                try self.updateDescriptors();
                 self.render_system.raytracing_descriptors_dirty = false;
                 self.render_system.renderables_dirty = false;
                 self.render_system.transform_only_change = false;
+                // Full rebind covers all frames; clear TLAS transition mask
+                self.tlas_transition_pending_mask = 0;
+            } else {
+                // Only rebind the current frame to avoid touching in-flight frames at high FPS
+                try self.updateDescriptorsForFrame(frame_index);
+
+                // Clear flags after successful per-frame rebind
+                if (tlas_changed) {
+                    self.render_system.renderables_dirty = false;
+                    self.render_system.transform_only_change = false;
+                }
+
+                // CRITICAL: Also clear raytracing_descriptors_dirty if we updated for it
+                // Otherwise it leaks into next frame and causes confusion
+                if (geometry_changed) {
+                    self.render_system.raytracing_descriptors_dirty = false;
+                }
+
+                // Mark this frame as completed in the TLAS transition mask
+                const mask_bit: u8 = (@as(u8, 1) << @intCast(frame_index));
+                self.tlas_transition_pending_mask &= ~mask_bit;
             }
         }
     }
 
     /// Toggle path tracing on/off (allows switching to raster)
     pub fn setEnabled(self: *PathTracingPass, enabled: bool) void {
+        const was_disabled = !self.enable_path_tracing;
         self.enable_path_tracing = enabled;
+
+        // If we're enabling PT after it was disabled, force a BVH rebuild
+        if (enabled and was_disabled) {
+            self.rt_system.forceRebuild();
+        }
     }
 
     /// Get the path-traced output texture

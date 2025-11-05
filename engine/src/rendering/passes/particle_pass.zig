@@ -28,6 +28,9 @@ const ParticleComponent = ecs.ParticleComponent;
 // Global UBO
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update checks
+// TODO: Use named resource binding: bindStorageBuffer("ParticleData", particle_buffer)
+
 /// Particle rendering pass
 /// Renders particles computed by ParticleComputePass
 pub const ParticlePass = struct {
@@ -138,6 +141,17 @@ pub const ParticlePass = struct {
             .cull_mode = .{}, // No culling for particles
             .dynamic_rendering_color_formats = &color_formats,
             .dynamic_rendering_depth_format = self.swapchain_depth_format,
+            // Enable standard alpha blending for particles
+            .color_blend_attachment = .{
+                .blend_enable = true,
+                .src_color_blend_factor = .src_alpha,
+                .dst_color_blend_factor = .one_minus_src_alpha,
+                .color_blend_op = .add,
+                .src_alpha_blend_factor = .one,
+                .dst_alpha_blend_factor = .one_minus_src_alpha,
+                .alpha_blend_op = .add,
+                .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+            },
         };
 
         const result = try self.pipeline_system.createPipeline(pipeline_config);
@@ -213,7 +227,7 @@ pub const ParticlePass = struct {
         // Setup dynamic rendering with helper (render on top of existing scene)
         // Use initLoad to preserve existing color and depth
         const rendering = DynamicRenderingHelper.initLoad(
-            frame_info.color_image_view,
+            frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
         );

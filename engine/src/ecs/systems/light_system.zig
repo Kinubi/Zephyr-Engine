@@ -130,9 +130,7 @@ pub const LightSystem = struct {
     }
 };
 
-/// Standalone system function for animating lights (for SystemScheduler)
-/// This animates point lights in a circle pattern
-pub fn animateLightsSystem(world: *World, dt: f32) !void {
+pub fn update(world: *World, dt: f32) !void {
     // Static time accumulator (persists across calls)
     const State = struct {
         var time_elapsed: f32 = 0.0;
@@ -140,54 +138,75 @@ pub fn animateLightsSystem(world: *World, dt: f32) !void {
     State.time_elapsed += dt;
 
     // Get GlobalUbo from world userdata for extraction
-
     const ubo_ptr = world.getUserData("global_ubo");
     const global_ubo: ?*GlobalUbo = if (ubo_ptr) |ptr| @ptrCast(@alignCast(ptr)) else null;
 
+    // Collect up to 16 lights with stable order by entity id
+    const MaxLights = 16;
+    const Entry = struct {
+        id: usize,
+        transform: *Transform,
+        light: *const PointLight,
+    };
+    var list: [MaxLights]Entry = undefined;
+    var count: usize = 0;
+
     var view = try world.view(PointLight);
     var iter = view.iterator();
-    var light_index: usize = 0;
-
-    while (iter.next()) |entry| : (light_index += 1) {
-        const point_light = entry.component;
+    while (iter.next()) |entry| {
         const transform_ptr = world.get(Transform, entry.entity) orelse continue;
-
-        // Animate position in a circle
-        const radius: f32 = 1.5;
-        const height: f32 = 0.5;
-        const speed: f32 = 1.0;
-        const angle_offset: f32 = @as(f32, @floatFromInt(light_index)) * (2.0 * std.math.pi / 3.0);
-
-        const angle = State.time_elapsed * speed + angle_offset;
-        const x = @cos(angle) * radius;
-        const z = @sin(angle) * radius;
-
-        // Update transform position using setter to mark dirty flag
-        transform_ptr.setPosition(Math.Vec3.init(x, height, z));
-
-        // Extract to GlobalUbo if available
-        if (global_ubo) |ubo| {
-            if (light_index < 16) {
-                ubo.point_lights[light_index] = .{
-                    .position = Math.Vec4.init(x, height, z, 1.0),
-                    .color = Math.Vec4.init(
-                        point_light.color.x * point_light.intensity,
-                        point_light.color.y * point_light.intensity,
-                        point_light.color.z * point_light.intensity,
-                        point_light.intensity,
-                    ),
-                };
-            }
+        if (count < MaxLights) {
+            list[count] = .{
+                .id = @intFromEnum(entry.entity),
+                .transform = transform_ptr,
+                .light = entry.component,
+            };
+            count += 1;
         }
     }
 
-    // Finalize GlobalUbo light data
-    if (global_ubo) |ubo| {
-        ubo.num_point_lights = @intCast(@min(light_index, 16));
+    // Sort by stable entity id
+    std.sort.pdq(Entry, list[0..count], {}, struct {
+        fn lessThan(_: void, a: Entry, b: Entry) bool {
+            return a.id < b.id;
+        }
+    }.lessThan);
 
+    // Animate and write to UBO in sorted order with even angular spacing
+    const radius: f32 = 1.5;
+    const height: f32 = 0.5;
+    const speed: f32 = 1.0;
+    const two_pi: f32 = 2.0 * std.math.pi;
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const phase = if (count > 0) (@as(f32, @floatFromInt(i)) * (two_pi / @as(f32, @floatFromInt(count)))) else 0.0;
+        const angle = State.time_elapsed * speed + phase;
+        const x = @cos(angle) * radius;
+        const z = @sin(angle) * radius;
+
+        // Update transform position and UBO
+        list[i].transform.setPosition(Math.Vec3.init(x, height, z));
+
+        if (global_ubo) |ubo| {
+            ubo.point_lights[i] = .{
+                .position = Math.Vec4.init(x, height, z, 1.0),
+                .color = Math.Vec4.init(
+                    list[i].light.color.x * list[i].light.intensity,
+                    list[i].light.color.y * list[i].light.intensity,
+                    list[i].light.color.z * list[i].light.intensity,
+                    list[i].light.intensity,
+                ),
+            };
+        }
+    }
+
+    if (global_ubo) |ubo| {
+        ubo.num_point_lights = @intCast(count);
         // Clear remaining light slots
-        for (light_index..16) |i| {
-            ubo.point_lights[i] = .{};
+        var j: usize = count;
+        while (j < MaxLights) : (j += 1) {
+            ubo.point_lights[j] = .{};
         }
     }
 }

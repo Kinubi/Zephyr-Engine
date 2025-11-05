@@ -25,7 +25,7 @@ struct Attributes
 
 struct Payload
 {
-    [[vk::location(0)]] float3 hitValue;
+    [[vk::location(0)]] float4 hitValue;
 };
 struct Vertex
 {
@@ -88,9 +88,9 @@ void main(
         float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
    
         float3 albedo = tex.SampleLevel(sampler0, uv, 0).rgb;
-        p.hitValue = float3(albedo.b, albedo.g, albedo.r) + (mat.emissive_color * mat.emissive);
+        p.hitValue = float4(albedo.r, albedo.g, albedo.b, 1.0) + (mat.emissive_color * mat.emissive);
     } else {
-        p.hitValue = normal * 0.5 + 0.5; 
+        p.hitValue = float4(normal * 0.5 + 0.5, 1.0);
     }
     
 

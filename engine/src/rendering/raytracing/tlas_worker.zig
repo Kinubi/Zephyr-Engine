@@ -1,7 +1,7 @@
 const std = @import("std");
-const log = @import("../utils/log.zig").log;
+const log = @import("../../utils/log.zig").log;
 const vk = @import("vulkan");
-const Math = @import("../utils/math.zig");
+const Math = @import("../../utils/math.zig");
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
 const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
 const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
@@ -9,9 +9,9 @@ const GeometryData = @import("multithreaded_bvh_builder.zig").GeometryData;
 const BvhWorkData = @import("multithreaded_bvh_builder.zig").BvhWorkData;
 const buildTlasSynchronous = @import("multithreaded_bvh_builder.zig").buildTlasSynchronous;
 const blasWorkerFn = @import("multithreaded_bvh_builder.zig").blasWorkerFn;
-const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhBuildingWork;
-const RenderData = @import("../rendering/render_data_types.zig");
-const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
+const createBvhBuildingWork = @import("../../threading/thread_pool.zig").createBvhBuildingWork;
+const RenderData = @import("../../rendering/render_data_types.zig");
+const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 
 // TLAS worker implementation
 // This file implements the per-job atomic BLAS result buffer and the event-driven
@@ -131,7 +131,14 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             const geom_data = try job.allocator.create(GeometryData);
             geom_data.* = .{
                 .mesh_ptr = job.geometries[geom_index].mesh_ptr,
-                .material_id = 0, // TODO: Get from instance or geometry
+                // TODO(ARCHITECTURE): REMOVE material_id FROM GeometryData - MEDIUM PRIORITY
+                // Problem: GeometryData.material_id is per-geometry, but material should be per-instance
+                // Reality: Different instances of same geometry can have different materials
+                // Solution: Material ID stored in InstanceData.custom_index (already exists!)
+                // Refactor: Remove material_id from GeometryData, use only InstanceData.custom_index
+                // Impact: BLAS doesn't need material info (geometry only), TLAS instances have material
+                // Branch: features/raytracing-architecture
+                .material_id = 0, // Placeholder - should be removed from GeometryData entirely
                 .transform = Math.Mat4.identity(), // Identity transform for BLAS (transforms applied at TLAS level)
                 .mesh_id = geom_id,
             };

@@ -1,12 +1,9 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const zephyr = @import("zephyr");
-
-const GraphicsContext = zephyr.GraphicsContext;
 const Math = zephyr.math;
 const Window = zephyr.Window;
 const Camera = zephyr.Camera;
-const glfw = @import("mach-glfw");
 
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");

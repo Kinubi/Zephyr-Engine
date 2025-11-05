@@ -1,20 +1,21 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Buffer = @import("../core/buffer.zig").Buffer;
-const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
-const log = @import("../utils/log.zig").log;
-const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
-const RenderData = @import("../rendering/render_data_types.zig");
-const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
+const Buffer = @import("../../core/buffer.zig").Buffer;
+const FrameInfo = @import("../../rendering/frameinfo.zig").FrameInfo;
+const log = @import("../../utils/log.zig").log;
+const ThreadPoolMod = @import("../../threading/thread_pool.zig");
+
+const RenderData = @import("../../rendering/render_data_types.zig");
+const RenderSystem = @import("../../ecs/systems/render_system.zig").RenderSystem;
+const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 // Import the new multithreaded BVH builder
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
 const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
-const TlasResult = @import("multithreaded_bvh_builder.zig").TlasResult;
 const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
-const BvhBuildResult = @import("multithreaded_bvh_builder.zig").BvhBuildResult;
 const TlasWorker = @import("tlas_worker.zig");
 const TlasJob = TlasWorker.TlasJob;
+const ThreadPool = ThreadPoolMod.ThreadPool;
 
 fn alignForward(val: usize, alignment: usize) usize {
     return ((val + alignment - 1) / alignment) * alignment;
@@ -74,6 +75,7 @@ pub const RaytracingSystem = struct {
     // Multithreaded BVH system
     bvh_builder: *MultithreadedBvhBuilder = undefined,
     bvh_build_in_progress: bool = false,
+    force_rebuild: bool = false, // Force rebuild on next update (overrides all checks)
     next_tlas_job_id: u64 = 1,
 
     // Shader Binding Table (for raytracing)
@@ -87,6 +89,10 @@ pub const RaytracingSystem = struct {
     per_frame_destroy: [MAX_FRAMES_IN_FLIGHT]PerFrameDestroyQueue = undefined,
 
     allocator: std.mem.Allocator = undefined,
+
+    /// Cooldown frames after a TLAS pickup to allow all frames-in-flight to
+    /// rebind their descriptor sets before spawning another TLAS build.
+    tlas_rebuild_cooldown_frames: u32 = 0,
 
     /// Enhanced init with multithreaded BVH support
     pub fn init(
@@ -249,7 +255,7 @@ pub const RaytracingSystem = struct {
     /// Update BVH state using data from RenderSystem (for modern ECS-based rendering)
     pub fn update(
         self: *RaytracingSystem,
-        render_system: *@import("../ecs/systems/render_system.zig").RenderSystem,
+        render_system: *RenderSystem,
         frame_info: *const FrameInfo,
         geo_changed: bool,
     ) !bool {
@@ -300,6 +306,17 @@ pub const RaytracingSystem = struct {
 
                 // Mark build as no longer in progress
                 self.bvh_build_in_progress = false;
+
+                // Check if force rebuild was requested while this build was in progress
+                if (self.force_rebuild) {
+                    // Skip cooldown to allow immediate rebuild
+                    self.tlas_rebuild_cooldown_frames = 0;
+                } else {
+                    // Start cooldown so descriptor sets for all frames can rebind
+                    self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT;
+                }
+
+                return true;
             }
         }
 
@@ -336,7 +353,20 @@ pub const RaytracingSystem = struct {
         const is_transform_only = render_system.transform_only_change and render_system.renderables_dirty;
         const rebuild_needed = try render_system.checkBvhRebuildNeeded();
 
-        if ((is_transform_only or rebuild_needed or geo_changed) and !self.bvh_build_in_progress) {
+        // Decrement cooldown if active
+        if (self.tlas_rebuild_cooldown_frames > 0) {
+            self.tlas_rebuild_cooldown_frames -= 1;
+        }
+
+        // Force rebuild overrides everything (except in-progress builds)
+        const wants_rebuild = self.force_rebuild or is_transform_only or rebuild_needed or geo_changed;
+        const can_spawn_new_build = self.tlas_rebuild_cooldown_frames == 0 and !self.bvh_build_in_progress;
+
+        if (wants_rebuild and can_spawn_new_build) {
+            // Clear force flag when we actually start the build
+            if (self.force_rebuild) {
+                self.force_rebuild = false;
+            }
             // Get current raytracing data
             const rt_data = try render_system.getRaytracingData();
             defer {
@@ -352,12 +382,7 @@ pub const RaytracingSystem = struct {
             // When it completes, registry will handle the swap automatically
             try self.spawnTlasWorker(rt_data);
 
-            // Clear dirty flags
-            render_system.renderables_dirty = false;
-            render_system.transform_only_change = false;
-            render_system.raytracing_descriptors_dirty = false;
-
-            return true;
+            return false;
         }
 
         return false; // No rebuild needed or already in progress
@@ -415,7 +440,7 @@ pub const RaytracingSystem = struct {
         // Spawn TLAS worker asynchronously via ThreadPool
         // Create work item for TLAS building
         const work_id = job.job_id;
-        const thread_pool = @import("../threading/thread_pool.zig");
+        const thread_pool = ThreadPoolMod;
 
         // Use createBvhBuildingWork for TLAS with job as work_data
         const work_item = thread_pool.createBvhBuildingWork(
@@ -522,6 +547,12 @@ pub const RaytracingSystem = struct {
     /// Call this AFTER waiting for that frame's fence to ensure GPU is done
     pub fn flushDeferredFrame(self: *RaytracingSystem, frame_index: u32) void {
         self.flushDestroyQueue(&self.per_frame_destroy[frame_index]);
+    }
+
+    /// Force a rebuild on the next update, overriding all checks
+    /// Call this when enabling PT to ensure fresh BVH
+    pub fn forceRebuild(self: *RaytracingSystem) void {
+        self.force_rebuild = true;
     }
 
     /// Flush ALL pending destruction queues immediately

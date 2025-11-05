@@ -101,7 +101,7 @@ pub const EventCategory = enum {
 fn getEventCategory(event_type: EventType) EventCategory {
     return switch (event_type) {
         .WindowResize, .WindowClose => .Window,
-        .KeyPressed, .KeyReleased, .MouseButtonPressed, .MouseButtonReleased, .MouseMoved, .MouseScrolled => .Input,
+        .KeyPressed, .KeyReleased, .KeyTyped, .MouseButtonPressed, .MouseButtonReleased, .MouseMoved, .MouseScrolled => .Input,
         .PathTracingToggled, .WireframeToggled, .CameraUpdated, .SceneLoaded => .Application,
     };
 }

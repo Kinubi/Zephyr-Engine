@@ -4,6 +4,40 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const log = @import("../utils/log.zig").log;
 const LogLevel = @import("../utils/log.zig").LogLevel;
 
+/// TODO(FEATURE): GPU MEMORY DEFRAGMENTATION - HIGH PRIORITY
+/// Currently using VMA (Vulkan Memory Allocator) via Buffer abstraction.
+/// Memory fragmentation grows over time from many small allocations.
+///
+/// Required features:
+/// 1. Track buffer lifetimes and usage patterns
+/// 2. Defragment during low activity (loading screens)
+/// 3. Copy small allocations into consolidated buffers
+/// 4. Update descriptor sets after relocation
+/// 5. Use staging buffer for GPU-side copies
+///
+/// Required changes:
+/// - Add engine/src/rendering/memory_defragmenter.zig
+/// - Add defragmentation hooks to Buffer
+/// - Pause rendering during defrag in unified_pipeline_system.zig
+///
+/// Benefits: Better memory utilization, prevent OOM, longer stability
+/// Complexity: HIGH - requires descriptor tracking + GPU synchronization
+/// Branch: features/memory-defragmentation
+///
+/// TODO(MAINTENANCE): MEMORY BUDGET TRACKING - MEDIUM PRIORITY
+/// Track GPU memory usage across buffers, textures, BLAS.
+/// Warn when approaching limits.
+///
+/// Required changes:
+/// - Add engine/src/rendering/memory_tracker.zig
+/// - Report allocations from Buffer.init()
+/// - Add per-category budgets (textures, buffers, BLAS)
+/// - CVars: r.maxTextureMemoryMB, r.maxBufferMemoryMB
+/// - ImGui panel showing memory breakdown
+///
+/// Benefits: Prevent OOM crashes, easier profiling
+/// Complexity: MEDIUM - add tracking hooks
+/// Branch: maintenance (can be done incrementally)
 pub const Buffer = struct {
     gc: *GraphicsContext,
     instance_size: vk.DeviceSize,

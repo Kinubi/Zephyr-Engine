@@ -46,7 +46,7 @@ This document tracks systems that are implemented but lack full documentation.
 
 **Files**:
 - `src/scene/scene.zig`
-- `src/scene/game_object_v2.zig`
+- `src/scene/game_object.zig`
 
 ### 2. Buffer System
 **Status**: ✅ Implemented, ⏳ Documentation Needed

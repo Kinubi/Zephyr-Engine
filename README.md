@@ -219,7 +219,7 @@ Zephyr-Engine/
 │   │   └── systems/             # TransformSystem, RenderSystem
 │   ├── scene/                   # Scene Management ✅
 │   │   ├── scene.zig         # ECS-based scene system
-│   │   └── game_object_v2.zig   # Entity wrapper
+│   │   └── game_object.zig   # Entity wrapper
 │   ├── assets/                  # Asset Management ✅
 │   │   ├── asset_manager.zig    # Central asset coordination
 │   │   ├── shader_hot_reload.zig # Real-time shader updates

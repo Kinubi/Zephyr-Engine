@@ -1,17 +1,23 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const zstbi = @import("zstbi");
+pub const zstbi = @import("zstbi");
 const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Buffer = @import("buffer.zig").Buffer;
 const log = @import("../utils/log.zig").log;
 const LogLevel = @import("../utils/log.zig").LogLevel;
+
+// TODO(FEATURE): ASYNC TEXTURE COMPRESSION & MIP GENERATION - MEDIUM PRIORITY
+// Currently: textures loaded without mipmaps, no compression, synchronous mip gen blocks loading
+// Required: Generate mipmaps on worker thread, BC7/BC5/BC4 compression, stream mips progressively
+// Files: texture.zig (async mip gen), asset_loader.zig (queue jobs), texture_compressor.zig (new)
+// Branch: features/texture-compression
 
 // Global ZSTBI state management
 var zstbi_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var zstbi_init_mutex: std.Thread.Mutex = .{};
 
 /// Safely initialize zstbi once per application
-fn ensureZstbiInit(allocator: std.mem.Allocator) void {
+pub fn ensureZstbiInit(allocator: std.mem.Allocator) void {
     if (!zstbi_initialized.load(.acquire)) {
         zstbi_init_mutex.lock();
         defer zstbi_init_mutex.unlock();
@@ -56,12 +62,21 @@ pub const Texture = struct {
         var aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
         var image_layout: vk.ImageLayout = undefined;
 
+        // Helper to detect if a depth format has a stencil component
+        const formatHasStencil = switch (format) {
+            .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d16_unorm_s8_uint => true,
+            else => false,
+        };
+
         // Determine appropriate layout based on usage flags
         if (usage.color_attachment_bit) {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
             image_layout = vk.ImageLayout.color_attachment_optimal;
         } else if (usage.depth_stencil_attachment_bit) {
-            aspect_mask = vk.ImageAspectFlags{ .depth_bit = true };
+            aspect_mask = if (formatHasStencil)
+                (vk.ImageAspectFlags{ .depth_bit = true, .stencil_bit = true })
+            else
+                (vk.ImageAspectFlags{ .depth_bit = true });
             image_layout = vk.ImageLayout.depth_stencil_attachment_optimal;
         } else if (usage.storage_bit) {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
@@ -149,6 +164,188 @@ pub const Texture = struct {
             .anisotropy_enable = .false,
         };
         const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
+        return Texture{
+            .image = image,
+            .image_view = image_view,
+            .memory = memory,
+            .sampler = sampler,
+            .mip_levels = 1,
+            .extent = extent,
+            .format = format,
+            .descriptor = vk.DescriptorImageInfo{
+                .sampler = sampler,
+                .image_view = image_view,
+                .image_layout = image_layout,
+            },
+            .gc = gc,
+        };
+    }
+
+    /// Create a texture and transition initial layout using a dedicated single-time command buffer,
+    /// regardless of the calling thread. Useful during early startup when secondary buffers are unsafe.
+    pub fn initSingleTime(
+        gc: *GraphicsContext,
+        format: vk.Format,
+        extent: vk.Extent3D,
+        usage: vk.ImageUsageFlags,
+        sample_count: vk.SampleCountFlags,
+    ) !Texture {
+        var aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
+        var image_layout: vk.ImageLayout = undefined;
+
+        const formatHasStencil = switch (format) {
+            .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d16_unorm_s8_uint => true,
+            else => false,
+        };
+
+        if (usage.color_attachment_bit) {
+            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
+            image_layout = vk.ImageLayout.color_attachment_optimal;
+        } else if (usage.depth_stencil_attachment_bit) {
+            aspect_mask = if (formatHasStencil)
+                (vk.ImageAspectFlags{ .depth_bit = true, .stencil_bit = true })
+            else
+                (vk.ImageAspectFlags{ .depth_bit = true });
+            image_layout = vk.ImageLayout.depth_stencil_attachment_optimal;
+        } else if (usage.storage_bit) {
+            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
+            image_layout = vk.ImageLayout.general;
+        } else if (usage.transfer_dst_bit) {
+            // Common for staging destination before sampling
+            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
+            image_layout = vk.ImageLayout.transfer_dst_optimal;
+        } else {
+            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
+            image_layout = vk.ImageLayout.shader_read_only_optimal;
+        }
+
+        const image_info = vk.ImageCreateInfo{
+            .s_type = vk.StructureType.image_create_info,
+            .image_type = .@"2d",
+            .format = format,
+            .extent = extent,
+            .mip_levels = 1,
+            .array_layers = 1,
+            .samples = sample_count,
+            .tiling = vk.ImageTiling.optimal,
+            .usage = usage,
+            .initial_layout = vk.ImageLayout.undefined,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .flags = .{},
+            .p_next = null,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        };
+
+        var image: vk.Image = undefined;
+        var memory: vk.DeviceMemory = undefined;
+        try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image, &memory);
+
+        var view_info = vk.ImageViewCreateInfo{
+            .s_type = vk.StructureType.image_view_create_info,
+            .view_type = vk.ImageViewType.@"2d",
+            .format = format,
+            .subresource_range = .{
+                .aspect_mask = aspect_mask,
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image = image,
+            .components = .{
+                .r = vk.ComponentSwizzle.identity,
+                .g = vk.ComponentSwizzle.identity,
+                .b = vk.ComponentSwizzle.identity,
+                .a = vk.ComponentSwizzle.identity,
+            },
+            .flags = .{},
+            .p_next = null,
+        };
+
+        const image_view = gc.vkd.createImageView(gc.dev, &view_info, null) catch return error.FailedToCreateImageView;
+
+        // Perform initial layout transition using a temporary command pool/buffer.
+        // This avoids relying on gc.command_pool which may not be created yet during early startup.
+        const temp_pool = try gc.vkd.createCommandPool(gc.dev, &vk.CommandPoolCreateInfo{
+            .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
+            .queue_family_index = gc.graphics_queue.family,
+        }, null);
+        defer gc.vkd.destroyCommandPool(gc.dev, temp_pool, null);
+
+        var alloc_info = vk.CommandBufferAllocateInfo{
+            .s_type = vk.StructureType.command_buffer_allocate_info,
+            .command_pool = temp_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        };
+        var cmd: vk.CommandBuffer = undefined;
+        try gc.vkd.allocateCommandBuffers(gc.dev, &alloc_info, @ptrCast(&cmd));
+        defer gc.vkd.freeCommandBuffers(gc.dev, temp_pool, 1, @ptrCast(&cmd));
+
+        var begin_info = vk.CommandBufferBeginInfo{
+            .s_type = vk.StructureType.command_buffer_begin_info,
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        };
+        try gc.vkd.beginCommandBuffer(cmd, &begin_info);
+
+        gc.transitionImageLayout(
+            cmd,
+            image,
+            vk.ImageLayout.undefined,
+            image_layout,
+            .{
+                .aspect_mask = aspect_mask,
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+
+        try gc.vkd.endCommandBuffer(cmd);
+
+        var submit_info = vk.SubmitInfo{
+            .s_type = vk.StructureType.submit_info,
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = null,
+            .p_wait_dst_stage_mask = null,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cmd),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = null,
+        };
+
+        // Synchronize queue access as required by Vulkan spec
+        gc.queue_mutex.lock();
+        defer gc.queue_mutex.unlock();
+        try gc.vkd.queueSubmit(gc.graphics_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
+        try gc.vkd.queueWaitIdle(gc.graphics_queue.handle);
+
+        // Sampler
+        var sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = vk.Filter.linear,
+            .min_filter = vk.Filter.linear,
+            .mipmap_mode = vk.SamplerMipmapMode.linear,
+            .address_mode_u = vk.SamplerAddressMode.clamp_to_border,
+            .address_mode_v = vk.SamplerAddressMode.clamp_to_border,
+            .address_mode_w = vk.SamplerAddressMode.clamp_to_border,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = 1.0,
+            .min_lod = 0.0,
+            .max_lod = 1.0,
+            .border_color = vk.BorderColor.float_opaque_black,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = .false,
+            .compare_op = vk.CompareOp.always,
+            .anisotropy_enable = .false,
+        };
+        const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
+
         return Texture{
             .image = image,
             .image_view = image_view,
@@ -548,6 +745,141 @@ pub const Texture = struct {
 
     pub fn getDescriptorInfo(self: *Texture) vk.DescriptorImageInfo {
         return self.descriptor;
+    }
+
+    /// Load texture from raw pixel data using ONLY single-time commands (synchronous)
+    /// Suitable for UI textures that need immediate availability (e.g., ImGui)
+    /// Transitions: undefined -> transfer_dst -> shader_read_only
+    pub fn loadFromMemorySingle(
+        gc: *GraphicsContext,
+        pixels: []const u8,
+        width: u32,
+        height: u32,
+        format: vk.Format,
+    ) !Texture {
+        const extent = vk.Extent3D{
+            .width = width,
+            .height = height,
+            .depth = 1,
+        };
+
+        // Create the texture image
+        var texture = try Texture.init(
+            gc,
+            format,
+            extent,
+            .{ .transfer_dst_bit = true, .sampled_bit = true },
+            .{ .@"1_bit" = true },
+        );
+        errdefer texture.deinit();
+
+        // Transition from undefined to transfer_dst_optimal
+        const transition1_cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            transition1_cmd,
+            texture.image,
+            .undefined,
+            .transfer_dst_optimal,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+        try gc.endSingleTimeCommands(transition1_cmd);
+
+        // Upload pixel data via staging buffer
+        const buffer_size = pixels.len;
+        var staging_buffer = try Buffer.init(
+            gc,
+            buffer_size,
+            1,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        defer staging_buffer.deinit();
+
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(pixels, buffer_size, 0);
+        staging_buffer.unmap();
+
+        // Copy buffer to image
+        const copy_cmd = try gc.beginSingleTimeCommands();
+        const region = vk.BufferImageCopy{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_subresource = .{
+                .aspect_mask = .{ .color_bit = true },
+                .mip_level = 0,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+            .image_extent = .{ .width = width, .height = height, .depth = 1 },
+        };
+        gc.vkd.cmdCopyBufferToImage(
+            copy_cmd,
+            staging_buffer.buffer,
+            texture.image,
+            .transfer_dst_optimal,
+            1,
+            @ptrCast(&region),
+        );
+        try gc.endSingleTimeCommands(copy_cmd);
+
+        // Transition to shader_read_only_optimal
+        const transition2_cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            transition2_cmd,
+            texture.image,
+            .transfer_dst_optimal,
+            .shader_read_only_optimal,
+            .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+        try gc.endSingleTimeCommands(transition2_cmd);
+
+        // Update descriptor layout
+        texture.descriptor.image_layout = .shader_read_only_optimal;
+
+        return texture;
+    }
+
+    /// Load texture from file using ONLY single-time commands (synchronous)
+    /// Suitable for UI textures that need immediate availability (e.g., ImGui)
+    /// Automatically decodes image to RGBA8 format
+    pub fn loadFromFileSingle(
+        gc: *GraphicsContext,
+        allocator: std.mem.Allocator,
+        filepath: []const u8,
+    ) !Texture {
+        // Ensure zstbi is initialized
+        ensureZstbiInit(allocator);
+
+        // Load and decode image file
+        const file_data = try std.fs.cwd().readFileAlloc(allocator, filepath, 10 * 1024 * 1024); // 10MB max
+        defer allocator.free(file_data);
+
+        var image = try zstbi.Image.loadFromMemory(file_data, 4); // 4 channels = RGBA
+        defer image.deinit();
+
+        const pixel_data = image.data[0 .. image.width * image.height * 4];
+
+        return loadFromMemorySingle(
+            gc,
+            pixel_data,
+            image.width,
+            image.height,
+            .r8g8b8a8_srgb,
+        );
     }
 
     pub fn deinit(self: *Texture) void {

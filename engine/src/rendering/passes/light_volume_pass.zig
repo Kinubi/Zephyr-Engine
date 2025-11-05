@@ -28,6 +28,9 @@ const LightSystem = ecs.LightSystem;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 
+// TODO: SIMPLIFY RENDER PASS - Remove resource update checks
+// TODO: Use named resource binding: bindStorageBuffer("LightVolumes", light_volume_buffer)
+
 /// Light volume data for SSBO (matches shader struct)
 const LightVolumeData = extern struct {
     position: [4]f32,
@@ -282,7 +285,7 @@ pub const LightVolumePass = struct {
 
         // Setup dynamic rendering with load operations (don't clear, render on top of geometry)
         const helper = DynamicRenderingHelper.initLoad(
-            frame_info.color_image_view,
+            frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
         );

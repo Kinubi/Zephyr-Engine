@@ -1,18 +1,19 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
-const Buffer = @import("../core/buffer.zig").Buffer;
-const Vertex = @import("../rendering/mesh.zig").Vertex;
-const Model = @import("../rendering/mesh.zig").Model;
-const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
-const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
-const WorkPriority = @import("../threading/thread_pool.zig").WorkPriority;
-const createBvhBuildingWork = @import("../threading/thread_pool.zig").createBvhBuildingWork;
-const log = @import("../utils/log.zig").log;
-const Math = @import("../utils/math.zig");
-const Mesh = @import("../rendering/mesh.zig").Mesh;
+const GraphicsContext = @import("../../core/graphics_context.zig").GraphicsContext;
+const Buffer = @import("../../core/buffer.zig").Buffer;
+const Vertex = @import("../../rendering/mesh.zig").Vertex;
+const Model = @import("../../rendering/mesh.zig").Model;
+const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
+const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
+const WorkPriority = @import("../../threading/thread_pool.zig").WorkPriority;
+const createBvhBuildingWork = @import("../../threading/thread_pool.zig").createBvhBuildingWork;
+const log = @import("../../utils/log.zig").log;
+const Math = @import("../../utils/math.zig");
+const Mesh = @import("../../rendering/mesh.zig").Mesh;
 
-const RaytracingData = @import("../rendering/render_data_types.zig").RaytracingData;
+const RaytracingData = @import("../../rendering/render_data_types.zig").RaytracingData;
+const tlas_worker = @import("tlas_worker.zig");
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {
@@ -101,6 +102,27 @@ pub const MultithreadedBvhBuilder = struct {
     completed_tlas: std.atomic.Value(?*TlasResult),
     old_blas_head: std.atomic.Value(?*BlasDestructionNode), // Lock-free linked list head
 
+    // TODO(FEATURE): REMOVE GLOBAL BLAS REGISTRY - HIGH PRIORITY
+    // This global registry causes problems:
+    // 1. BLAS rebuilt when mesh_ptr changes (even if geometry identical)
+    // 2. No ownership semantics (who destroys the BLAS?)
+    // 3. Difficult to implement reference counting for shared meshes
+    //
+    // Solution: Move BLAS ownership to Mesh/Geometry structures
+    // - Mesh owns its BLAS (built once on load, destroyed with mesh)
+    // - Registry becomes lookup table: geometry_id -> Mesh (which contains BLAS)
+    // - Reference counting for shared meshes across multiple entities
+    //
+    // Required changes:
+    // 1. Add BLAS field to Mesh/Geometry (see geometry.zig TODO)
+    // 2. Build BLAS during mesh load (asset_loader.zig)
+    // 3. Replace lookupBlas() with mesh.getBlas()
+    // 4. Remove registerBlas(), updateBlas() methods
+    // 5. BLAS destroyed when mesh ref-count reaches 0
+    //
+    // Complexity: HIGH - requires asset loading + raytracing system refactor
+    // Branch: features/blas-ownership (coordinate with geometry.zig changes)
+    //
     // Lock-free BLAS registry: array indexed by geometry_id with atomic pointers
     // Each slot holds an atomic pointer to a heap-allocated BlasResult
     // null = BLAS not built yet, non-null = BLAS available
@@ -400,7 +422,6 @@ pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
 
     // If this BLAS is part of a TLAS job, fill the slot in the job's buffer
     if (work_data.tlas_job) |job| {
-        const tlas_worker = @import("tlas_worker.zig");
 
         // Allocate BlasResult on heap for the job's buffer
         const blas_ptr = builder.allocator.create(BlasResult) catch |err| {

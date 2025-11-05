@@ -75,15 +75,20 @@ pub const GraphicsContext = struct {
     graphics_queue: Queue,
     present_queue: Queue,
     compute_queue: Queue, // Added for async compute
+    transfer_queue: Queue, // Dedicated transfer queue for copy operations
     command_pool: vk.CommandPool,
+    transfer_command_pool: vk.CommandPool, // Command pool for transfer operations
     main_thread_id: std.Thread.Id,
     allocator: Allocator,
     worker_command_pools: std.ArrayList(WorkerCommandPool),
+    transfer_command_pools: std.ArrayList(WorkerCommandPool), // Per-thread transfer pools
     command_pool_mutex: std.Thread.Mutex,
+    transfer_pool_mutex: std.Thread.Mutex,
 
     // Queue submission synchronization
     // Vulkan spec requires external synchronization for queue access from multiple threads
     queue_mutex: std.Thread.Mutex,
+    transfer_queue_mutex: std.Thread.Mutex, // Separate mutex for transfer queue
 
     pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: *c.GLFWwindow) !GraphicsContext {
         var self: GraphicsContext = undefined;
@@ -91,7 +96,9 @@ pub const GraphicsContext = struct {
         self.main_thread_id = std.Thread.getCurrentId();
         self.allocator = allocator;
         self.worker_command_pools = .{};
+        self.transfer_command_pools = .{};
         self.command_pool_mutex = std.Thread.Mutex{};
+        self.transfer_pool_mutex = std.Thread.Mutex{};
 
         // Initialize double-buffered secondary command buffer collection
         if (!secondary_buffers_initialized) {
@@ -137,6 +144,11 @@ pub const GraphicsContext = struct {
                 }
             }
         }
+        // TODO(MAINTENANCE): ADD VULKAN VALIDATION ERROR HANDLING - MEDIUM PRIORITY
+        // Currently: validation layer enabled but errors only logged to console (easy to miss)
+        // Required: Add debug messenger callback, show errors in ImGui panel (red banner), CVar: r.breakOnValidationError
+        // Files: graphics_context.zig (debug messenger), editor UI (error panel)
+        // Branch: maintenance
         const instance_layers = &[_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
 
         var layer_count: u32 = 0;
@@ -196,11 +208,13 @@ pub const GraphicsContext = struct {
         self.graphics_queue = Queue.init(self.vkd, self.dev, candidate.queues.graphics_family, false);
         self.present_queue = Queue.init(self.vkd, self.dev, candidate.queues.present_family, false);
         self.compute_queue = Queue.init(self.vkd, self.dev, candidate.queues.compute_family, false);
+        self.transfer_queue = Queue.init(self.vkd, self.dev, candidate.queues.transfer_family, false);
 
         self.mem_props = self.vki.getPhysicalDeviceMemoryProperties(self.pdev);
 
         // Initialize queue synchronization
         self.queue_mutex = std.Thread.Mutex{};
+        self.transfer_queue_mutex = std.Thread.Mutex{};
 
         return self;
     }
@@ -212,6 +226,13 @@ pub const GraphicsContext = struct {
         }
         self.worker_command_pools.deinit(self.allocator);
         self.command_pool_mutex.unlock();
+
+        self.transfer_pool_mutex.lock();
+        for (self.transfer_command_pools.items) |transfer_pool| {
+            self.vkd.destroyCommandPool(self.dev, transfer_pool.pool, null);
+        }
+        self.transfer_command_pools.deinit(self.allocator);
+        self.transfer_pool_mutex.unlock();
 
         log(.INFO, "graphics_context", "Cleaning up pending secondary command buffers", .{});
         if (secondary_buffers_initialized) {
@@ -234,6 +255,7 @@ pub const GraphicsContext = struct {
         }
 
         self.vkd.destroyCommandPool(self.dev, self.command_pool, null);
+        self.vkd.destroyCommandPool(self.dev, self.transfer_command_pool, null);
         self.vkd.destroyDevice(self.dev, null);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
         self.vki.destroyInstance(self.instance, null);
@@ -270,6 +292,11 @@ pub const GraphicsContext = struct {
             .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = self.graphics_queue.family,
         }, null);
+
+        self.transfer_command_pool = try self.vkd.createCommandPool(self.dev, &.{
+            .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
+            .queue_family_index = self.transfer_queue.family,
+        }, null);
     }
 
     /// Returns a command pool appropriate for the current thread.
@@ -299,6 +326,28 @@ pub const GraphicsContext = struct {
         }
     }
 
+    /// Get or create per-thread transfer command pool
+    pub fn getThreadTransferCommandPool(self: *GraphicsContext) !vk.CommandPool {
+        const thread_id = std.Thread.getCurrentId();
+
+        self.transfer_pool_mutex.lock();
+        defer self.transfer_pool_mutex.unlock();
+
+        for (self.transfer_command_pools.items) |transfer_pool| {
+            if (transfer_pool.id == thread_id) {
+                return transfer_pool.pool;
+            }
+        }
+
+        const new_pool = try self.vkd.createCommandPool(self.dev, &.{
+            .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
+            .queue_family_index = self.transfer_queue.family,
+        }, null);
+        try self.transfer_command_pools.append(self.allocator, .{ .id = thread_id, .pool = new_pool });
+
+        return new_pool;
+    }
+
     /// Clean up thread-local command pool (should be called when worker thread exits)
     pub fn cleanupThreadCommandPool(self: *GraphicsContext) void {
         if (std.Thread.getCurrentId() == self.main_thread_id) {
@@ -313,6 +362,19 @@ pub const GraphicsContext = struct {
         while (index < self.worker_command_pools.items.len) : (index += 1) {
             if (self.worker_command_pools.items[index].id == thread_id) {
                 const removed = self.worker_command_pools.swapRemove(index);
+                self.vkd.destroyCommandPool(self.dev, removed.pool, null);
+                break;
+            }
+        }
+
+        // Also cleanup transfer pool
+        self.transfer_pool_mutex.lock();
+        defer self.transfer_pool_mutex.unlock();
+
+        index = 0;
+        while (index < self.transfer_command_pools.items.len) : (index += 1) {
+            if (self.transfer_command_pools.items[index].id == thread_id) {
+                const removed = self.transfer_command_pools.swapRemove(index);
                 self.vkd.destroyCommandPool(self.dev, removed.pool, null);
                 break;
             }
@@ -341,95 +403,50 @@ pub const GraphicsContext = struct {
         return self.graphics_queue;
     }
 
-    /// Copy buffer using worker-friendly secondary command buffer approach
+    /// Copy buffer using dedicated transfer queue (no graphics queue contention)
     pub fn copyBuffer(self: *GraphicsContext, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
-        // Check if we're on a worker thread
-        if (std.Thread.getCurrentId() != self.main_thread_id) {
-            // Use secondary command buffer (no queue submission)
-            var secondary_cmd = try self.beginWorkerCommandBuffer();
-            const region = vk.BufferCopy{
-                .src_offset = 0,
-                .dst_offset = 0,
-                .size = size,
-            };
-            self.vkd.cmdCopyBuffer(secondary_cmd.command_buffer, src, dst, 1, @ptrCast(&region));
-            try self.endWorkerCommandBuffer(&secondary_cmd);
-        } else {
-            // Main thread can use legacy approach for now
-            const command_buffer = try self.beginSingleTimeCommands();
-            defer self.endSingleTimeCommands(command_buffer) catch |err| {
-                log(.ERROR, "graphics_context", "endSingleTimeCommands failed: {any}", .{err});
-            };
-            const region = vk.BufferCopy{
-                .src_offset = 0,
-                .dst_offset = 0,
-                .size = size,
-            };
-            self.vkd.cmdCopyBuffer(command_buffer, src, dst, 1, @ptrCast(&region));
-        }
+        const command_buffer = try self.beginTransferCommandBuffer();
+        defer self.endTransferCommandBuffer(command_buffer) catch |err| {
+            log(.ERROR, "graphics_context", "endTransferCommandBuffer failed: {any}", .{err});
+        };
+
+        const region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = 0,
+            .size = size,
+        };
+        self.vkd.cmdCopyBuffer(command_buffer, src, dst, 1, @ptrCast(&region));
     }
 
     pub fn copyBufferWithOffset(self: *GraphicsContext, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize, dst_offset: vk.DeviceSize, src_offset: vk.DeviceSize) !void {
-        // Check if we're on a worker thread
-        if (std.Thread.getCurrentId() != self.main_thread_id) {
-            // Use secondary command buffer (no queue submission)
-            var secondary_cmd = try self.beginWorkerCommandBuffer();
-            const region = vk.BufferCopy{
-                .src_offset = src_offset,
-                .dst_offset = dst_offset,
-                .size = size,
-            };
-            self.vkd.cmdCopyBuffer(secondary_cmd.command_buffer, src, dst, 1, @ptrCast(&region));
-            try self.endWorkerCommandBuffer(&secondary_cmd);
-        } else {
-            // Main thread can use legacy approach for now
-            const command_buffer = try self.beginSingleTimeCommands();
-            defer self.endSingleTimeCommands(command_buffer) catch |err| {
-                log(.ERROR, "graphics_context", "endSingleTimeCommands failed: {any}", .{err});
-            };
-            const region = vk.BufferCopy{
-                .src_offset = src_offset,
-                .dst_offset = dst_offset,
-                .size = size,
-            };
-            self.vkd.cmdCopyBuffer(command_buffer, src, dst, 1, @ptrCast(&region));
-        }
+        const command_buffer = try self.beginTransferCommandBuffer();
+        defer self.endTransferCommandBuffer(command_buffer) catch |err| {
+            log(.ERROR, "graphics_context", "endTransferCommandBuffer failed: {any}", .{err});
+        };
+
+        const region = vk.BufferCopy{
+            .src_offset = src_offset,
+            .dst_offset = dst_offset,
+            .size = size,
+        };
+        self.vkd.cmdCopyBuffer(command_buffer, src, dst, 1, @ptrCast(&region));
     }
 
-    /// Copy from staging buffer with proper lifetime management for worker threads
+    /// Copy from staging buffer using dedicated transfer queue
     pub fn copyFromStagingBuffer(self: *GraphicsContext, dst: vk.Buffer, staging_buffer: *Buffer, size: vk.DeviceSize) !void {
-        // Check if we're on a worker thread
-        if (std.Thread.getCurrentId() != self.main_thread_id) {
-            // Use secondary command buffer with staging buffer lifetime management
-            staging_buffer.unmap();
-            var secondary_cmd = try self.beginWorkerCommandBuffer();
-            const region = vk.BufferCopy{
-                .src_offset = 0,
-                .dst_offset = 0,
-                .size = size,
-            };
-            self.vkd.cmdCopyBuffer(secondary_cmd.command_buffer, staging_buffer.buffer, dst, 1, @ptrCast(&region));
-            // Add staging buffer to pending resources (will be cleaned up after command execution)
-            try secondary_cmd.addPendingResource(staging_buffer.buffer, staging_buffer.memory);
-            try self.endWorkerCommandBuffer(&secondary_cmd);
-            staging_buffer.buffer = vk.Buffer.null_handle;
-            staging_buffer.memory = vk.DeviceMemory.null_handle;
-            staging_buffer.descriptor_info.buffer = vk.Buffer.null_handle;
-            // Don't call staging_buffer.deinit() - it will be cleaned up after command execution
-        } else {
-            // Main thread executes command synchronously
-            const region = vk.BufferCopy{
-                .src_offset = 0,
-                .dst_offset = 0,
-                .size = size,
-            };
-            const command_buffer = try self.beginSingleTimeCommands();
-            self.vkd.cmdCopyBuffer(command_buffer, staging_buffer.buffer, dst, 1, @ptrCast(&region));
-            // End and execute synchronously, then cleanup
-            try self.endSingleTimeCommands(command_buffer);
-            // Now safe to deinit staging buffer since command has executed
-            staging_buffer.deinit();
-        }
+        const region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = 0,
+            .size = size,
+        };
+
+        const command_buffer = try self.beginTransferCommandBuffer();
+        self.vkd.cmdCopyBuffer(command_buffer, staging_buffer.buffer, dst, 1, @ptrCast(&region));
+        // Submit and wait for transfer to complete
+        try self.endTransferCommandBuffer(command_buffer);
+
+        // Now safe to deinit staging buffer since transfer queue has finished
+        staging_buffer.deinit();
     }
 
     pub fn createCommandBuffers(
@@ -703,6 +720,63 @@ pub const GraphicsContext = struct {
         try pending_buffers[write_idx].append(self.allocator, secondary_cmd.*);
     }
 
+    /// Begin a transfer command buffer (primary, immediate submission to transfer queue)
+    /// Use this for buffer copies and other transfer operations that can run independently
+    pub fn beginTransferCommandBuffer(self: *GraphicsContext) !vk.CommandBuffer {
+        const pool = try self.getThreadTransferCommandPool();
+
+        var alloc_info = vk.CommandBufferAllocateInfo{
+            .s_type = vk.StructureType.command_buffer_allocate_info,
+            .command_pool = pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        };
+
+        var command_buffer: vk.CommandBuffer = undefined;
+        {
+            self.transfer_pool_mutex.lock();
+            defer self.transfer_pool_mutex.unlock();
+            try self.vkd.allocateCommandBuffers(self.dev, &alloc_info, @ptrCast(&command_buffer));
+        }
+
+        var begin_info = vk.CommandBufferBeginInfo{
+            .s_type = vk.StructureType.command_buffer_begin_info,
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        };
+
+        try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+        return command_buffer;
+    }
+
+    /// End and submit a transfer command buffer to the transfer queue
+    /// This submits immediately and waits for completion (synchronous)
+    pub fn endTransferCommandBuffer(self: *GraphicsContext, command_buffer: vk.CommandBuffer) !void {
+        try self.vkd.endCommandBuffer(command_buffer);
+
+        var submit_info = vk.SubmitInfo{
+            .s_type = vk.StructureType.submit_info,
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = null,
+            .p_wait_dst_stage_mask = null,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = null,
+        };
+
+        // Submit to transfer queue with proper synchronization
+        self.transfer_queue_mutex.lock();
+        defer self.transfer_queue_mutex.unlock();
+
+        try self.vkd.queueSubmit(self.transfer_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
+        try self.vkd.queueWaitIdle(self.transfer_queue.handle);
+
+        // Free the command buffer back to the pool
+        const pool = try self.getThreadTransferCommandPool();
+        self.vkd.freeCommandBuffers(self.dev, pool, 1, @ptrCast(&command_buffer));
+    }
+
     // Storage for secondary command buffers that are submitted but not yet executed
     var submitted_secondary_buffers: std.ArrayList(SecondaryCommandBuffer) = undefined;
     var submitted_buffers_mutex: std.Thread.Mutex = std.Thread.Mutex{};
@@ -710,8 +784,10 @@ pub const GraphicsContext = struct {
 
     /// Execute all pending secondary command buffers on main thread
     pub fn executeCollectedSecondaryBuffers(self: *GraphicsContext, primary_cmd: vk.CommandBuffer) !void {
-        // Atomic flip: swap write index and take ownership of read buffer
-        const read_idx = 1 - current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
+        // Atomic flip: swap write index and take ownership of the PREVIOUS write buffer as our read buffer.
+        // The swap returns the old write index, which is exactly the buffer we should now read and execute.
+        const prev_write_idx = current_write_index.swap(1 - current_write_index.load(.monotonic), .acq_rel);
+        const read_idx = prev_write_idx;
 
         // No lock needed - we own the read buffer
         if (pending_buffers[read_idx].items.len == 0) return;
@@ -860,8 +936,10 @@ pub const GraphicsContext = struct {
         self: *GraphicsContext,
         present_info: *const vk.PresentInfoKHR,
     ) !vk.Result {
-        // If present queue is the same as graphics queue, use the same mutex
-        if (self.present_queue.family == self.graphics_queue.family) {
+        // If present queue is the same HANDLE as graphics queue, use the same mutex
+        // Comparing handles is more robust than comparing families, as drivers/devices
+        // may alias capabilities across families/indices.
+        if (self.present_queue.handle == self.graphics_queue.handle) {
             self.queue_mutex.lock();
             defer self.queue_mutex.unlock();
         }
@@ -876,8 +954,8 @@ pub const GraphicsContext = struct {
         submits: [*]const vk.SubmitInfo,
         fence: vk.Fence,
     ) !void {
-        // If compute queue is the same as graphics queue, use the same mutex
-        if (self.compute_queue.family == self.graphics_queue.family) {
+        // If compute queue is the same HANDLE as graphics queue, use the same mutex
+        if (self.compute_queue.handle == self.graphics_queue.handle) {
             self.queue_mutex.lock();
             defer self.queue_mutex.unlock();
         }
@@ -1142,25 +1220,46 @@ fn createSurface(instance: vk.Instance, window: *c.GLFWwindow) !vk.SurfaceKHR {
 
 fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: DeviceCandidate) !vk.Device {
     const priority = [_]f32{1};
-    const qci = [_]vk.DeviceQueueCreateInfo{
-        .{
-            .flags = .{},
-            .queue_family_index = candidate.queues.graphics_family,
-            .queue_count = 2,
-            .p_queue_priorities = &priority,
-        },
-        .{
-            .flags = .{},
-            .queue_family_index = candidate.queues.present_family,
-            .queue_count = 1,
-            .p_queue_priorities = &priority,
-        },
+
+    // Build queue create infos, accounting for potential aliasing
+    var queue_create_infos = std.ArrayList(vk.DeviceQueueCreateInfo){};
+    defer queue_create_infos.deinit(allocator);
+
+    var unique_families = std.ArrayList(u32){};
+    defer unique_families.deinit(allocator);
+
+    // Collect unique queue families
+    const all_families = [_]u32{
+        candidate.queues.graphics_family,
+        candidate.queues.present_family,
+        candidate.queues.compute_family,
+        candidate.queues.transfer_family,
     };
 
-    const queue_count: u32 = if (candidate.queues.graphics_family == candidate.queues.present_family)
-        1 // nvidia
-    else
-        2; // amd
+    for (all_families) |family| {
+        var is_unique = true;
+        for (unique_families.items) |existing| {
+            if (existing == family) {
+                is_unique = false;
+                break;
+            }
+        }
+        if (is_unique) {
+            try unique_families.append(allocator, family);
+        }
+    }
+
+    // Create queue create info for each unique family
+    for (unique_families.items) |family| {
+        // Graphics family gets 2 queues if possible, others get 1
+        const queue_count: u32 = if (family == candidate.queues.graphics_family) 2 else 1;
+        try queue_create_infos.append(allocator, .{
+            .flags = .{},
+            .queue_family_index = family,
+            .queue_count = queue_count,
+            .p_queue_priorities = &priority,
+        });
+    }
 
     var device_extensions = try std.ArrayList([*:0]const u8).initCapacity(allocator, required_device_extensions.len);
     defer device_extensions.deinit(allocator);
@@ -1186,8 +1285,8 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
     }
     var create_info = vk.DeviceCreateInfo{
         .flags = .{},
-        .queue_create_info_count = queue_count,
-        .p_queue_create_infos = &qci,
+        .queue_create_info_count = @intCast(queue_create_infos.items.len),
+        .p_queue_create_infos = queue_create_infos.items.ptr,
         .enabled_layer_count = 0,
         .pp_enabled_layer_names = undefined,
         .enabled_extension_count = @as(u32, @intCast(device_extensions.items.len)),
@@ -1258,6 +1357,7 @@ const QueueAllocation = struct {
     graphics_family: u32,
     present_family: u32,
     compute_family: u32, // Added for async compute
+    transfer_family: u32, // Dedicated transfer queue for copy operations
 };
 
 fn pickPhysicalDevice(
@@ -1321,7 +1421,18 @@ fn allocateQueues(vki: InstanceWrapper, pdev: vk.PhysicalDevice, allocator: Allo
     var graphics_family: ?u32 = null;
     var present_family: ?u32 = null;
     var compute_family: ?u32 = null;
+    var transfer_family: ?u32 = null;
 
+    // First pass: find dedicated transfer queue (transfer bit but NOT graphics bit)
+    for (families, 0..) |properties, i| {
+        const family = @as(u32, @intCast(i));
+        if (properties.queue_flags.transfer_bit and !properties.queue_flags.graphics_bit and !properties.queue_flags.compute_bit) {
+            transfer_family = family;
+            break;
+        }
+    }
+
+    // Second pass: find other queues and fallback transfer
     for (families, 0..) |properties, i| {
         const family = @as(u32, @intCast(i));
 
@@ -1336,13 +1447,19 @@ fn allocateQueues(vki: InstanceWrapper, pdev: vk.PhysicalDevice, allocator: Allo
         if (compute_family == null and properties.queue_flags.compute_bit) {
             compute_family = family;
         }
+
+        // Fallback: if no dedicated transfer queue found, use graphics queue
+        if (transfer_family == null and properties.queue_flags.transfer_bit) {
+            transfer_family = family;
+        }
     }
 
-    if (graphics_family != null and present_family != null and compute_family != null) {
+    if (graphics_family != null and present_family != null and compute_family != null and transfer_family != null) {
         return QueueAllocation{
             .graphics_family = graphics_family.?,
             .present_family = present_family.?,
             .compute_family = compute_family.?,
+            .transfer_family = transfer_family.?,
         };
     }
 

@@ -9,11 +9,15 @@ const UIMath = @import("ui_math.zig");
 const GizmoModule = @import("../gizmo.zig");
 const Gizmo = GizmoModule.Gizmo;
 
-pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, scene: *zephyr.Scene, selected: zephyr.Entity) bool {
+pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_pos: [2]f32, viewport_size: [2]f32, camera: *zephyr.Camera, world_pos: Math.Vec3, scene: *zephyr.Scene, selected: zephyr.Entity) bool {
     const io = c.ImGui_GetIO();
     const mouse = io.*.MousePos;
-    const mouse_x = mouse.x;
-    const mouse_y = mouse.y;
+    const window_mouse_x = mouse.x;
+    const window_mouse_y = mouse.y;
+
+    // Convert window coordinates to viewport-relative coordinates
+    const mouse_x = window_mouse_x - viewport_pos[0];
+    const mouse_y = window_mouse_y - viewport_pos[1];
     const mouse_clicked = c.ImGui_IsMouseClicked(0);
 
     const ray = ViewportPicker.rayFromMouse(camera, mouse_x, mouse_y, viewport_size);
@@ -24,7 +28,7 @@ pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_size: [2]
     state.*.hovered_kind = pick_hover.kind;
 
     // Draw gizmo visuals based on current tool (uses state.hovered_* for highlighting)
-    GizmoModule.drawBase(draw_list, viewport_size, camera, world_pos, state.*.hovered_axis, state.*.hovered_kind, state.*.tool);
+    GizmoModule.drawBase(draw_list, viewport_pos, viewport_size, camera, world_pos, state.*.hovered_axis, state.*.hovered_kind, state.*.tool);
     // Helper: get transform pointer
     const transform = scene.ecs_world.get(zephyr.Transform, selected) orelse return false;
 

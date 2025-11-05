@@ -47,13 +47,21 @@ pub const RenderLayer = struct {
 
         // Begin frame - starts both graphics and compute command buffers
         try self.swapchain.beginFrame(frame_info.*);
+        const mutable_frame_info: *FrameInfo = @constCast(frame_info);
+        const current_hdr = self.swapchain.currentHdrTexture();
+        mutable_frame_info.hdr_texture = current_hdr;
+
+        if (self.swapchain.use_viewport_texture) {
+            return;
+        }
 
         // Populate image views for dynamic rendering (swapchain images are now ready)
         const swap_image = self.swapchain.currentSwapImage();
         // Note: We need to cast away const here to populate frame_info
         // This is safe because we're in the begin phase
-        const mutable_frame_info: *FrameInfo = @constCast(frame_info);
-        mutable_frame_info.color_image = self.swapchain.currentImage();
+
+        // Route all rendering into the HDR backbuffer managed by the swapchain
+        mutable_frame_info.color_image = swap_image.image;
         mutable_frame_info.color_image_view = swap_image.view;
         mutable_frame_info.depth_image_view = swap_image.depth_image_view;
     }

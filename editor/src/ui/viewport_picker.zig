@@ -133,28 +133,17 @@ pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_size: [2]f32
         return Ray{ .origin = origin, .dir = Math.Vec3.init(0, 0, -1) };
     }
 
-    const main_viewport = c.ImGui_GetMainViewport();
-    const window_origin_x = main_viewport.*.Pos.x;
-    const window_origin_y = main_viewport.*.Pos.y;
-    const window_width = main_viewport.*.Size.x;
-    const window_height = main_viewport.*.Size.y;
-
-    if (window_width <= 0.0 or window_height <= 0.0) {
-        const inv_view = &camera.inverseViewMatrix;
-        const origin = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
-        return Ray{ .origin = origin, .dir = Math.Vec3.init(0, 0, -1) };
-    }
-
-    // Convert mouse position (ImGui space) into clip space coordinates
-    const window_u = (mouse_x - window_origin_x) / window_width;
-    const window_v = (mouse_y - window_origin_y) / window_height;
-    const ndc_x = window_u * 2.0 - 1.0;
-    const ndc_y = window_v * 2.0 - 1.0;
+    // Mouse coordinates are now in viewport space (relative to viewport origin)
+    // Convert viewport-relative mouse position to normalized device coordinates
+    const viewport_u = mouse_x / vp_size[0];
+    const viewport_v = mouse_y / vp_size[1];
+    const ndc_x = viewport_u * 2.0 - 1.0;
+    const ndc_y = viewport_v * 2.0 - 1.0;
 
     const fovy = Math.radians(camera.fov);
     const tanHalf = @tan(fovy * 0.5);
 
-    const aspect = window_width / window_height;
+    const aspect = vp_size[0] / vp_size[1];
 
     // Perspective ray: point through the camera frustum
     const dir_cam = Math.Vec3.init(ndc_x * aspect * tanHalf, ndc_y * tanHalf, 1.0);

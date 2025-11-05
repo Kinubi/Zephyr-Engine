@@ -4,6 +4,12 @@ const EntityId = @import("../entity_registry.zig").EntityId;
 
 /// Transform component for ECS entities
 /// Supports local transforms with optional parent-child hierarchies
+///
+/// TODO(MAINTENANCE): STORE QUATERNION INSTEAD OF EULER - LOW PRIORITY
+/// Currently: stores Euler angles (gimbal lock issues, poor interpolation)
+/// Required: Store quaternion, add Euler<->Quat conversion in math.zig
+/// Files: transform.zig (change rotation field), game_object.zig (implement get/setRotation)
+/// Branch: maintenance
 pub const Transform = struct {
     /// Local position relative to parent (or world if no parent)
     position: math.Vec3,
