@@ -16,6 +16,7 @@ const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
+const TextureSystem = @import("../../ecs/systems/texture_system.zig").TextureSystem;
 const vertex_formats = @import("../vertex_formats.zig");
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
@@ -42,6 +43,7 @@ pub const GeometryPass = struct {
     resource_binder: ResourceBinder,
     asset_manager: *AssetManager,
     material_system: *MaterialSystem,
+    texture_system: *TextureSystem,
     ecs_world: *World,
     global_ubo_set: *GlobalUboSet,
 
@@ -67,6 +69,7 @@ pub const GeometryPass = struct {
         pipeline_system: *UnifiedPipelineSystem,
         asset_manager: *AssetManager,
         material_system: *MaterialSystem,
+        texture_system: *TextureSystem,
         ecs_world: *World,
         global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
@@ -87,6 +90,7 @@ pub const GeometryPass = struct {
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .asset_manager = asset_manager,
             .material_system = material_system,
+            .texture_system = texture_system,
             .ecs_world = ecs_world,
             .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
@@ -253,7 +257,7 @@ pub const GeometryPass = struct {
             }
 
             // Bind texture array using named binding "textures"
-            const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
+            const texture_image_infos = self.texture_system.getDescriptorArray();
             if (texture_image_infos.len > 0) {
                 var textures_ready = true;
                 for (texture_image_infos) |info| {

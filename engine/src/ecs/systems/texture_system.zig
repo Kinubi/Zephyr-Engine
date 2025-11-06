@@ -49,14 +49,12 @@ pub const TextureSystem = struct {
         self.asset_manager.textures_mutex.lock();
         const textures = self.asset_manager.loaded_textures.items;
         const count_changed = textures.len != self.last_texture_count;
-        const descriptors_updated = self.asset_manager.texture_descriptors_updated;
         self.asset_manager.textures_mutex.unlock();
 
-        if (count_changed or descriptors_updated) {
+        // Rebuild if texture count changed
+        if (count_changed or self.asset_manager.texture_descriptors_dirty) {
             if (textures.len > 0) {
                 try self.rebuildDescriptorArray();
-                // Clear the dirty flag since we've rebuilt
-                self.asset_manager.texture_descriptors_updated = false;
             } else {
                 // No textures - clean up descriptor array
                 if (self.descriptor_infos.len > 0) {
@@ -101,6 +99,7 @@ pub const TextureSystem = struct {
         self.descriptor_infos = infos;
         self.generation += 1;
         self.last_texture_count = textures.len;
+        self.asset_manager.texture_descriptors_dirty = false;
 
         log(.INFO, "texture_system", "Rebuilt texture descriptors: {} textures (index 0 = dummy, indices 1-{}), generation {}", .{ textures.len, textures.len - 1, self.generation });
     }
@@ -108,8 +107,11 @@ pub const TextureSystem = struct {
     /// Get GPU array index for a texture asset ID
     /// Used by MaterialSystem to resolve texture references
     pub fn getTextureIndex(self: *TextureSystem, asset_id: AssetId) ?u32 {
+        const asset_path = if (self.asset_manager.registry.getAsset(asset_id)) |a| a.path else "unknown";
+
         // Resolve to actual asset (handles fallbacks for loading/missing textures)
         const resolved_id = self.asset_manager.getAssetIdForRendering(asset_id);
+        const resolved_path = if (self.asset_manager.registry.getAsset(resolved_id)) |a| a.path else "unknown";
 
         // Lock textures mutex for thread-safe access
         self.asset_manager.textures_mutex.lock();
@@ -117,10 +119,15 @@ pub const TextureSystem = struct {
 
         // Look up index in asset_to_texture map
         if (self.asset_manager.asset_to_texture.get(resolved_id)) |index| {
-            return @intCast(index);
+            // asset_to_texture stores index into loaded_textures array (0-based)
+            // descriptor array has dummy at index 0, real textures at 1..N
+            const descriptor_index = index + 1;
+            log(.DEBUG, "texture_system", "[TRACE] getTextureIndex: assetId={} (path={s}) -> resolved to {} (path={s}) -> loaded_textures[{}] -> descriptor[{}]", .{ asset_id.toU64(), asset_path, resolved_id.toU64(), resolved_path, index, descriptor_index });
+            return @intCast(descriptor_index);
         }
 
         // Return 0 (fallback texture) if not found
+        log(.DEBUG, "texture_system", "[TRACE] getTextureIndex: assetId={} (path={s}) -> resolved to {} (path={s}) -> NOT FOUND, returning 0", .{ asset_id.toU64(), asset_path, resolved_id.toU64(), resolved_path });
         return 0;
     }
 

@@ -16,6 +16,9 @@ const Texture = @import("../../core/texture.zig").Texture;
 const RaytracingSystem = @import("../raytracing/raytracing_system.zig").RaytracingSystem;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+// Domain systems
+const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
+const TextureSystem = @import("../../ecs/systems/texture_system.zig").TextureSystem;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const Mesh = @import("../mesh.zig").Mesh;
@@ -98,6 +101,10 @@ pub const PathTracingPass = struct {
     asset_manager: *AssetManager,
     render_system: *RenderSystem,
 
+    // Domain systems
+    material_system: *MaterialSystem,
+    texture_system: *TextureSystem,
+
     // Path tracing pipeline
     path_tracing_pipeline: PipelineId = undefined,
     cached_pipeline_handle: vk.Pipeline = .null_handle,
@@ -135,6 +142,8 @@ pub const PathTracingPass = struct {
         ecs_world: *World,
         asset_manager: *AssetManager,
         render_system: *RenderSystem,
+        material_system: *MaterialSystem,
+        texture_system: *TextureSystem,
         swapchain_format: vk.Format,
         width: u32,
         height: u32,
@@ -167,19 +176,6 @@ pub const PathTracingPass = struct {
             vk.SampleCountFlags{ .@"1_bit" = true },
         );
 
-        _ = try graphics_context.transitionImageLayoutSingleTime(
-            output_texture.image,
-            .undefined,
-            .general,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
-
         // Initialize per-frame descriptor data
         var per_frame: [MAX_FRAMES_IN_FLIGHT]PerFrameDescriptorData = undefined;
         for (&per_frame) |*frame_data| {
@@ -202,6 +198,8 @@ pub const PathTracingPass = struct {
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
             .render_system = render_system,
+            .material_system = material_system,
+            .texture_system = texture_system,
             .rt_system = rt_system,
             .output_texture = output_texture,
             .width = width,
@@ -291,9 +289,9 @@ pub const PathTracingPass = struct {
             self.allocator.free(rt_data.materials);
         }
 
-        // Get material buffer info from asset manager
-        const material_info = if (self.asset_manager.material_buffer) |buffer|
-            buffer.descriptor_info
+        // Get material buffer info from MaterialSystem
+        const material_info = if (self.material_system.getCurrentBuffer()) |buffer|
+            buffer.buffer.descriptor_info
         else
             vk.DescriptorBufferInfo{
                 .buffer = vk.Buffer.null_handle,
@@ -301,8 +299,8 @@ pub const PathTracingPass = struct {
                 .range = 0,
             };
 
-        // Get texture array from asset manager
-        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
+        // Get texture array from TextureSystem
+        const texture_image_infos = self.texture_system.getDescriptorArray();
         const textures_ready = blk: {
             if (texture_image_infos.len == 0) break :blk false;
             for (texture_image_infos) |info| {
@@ -404,9 +402,9 @@ pub const PathTracingPass = struct {
     fn updateDescriptorsForFrame(self: *PathTracingPass, target_frame: u32) !void {
         const frame_idx: usize = @intCast(target_frame);
 
-        // Material buffer (no need to query rt_data here)
-        const material_info = if (self.asset_manager.material_buffer) |buffer|
-            buffer.descriptor_info
+        // Material buffer from MaterialSystem
+        const material_info = if (self.material_system.getCurrentBuffer()) |buffer|
+            buffer.buffer.descriptor_info
         else
             vk.DescriptorBufferInfo{ .buffer = vk.Buffer.null_handle, .offset = 0, .range = 0 };
 
@@ -416,8 +414,8 @@ pub const PathTracingPass = struct {
             .range = material_info.range,
         } };
 
-        // Textures array
-        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
+        // Textures array from TextureSystem
+        const texture_image_infos = self.texture_system.getDescriptorArray();
         const textures_ready = blk: {
             if (texture_image_infos.len == 0) break :blk false;
             for (texture_image_infos) |info| {

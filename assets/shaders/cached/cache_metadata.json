@@ -77,7 +77,7 @@
       "cached_spirv_path": "assets/shaders/cached/textured.frag.spv",
       "file_hash": "13607395289437640338",
       "options_hash": "13509613240315378116",
-      "compile_time": 1762430767
+      "compile_time": 1762436623
     },
     "assets/shaders/particles.comp": {
       "cached_spirv_path": "assets/shaders/cached/particles.comp.spv",

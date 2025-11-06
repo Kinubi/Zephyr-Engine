@@ -64,7 +64,7 @@ pub const MaterialSystem = struct {
         const count_changed = materials.len != self.last_material_count;
         const materials_dirty = self.asset_manager.materials_dirty;
 
-        // Also check if TextureSystem has new textures (generation changed)
+        // Check if TextureSystem has new textures (generation changed)
         const texture_gen_changed = if (self.texture_system) |ts|
             ts.generation != self.last_texture_generation
         else
@@ -113,6 +113,7 @@ pub const MaterialSystem = struct {
                 if (material_ptr.albedo_texture_id != 0) {
                     const albedo_asset_id = AssetId.fromU64(@as(u64, @intCast(material_ptr.albedo_texture_id)));
                     const albedo_index = texture_system.getTextureIndex(albedo_asset_id) orelse 0;
+                    log(.DEBUG, "material_system", "Material[{}] albedo: assetId={} -> textureIndex={}", .{ i, albedo_asset_id.toU64(), albedo_index });
                     material_data[i].albedo_texture_id = albedo_index;
                 } else {
                     material_data[i].albedo_texture_id = 0;

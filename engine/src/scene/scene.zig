@@ -128,21 +128,46 @@ pub const Scene = struct {
     }
 
     /// Spawn a static prop with mesh and texture
+    /// Material parameters for spawnProp
+    pub const MaterialParams = struct {
+        albedo_texture_path: ?[]const u8 = null,
+        roughness_texture_path: ?[]const u8 = null,
+        albedo_color: [4]f32 = [4]f32{ 1.0, 1.0, 1.0, 1.0 },
+        roughness: f32 = 0.5,
+        metallic: f32 = 0.0,
+        emissive: f32 = 0.0,
+    };
+
     pub fn spawnProp(
         self: *Scene,
         model_path: []const u8,
-        texture_path: []const u8,
+        material_params: MaterialParams,
     ) !*GameObject {
 
         // 1. Load model mesh
         const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
 
-        // 2. Load texture
-        const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
+        // 2. Load textures (if provided)
+        const albedo_texture_id = if (material_params.albedo_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
 
-        // 3. Create material from texture - this registers the material with AssetManager
-        //    which will later upload it to the GPU material buffer
-        const material_id = try self.asset_manager.createMaterial(texture_id);
+        const roughness_texture_id = if (material_params.roughness_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
+
+        // 3. Create material - this registers the material with AssetManager
+        //    MaterialSystem will later read it and upload to GPU buffer
+        const material_id = try self.asset_manager.createMaterialWithParams(
+            albedo_texture_id,
+            roughness_texture_id,
+            material_params.albedo_color,
+            material_params.roughness,
+            material_params.metallic,
+            material_params.emissive,
+        );
 
         // Create ECS entity
         const entity = try self.ecs_world.createEntity();
@@ -154,7 +179,9 @@ pub const Scene = struct {
 
         // Add MeshRenderer component
         var mesh_renderer = MeshRenderer.init(model_id, material_id);
-        mesh_renderer.setTexture(texture_id);
+        if (albedo_texture_id.toU64() != 0) {
+            mesh_renderer.setTexture(albedo_texture_id);
+        }
         try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
 
         // Create GameObject wrapper
@@ -652,6 +679,7 @@ pub const Scene = struct {
             pipeline_system,
             self.asset_manager,
             self.material_system.?,
+            self.texture_system.?,
             self.ecs_world,
             global_ubo_set,
             hdr_color_format,
@@ -667,7 +695,7 @@ pub const Scene = struct {
         }
 
         // Create PathTracingPass (alternative to raster rendering)
-        const path_tracing_pass = PathTracingPass.create(
+        const path_tracing_pass = if (self.material_system != null and self.texture_system != null) PathTracingPass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
@@ -676,13 +704,15 @@ pub const Scene = struct {
             self.ecs_world,
             self.asset_manager,
             &self.render_system,
+            self.material_system.?,
+            self.texture_system.?,
             hdr_color_format,
             width,
             height,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create PathTracingPass: {}. Path tracing disabled.", .{err});
             break :blk null;
-        };
+        } else null;
 
         // NOTE: Path tracing pass starts disabled (enable via setPathTracingEnabled())
         if (path_tracing_pass) |pass| {

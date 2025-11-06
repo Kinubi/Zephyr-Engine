@@ -886,15 +886,15 @@ pub const GeometryPass = struct {
 4. ✅ Connect to AssetManager for texture list (read-only)
 5. ✅ Implement automatic descriptor array rebuild when textures load
 6. ✅ Provide `getDescriptorArray()` for ResourceBinder binding (NO binding logic in TextureSystem)
-7. ⏳ Integrate with Engine core systems
-8. ⏳ Test texture loading and hot-reload
+7. ✅ Integrate with Engine core systems
+8. ✅ Test texture loading and hot-reload
 
 #### MaterialSystem ↔ TextureSystem Integration
 When materials are created/updated:
-1. Material specifies texture **asset ID** (e.g., "wall_albedo.png")
-2. MaterialSystem queries TextureSystem: "What's the GPU index for 'wall_albedo.png'?"
-3. TextureSystem returns index from its descriptor array
-4. MaterialSystem writes index into material buffer
+1. ✅ Material specifies texture **asset ID** (e.g., "wall_albedo.png")
+2. ✅ MaterialSystem queries TextureSystem: "What's the GPU index for 'wall_albedo.png'?"
+3. ✅ TextureSystem returns index from its descriptor array
+4. ✅ MaterialSystem writes index into material buffer
 5. Shader samples: `texture(textures[material.albedo_texture_index], uv)`
 
 **Key Insight**: Materials reference textures by index, TextureSystem manages the array.
@@ -1535,14 +1535,21 @@ try buffer_manager.defragment(idle_time_ms);
 
 **Production Ready**: Successfully tested with textured.vert/frag geometry pass
 
-### ✅ **PHASE 3 COMPLETE** - MaterialSystem Integration
+### ✅ **PHASE 3 COMPLETE** - MaterialSystem & TextureSystem Integration
 
 **Completed Work:**
 - ✅ **MaterialSystem**: Domain manager for material GPU buffers
   - Creates/updates buffers via BufferManager
   - Separates GPU resources from AssetManager CPU data
   - Automatic rebuild on material changes (count or texture updates)
+  - Tracks TextureSystem generation for texture index synchronization
   - Frame-safe buffer destruction
+- ✅ **TextureSystem**: Domain manager for texture descriptor arrays
+  - Creates/updates descriptor arrays via BufferManager
+  - Manages texture index 0 as reserved (white dummy texture)
+  - Automatic rebuild when textures load or descriptors change
+  - Generation counter for dependent systems (MaterialSystem)
+  - Proper 1:1 mapping between loaded_textures and descriptor array
 - ✅ **ResourceBinder Auto-Rebinding**: 
   - `updateFrame()` automatically detects VkBuffer handle changes
   - Rebinds changed buffers without manual tracking
@@ -1550,7 +1557,8 @@ try buffer_manager.defragment(idle_time_ms);
 - ✅ **Integration Verified**:
   - No validation errors
   - Clean shutdown with proper cleanup
-  - Materials update correctly when textures load
+  - Materials update correctly when textures load asynchronously
+  - Texture indices resolve correctly (0 = solid color, 1+ = sampled texture)
 
 ### ⏳ **REMAINING WORK** - Phases 4-9 (TODO)
 
@@ -1579,12 +1587,18 @@ try buffer_manager.defragment(idle_time_ms);
 - Bindings use shader variable names (e.g., "MaterialBuffer", "GlobalUbo")
 - No numeric indices - fully name-driven
 
-**✅ MaterialSystem (Phase 3)**:
-- Domain manager for material GPU buffers
-- Creates buffers via BufferManager with "MaterialBuffer" name
-- Automatically rebuilds when materials change
-- ResourceBinder auto-detects buffer changes and rebinds
-- Clean separation: AssetManager (CPU data) → MaterialSystem (GPU resources)
+**✅ MaterialSystem & TextureSystem (Phase 3)**:
+- **MaterialSystem**: Domain manager for material GPU buffers
+  - Creates buffers via BufferManager with "MaterialBuffer" name
+  - Automatically rebuilds when materials change or textures update
+  - Tracks TextureSystem generation for synchronization
+  - Resolves texture indices via TextureSystem
+- **TextureSystem**: Domain manager for texture descriptors
+  - Manages descriptor arrays with index 0 reserved (white dummy)
+  - Generation counter for dependent systems
+  - Automatic rebuild on texture load or descriptor changes
+- **ResourceBinder**: Auto-detects buffer changes and rebinds
+- Clean separation: AssetManager (CPU data) → Domain Systems (GPU resources)
 
 **✅ Engine Architecture**:
 - All rendering systems moved from application to engine-side

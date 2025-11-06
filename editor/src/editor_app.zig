@@ -234,37 +234,49 @@ pub const App = struct {
         const box_offset_z: f32 = 3.0; // Push box away from camera
 
         // Floor (white)
-        const floor = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const floor = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/missing.png",
+        });
         try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
-        const ceiling = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const ceiling = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/missing.png",
+        });
         try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
         // Back wall (white)
-        const back_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const back_wall = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/error.png",
+        });
         try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
         // Left wall (red) - using error.png for red color
-        const left_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/error.png");
+        const left_wall = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+        });
         try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
-        const right_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/default.png");
+        const right_wall = try scene.spawnProp("assets/models/cube.obj", .{});
         try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
-        // Second vase (right side) - flat vase
-        const vase2 = try scene.spawnProp("assets/models/flat_vase.obj", "assets/textures/granitesmooth1-albedo.png");
+        // Second vase (right side) - flat vase with PBR material
+        const vase2 = try scene.spawnProp("assets/models/flat_vase.obj", .{
+            .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+            .roughness_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-roughness3.png",
+            .roughness = 1.0, // Use full roughness from texture
+        });
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
         // Attach a small script that moves the vase gradually each frame
@@ -314,7 +326,7 @@ pub const App = struct {
 
         log(.INFO, "app", "Scene v2: Lights added successfully", .{});
 
-        asset_manager.beginFrame();
+        // NOTE: TextureSystem and MaterialSystem now handle their own updates
         // Initialize RenderGraph for scene
         // Get window dimensions for path tracing pass
         var window_width: c_int = 0;
@@ -390,9 +402,8 @@ pub const App = struct {
     }
 
     pub fn update(self: *App) !bool {
-        // Reset AssetManager dirty flags at frame start
-        // Async completion will set them back to true during the frame
-        asset_manager.beginFrame();
+        // NOTE: TextureSystem and MaterialSystem now handle their own updates
+        // No need for AssetManager.beginFrame() anymore
 
         // Process deferred pipeline destroys for hot reload safety
         self.engine.getUnifiedPipelineSystem().?.processDeferredDestroys();
@@ -413,7 +424,9 @@ pub const App = struct {
             if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
                 log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
 
-                var loaded_object = try scene.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
+                var loaded_object = try scene.spawnProp(scheduled_asset.model_path, .{
+                    .albedo_texture_path = scheduled_asset.texture_path,
+                });
                 try loaded_object.setPosition(scheduled_asset.position);
                 try loaded_object.setScale(scheduled_asset.scale);
 
