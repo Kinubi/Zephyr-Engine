@@ -5,6 +5,7 @@ const PipelineId = @import("unified_pipeline_system.zig").PipelineId;
 const Resource = @import("unified_pipeline_system.zig").Resource;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
+const ShaderReflection = @import("../assets/shader_compiler.zig").ShaderReflection;
 const log = @import("../utils/log.zig").log;
 
 // ============================================================================
@@ -58,6 +59,25 @@ pub const ResourceBinder = struct {
     bound_textures: std.HashMap(BindingKey, BoundTexture, BindingKeyContext, std.hash_map.default_max_load_percentage),
     bound_storage_buffers: std.HashMap(BindingKey, BoundStorageBuffer, BindingKeyContext, std.hash_map.default_max_load_percentage),
 
+    // Phase 2: Named binding registry
+    binding_registry: std.StringHashMap(BindingLocation),
+
+    /// Named binding location information
+    pub const BindingLocation = struct {
+        set: u32,
+        binding: u32,
+        binding_type: BindingType,
+    };
+
+    /// Binding types for validation
+    pub const BindingType = enum {
+        uniform_buffer,
+        storage_buffer,
+        sampled_image,
+        storage_image,
+        combined_image_sampler,
+    };
+
     pub fn init(allocator: std.mem.Allocator, pipeline_system: *UnifiedPipelineSystem) ResourceBinder {
         return ResourceBinder{
             .pipeline_system = pipeline_system,
@@ -65,13 +85,133 @@ pub const ResourceBinder = struct {
             .bound_uniform_buffers = std.HashMap(BindingKey, BoundUniformBuffer, BindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .bound_textures = std.HashMap(BindingKey, BoundTexture, BindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .bound_storage_buffers = std.HashMap(BindingKey, BoundStorageBuffer, BindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .binding_registry = std.StringHashMap(BindingLocation).init(allocator),
         };
     }
 
     pub fn deinit(self: *ResourceBinder) void {
+        // Clean up binding registry names
+        var iterator = self.binding_registry.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.binding_registry.deinit();
+
         self.bound_uniform_buffers.deinit();
         self.bound_textures.deinit();
         self.bound_storage_buffers.deinit();
+    }
+
+    /// Register a named binding location (manual or from shader reflection)
+    pub fn registerBinding(
+        self: *ResourceBinder,
+        name: []const u8,
+        location: BindingLocation,
+    ) !void {
+        // Check if binding already exists
+        if (self.binding_registry.get(name)) |existing_location| {
+            // If location matches exactly, it's a duplicate from multiple shader stages (vertex + fragment)
+            if (existing_location.set == location.set and 
+                existing_location.binding == location.binding and 
+                existing_location.binding_type == location.binding_type) {
+                // Silently skip duplicate - this is expected for bindings used in multiple shader stages
+                return;
+            }
+            
+            // Different location for same name - this is a warning-worthy situation
+            log(.WARN, "resource_binder", "Binding name '{s}' already registered with different location (old: set:{} binding:{} type:{}, new: set:{} binding:{} type:{})", .{
+                name, 
+                existing_location.set, existing_location.binding, existing_location.binding_type,
+                location.set, location.binding, location.binding_type
+            });
+            return error.DuplicateBindingName;
+        }
+
+        // New binding - allocate and register
+        const owned_name = try self.allocator.dupe(u8, name);
+        try self.binding_registry.put(owned_name, location);
+        log(.INFO, "resource_binder", "Registered binding '{s}' -> set:{} binding:{} type:{}", .{ name, location.set, location.binding, location.binding_type });
+    }
+
+    /// Look up a binding location by name
+    pub fn lookupBinding(self: *ResourceBinder, name: []const u8) ?BindingLocation {
+        return self.binding_registry.get(name);
+    }
+
+    /// Clear all registered bindings (e.g., when pipeline changes)
+    pub fn clearBindingRegistry(self: *ResourceBinder) void {
+        var iterator = self.binding_registry.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.binding_registry.clearAndFree();
+    }
+
+    /// Populate binding registry from shader reflection data
+    /// This is called by UnifiedPipelineSystem when creating pipelines
+    pub fn populateFromReflection(
+        self: *ResourceBinder,
+        reflection: ShaderReflection,
+    ) !void {
+        const initial_count = self.binding_registry.count();
+        
+        // Register uniform buffers
+        for (reflection.uniform_buffers.items) |ub| {
+            const location = BindingLocation{
+                .set = ub.set,
+                .binding = ub.binding,
+                .binding_type = .uniform_buffer,
+            };
+            try self.registerBinding(ub.name, location);
+        }
+
+        // Register storage buffers
+        for (reflection.storage_buffers.items) |sb| {
+            const location = BindingLocation{
+                .set = sb.set,
+                .binding = sb.binding,
+                .binding_type = .storage_buffer,
+            };
+            try self.registerBinding(sb.name, location);
+        }
+
+        // Register textures
+        for (reflection.textures.items) |tex| {
+            const location = BindingLocation{
+                .set = tex.set,
+                .binding = tex.binding,
+                .binding_type = .combined_image_sampler,
+            };
+            try self.registerBinding(tex.name, location);
+        }
+
+        // Register storage images
+        for (reflection.storage_images.items) |img| {
+            const location = BindingLocation{
+                .set = img.set,
+                .binding = img.binding,
+                .binding_type = .storage_image,
+            };
+            try self.registerBinding(img.name, location);
+        }
+
+        // Register samplers
+        for (reflection.samplers.items) |samp| {
+            const location = BindingLocation{
+                .set = samp.set,
+                .binding = samp.binding,
+                .binding_type = .sampled_image,
+            };
+            try self.registerBinding(samp.name, location);
+        }
+
+        const final_count = self.binding_registry.count();
+        const registered_count = final_count - initial_count;
+        log(.INFO, "resource_binder", "Populated {} unique bindings from shader reflection ({} total entries)", .{
+            registered_count,
+            reflection.uniform_buffers.items.len + reflection.storage_buffers.items.len +
+            reflection.textures.items.len + reflection.storage_images.items.len + reflection.samplers.items.len
+        });
     }
 
     /// Bind a uniform buffer to a pipeline
@@ -223,6 +363,126 @@ pub const ResourceBinder = struct {
         frame_index: u32,
     ) !void {
         try self.bindTexture(pipeline_id, set, binding, image_view, sampler, .general, frame_index);
+    }
+
+    // ============================================================================
+    // PHASE 2: NAMED BINDING API
+    // ============================================================================
+    //
+    // AUTOMATIC SHADER REFLECTION:
+    // - Binding names are automatically extracted from shader reflection via SPIRV-Cross
+    // - The names come directly from the variable names declared in shaders (GLSL/HLSL)
+    // - UnifiedPipelineSystem calls populateFromReflection() when creating pipelines
+    // - This ensures binding names match exactly what's declared in shader code
+    //
+    // SHADER NAMING CONVENTIONS (for shader authors):
+    // - Use descriptive names that indicate the buffer's purpose in shaders:
+    //   * layout(binding = 0) uniform CameraUBO { ... } cameraUBO;
+    //   * layout(binding = 1) buffer MaterialBuffer { ... } materialBuffer;
+    //   * layout(binding = 2) uniform sampler2D albedoTexture;
+    // - Use camelCase or PascalCase for consistency with code style
+    // - Avoid generic names like "buffer0", "texture1" - be descriptive!
+    // - Array resources use array syntax: uniform sampler2D textures[16];
+    //
+    // USAGE IN CODE:
+    // - Use the exact name from shader: bindUniformBufferNamed("CameraUBO", ...)
+    // - Names are case-sensitive and must match shader declarations exactly
+    // - Check spirv_reflection_debug.json for available binding names
+    //
+    // ============================================================================
+
+    /// Bind a uniform buffer by name
+    pub fn bindUniformBufferNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        buffer: *Buffer,
+        offset: vk.DeviceSize,
+        range: vk.DeviceSize,
+        frame_index: u32,
+    ) !void {
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        if (location.binding_type != .uniform_buffer) {
+            log(.ERROR, "resource_binder", "Binding '{s}' is not a uniform buffer (type: {})", .{ binding_name, location.binding_type });
+            return error.BindingTypeMismatch;
+        }
+
+        try self.bindUniformBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
+        log(.DEBUG, "resource_binder", "Bound uniform buffer '{s}' to set:{} binding:{}", .{ binding_name, location.set, location.binding });
+    }
+
+    /// Bind a storage buffer by name
+    pub fn bindStorageBufferNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        buffer: *Buffer,
+        offset: vk.DeviceSize,
+        range: vk.DeviceSize,
+        frame_index: u32,
+    ) !void {
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        if (location.binding_type != .storage_buffer) {
+            log(.ERROR, "resource_binder", "Binding '{s}' is not a storage buffer (type: {})", .{ binding_name, location.binding_type });
+            return error.BindingTypeMismatch;
+        }
+
+        try self.bindStorageBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
+        log(.DEBUG, "resource_binder", "Bound storage buffer '{s}' to set:{} binding:{}", .{ binding_name, location.set, location.binding });
+    }
+
+    /// Bind a texture by name
+    pub fn bindTextureNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        image_view: vk.ImageView,
+        sampler: vk.Sampler,
+        layout: vk.ImageLayout,
+        frame_index: u32,
+    ) !void {
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        if (location.binding_type != .combined_image_sampler and location.binding_type != .sampled_image) {
+            log(.ERROR, "resource_binder", "Binding '{s}' is not a texture (type: {})", .{ binding_name, location.binding_type });
+            return error.BindingTypeMismatch;
+        }
+
+        try self.bindTexture(pipeline_id, location.set, location.binding, image_view, sampler, layout, frame_index);
+        log(.DEBUG, "resource_binder", "Bound texture '{s}' to set:{} binding:{}", .{ binding_name, location.set, location.binding });
+    }
+
+    /// Convenience function to bind a full uniform buffer by name
+    pub fn bindFullUniformBufferNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        buffer: *Buffer,
+        frame_index: u32,
+    ) !void {
+        try self.bindUniformBufferNamed(pipeline_id, binding_name, buffer, 0, vk.WHOLE_SIZE, frame_index);
+    }
+
+    /// Convenience function to bind a full storage buffer by name
+    pub fn bindFullStorageBufferNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        buffer: *Buffer,
+        frame_index: u32,
+    ) !void {
+        try self.bindStorageBufferNamed(pipeline_id, binding_name, buffer, 0, vk.WHOLE_SIZE, frame_index);
     }
 
     /// Update descriptor bindings for a specific pipeline and frame

@@ -297,7 +297,7 @@ pub const UnifiedPipelineSystem = struct {
                 const compiled_shader = try self.shader_manager.loadShader(raygen_path, config.shader_options);
                 const shader = try self.allocator.create(Shader);
                 const entry_point = if (config.raygen_entry_point) |name| entry_point_definition{ .name = name } else null;
-                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .raygen_bit_khr = true }, entry_point);
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .raygen_bit_khr = true }, entry_point, compiled_shader.compiled_shader.reflection);
                 try shaders.append(self.allocator, shader);
                 raygen_stage_index = @as(u32, @intCast(shaders.items.len - 1));
                 try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .raygen_bit_khr = true });
@@ -307,7 +307,7 @@ pub const UnifiedPipelineSystem = struct {
                 const compiled_shader = try self.shader_manager.loadShader(miss_path, config.shader_options);
                 const shader = try self.allocator.create(Shader);
                 const entry_point = if (config.miss_entry_point) |name| entry_point_definition{ .name = name } else null;
-                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .miss_bit_khr = true }, entry_point);
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .miss_bit_khr = true }, entry_point, compiled_shader.compiled_shader.reflection);
                 try shaders.append(self.allocator, shader);
                 miss_stage_index = @as(u32, @intCast(shaders.items.len - 1));
                 try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .miss_bit_khr = true });
@@ -317,7 +317,7 @@ pub const UnifiedPipelineSystem = struct {
                 const compiled_shader = try self.shader_manager.loadShader(chit_path, config.shader_options);
                 const shader = try self.allocator.create(Shader);
                 const entry_point = if (config.closest_hit_entry_point) |name| entry_point_definition{ .name = name } else null;
-                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .closest_hit_bit_khr = true }, entry_point);
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .closest_hit_bit_khr = true }, entry_point, compiled_shader.compiled_shader.reflection);
                 try shaders.append(self.allocator, shader);
                 closest_hit_stage_index = @as(u32, @intCast(shaders.items.len - 1));
                 try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .closest_hit_bit_khr = true });
@@ -327,7 +327,7 @@ pub const UnifiedPipelineSystem = struct {
                 const compiled_shader = try self.shader_manager.loadShader(ahit_path, config.shader_options);
                 const shader = try self.allocator.create(Shader);
                 const entry_point = if (config.any_hit_entry_point) |name| entry_point_definition{ .name = name } else null;
-                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .any_hit_bit_khr = true }, entry_point);
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .any_hit_bit_khr = true }, entry_point, compiled_shader.compiled_shader.reflection);
                 try shaders.append(self.allocator, shader);
                 any_hit_stage_index = @as(u32, @intCast(shaders.items.len - 1));
                 try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .any_hit_bit_khr = true });
@@ -337,7 +337,7 @@ pub const UnifiedPipelineSystem = struct {
                 const compiled_shader = try self.shader_manager.loadShader(intersection_path, config.shader_options);
                 const shader = try self.allocator.create(Shader);
                 const entry_point = if (config.intersection_entry_point) |name| entry_point_definition{ .name = name } else null;
-                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .intersection_bit_khr = true }, entry_point);
+                shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .intersection_bit_khr = true }, entry_point, compiled_shader.compiled_shader.reflection);
                 try shaders.append(self.allocator, shader);
                 intersection_stage_index = @as(u32, @intCast(shaders.items.len - 1));
                 try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .intersection_bit_khr = true });
@@ -347,7 +347,7 @@ pub const UnifiedPipelineSystem = struct {
                 if (config.compute_shader) |compute_path| {
                     const compiled_shader = try self.shader_manager.loadShader(compute_path, config.shader_options);
                     const shader = try self.allocator.create(Shader);
-                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .compute_bit = true }, null);
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .compute_bit = true }, null, compiled_shader.compiled_shader.reflection);
                     try shaders.append(self.allocator, shader);
                     try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .compute_bit = true });
                 }
@@ -355,7 +355,7 @@ pub const UnifiedPipelineSystem = struct {
                 if (config.vertex_shader) |vertex_path| {
                     const compiled_shader = try self.shader_manager.loadShader(vertex_path, config.shader_options);
                     const shader = try self.allocator.create(Shader);
-                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null);
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .vertex_bit = true }, null, compiled_shader.compiled_shader.reflection);
                     try shaders.append(self.allocator, shader);
                     try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .vertex_bit = true });
                 }
@@ -363,7 +363,7 @@ pub const UnifiedPipelineSystem = struct {
                 if (config.fragment_shader) |fragment_path| {
                     const compiled_shader = try self.shader_manager.loadShader(fragment_path, config.shader_options);
                     const shader = try self.allocator.create(Shader);
-                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null);
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .fragment_bit = true }, null, compiled_shader.compiled_shader.reflection);
                     try shaders.append(self.allocator, shader);
                     try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .fragment_bit = true });
                 }
@@ -705,6 +705,52 @@ pub const UnifiedPipelineSystem = struct {
 
         if (frame_index >= frame_sets.len) return null;
         return frame_sets[frame_index];
+    }
+
+    /// Get combined shader reflection data from all shaders in a pipeline
+    /// Merges reflection data stored in each shader
+    pub fn getPipelineReflection(self: *UnifiedPipelineSystem, pipeline_id: PipelineId) !?ShaderCompiler.ShaderReflection {
+        const pipeline = self.pipelines.get(pipeline_id) orelse return null;
+
+        // Create a combined reflection by merging all shader reflections
+        var combined_reflection = ShaderCompiler.ShaderReflection.init();
+
+        // Merge reflection from each shader in the pipeline
+        for (pipeline.shaders) |shader| {
+            const reflection = shader.reflection;
+
+            // Merge uniform buffers
+            for (reflection.uniform_buffers.items) |ub| {
+                try combined_reflection.uniform_buffers.append(self.allocator, ub);
+            }
+
+            // Merge storage buffers
+            for (reflection.storage_buffers.items) |sb| {
+                try combined_reflection.storage_buffers.append(self.allocator, sb);
+            }
+
+            // Merge textures
+            for (reflection.textures.items) |tex| {
+                try combined_reflection.textures.append(self.allocator, tex);
+            }
+
+            // Merge storage images
+            for (reflection.storage_images.items) |img| {
+                try combined_reflection.storage_images.append(self.allocator, img);
+            }
+
+            // Merge samplers
+            for (reflection.samplers.items) |samp| {
+                try combined_reflection.samplers.append(self.allocator, samp);
+            }
+
+            // Merge acceleration structures
+            for (reflection.acceleration_structures.items) |accel| {
+                try combined_reflection.acceleration_structures.append(self.allocator, accel);
+            }
+        }
+
+        return combined_reflection;
     }
 
     /// Bind a resource to a descriptor set

@@ -183,6 +183,14 @@ pub const GeometryPass = struct {
 
         // Mark resources as needing setup
         self.resources_need_setup = true;
+        
+        // Populate ResourceBinder with shader reflection data
+        if (try self.pipeline_system.getPipelineReflection(self.geometry_pipeline)) |reflection| {
+            var mut_reflection = reflection;
+            try self.resource_binder.populateFromReflection(mut_reflection);
+            mut_reflection.deinit(self.allocator);
+        }
+        
         self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
 
         log(.INFO, "geometry_pass", "Setup complete (color: {}, depth: {})", .{ self.color_target.toInt(), self.depth_buffer.toInt() });

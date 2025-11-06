@@ -195,19 +195,45 @@ pub const BufferManager = struct {
     }
 
     /// Bind buffer via ResourceBinder integration
+    /// Bind buffer via ResourceBinder's named binding API
+    /// Automatically detects buffer type (uniform vs storage) and uses appropriate binding method
     pub fn bindBuffer(
         self: *BufferManager,
         managed_buffer: *ManagedBuffer,
         binding_name: []const u8,
-        _: u32, // frame_index currently unused but reserved for future frame tracking
+        frame_index: u32,
     ) !void {
-        // TODO: Integrate with ResourceBinder named binding system
-        // For now, this is a placeholder that logs the binding attempt
-        _ = self; // Will be used for ResourceBinder access in full implementation
+        // Determine buffer type from usage flags
+        const is_uniform = managed_buffer.buffer.usage_flags.uniform_buffer_bit;
+        const is_storage = managed_buffer.buffer.usage_flags.storage_buffer_bit;
 
-        log(.DEBUG, "buffer_manager", "Binding buffer '{s}' to '{s}' (placeholder)", .{
-            managed_buffer.name, binding_name,
-        });
+        if (is_uniform) {
+            try self.resource_binder.bindUniformBufferNamed(
+                binding_name,
+                &managed_buffer.buffer,
+                frame_index,
+            );
+            log(.DEBUG, "buffer_manager", "Bound uniform buffer '{s}' to '{s}'", .{
+                managed_buffer.name,
+                binding_name,
+            });
+        } else if (is_storage) {
+            try self.resource_binder.bindStorageBufferNamed(
+                binding_name,
+                &managed_buffer.buffer,
+                frame_index,
+            );
+            log(.DEBUG, "buffer_manager", "Bound storage buffer '{s}' to '{s}'", .{
+                managed_buffer.name,
+                binding_name,
+            });
+        } else {
+            log(.WARN, "buffer_manager", "Buffer '{s}' has neither uniform nor storage usage flag - cannot bind to '{s}'", .{
+                managed_buffer.name,
+                binding_name,
+            });
+            return error.InvalidBufferUsage;
+        }
     }
 
     /// Called at frame start to cleanup old buffers
