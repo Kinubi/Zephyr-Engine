@@ -8,9 +8,9 @@ const log = @import("../utils/log.zig").log;
 pub const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 pub const BufferStrategy = enum {
-    device_local,    // Device memory, staging upload
-    host_visible,    // Host memory, direct write
-    host_cached,     // Host memory, manual flush
+    device_local, // Device memory, staging upload
+    host_visible, // Host memory, direct write
+    host_cached, // Host memory, manual flush
 };
 
 pub const BufferConfig = struct {
@@ -34,13 +34,13 @@ pub const ManagedBuffer = struct {
     strategy: BufferStrategy,
     created_frame: u64,
     binding_info: ?BindingInfo = null,
-    
+
     pub const BindingInfo = struct {
         set: u32,
         binding: u32,
         pipeline_name: []const u8,
     };
-    
+
     /// Get descriptor info for manual binding
     pub fn getDescriptorInfo(self: *const ManagedBuffer) vk.DescriptorBufferInfo {
         return self.buffer.descriptor_info;
@@ -51,15 +51,15 @@ pub const BufferManager = struct {
     allocator: std.mem.Allocator,
     graphics_context: *GraphicsContext,
     resource_binder: *ResourceBinder,
-    
+
     // Ring buffers for frame-safe cleanup
     deferred_buffers: [MAX_FRAMES_IN_FLIGHT]std.ArrayList(ManagedBuffer),
     current_frame: u32 = 0,
     frame_counter: u64 = 0,
-    
+
     // Global registry for debugging
     all_buffers: std.StringHashMap(BufferStats),
-    
+
     /// Initialize BufferManager with ResourceBinder integration
     pub fn init(
         allocator: std.mem.Allocator,
@@ -74,28 +74,28 @@ pub const BufferManager = struct {
             .deferred_buffers = undefined,
             .all_buffers = std.StringHashMap(BufferStats).init(allocator),
         };
-        
+
         // Initialize ring buffer arrays
         for (&self.deferred_buffers) |*slot| {
-            slot.* = std.ArrayList(ManagedBuffer).init(allocator);
+            slot.* = std.ArrayList(ManagedBuffer){};
         }
-        
+
         log(.INFO, "buffer_manager", "BufferManager initialized", .{});
         return self;
     }
-    
+
     pub fn deinit(self: *BufferManager) void {
         // Clean up all deferred buffers
         for (&self.deferred_buffers) |*slot| {
             self.cleanupRingSlot(slot);
-            slot.deinit();
+            slot.deinit(self.allocator);
         }
-        
+
         self.all_buffers.deinit();
         self.allocator.destroy(self);
         log(.INFO, "buffer_manager", "BufferManager deinitialized", .{});
     }
-    
+
     /// Create buffer with specified strategy
     pub fn createBuffer(
         self: *BufferManager,
@@ -105,14 +105,14 @@ pub const BufferManager = struct {
         // Duplicate the name for ownership
         const owned_name = try self.allocator.dupe(u8, config.name);
         errdefer self.allocator.free(owned_name);
-        
+
         // Create the buffer based on strategy
         const buffer = switch (config.strategy) {
             .device_local => try self.createDeviceLocalBuffer(config),
             .host_visible => try self.createHostVisibleBuffer(config),
             .host_cached => try self.createHostCachedBuffer(config),
         };
-        
+
         const managed = ManagedBuffer{
             .buffer = buffer,
             .name = owned_name,
@@ -120,7 +120,7 @@ pub const BufferManager = struct {
             .strategy = config.strategy,
             .created_frame = self.frame_counter,
         };
-        
+
         // Add to statistics
         try self.all_buffers.put(owned_name, BufferStats{
             .size = config.size,
@@ -128,14 +128,14 @@ pub const BufferManager = struct {
             .created_frame = self.frame_counter,
             .last_updated = self.frame_counter,
         });
-        
+
         log(.DEBUG, "buffer_manager", "Created buffer '{s}': {} bytes, strategy: {}", .{
             config.name, config.size, config.strategy,
         });
-        
+
         return managed;
     }
-    
+
     /// Create and upload data in one call (device-local only)
     pub fn createAndUpload(
         self: *BufferManager,
@@ -149,13 +149,13 @@ pub const BufferManager = struct {
             .strategy = .device_local,
             .usage = .{ .vertex_buffer_bit = true, .transfer_dst_bit = true },
         };
-        
+
         var managed = try self.createBuffer(config, frame_index);
         try self.updateBuffer(&managed, data, frame_index);
-        
+
         return managed;
     }
-    
+
     /// Update buffer contents (strategy-aware)
     pub fn updateBuffer(
         self: *BufferManager,
@@ -183,17 +183,17 @@ pub const BufferManager = struct {
                 managed_buffer.buffer.unmap();
             },
         }
-        
+
         // Update statistics
         if (self.all_buffers.getPtr(managed_buffer.name)) |stats| {
             stats.last_updated = self.frame_counter;
         }
-        
+
         log(.DEBUG, "buffer_manager", "Updated buffer '{s}': {} bytes", .{
             managed_buffer.name, data.len,
         });
     }
-    
+
     /// Bind buffer via ResourceBinder integration
     pub fn bindBuffer(
         self: *BufferManager,
@@ -204,47 +204,47 @@ pub const BufferManager = struct {
         // TODO: Integrate with ResourceBinder named binding system
         // For now, this is a placeholder that logs the binding attempt
         _ = self; // Will be used for ResourceBinder access in full implementation
-        
+
         log(.DEBUG, "buffer_manager", "Binding buffer '{s}' to '{s}' (placeholder)", .{
             managed_buffer.name, binding_name,
         });
     }
-    
+
     /// Called at frame start to cleanup old buffers
     pub fn beginFrame(self: *BufferManager, frame_index: u32) void {
         self.current_frame = frame_index;
         self.frame_counter += 1;
-        
+
         // Cleanup buffers that are now safe to destroy
         const cleanup_slot = &self.deferred_buffers[frame_index];
         self.cleanupRingSlot(cleanup_slot);
     }
-    
+
     /// Queue buffer for deferred destruction
     pub fn destroyBuffer(self: *BufferManager, managed_buffer: ManagedBuffer) !void {
         const slot = &self.deferred_buffers[self.current_frame];
         try slot.append(managed_buffer);
-        
+
         // Remove from statistics
         _ = self.all_buffers.remove(managed_buffer.name);
-        
+
         log(.DEBUG, "buffer_manager", "Queued buffer '{s}' for destruction", .{managed_buffer.name});
     }
-    
+
     /// Print memory statistics
     pub fn printStatistics(self: *BufferManager) void {
         log(.INFO, "buffer_manager", "=== Buffer Manager Statistics ===", .{});
-        
+
         var total_size: u64 = 0;
         var buffer_count: u32 = 0;
         var strategy_counts = [_]u32{0} ** 3; // device_local, host_visible, host_cached
-        
+
         var iter = self.all_buffers.iterator();
         while (iter.next()) |entry| {
             const stats = entry.value_ptr;
             total_size += stats.size;
             buffer_count += 1;
-            
+
             const strategy_idx = switch (stats.strategy) {
                 .device_local => 0,
                 .host_visible => 1,
@@ -252,7 +252,7 @@ pub const BufferManager = struct {
             };
             strategy_counts[strategy_idx] += 1;
         }
-        
+
         log(.INFO, "buffer_manager", "Total buffers: {}", .{buffer_count});
         log(.INFO, "buffer_manager", "Total size: {d:.2} MB", .{@as(f32, @floatFromInt(total_size)) / (1024.0 * 1024.0)});
         log(.INFO, "buffer_manager", "Device-local: {}, Host-visible: {}, Host-cached: {}", .{
@@ -260,9 +260,9 @@ pub const BufferManager = struct {
         });
         log(.INFO, "buffer_manager", "===============================", .{});
     }
-    
+
     // Private implementation details
-    
+
     /// Create staging buffer and upload to device
     fn uploadViaStaging(
         self: *BufferManager,
@@ -276,27 +276,27 @@ pub const BufferManager = struct {
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
-        
+
         try staging.map(data.len, 0);
         staging.writeToBuffer(data, data.len, 0);
         staging.unmap();
-        
+
         // Copy from staging to destination buffer using graphics context
         try self.graphics_context.copyFromStagingBuffer(dst.buffer, &staging, data.len);
-        
+
         log(.DEBUG, "buffer_manager", "Staging upload completed for {} bytes", .{data.len});
     }
-    
+
     /// Cleanup buffers in ring slot
     fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(ManagedBuffer)) void {
-        for (slot.items) |managed| {
+        for (slot.items) |*managed| {
             managed.buffer.deinit();
             // Free the duplicated name string
             self.allocator.free(managed.name);
         }
         slot.clearRetainingCapacity();
     }
-    
+
     /// Create device-local buffer (optimal for GPU access)
     fn createDeviceLocalBuffer(self: *BufferManager, config: BufferConfig) !Buffer {
         return Buffer.initNamed(
@@ -308,7 +308,7 @@ pub const BufferManager = struct {
             config.name,
         );
     }
-    
+
     /// Create host-visible buffer (CPU mappable)
     fn createHostVisibleBuffer(self: *BufferManager, config: BufferConfig) !Buffer {
         return Buffer.initNamed(
@@ -320,7 +320,7 @@ pub const BufferManager = struct {
             config.name,
         );
     }
-    
+
     /// Create host-cached buffer (CPU mappable with manual flushing)
     fn createHostCachedBuffer(self: *BufferManager, config: BufferConfig) !Buffer {
         return Buffer.initNamed(
