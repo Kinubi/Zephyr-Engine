@@ -83,17 +83,14 @@ pub const TextureSystem = struct {
             self.allocator.free(self.descriptor_infos);
         }
 
-        // Build new array - indices start at 1, so we need textures.len + 1 slots
-        // Index 0 is reserved (unused), indices 1..N map to textures[0..N-1]
-        const infos = try self.allocator.alloc(vk.DescriptorImageInfo, textures.len + 1);
+        // Build new array - we need textures.len slots (no +1 needed)
+        // Descriptor array directly mirrors loaded_textures array
+        const infos = try self.allocator.alloc(vk.DescriptorImageInfo, textures.len);
 
-        // Index 0: Placeholder (never accessed if shader checks index == 0)
-        // Use first texture as dummy to avoid validation errors
-        infos[0] = if (textures.len > 0) textures[0].getDescriptorInfo() else std.mem.zeroes(vk.DescriptorImageInfo);
-
-        // Indices 1..N: Real textures
+        // Copy all texture descriptors 1:1
         for (textures, 0..) |texture, i| {
-            infos[i + 1] = texture.getDescriptorInfo();
+            infos[i] = texture.getDescriptorInfo();
+            log(.DEBUG, "texture_system", "[TRACE] descriptor[{}] = texture imageView={}, sampler={}", .{ i, @intFromEnum(infos[i].image_view), @intFromEnum(infos[i].sampler) });
         }
 
         self.descriptor_infos = infos;
@@ -101,7 +98,7 @@ pub const TextureSystem = struct {
         self.last_texture_count = textures.len;
         self.asset_manager.texture_descriptors_dirty = false;
 
-        log(.INFO, "texture_system", "Rebuilt texture descriptors: {} textures (index 0 = dummy, indices 1-{}), generation {}", .{ textures.len, textures.len - 1, self.generation });
+        log(.INFO, "texture_system", "Rebuilt texture descriptors: {} textures (indices 0-{}), generation {}", .{ textures.len, textures.len - 1, self.generation });
     }
 
     /// Get GPU array index for a texture asset ID
@@ -119,11 +116,9 @@ pub const TextureSystem = struct {
 
         // Look up index in asset_to_texture map
         if (self.asset_manager.asset_to_texture.get(resolved_id)) |index| {
-            // asset_to_texture stores index into loaded_textures array (0-based)
-            // descriptor array has dummy at index 0, real textures at 1..N
-            const descriptor_index = index + 1;
-            log(.DEBUG, "texture_system", "[TRACE] getTextureIndex: assetId={} (path={s}) -> resolved to {} (path={s}) -> loaded_textures[{}] -> descriptor[{}]", .{ asset_id.toU64(), asset_path, resolved_id.toU64(), resolved_path, index, descriptor_index });
-            return @intCast(descriptor_index);
+            // Descriptor array directly mirrors loaded_textures (1:1 mapping)
+            log(.DEBUG, "texture_system", "[TRACE] getTextureIndex: assetId={} (path={s}) -> resolved to {} (path={s}) -> index {}", .{ asset_id.toU64(), asset_path, resolved_id.toU64(), resolved_path, index });
+            return @intCast(index);
         }
 
         // Return 0 (fallback texture) if not found
