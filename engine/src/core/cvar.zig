@@ -45,12 +45,12 @@ pub const CVar = struct {
     // optional Lua handler name to call asynchronously (stored as bytes)
     on_change_lua: std.ArrayList(u8),
 
-    pub fn deinit(self: *CVar) void {
+    pub fn deinit(self: *CVar, allocator: std.mem.Allocator) void {
         // free owned buffers
-        self.str_val.deinit();
-        self.default_str.deinit();
-        self.description.deinit();
-        self.on_change_lua.deinit();
+        if (self.str_val.items.len > 0) self.str_val.deinit(allocator);
+        if (self.default_str.items.len > 0) self.default_str.deinit(allocator);
+        if (self.description.items.len > 0) self.description.deinit(allocator);
+        if (self.on_change_lua.items.len > 0) self.on_change_lua.deinit(allocator);
     }
 };
 
@@ -68,7 +68,7 @@ pub const CVarRegistry = struct {
     pending_changes: std.ArrayList(CVarChange),
 
     pub fn init(allocator: std.mem.Allocator) !CVarRegistry {
-        return CVarRegistry{ .allocator = allocator, .map = std.StringHashMap(*CVar).init(allocator), .mutex = .{}, .pending_changes = std.ArrayList(CVarChange){} };
+        return CVarRegistry{ .allocator = allocator, .map = std.StringHashMap(*CVar).init(allocator), .mutex = .{}, .pending_changes = .{} };
     }
 
     pub fn deinit(self: *CVarRegistry) void {
@@ -77,8 +77,8 @@ pub const CVarRegistry = struct {
         defer self.mutex.unlock();
         var it = self.map.iterator();
         while (it.next()) |entry| {
-            const cv = entry.value.*;
-            cv.deinit();
+            const cv = entry.value_ptr.*;
+            cv.deinit(self.allocator);
             // free the struct memory
             self.allocator.destroy(cv);
         }
@@ -89,7 +89,7 @@ pub const CVarRegistry = struct {
             if (e.old.len > 0) self.allocator.free(e.old);
             if (e.new.len > 0) self.allocator.free(e.new);
         }
-        self.pending_changes.deinit();
+        self.pending_changes.deinit(self.allocator);
     }
 
     /// Take pending change events. Returns an allocated array of CVarChange
@@ -100,7 +100,7 @@ pub const CVarRegistry = struct {
         defer self.mutex.unlock();
 
         const count = self.pending_changes.items.len;
-        if (count == 0) return allocator.alloc(CVarChange, 0);
+        if (count == 0) return &[_]CVarChange{};
 
         const out = try allocator.alloc(CVarChange, count);
         var i: usize = 0;
@@ -307,6 +307,7 @@ pub const CVarRegistry = struct {
         cvar_ptr.*.default_float = 0.0;
         cvar_ptr.*.default_bool = false;
         cvar_ptr.*.default_str = std.ArrayList(u8){};
+        cvar_ptr.*.on_change_lua = std.ArrayList(u8){};
 
         // infer
         if (val.len > 0) {
@@ -388,6 +389,7 @@ pub const CVarRegistry = struct {
         cvar_ptr.*.default_float = 0.0;
         cvar_ptr.*.default_bool = false;
         cvar_ptr.*.default_str = std.ArrayList(u8){};
+        cvar_ptr.*.on_change_lua = std.ArrayList(u8){};
         cvar_ptr.*.min_int = min_int;
         cvar_ptr.*.max_int = max_int;
         cvar_ptr.*.min_float = min_float;
@@ -515,6 +517,10 @@ pub fn ensureGlobal(allocator: std.mem.Allocator) !*CVarRegistry {
     _ = boxed.registerCVar("debug_log_level", .Int, "2", "Logging verbosity (0=off..5=debug)", CVarFlags{ .archived = true, .read_only = false }, null, null, null, null, null) catch {};
     _ = boxed.registerCVar("r_texture_quality", .Int, "2", "Texture quality level (0=low..3=high)", CVarFlags{ .archived = true, .read_only = false }, null, null, null, null, null) catch {};
 
+    // Memory tracking CVARs
+    _ = boxed.registerCVar("r_trackMemory", .Bool, "false", "Enable GPU memory allocation tracking", CVarFlags{ .archived = true, .read_only = false }, null, null, null, null, null) catch {};
+    _ = boxed.registerCVar("r_logMemoryAllocs", .Bool, "false", "Log individual memory allocations", CVarFlags{ .archived = false, .read_only = false }, null, null, null, null, null) catch {};
+
     // attempt to load archived CVARs persisted on disk
     _ = loadArchivedFromFile(boxed, "cache/cvars.cfg") catch {};
 
@@ -538,14 +544,18 @@ pub fn deinitGlobal() void {
 }
 
 pub fn loadArchivedFromFile(self: *CVarRegistry, path: []const u8) !void {
+    const log = @import("../utils/log.zig").log;
+    log(.INFO, "cvar", "Loading archived CVars from {s}", .{path});
+
     const fs = std.fs.cwd();
     var file = try fs.openFile(path, .{});
     defer file.close();
     const contents = try file.readToEndAlloc(self.allocator, 8192);
     defer self.allocator.free(contents);
 
+    var loaded_count: usize = 0;
     var start: usize = 0;
-    while (start < contents.len) : (start += 1) {
+    while (start < contents.len) {
         var end = start;
         while (end < contents.len and contents[end] != '\n') : (end += 1) {}
         const line = contents[start..end];
@@ -561,38 +571,61 @@ pub fn loadArchivedFromFile(self: *CVarRegistry, path: []const u8) !void {
             }
             if (found and eq_index > 0) {
                 const key = line[0..eq_index];
-                const val = line[eq_index + 1 ..];
+                var val = line[eq_index + 1 ..];
+                // Trim trailing whitespace (including \r from Windows line endings)
+                while (val.len > 0 and (val[val.len - 1] == ' ' or val[val.len - 1] == '\t' or val[val.len - 1] == '\r')) {
+                    val = val[0 .. val.len - 1];
+                }
                 // set without erroring on parse issues
-                _ = self.setFromString(key, val) catch {};
+                self.setFromString(key, val) catch |err| {
+                    log(.WARN, "cvar", "Failed to load {s}={s}: {}", .{ key, val, err });
+                    start = end + 1;
+                    continue;
+                };
+                log(.DEBUG, "cvar", "Loaded: {s} = {s}", .{ key, val });
+                loaded_count += 1;
             }
         }
         start = end + 1;
     }
+    log(.INFO, "cvar", "Loaded {} archived CVars", .{loaded_count});
 }
 
 pub fn saveArchivedToFile(self: *CVarRegistry, path: []const u8) !void {
+    const log = @import("../utils/log.zig").log;
+    log(.INFO, "cvar", "Saving archived CVars to {s}", .{path});
+
     const fs = std.fs.cwd();
     var file = try fs.createFile(path, .{});
     defer file.close();
-    var w = file.writer();
 
     self.mutex.lock();
     defer self.mutex.unlock();
 
+    var saved_count: usize = 0;
     var it = self.map.iterator();
     while (it.next()) |entry| {
-        const cv = entry.value.*;
+        const cv = entry.value_ptr.*;
         if (cv.flags.archived) {
             // write "key=value\n"
             const key = entry.key_ptr.*;
-            try w.writeAll(key);
-            try w.writeAll("=");
-            // get value as string into allocator memory, write it, then free
-            const v = try self.getAsStringAlloc(key, self.allocator) orelse continue;
-            try w.writeAll(v);
-            try w.writeAll("\n");
-            // free the allocated value
-            self.allocator.free(v);
+            _ = try file.writeAll(key);
+            _ = try file.writeAll("=");
+
+            // Format value directly without calling getAsStringAlloc (avoids deadlock)
+            const value_str = switch (cv.ctype) {
+                .Int => try std.fmt.allocPrint(self.allocator, "{}", .{cv.int_val}),
+                .Float => try std.fmt.allocPrint(self.allocator, "{d}", .{cv.float_val}),
+                .Bool => if (cv.bool_val) try self.allocator.dupe(u8, "true") else try self.allocator.dupe(u8, "false"),
+                .String => try self.allocator.dupe(u8, cv.str_val.items),
+            };
+            defer self.allocator.free(value_str);
+
+            _ = try file.writeAll(value_str);
+            log(.DEBUG, "cvar", "Saved: {s} = {s}", .{ key, value_str });
+            saved_count += 1;
+            _ = try file.writeAll("\n");
         }
     }
+    log(.INFO, "cvar", "Saved {} archived CVars", .{saved_count});
 }

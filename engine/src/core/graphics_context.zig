@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const MAX_FRAMES_IN_FLIGHT = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const Buffer = @import("buffer.zig").Buffer;
 const log = @import("../utils/log.zig").log;
+const MemoryTracker = @import("../rendering/memory_tracker.zig").MemoryTracker;
 
 const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
@@ -89,6 +90,9 @@ pub const GraphicsContext = struct {
     // Vulkan spec requires external synchronization for queue access from multiple threads
     queue_mutex: std.Thread.Mutex,
     transfer_queue_mutex: std.Thread.Mutex, // Separate mutex for transfer queue
+
+    // Memory tracking (optional)
+    memory_tracker: ?*MemoryTracker = null,
 
     pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: *c.GLFWwindow) !GraphicsContext {
         var self: GraphicsContext = undefined;
@@ -215,6 +219,9 @@ pub const GraphicsContext = struct {
         // Initialize queue synchronization
         self.queue_mutex = std.Thread.Mutex{};
         self.transfer_queue_mutex = std.Thread.Mutex{};
+
+        // Initialize memory tracker as null (can be set later if needed)
+        self.memory_tracker = null;
 
         return self;
     }
@@ -583,6 +590,15 @@ pub const GraphicsContext = struct {
         const mem_reqs = self.vkd.getImageMemoryRequirements(self.dev, image.*);
         memory.* = try self.allocate(mem_reqs, memory_properties, .{});
         try self.vkd.bindImageMemory(self.dev, image.*, memory.*, 0);
+
+        // Track texture memory allocation using image handle as unique identifier
+        if (self.memory_tracker) |tracker| {
+            var buf: [32]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "texture_{x}", .{@intFromEnum(image.*)}) catch "texture_unknown";
+            tracker.trackAllocation(key, mem_reqs.size, .texture) catch |err| {
+                log(.WARN, "graphics_context", "Failed to track texture allocation: {}", .{err});
+            };
+        }
     }
 
     // Secondary command buffer for worker threads - no queue submission

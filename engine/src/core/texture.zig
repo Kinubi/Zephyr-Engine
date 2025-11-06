@@ -51,6 +51,7 @@ pub const Texture = struct {
     format: vk.Format,
     descriptor: vk.DescriptorImageInfo,
     gc: *GraphicsContext,
+    memory_size: u64 = 0, // Track memory size for proper untracking
 
     pub fn init(
         gc: *GraphicsContext,
@@ -106,6 +107,11 @@ pub const Texture = struct {
         var image: vk.Image = undefined;
         var memory: vk.DeviceMemory = undefined;
         try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image, &memory);
+        
+        // Query memory size for tracking
+        const mem_reqs = gc.vkd.getImageMemoryRequirements(gc.dev, image);
+        const memory_size = mem_reqs.size;
+        
         var view_info = vk.ImageViewCreateInfo{
             .s_type = vk.StructureType.image_view_create_info,
             .view_type = vk.ImageViewType.@"2d",
@@ -178,6 +184,7 @@ pub const Texture = struct {
                 .image_layout = image_layout,
             },
             .gc = gc,
+            .memory_size = memory_size,
         };
     }
 
@@ -240,6 +247,10 @@ pub const Texture = struct {
         var image: vk.Image = undefined;
         var memory: vk.DeviceMemory = undefined;
         try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image, &memory);
+
+        // Query memory size for tracking
+        const mem_reqs = gc.vkd.getImageMemoryRequirements(gc.dev, image);
+        const memory_size = mem_reqs.size;
 
         var view_info = vk.ImageViewCreateInfo{
             .s_type = vk.StructureType.image_view_create_info,
@@ -360,6 +371,7 @@ pub const Texture = struct {
                 .image_layout = image_layout,
             },
             .gc = gc,
+            .memory_size = memory_size,
         };
     }
 
@@ -883,6 +895,15 @@ pub const Texture = struct {
     }
 
     pub fn deinit(self: *Texture) void {
+        // Untrack memory before destroying using image handle as unique identifier
+        if (self.gc.memory_tracker) |tracker| {
+            if (self.memory_size > 0) {
+                var buf: [32]u8 = undefined;
+                const key = std.fmt.bufPrint(&buf, "texture_{x}", .{@intFromEnum(self.image)}) catch "texture_unknown";
+                tracker.untrackAllocation(key);
+            }
+        }
+        
         // Destroy Vulkan resources in reverse order of creation
         self.gc.vkd.destroySampler(self.gc.dev, self.sampler, null);
         self.gc.vkd.destroyImageView(self.gc.dev, self.image_view, null);

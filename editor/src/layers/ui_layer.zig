@@ -441,12 +441,20 @@ fn findDepthHasStencil(format: vk.Format) bool {
 
 /// Computes desired viewport extent from ImGui viewport size (fallback to swapchain).
 fn computeDesiredExtent(self: *UILayer) vk.Extent2D {
+    // Use viewport size from previous frame (updated during render phase)
+    // This creates textures at the actual viewport resolution, avoiding wasteful overrendering
     const vp_w = self.ui_renderer.viewport_size[0];
     const vp_h = self.ui_renderer.viewport_size[1];
     const has_valid_size = (vp_w >= 1.0 and vp_h >= 1.0);
 
-    const width: u32 = if (has_valid_size) @intFromFloat(@floor(vp_w)) else self.swapchain.extent.width;
-    const height: u32 = if (has_valid_size) @intFromFloat(@floor(vp_h)) else self.swapchain.extent.height;
+    // Fallback to swapchain extent if viewport hasn't been rendered yet
+    var width: u32 = if (has_valid_size) @intFromFloat(@floor(vp_w)) else self.swapchain.extent.width;
+    var height: u32 = if (has_valid_size) @intFromFloat(@floor(vp_h)) else self.swapchain.extent.height;
+
+    // Clamp to swapchain extent to avoid creating textures larger than the surface supports
+    // This handles the case where viewport size from previous frame exceeds new swapchain extent
+    width = @min(width, self.swapchain.extent.width);
+    height = @min(height, self.swapchain.extent.height);
 
     return .{ .width = if (width == 0) 1 else width, .height = if (height == 0) 1 else height };
 }
@@ -463,6 +471,8 @@ fn destroyOldViewportTextures(self: *UILayer) void {
 
 /// Recreates HDR textures for all swap images at the given extent.
 fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.Extent2D) !void {
+    log(.INFO, "ui_layer", "Recreating HDR textures at size {}x{}", .{ extent.width, extent.height });
+
     const extent3d = makeExtent3D(extent);
     const color_barrier = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },

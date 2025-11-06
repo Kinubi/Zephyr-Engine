@@ -160,6 +160,11 @@ pub const App = struct {
         // ==================== Initialize Engine ====================
         // Engine handles: window, graphics context, swapchain, command buffers, base layers
         log(.INFO, "app", "Initializing engine core systems...", .{});
+
+        // Initialize CVar registry before engine initialization
+        _ = try zephyr.cvar.ensureGlobal(self.allocator);
+        const cvar_reg = zephyr.cvar.getGlobal();
+
         self.engine = try zephyr.Engine.init(self.allocator, .{
             .window = .{
                 .width = 2560,
@@ -170,6 +175,7 @@ pub const App = struct {
             .enable_performance_monitoring = true,
             .enable_render_thread = true, // Phase 2.1 complete: prepare/update/render separation
             .thread_pool = thread_pool, // Pass thread pool to engine
+            .cvar_registry = if (cvar_reg) |reg| @ptrCast(reg) else null,
         });
         errdefer self.engine.deinit();
 
@@ -549,13 +555,13 @@ pub const App = struct {
         self.engine.deinit();
         log(.INFO, "app", "Engine shut down", .{});
 
+        // Save and cleanup global CVar registry (persists archived CVars to disk)
+        zephyr.cvar.deinitGlobal();
+        log(.INFO, "app", "CVar system shut down (archived CVars saved)", .{});
+
         // Now safe to shutdown thread pool (engine no longer needs it)
         thread_pool.deinit();
         self.allocator.destroy(thread_pool);
         log(.INFO, "app", "Thread pool shut down", .{});
-
-        // Clean up zstbi global state
-        // TODO: Restore once Texture.deinitZstbi() is available
-        // Texture.deinitZstbi();
     }
 };

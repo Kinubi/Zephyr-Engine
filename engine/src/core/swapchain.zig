@@ -121,7 +121,7 @@ pub const Swapchain = struct {
             gc.vkd.destroySwapchainKHR(gc.dev, old_handle, null);
         }
 
-        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, extent, .r16g16b16a16_sfloat);
+        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, actual_extent, .r16g16b16a16_sfloat);
         errdefer for (swap_images) |si| si.deinit(gc);
 
         // var next_image_acquired = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);

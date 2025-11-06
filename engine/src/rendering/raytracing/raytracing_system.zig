@@ -290,6 +290,9 @@ pub const RaytracingSystem = struct {
                     // Queue buffers for destruction
                     self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old.buffer) catch |err| {
                         log(.ERROR, "raytracing", "Failed to queue old TLAS buffer: {}", .{err});
+                        if (self.gc.memory_tracker) |tracker| {
+                            tracker.untrackAllocation("tlas_structure");
+                        }
                         var immediate = old.buffer;
                         immediate.deinit();
                     };
@@ -332,6 +335,9 @@ pub const RaytracingSystem = struct {
             self.per_frame_destroy[frame_index].blas_handles.append(self.allocator, old_blas.acceleration_structure) catch |err| {
                 log(.ERROR, "raytracing", "Failed to queue old BLAS handle for destruction: {}", .{err});
                 self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
+                if (self.gc.memory_tracker) |tracker| {
+                    tracker.untrackAllocation("blas_structure");
+                }
                 var immediate = old_blas.buffer;
                 immediate.deinit();
                 continue;
@@ -340,6 +346,9 @@ pub const RaytracingSystem = struct {
             self.per_frame_destroy[frame_index].blas_buffers.append(self.allocator, old_blas.buffer) catch |err| {
                 log(.ERROR, "raytracing", "Failed to queue old BLAS buffer for destruction: {}", .{err});
                 self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
+                if (self.gc.memory_tracker) |tracker| {
+                    tracker.untrackAllocation("blas_structure");
+                }
                 var immediate = old_blas.buffer;
                 immediate.deinit();
                 if (self.per_frame_destroy[frame_index].blas_handles.items.len > 0) {
@@ -484,6 +493,9 @@ pub const RaytracingSystem = struct {
         if (self.tlas_registry.current.load(.acquire)) |entry| {
             log(.INFO, "raytracing", "Deinit: destroying TLAS from registry {x}", .{@intFromEnum(entry.acceleration_structure)});
             self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, entry.acceleration_structure, null);
+            if (self.gc.memory_tracker) |tracker| {
+                tracker.untrackAllocation("tlas_structure");
+            }
             var buf = entry.buffer;
             buf.deinit();
             var inst_buf = entry.instance_buffer;
@@ -522,6 +534,10 @@ pub const RaytracingSystem = struct {
         queue.blas_handles.clearRetainingCapacity();
 
         for (queue.blas_buffers.items) |*buf| {
+            // Untrack BLAS memory before destroying
+            if (self.gc.memory_tracker) |tracker| {
+                tracker.untrackAllocation("blas_structure");
+            }
             buf.deinit();
         }
         queue.blas_buffers.clearRetainingCapacity();
@@ -533,6 +549,10 @@ pub const RaytracingSystem = struct {
         queue.tlas_handles.clearRetainingCapacity();
 
         for (queue.tlas_buffers.items) |*buf| {
+            // Untrack TLAS memory before destroying
+            if (self.gc.memory_tracker) |tracker| {
+                tracker.untrackAllocation("tlas_structure");
+            }
             buf.deinit();
         }
         queue.tlas_buffers.clearRetainingCapacity();

@@ -520,6 +520,13 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
         .{ .device_local_bit = true },
     );
 
+    // Track BLAS memory allocation
+    if (builder.gc.memory_tracker) |tracker| {
+        tracker.trackAllocation("blas_structure", size_info.acceleration_structure_size, .blas) catch |err| {
+            log(.WARN, "bvh_builder", "Failed to track BLAS allocation: {}", .{err});
+        };
+    }
+
     // Create acceleration structure
     var as_create_info = vk.AccelerationStructureCreateInfoKHR{
         .s_type = vk.StructureType.acceleration_structure_create_info_khr,
@@ -678,6 +685,13 @@ pub fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []cons
         .{ .acceleration_structure_storage_bit_khr = true, .shader_device_address_bit = true },
         .{ .device_local_bit = true },
     );
+
+    // Track TLAS memory allocation
+    if (builder.gc.memory_tracker) |tracker| {
+        tracker.trackAllocation("tlas_structure", tlas_size_info.acceleration_structure_size, .tlas) catch |err| {
+            log(.WARN, "bvh_builder", "Failed to track TLAS allocation: {}", .{err});
+        };
+    }
 
     // Create TLAS acceleration structure
     var tlas_create_info = vk.AccelerationStructureCreateInfoKHR{

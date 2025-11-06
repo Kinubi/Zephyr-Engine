@@ -62,24 +62,26 @@ pub const Mesh = struct {
         const buffer_size: usize = @sizeOf(Vertex) * vertex_count;
 
         // Create staging buffer using Buffer abstraction
-        var staging_buffer = try Buffer.init(
+        var staging_buffer = try Buffer.initNamed(
             gc,
             @sizeOf(Vertex),
             vertex_count,
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
+            "mesh_vertex_staging",
         );
 
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.vertices.items), buffer_size, 0);
 
         // Create device-local vertex buffer using Buffer abstraction
-        self.vertex_buffer = try Buffer.init(
+        self.vertex_buffer = try Buffer.initNamed(
             gc,
             @sizeOf(Vertex),
             vertex_count,
             .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
             .{ .device_local_bit = true },
+            "mesh_vertex_buffer",
         );
         // Copy from staging to device-local (handles staging buffer lifetime)
         try gc.copyFromStagingBuffer(self.vertex_buffer.?.buffer, &staging_buffer, buffer_size);
@@ -93,24 +95,26 @@ pub const Mesh = struct {
         const buffer_size: usize = @sizeOf(u32) * index_count;
 
         // Create staging buffer using Buffer abstraction
-        var staging_buffer = try Buffer.init(
+        var staging_buffer = try Buffer.initNamed(
             gc,
             @sizeOf(u32),
             index_count,
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
+            "mesh_index_staging",
         );
 
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.indices.items), buffer_size, 0);
 
         // Create device-local index buffer using Buffer abstraction
-        self.index_buffer = try Buffer.init(
+        self.index_buffer = try Buffer.initNamed(
             gc,
             @sizeOf(u32),
             index_count,
             .{ .storage_buffer_bit = true, .index_buffer_bit = true, .transfer_dst_bit = true, .shader_device_address_bit = true, .acceleration_structure_build_input_read_only_bit_khr = true },
             .{ .device_local_bit = true },
+            "mesh_index_buffer",
         );
         // Copy from staging to device-local (handles staging buffer lifetime)
         try gc.copyFromStagingBuffer(self.index_buffer.?.buffer, &staging_buffer, buffer_size);
