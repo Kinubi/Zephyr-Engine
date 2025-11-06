@@ -19,6 +19,7 @@ const CVarRegistry = @import("cvar.zig").CVarRegistry;
 const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const MaterialSystem = @import("../rendering/material_system.zig").MaterialSystem;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
 const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const ecs = @import("../ecs.zig");
@@ -60,6 +61,7 @@ pub const Engine = struct {
     unified_pipeline_system: ?*UnifiedPipelineSystem = null,
     resource_binder: ?*ResourceBinder = null,
     buffer_manager: ?*BufferManager = null,
+    material_system: ?*MaterialSystem = null,
 
     // Asset and file systems
     file_watcher: ?*FileWatcher = null,
@@ -282,6 +284,11 @@ pub const Engine = struct {
         }
 
         // Rendering systems (cleanup in reverse order of initialization)
+        log(.INFO, "engine", "Cleaning up MaterialSystem...", .{});
+        if (self.material_system) |ms| {
+            ms.deinit();
+        }
+
         log(.INFO, "engine", "Cleaning up BufferManager...", .{});
         if (self.buffer_manager) |bm| {
             bm.deinit();
@@ -605,7 +612,14 @@ pub const Engine = struct {
             self.resource_binder.?,
         );
 
-        log(.INFO, "engine", "Core systems initialized (AssetManager, ShaderManager, UnifiedPipelineSystem, ResourceBinder, BufferManager, ECS)", .{});
+        // Initialize MaterialSystem
+        self.material_system = try MaterialSystem.init(
+            self.allocator,
+            self.buffer_manager.?,
+            self.asset_manager.?,
+        );
+
+        log(.INFO, "engine", "Core systems initialized (AssetManager, ShaderManager, UnifiedPipelineSystem, ResourceBinder, BufferManager, MaterialSystem, ECS)", .{});
     }
 
     // === Rendering System Accessors ===
@@ -628,6 +642,11 @@ pub const Engine = struct {
     /// Get the buffer manager instance
     pub fn getBufferManager(self: *Engine) ?*BufferManager {
         return self.buffer_manager;
+    }
+
+    /// Get the material system instance
+    pub fn getMaterialSystem(self: *Engine) ?*MaterialSystem {
+        return self.material_system;
     }
 
     /// Get the ECS world instance

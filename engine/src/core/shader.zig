@@ -19,9 +19,9 @@ pub const Shader = struct {
             .code_size = code.len,
             .p_code = data,
         }, null);
-        return Shader{ 
-            .module = module, 
-            .shader_type = shader_type, 
+        return Shader{
+            .module = module,
+            .shader_type = shader_type,
             .entry_point = entry_point orelse entry_point_definition{ .name = "main" },
             .reflection = reflection,
         };

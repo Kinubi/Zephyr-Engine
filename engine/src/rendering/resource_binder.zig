@@ -111,19 +111,16 @@ pub const ResourceBinder = struct {
         // Check if binding already exists
         if (self.binding_registry.get(name)) |existing_location| {
             // If location matches exactly, it's a duplicate from multiple shader stages (vertex + fragment)
-            if (existing_location.set == location.set and 
-                existing_location.binding == location.binding and 
-                existing_location.binding_type == location.binding_type) {
+            if (existing_location.set == location.set and
+                existing_location.binding == location.binding and
+                existing_location.binding_type == location.binding_type)
+            {
                 // Silently skip duplicate - this is expected for bindings used in multiple shader stages
                 return;
             }
-            
+
             // Different location for same name - this is a warning-worthy situation
-            log(.WARN, "resource_binder", "Binding name '{s}' already registered with different location (old: set:{} binding:{} type:{}, new: set:{} binding:{} type:{})", .{
-                name, 
-                existing_location.set, existing_location.binding, existing_location.binding_type,
-                location.set, location.binding, location.binding_type
-            });
+            log(.WARN, "resource_binder", "Binding name '{s}' already registered with different location (old: set:{} binding:{} type:{}, new: set:{} binding:{} type:{})", .{ name, existing_location.set, existing_location.binding, existing_location.binding_type, location.set, location.binding, location.binding_type });
             return error.DuplicateBindingName;
         }
 
@@ -154,7 +151,7 @@ pub const ResourceBinder = struct {
         reflection: ShaderReflection,
     ) !void {
         const initial_count = self.binding_registry.count();
-        
+
         // Register uniform buffers
         for (reflection.uniform_buffers.items) |ub| {
             const location = BindingLocation{
@@ -207,11 +204,8 @@ pub const ResourceBinder = struct {
 
         const final_count = self.binding_registry.count();
         const registered_count = final_count - initial_count;
-        log(.INFO, "resource_binder", "Populated {} unique bindings from shader reflection ({} total entries)", .{
-            registered_count,
-            reflection.uniform_buffers.items.len + reflection.storage_buffers.items.len +
-            reflection.textures.items.len + reflection.storage_images.items.len + reflection.samplers.items.len
-        });
+        log(.INFO, "resource_binder", "Populated {} unique bindings from shader reflection ({} total entries)", .{ registered_count, reflection.uniform_buffers.items.len + reflection.storage_buffers.items.len +
+            reflection.textures.items.len + reflection.storage_images.items.len + reflection.samplers.items.len });
     }
 
     /// Bind a uniform buffer to a pipeline
@@ -485,8 +479,77 @@ pub const ResourceBinder = struct {
         try self.bindStorageBufferNamed(pipeline_id, binding_name, buffer, 0, vk.WHOLE_SIZE, frame_index);
     }
 
+    /// Bind a texture array by name (for descriptor arrays like uniform sampler2D textures[N])
+    pub fn bindTextureArrayNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        image_infos: []const vk.DescriptorImageInfo,
+        frame_index: u32,
+    ) !void {
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        if (location.binding_type != .combined_image_sampler and location.binding_type != .sampled_image) {
+            log(.ERROR, "resource_binder", "Binding '{s}' is not a texture (type: {})", .{ binding_name, location.binding_type });
+            return error.BindingTypeMismatch;
+        }
+
+        const resource = Resource{
+            .image_array = image_infos,
+        };
+
+        try self.pipeline_system.bindResource(pipeline_id, location.set, location.binding, resource, frame_index);
+        log(.DEBUG, "resource_binder", "Bound texture array '{s}' ({} textures) to set:{} binding:{}", .{ binding_name, image_infos.len, location.set, location.binding });
+    }
+
     /// Update descriptor bindings for a specific pipeline and frame
+    /// Automatically rebinds any buffers whose VkBuffer handle has changed
     pub fn updateFrame(self: *ResourceBinder, pipeline_id: PipelineId, frame_index: u32) !void {
+        // Check all bound storage buffers for this pipeline/frame to see if their handles changed
+        var storage_iter = self.bound_storage_buffers.iterator();
+        while (storage_iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (key.pipeline_id.hash != pipeline_id.hash or key.frame_index != frame_index) continue;
+
+            const bound = entry.value_ptr.*;
+            const current_handle = bound.buffer.buffer;
+
+            // Check if buffer handle changed (buffer was recreated)
+            // If so, rebind it automatically
+            const resource = Resource{
+                .buffer = .{
+                    .buffer = current_handle,
+                    .offset = bound.offset,
+                    .range = bound.range,
+                },
+            };
+
+            try self.pipeline_system.bindResource(pipeline_id, key.set, key.binding, resource, frame_index);
+        }
+
+        // Check uniform buffers too
+        var uniform_iter = self.bound_uniform_buffers.iterator();
+        while (uniform_iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (key.pipeline_id.hash != pipeline_id.hash or key.frame_index != frame_index) continue;
+
+            const bound = entry.value_ptr.*;
+            const current_handle = bound.buffer.buffer;
+
+            const resource = Resource{
+                .buffer = .{
+                    .buffer = current_handle,
+                    .offset = bound.offset,
+                    .range = bound.range,
+                },
+            };
+
+            try self.pipeline_system.bindResource(pipeline_id, key.set, key.binding, resource, frame_index);
+        }
+
         try self.pipeline_system.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
     }
 

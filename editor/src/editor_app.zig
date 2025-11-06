@@ -328,6 +328,7 @@ pub const App = struct {
         try scene.initRenderGraph(
             gc,
             self.engine.getUnifiedPipelineSystem().?,
+            self.engine.getMaterialSystem().?,
             swapchain.hdr_format, // HDR color format for render passes
             swapchain.surface_format.format, // LDR color format (swapchain format) for tonemap
             try swapchain.depthFormat(),
@@ -392,6 +393,10 @@ pub const App = struct {
         // Reset AssetManager dirty flags at frame start
         // Async completion will set them back to true during the frame
         asset_manager.beginFrame();
+
+        // Update MaterialSystem to rebuild buffer if materials changed
+        const frame_index = @rem(frame_counter, MAX_FRAMES_IN_FLIGHT);
+        try self.engine.getMaterialSystem().?.update(@intCast(frame_index));
 
         // Process deferred pipeline destroys for hot reload safety
         self.engine.getUnifiedPipelineSystem().?.processDeferredDestroys();

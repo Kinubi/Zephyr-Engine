@@ -12,6 +12,7 @@ const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const MaterialSystem = @import("../rendering/material_system.zig").MaterialSystem;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
@@ -343,17 +344,15 @@ pub const Scene = struct {
         color: Vec3,
         intensity: f32,
     ) !*GameObject {
-        log(.INFO, "scene", "Spawning point light (color={d:.2}/{d:.2}/{d:.2}, intensity={d:.2})", .{ 
-            color.x, color.y, color.z, intensity 
-        });
+        log(.INFO, "scene", "Spawning point light (color={d:.2}/{d:.2}/{d:.2}, intensity={d:.2})", .{ color.x, color.y, color.z, intensity });
 
         // Create entity with Transform and Name
         const light_obj = try self.spawnEmpty("light");
-        
+
         // Add PointLight component
         const point_light = PointLight.initWithColor(color, intensity);
         try self.ecs_world.emplace(PointLight, light_obj.entity_id, point_light);
-        
+
         return light_obj;
     }
 
@@ -585,6 +584,7 @@ pub const Scene = struct {
         self: *Scene,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
+        material_system: *MaterialSystem,
         hdr_color_format: vk.Format,
         ldr_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
@@ -622,6 +622,7 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             self.asset_manager,
+            material_system,
             self.ecs_world,
             global_ubo_set,
             hdr_color_format,

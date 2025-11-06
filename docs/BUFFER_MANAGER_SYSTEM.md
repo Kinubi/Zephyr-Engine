@@ -868,35 +868,109 @@ pub const GeometryPass = struct {
 
 ---
 
-### Phase 3: MaterialSystem (Week 2)
+### Phase 3: MaterialSystem + TextureSystem (Week 2)
 
-**Goal**: Move material buffer out of AssetManager
+**Goal**: Create domain managers for materials and textures
 
-1. ⏳ Create `material_system.zig`
-2. ⏳ Implement material buffer creation via BufferManager
-3. ⏳ Connect to AssetManager for data (read-only)
-4. ⏳ Update GeometryPass to use MaterialSystem
-5. ⏳ Remove material buffer from AssetManager
-6. ⏳ Test hot-reload still works
+#### MaterialSystem
+1. ✅ Create `material_system.zig`
+2. ✅ Implement material buffer creation via BufferManager
+3. ✅ Connect to AssetManager for data (read-only)
+4. ✅ Implement automatic buffer rebuild when materials change
+5. ✅ Bind via ResourceBinder with named binding "MaterialBuffer"
+6. ✅ Integrate with Engine core systems
+7. ✅ Test hot-reload and buffer updates
 
-**Validation**: Materials render correctly, hot-reload works
+#### TextureSystem  
+1. ⏳ Create `texture_system.zig`
+2. ⏳ Implement texture descriptor array building
+3. ⏳ Connect to AssetManager for texture list (read-only)
+4. ⏳ Implement automatic descriptor array rebuild when textures load
+5. ⏳ Bind via ResourceBinder with named binding "textures"
+6. ⏳ Integrate with Engine core systems
+7. ⏳ Test texture loading and hot-reload
 
-> **Status**: 🚧 **TODO** - Phase 3 not yet implemented
+#### MaterialSystem ↔ TextureSystem Integration
+When materials are created/updated:
+1. Material specifies texture **asset ID** (e.g., "wall_albedo.png")
+2. MaterialSystem queries TextureSystem: "What's the GPU index for 'wall_albedo.png'?"
+3. TextureSystem returns index from its descriptor array
+4. MaterialSystem writes index into material buffer
+5. Shader samples: `texture(textures[material.albedo_texture_index], uv)`
+
+**Key Insight**: Materials reference textures by index, TextureSystem manages the array.
+
+Example material authoring:
+```zig
+const material = Material{
+    .albedo_texture = "wall_albedo.png",  // Asset ID
+    .roughness = 0.8,
+    .metallic = 0.0,
+    .emissive = 0.0,
+};
+// MaterialSystem resolves "wall_albedo.png" → GPU index via TextureSystem
+```
+
+#### GeometryPass Integration
+1. ✅ Remove material management from GeometryPass
+2. ⏳ Remove texture descriptor management from GeometryPass
+3. ✅ Use MaterialSystem for material buffer
+4. ⏳ Use TextureSystem for texture descriptors
+5. ✅ ResourceBinder auto-detects buffer changes in updateFrame()
+6. ⏳ MaterialSystem queries TextureSystem for texture indices
+
+**Validation**: Materials and textures render correctly, hot-reload works, no manual resource tracking in pass
+
+> **Status**: � **IN PROGRESS** - MaterialSystem complete, TextureSystem pending (November 2025)
+
+**What's Done**:
+- ✅ **MaterialSystem**: Fully implemented and integrated
+  - Creates material buffer via BufferManager with name "MaterialBuffer"
+  - Automatically rebuilds when materials change (checks `materials_dirty` flag)
+  - Uses device_local strategy with staging uploads
+  - Properly queues old buffers for frame-safe destruction
+  - Tracks generation counter for cache invalidation
+- ✅ **ResourceBinder Auto-Rebinding**: Detects buffer handle changes in `updateFrame()`
+  - Iterates all bound storage/uniform buffers
+  - Compares current VkBuffer handles
+  - Auto-rebinds if handle changed (buffer was recreated)
+  - Only writes descriptors if something actually changed
+- ✅ **GeometryPass**: Simplified to use MaterialSystem
+  - Calls `bindResources()` once in setup
+  - Calls `updateFrame()` which auto-detects buffer changes
+  - No manual dirty tracking or resource management
+
+**What's Pending**:
+- ⏳ **TextureSystem**: Move texture descriptor array from AssetManager
+- ⏳ **GeometryPass**: Remove texture descriptor management
 
 ---
 
-### Phase 4: TextureDescriptorManager (Week 2-3)
+### Phase 4: BaseRenderPass - Zero Boilerplate API (Week 2-3)
 
-**Goal**: Move texture descriptors out of AssetManager
+**Goal**: Create builder pattern for simple render passes
 
-1. ⏳ Create `texture_descriptor_manager.zig`
-2. ⏳ Implement descriptor array building
-3. ⏳ Connect to AssetManager for texture list
-4. ⏳ Update GeometryPass to use TextureDescriptorManager
-5. ⏳ Remove descriptor array from AssetManager
-6. ⏳ Test texture loading and hot-reload
+See [RENDER_PASS_VISION.md](RENDER_PASS_VISION.md) for full design.
 
-**Validation**: Textures render correctly, hot-reload works
+1. ⏳ Create `base_render_pass.zig`
+2. ⏳ Implement `registerShader()` queuing
+3. ⏳ Implement `bind()` queuing
+4. ⏳ Implement `bake()` - creates pipeline + binds resources
+5. ⏳ Add default `updateImpl()` that just calls `updateFrame()`
+6. ⏳ Document usage patterns
+
+**Example Usage**:
+```zig
+const quad_pass = BaseRenderPass.create(allocator, "quad_pass", ...);
+quad_pass.registerShader("quad.vert");
+quad_pass.registerShader("quad.frag");
+quad_pass.bind("GlobalUBO", ubo);
+quad_pass.bind("Textures", textures);
+quad_pass.bake();
+// Done! RenderGraph calls execute() automatically
+```
+
+**Validation**: Can create simple passes without new files, GeometryPass still works as custom pass
 
 > **Status**: 🚧 **TODO** - Phase 4 not yet implemented
 
@@ -1448,37 +1522,61 @@ try buffer_manager.defragment(idle_time_ms);
 
 **Production Ready**: Successfully tested with textured.vert/frag geometry pass
 
-### ⏳ **REMAINING WORK** - Phases 3-9 (TODO)
+### ✅ **PHASE 3 COMPLETE** - MaterialSystem Integration
+
+**Completed Work:**
+- ✅ **MaterialSystem**: Domain manager for material GPU buffers
+  - Creates/updates buffers via BufferManager
+  - Separates GPU resources from AssetManager CPU data
+  - Automatic rebuild on material changes (count or texture updates)
+  - Frame-safe buffer destruction
+- ✅ **ResourceBinder Auto-Rebinding**: 
+  - `updateFrame()` automatically detects VkBuffer handle changes
+  - Rebinds changed buffers without manual tracking
+  - Passes only call `updateFrame()` - no resource management
+- ✅ **Integration Verified**:
+  - No validation errors
+  - Clean shutdown with proper cleanup
+  - Materials update correctly when textures load
+
+### ⏳ **REMAINING WORK** - Phases 4-9 (TODO)
 
 **What Still Needs Implementation:**
-- 🚧 **MaterialSystem**: Moving material buffers out of AssetManager  
+- 🚧 **BaseRenderPass**: Convenience API for simple passes
+  - `registerShader()` / `bind()` / `bake()` pattern
+  - Zero-boilerplate pass creation
+  - See RENDER_PASS_VISION.md for design
 - 🚧 **TextureDescriptorManager**: Moving texture descriptors out of AssetManager
 - 🚧 **Instanced Rendering**: RenderSystem batching and GeometryPass updates
 - 🚧 **Shader Updates**: SSBO bindings and `gl_InstanceIndex` usage
-- 🚧 **GlobalUBO Migration**: BufferManager integration for UBOs
+- 🚧 **GlobalUBO Migration**: Complete BufferManager integration for UBOs
 - 🚧 **Testing & Documentation**: Comprehensive tests and performance validation
 
-### Current Working Features (Phase 1 Only)
+### Current Working Features (Phases 1-3)
 
-The foundation is in place with the following **basic** capabilities:
+**✅ BufferManager (Phase 1)**:
+- Strategy-based buffer allocation (.device_local, .host_visible, .host_cached)
+- Staging buffer uploads for device-local buffers
+- Frame-safe deferred destruction (ring buffer cleanup)
+- Integrated into engine initialization
 
-**✅ Basic BufferManager Structure**:
-- BufferManager class created with basic API outline
-- Integrated into engine initialization (not yet used by rendering)
-- Zig 0.15 compatibility fixes applied
+**✅ Named Binding API (Phase 2)**:
+- `bindUniformBufferNamed()`, `bindStorageBufferNamed()`, `bindTextureArrayNamed()`
+- Automatic shader reflection to populate binding registry
+- Bindings use shader variable names (e.g., "MaterialBuffer", "GlobalUbo")
+- No numeric indices - fully name-driven
 
-**✅ Engine Architecture Fix**:
+**✅ MaterialSystem (Phase 3)**:
+- Domain manager for material GPU buffers
+- Creates buffers via BufferManager with "MaterialBuffer" name
+- Automatically rebuilds when materials change
+- ResourceBinder auto-detects buffer changes and rebinds
+- Clean separation: AssetManager (CPU data) → MaterialSystem (GPU resources)
+
+**✅ Engine Architecture**:
 - All rendering systems moved from application to engine-side
 - ECS system moved to engine-side (dependency fix)
 - Clean application APIs established
-
-**⚠️ NOT YET IMPLEMENTED**:
-- Named resource binding (still using numeric indices)
-- Strategy-based buffer allocation (POOL, RING, IMMEDIATE)
-- Automatic buffer lifecycle management
-- MaterialSystem and TextureDescriptorManager
-- Instanced rendering batching
-- Shader updates for SSBO usage
 
 ---
 

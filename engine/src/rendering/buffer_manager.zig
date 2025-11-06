@@ -179,7 +179,7 @@ pub const BufferManager = struct {
                 try managed_buffer.buffer.map(data.len, 0);
                 managed_buffer.buffer.writeToBuffer(data, data.len, 0);
                 // Flush for cached memory (Buffer has flush method)
-                try managed_buffer.buffer.flush();
+                try managed_buffer.buffer.flush(data.len, 0);
                 managed_buffer.buffer.unmap();
             },
         }
@@ -249,7 +249,7 @@ pub const BufferManager = struct {
     /// Queue buffer for deferred destruction
     pub fn destroyBuffer(self: *BufferManager, managed_buffer: ManagedBuffer) !void {
         const slot = &self.deferred_buffers[self.current_frame];
-        try slot.append(managed_buffer);
+        try slot.append(self.allocator, managed_buffer);
 
         // Remove from statistics
         _ = self.all_buffers.remove(managed_buffer.name);
