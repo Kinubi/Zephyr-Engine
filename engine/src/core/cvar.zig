@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../utils/log.zig").log;
 
 pub const CVarType = enum {
     Int,
@@ -544,7 +545,6 @@ pub fn deinitGlobal() void {
 }
 
 pub fn loadArchivedFromFile(self: *CVarRegistry, path: []const u8) !void {
-    const log = @import("../utils/log.zig").log;
     log(.INFO, "cvar", "Loading archived CVars from {s}", .{path});
 
     const fs = std.fs.cwd();
@@ -582,7 +582,6 @@ pub fn loadArchivedFromFile(self: *CVarRegistry, path: []const u8) !void {
                     start = end + 1;
                     continue;
                 };
-                log(.DEBUG, "cvar", "Loaded: {s} = {s}", .{ key, val });
                 loaded_count += 1;
             }
         }
@@ -592,7 +591,6 @@ pub fn loadArchivedFromFile(self: *CVarRegistry, path: []const u8) !void {
 }
 
 pub fn saveArchivedToFile(self: *CVarRegistry, path: []const u8) !void {
-    const log = @import("../utils/log.zig").log;
     log(.INFO, "cvar", "Saving archived CVars to {s}", .{path});
 
     const fs = std.fs.cwd();
@@ -622,7 +620,6 @@ pub fn saveArchivedToFile(self: *CVarRegistry, path: []const u8) !void {
             defer self.allocator.free(value_str);
 
             _ = try file.writeAll(value_str);
-            log(.DEBUG, "cvar", "Saved: {s} = {s}", .{ key, value_str });
             saved_count += 1;
             _ = try file.writeAll("\n");
         }
