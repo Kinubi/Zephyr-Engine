@@ -8,11 +8,13 @@ const EntityId = @import("entity_registry.zig").EntityId;
 ///   - sparse: HashMap(EntityId -> dense_index) - for fast lookup
 ///   - entities: ArrayList(EntityId) - dense array of entity IDs
 ///   - components: ArrayList(T) - dense array of component data (parallel to entities)
+///   - versions: ArrayList(u32) - version counter per component for change detection
 ///
 /// Benefits:
 ///   - Iteration is cache-friendly (linear scan of dense arrays)
 ///   - Lookup is O(1) via sparse map
 ///   - Removal is O(1) via swap-remove
+///   - Change detection via version tracking
 pub fn DenseSet(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -23,6 +25,10 @@ pub fn DenseSet(comptime T: type) type {
         entities: std.ArrayList(EntityId),
         components: std.ArrayList(T),
 
+        // Change detection: version counter per component
+        versions: std.ArrayList(u32),
+        global_version: u32 = 0,
+
         // Sparse mapping (entity → dense index)
         sparse: std.AutoHashMap(EntityId, u32),
 
@@ -31,6 +37,7 @@ pub fn DenseSet(comptime T: type) type {
                 .allocator = allocator,
                 .entities = .{},
                 .components = .{},
+                .versions = .{},
                 .sparse = std.AutoHashMap(EntityId, u32).init(allocator),
             };
         }
@@ -38,6 +45,7 @@ pub fn DenseSet(comptime T: type) type {
         pub fn deinit(self: *Self) void {
             self.entities.deinit(self.allocator);
             self.components.deinit(self.allocator);
+            self.versions.deinit(self.allocator);
             self.sparse.deinit();
         }
 
@@ -50,13 +58,30 @@ pub fn DenseSet(comptime T: type) type {
 
             const dense_idx: u32 = @intCast(self.components.items.len);
 
+            self.global_version +%= 1; // Increment global version
             try self.entities.append(self.allocator, entity);
             try self.components.append(self.allocator, value);
+            try self.versions.append(self.allocator, self.global_version);
             try self.sparse.put(entity, dense_idx);
         }
 
-        /// Get a mutable reference to a component
+        /// Get a mutable reference to a component and mark it as modified
+        /// Increments version for change tracking - use getNoMark() for read-only access
+        pub fn getMut(self: *Self, entity: EntityId) ?*T {
+            const idx = self.sparse.get(entity) orelse return null;
+            self.global_version +%= 1;
+            self.versions.items[idx] = self.global_version;
+            return &self.components.items[idx];
+        }
+
+        /// Get a mutable reference to a component (deprecated, use getMut or getNoMark)
+        /// For backwards compatibility - marks component as modified
         pub fn get(self: *Self, entity: EntityId) ?*T {
+            return self.getMut(entity);
+        }
+
+        /// Get a mutable reference without marking as modified
+        pub fn getNoMark(self: *Self, entity: EntityId) ?*T {
             const idx = self.sparse.get(entity) orelse return null;
             return &self.components.items[idx];
         }
@@ -83,6 +108,7 @@ pub fn DenseSet(comptime T: type) type {
             if (idx != last_idx) {
                 self.components.items[idx] = self.components.items[last_idx];
                 self.entities.items[idx] = self.entities.items[last_idx];
+                self.versions.items[idx] = self.versions.items[last_idx];
 
                 // Update sparse index for swapped entity
                 self.sparse.put(self.entities.items[idx], idx) catch {
@@ -94,6 +120,7 @@ pub fn DenseSet(comptime T: type) type {
             // Remove last element
             _ = self.components.pop();
             _ = self.entities.pop();
+            _ = self.versions.pop();
             _ = self.sparse.remove(entity);
 
             return true;
@@ -108,7 +135,25 @@ pub fn DenseSet(comptime T: type) type {
         pub fn clear(self: *Self) void {
             self.entities.clearRetainingCapacity();
             self.components.clearRetainingCapacity();
+            self.versions.clearRetainingCapacity();
             self.sparse.clearRetainingCapacity();
+        }
+
+        /// Check if component changed since given version
+        pub fn hasChanged(self: *const Self, entity: EntityId, since_version: u32) bool {
+            const idx = self.sparse.get(entity) orelse return false;
+            return self.versions.items[idx] > since_version;
+        }
+
+        /// Get current version of component
+        pub fn getVersion(self: *const Self, entity: EntityId) ?u32 {
+            const idx = self.sparse.get(entity) orelse return null;
+            return self.versions.items[idx];
+        }
+
+        /// Get global version counter
+        pub fn getGlobalVersion(self: *const Self) u32 {
+            return self.global_version;
         }
     };
 }

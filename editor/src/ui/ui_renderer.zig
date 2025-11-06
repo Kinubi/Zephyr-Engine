@@ -813,6 +813,7 @@ pub const UIRenderer = struct {
 
                     // Compare verbs
                     if (std.mem.eql(u8, verb, "get")) {
+                        handled = true; // Mark as handled to prevent Lua execution
                         const name = remainder;
                         if (name.len > 0) {
                             if (cvar.getGlobal()) |rp| {
@@ -824,10 +825,14 @@ pub const UIRenderer = struct {
                                 } else {
                                     log(.WARN, "console", "CVar not found: {s}", .{name});
                                 }
-                                handled = true;
+                            } else {
+                                log(.ERROR, "console", "CVar system not initialized", .{});
                             }
+                        } else {
+                            log(.ERROR, "console", "Usage: get <cvar_name>", .{});
                         }
                     } else if (std.mem.eql(u8, verb, "set")) {
+                        handled = true; // Mark as handled
                         // set <name> <value...>
                         var space: usize = 0;
                         var i: usize = 0;
@@ -843,16 +848,18 @@ pub const UIRenderer = struct {
                             const val = remainder[space + 1 .. remainder.len];
                             if (cvar.getGlobal()) |rp| {
                                 const reg: *cvar.CVarRegistry = @ptrCast(rp);
-                                _ = reg.setFromString(name, val) catch {
-                                    log(.ERROR, "console", "Failed to set CVar {s}", .{name});
-                                    handled = true;
-                                    return;
+                                reg.setFromString(name, val) catch |err| {
+                                    log(.ERROR, "console", "Failed to set CVar {s}: {}", .{ name, err });
                                 };
                                 log(.INFO, "console", "Set {s} = {s}", .{ name, val });
+                            } else {
+                                log(.ERROR, "console", "CVar system not initialized", .{});
                             }
-                            handled = true;
+                        } else {
+                            log(.ERROR, "console", "Usage: set <cvar_name> <value>", .{});
                         }
                     } else if (std.mem.eql(u8, verb, "toggle")) {
+                        handled = true; // Mark as handled
                         const name = remainder;
                         if (name.len > 0) {
                             if (cvar.getGlobal()) |rp| {
@@ -866,10 +873,14 @@ pub const UIRenderer = struct {
                                 } else {
                                     log(.WARN, "console", "CVar not found: {s}", .{name});
                                 }
-                                handled = true;
+                            } else {
+                                log(.ERROR, "console", "CVar system not initialized", .{});
                             }
+                        } else {
+                            log(.ERROR, "console", "Usage: toggle <cvar_name>", .{});
                         }
                     } else if (std.mem.eql(u8, verb, "reset")) {
+                        handled = true; // Mark as handled
                         const name = remainder;
                         if (name.len > 0) {
                             if (cvar.getGlobal()) |rp| {
@@ -880,10 +891,14 @@ pub const UIRenderer = struct {
                                 } else {
                                     log(.WARN, "console", "CVar not found: {s}", .{name});
                                 }
-                                handled = true;
+                            } else {
+                                log(.ERROR, "console", "CVar system not initialized", .{});
                             }
+                        } else {
+                            log(.ERROR, "console", "Usage: reset <cvar_name>", .{});
                         }
                     } else if (std.mem.eql(u8, verb, "list")) {
+                        handled = true; // Mark as handled
                         const filter = remainder;
                         if (cvar.getGlobal()) |rp| {
                             const reg: *cvar.CVarRegistry = @ptrCast(rp);
@@ -899,8 +914,9 @@ pub const UIRenderer = struct {
                                 }
                                 std.heap.page_allocator.free(lst);
                             }
+                        } else {
+                            log(.ERROR, "console", "CVar system not initialized", .{});
                         }
-                        handled = true;
                     } else if (std.mem.eql(u8, verb, "help")) {
                         const name = remainder;
                         if (name.len > 0) {
@@ -915,8 +931,23 @@ pub const UIRenderer = struct {
                                 }
                                 handled = true;
                             }
+                        } else {
+                            // Show general help
+                            log(.INFO, "console", "=== Console Commands ===", .{});
+                            log(.INFO, "console", "  get <cvar>           - Get CVar value", .{});
+                            log(.INFO, "console", "  set <cvar> <value>   - Set CVar value", .{});
+                            log(.INFO, "console", "  toggle <cvar>        - Toggle boolean CVar", .{});
+                            log(.INFO, "console", "  list [pattern]       - List all CVars (optional filter)", .{});
+                            log(.INFO, "console", "  help <cvar>          - Show CVar description", .{});
+                            log(.INFO, "console", "  archive <cvar> <0|1> - Set CVar archive flag", .{});
+                            log(.INFO, "console", "", .{});
+                            log(.INFO, "console", "Memory Tracking CVars:", .{});
+                            log(.INFO, "console", "  r_trackMemory        - Enable GPU memory tracking (requires restart)", .{});
+                            log(.INFO, "console", "  r_logMemoryAllocs    - Log individual allocations", .{});
+                            handled = true;
                         }
                     } else if (std.mem.eql(u8, verb, "archive")) {
+                        handled = true; // Mark as handled
                         // archive <name> <0|1|true|false>
                         var space: usize = 0;
                         var i: usize = 0;
@@ -940,8 +971,11 @@ pub const UIRenderer = struct {
                                 } else {
                                     log(.WARN, "console", "CVar not found: {s}", .{name});
                                 }
+                            } else {
+                                log(.ERROR, "console", "CVar system not initialized", .{});
                             }
-                            handled = true;
+                        } else {
+                            log(.ERROR, "console", "Usage: archive <cvar_name> <0|1|true|false>", .{});
                         }
                     }
 
@@ -951,13 +985,18 @@ pub const UIRenderer = struct {
                             const sys = &scene_ptr.scripting_system;
                             if (sys.runner.state_pool) |sp| {
                                 const ls = sp.acquire();
-                                const exec_res = lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr)) catch {
-                                    log(.ERROR, "console", "(execute error)", .{});
-                                    sp.release(ls);
-                                    return;
-                                };
-                                if (exec_res.message.len > 0) log(.INFO, "console", "{s}", .{exec_res.message});
-                                sp.release(ls);
+                                defer sp.release(ls);
+                                if (lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr))) |exec_res| {
+                                    defer {
+                                        // Free the message if it was allocated
+                                        if (exec_res.message.len > 0) {
+                                            self.allocator.free(exec_res.message);
+                                        }
+                                    }
+                                    if (exec_res.message.len > 0) log(.INFO, "console", "{s}", .{exec_res.message});
+                                } else |err| {
+                                    log(.ERROR, "console", "Lua execution error: {}", .{err});
+                                }
                             } else {
                                 log(.WARN, "console", "(no lua state pool - cannot run synchronously)", .{});
                             }

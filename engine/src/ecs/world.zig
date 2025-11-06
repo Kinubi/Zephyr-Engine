@@ -44,23 +44,6 @@ const StorageMetadata = struct {
 /// Complexity: HIGH - new storage model + query optimization
 /// Branch: features/ecs-archetype
 ///
-/// TODO(MAINTENANCE): CHANGE DETECTION - LOW PRIORITY
-/// Add change detection to avoid unnecessary system updates.
-///
-/// Current issues:
-/// - TransformSystem updates all transforms every frame (even static)
-/// - RenderSystem extracts all entities (even if nothing changed)
-/// - No way to detect "dirty" components
-///
-/// Required changes:
-/// - Add version counter per component in dense_set.zig
-/// - Track component modifications in World
-/// - Add world.changed(Transform) query API
-/// - Update transform_system.zig, render_system.zig to skip unchanged
-///
-/// Benefits: Lower CPU for static scenes, enables reactive patterns
-/// Complexity: MEDIUM - add versioning to component storage
-/// Branch: maintenance (can be done incrementally)
 pub const World = struct {
     allocator: std.mem.Allocator,
     entity_registry: EntityRegistry,
@@ -68,6 +51,11 @@ pub const World = struct {
     storage_metadata: std.StringHashMap(StorageMetadata),
     thread_pool: ?*ThreadPool,
     userdata: std.StringHashMap(*anyopaque),
+    // Configurable chunk size for parallel dispatch
+    chunk_size: usize,
+
+    // Change detection: track last checked version per component type
+    last_checked_versions: std.StringHashMap(u32),
 
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !World {
         // Register ecs_update subsystem with thread pool if provided
@@ -89,10 +77,13 @@ pub const World = struct {
             .storage_metadata = std.StringHashMap(StorageMetadata).init(allocator),
             .thread_pool = thread_pool,
             .userdata = std.StringHashMap(*anyopaque).init(allocator),
+            .chunk_size = 256,
+            .last_checked_versions = std.StringHashMap(u32).init(allocator),
         };
     }
 
     pub fn deinit(self: *World) void {
+        self.last_checked_versions.deinit();
         self.userdata.deinit();
         var it = self.storages.iterator();
         while (it.next()) |entry| {
@@ -166,11 +157,34 @@ pub const World = struct {
         try storage.emplace(entity, value);
     }
 
-    pub fn get(self: *World, comptime T: type, entity: EntityId) ?*T {
+    /// Get a mutable reference to a component and mark it as modified
+    pub fn getMut(self: *World, comptime T: type, entity: EntityId) ?*T {
         const type_name = @typeName(T);
         const storage_ptr = self.storages.get(type_name) orelse return null;
         const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
-        return storage.get(entity);
+        return storage.getMut(entity);
+    }
+
+    /// Get a mutable reference (deprecated, use getMut or getNoMark)
+    /// Marks component as modified for backwards compatibility
+    pub fn get(self: *World, comptime T: type, entity: EntityId) ?*T {
+        return self.getMut(T, entity);
+    }
+
+    /// Get a mutable reference without marking as modified
+    pub fn getNoMark(self: *World, comptime T: type, entity: EntityId) ?*T {
+        const type_name = @typeName(T);
+        const storage_ptr = self.storages.get(type_name) orelse return null;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+        return storage.getNoMark(entity);
+    }
+
+    /// Get a const reference to a component (read-only)
+    pub fn getConst(self: *const World, comptime T: type, entity: EntityId) ?*const T {
+        const type_name = @typeName(T);
+        const storage_ptr = self.storages.get(type_name) orelse return null;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+        return storage.getConst(entity);
     }
 
     pub fn has(self: *const World, comptime T: type, entity: EntityId) bool {
@@ -204,7 +218,7 @@ pub const World = struct {
 
         // Use parallel dispatch if thread_pool is available
         if (self.thread_pool) |_| {
-            const chunk_size = 256; // TODO: Make this configurable
+            const chunk_size = self.chunk_size;
             try v.each_parallel(chunk_size, struct {
                 fn updateChunk(entities: []EntityId, components: []T, delta: f32) void {
                     _ = entities; // EntityId not needed for simple update
@@ -243,6 +257,42 @@ pub const World = struct {
     /// Get user data - returns null if not found
     pub fn getUserData(self: *World, key: []const u8) ?*anyopaque {
         return self.userdata.get(key);
+    }
+
+    /// Check if any components of type T have changed since last check.
+    /// Automatically updates last_checked_version for this component type.
+    /// Returns true if any components changed.
+    pub fn hasChanged(self: *World, comptime T: type) bool {
+        const name = @typeName(T);
+        const storage_ptr = self.storages.get(name) orelse return false;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+
+        const current_version = storage.getGlobalVersion();
+        const last_version = self.last_checked_versions.get(name) orelse 0;
+
+        // Update last checked version
+        self.last_checked_versions.put(name, current_version) catch {};
+
+        return current_version > last_version;
+    }
+
+    /// Check if a specific entity's component has changed since last check.
+    /// Does NOT automatically update last_checked_version (use hasChanged for that).
+    pub fn entityChanged(self: *World, comptime T: type, entity: EntityId) bool {
+        const name = @typeName(T);
+        const storage_ptr = self.storages.get(name) orelse return false;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+
+        const last_version = self.last_checked_versions.get(name) orelse 0;
+        return storage.hasChanged(entity, last_version);
+    }
+
+    /// Get current global version for component type T (useful for manual tracking).
+    pub fn getComponentVersion(self: *World, comptime T: type) ?u32 {
+        const name = @typeName(T);
+        const storage_ptr = self.storages.get(name) orelse return null;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+        return storage.getGlobalVersion();
     }
 };
 

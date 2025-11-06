@@ -131,7 +131,7 @@ pub const ImGuiVulkanBackend = struct {
         errdefer self.allocator.destroy(font_texture);
 
         font_texture.* = try self.uploadTexture(pixel_data, @intCast(width), @intCast(height));
-        font_texture.descriptor.image_layout = .shader_read_only_optimal;
+        font_texture.descriptor.image_layout = .general;
 
         self.font_texture = font_texture;
 
@@ -596,7 +596,7 @@ pub const ImGuiVulkanBackend = struct {
                 .sampler = di.sampler,
                 .image_view = di.image_view,
                 // Combined image samplers must use a read-only or general layout in descriptors
-                .image_layout = vk.ImageLayout.shader_read_only_optimal,
+                .image_layout = vk.ImageLayout.general,
             };
             writes[i] = vk.WriteDescriptorSet{
                 .dst_set = desc_sets[i],

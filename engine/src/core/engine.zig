@@ -12,6 +12,10 @@ const RenderLayer = @import("../layers/render_layer.zig").RenderLayer;
 const PerformanceLayer = @import("../layers/performance_layer.zig").PerformanceLayer;
 const RenderThreadContext = @import("../threading/render_thread.zig").RenderThreadContext;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
+const memory_tracker_module = @import("../rendering/memory_tracker.zig");
+const MemoryTracker = memory_tracker_module.MemoryTracker;
+const MemoryBudget = memory_tracker_module.MemoryBudget;
+const CVarRegistry = @import("cvar.zig").CVarRegistry;
 const log = @import("../utils/log.zig").log;
 const startRenderThread = @import("../threading/render_thread.zig").startRenderThread;
 const stopRenderThread = @import("../threading/render_thread.zig").stopRenderThread;
@@ -42,6 +46,7 @@ pub const Engine = struct {
     // Optional systems
     asset_manager: ?*AssetManager = null,
     performance_monitor: ?*PerformanceMonitor = null,
+    memory_tracker: ?*MemoryTracker = null,
 
     // Threading (optional)
     thread_pool: ?*ThreadPool = null, // Required for render thread
@@ -56,6 +61,7 @@ pub const Engine = struct {
         enable_performance_monitoring: bool = true,
         enable_render_thread: bool = false, // Phase 2.0: Separate render thread
         thread_pool: ?*ThreadPool = null, // Required if enable_render_thread is true
+        cvar_registry: ?*CVarRegistry = null, // Optional CVar registry for runtime config
 
         pub const WindowConfig = struct {
             width: u32 = 1280,
@@ -93,6 +99,29 @@ pub const Engine = struct {
             @ptrCast(engine.window.window.?),
         );
         errdefer engine.graphics_context.deinit();
+
+        // 2.5. Initialize memory tracker if enabled via CVar (defaults to OFF)
+        // User can enable with: cvar set r_trackMemory true
+        // And enable logging with: cvar set r_logMemoryAllocs true
+        engine.memory_tracker = null;
+        if (config.cvar_registry) |cvar_reg| {
+            if (cvar_reg.getAsStringAlloc("r_trackMemory", allocator)) |value| {
+                defer allocator.free(value);
+                log(.INFO, "engine", "r_trackMemory at startup: {s}", .{value});
+                if (std.mem.eql(u8, value, "true")) {
+                    const budget = MemoryBudget{
+                        .max_buffer_mb = 4096,
+                        .max_texture_mb = 8192,
+                        .max_blas_mb = 512,
+                        .max_tlas_mb = 256,
+                        .max_total_mb = 16384,
+                    };
+                    engine.memory_tracker = try MemoryTracker.init(allocator, budget);
+                    engine.graphics_context.memory_tracker = engine.memory_tracker;
+                    log(.INFO, "engine", "Memory tracker ENABLED (Buffer: 4GB, Texture: 8GB, BLAS: 512MB, TLAS: 256MB, Total: 16GB)", .{});
+                }
+            }
+        }
 
         // 3. Create swapchain
         engine.swapchain = try Swapchain.init(
@@ -232,6 +261,13 @@ pub const Engine = struct {
 
         // Graphics context
         self.graphics_context.deinit();
+
+        // Memory tracker (print statistics before cleanup)
+        if (self.memory_tracker) |tracker| {
+            log(.INFO, "engine", "=== Memory Tracking Statistics ===", .{});
+            tracker.printStatistics();
+            tracker.deinit(); // This also destroys the pointer
+        }
 
         // Window (last)
         self.window.deinit();

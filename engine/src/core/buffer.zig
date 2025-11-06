@@ -24,20 +24,6 @@ const LogLevel = @import("../utils/log.zig").LogLevel;
 /// Complexity: HIGH - requires descriptor tracking + GPU synchronization
 /// Branch: features/memory-defragmentation
 ///
-/// TODO(MAINTENANCE): MEMORY BUDGET TRACKING - MEDIUM PRIORITY
-/// Track GPU memory usage across buffers, textures, BLAS.
-/// Warn when approaching limits.
-///
-/// Required changes:
-/// - Add engine/src/rendering/memory_tracker.zig
-/// - Report allocations from Buffer.init()
-/// - Add per-category budgets (textures, buffers, BLAS)
-/// - CVars: r.maxTextureMemoryMB, r.maxBufferMemoryMB
-/// - ImGui panel showing memory breakdown
-///
-/// Benefits: Prevent OOM crashes, easier profiling
-/// Complexity: MEDIUM - add tracking hooks
-/// Branch: maintenance (can be done incrementally)
 pub const Buffer = struct {
     gc: *GraphicsContext,
     instance_size: vk.DeviceSize,
@@ -51,19 +37,41 @@ pub const Buffer = struct {
     mapped: ?*anyopaque = null,
     descriptor_info: vk.DescriptorBufferInfo = undefined,
 
+    // Optional name for memory tracking
+    tracking_name: ?[]const u8 = null,
+
     pub fn init(gc: *GraphicsContext, instance_size: vk.DeviceSize, instance_count: u32, usage_flags: vk.BufferUsageFlags, memory_property_flags: vk.MemoryPropertyFlags) !Buffer {
+        return initNamed(gc, instance_size, instance_count, usage_flags, memory_property_flags, null);
+    }
+
+    pub fn initNamed(gc: *GraphicsContext, instance_size: vk.DeviceSize, instance_count: u32, usage_flags: vk.BufferUsageFlags, memory_property_flags: vk.MemoryPropertyFlags, tracking_name: ?[]const u8) !Buffer {
         const lcm = (gc.props.limits.min_uniform_buffer_offset_alignment * gc.props.limits.non_coherent_atom_size) / std.math.gcd(gc.props.limits.min_uniform_buffer_offset_alignment, gc.props.limits.non_coherent_atom_size);
 
         const alignment_size: vk.DeviceSize = Buffer.getAlignment(instance_size, lcm);
         const buffer_size = instance_count * alignment_size;
-        var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size, .mapped = null };
+        var self = Buffer{ .gc = gc, .instance_size = instance_size, .instance_count = instance_count, .usage_flags = usage_flags, .memory_property_flags = memory_property_flags, .alignment_size = alignment_size, .buffer_size = buffer_size, .mapped = null, .tracking_name = tracking_name };
         try gc.createBuffer(self.buffer_size, usage_flags, memory_property_flags, @constCast(&self.buffer), @constCast(&self.memory));
         self.descriptor_info = .{ .buffer = self.buffer, .offset = 0, .range = vk.WHOLE_SIZE };
+
+        // Track memory allocation if memory tracker is available
+        if (gc.memory_tracker) |tracker| {
+            const name = self.tracking_name orelse "unnamed_buffer";
+            tracker.trackAllocation(name, buffer_size, .buffer) catch |err| {
+                log(.WARN, "buffer", "Failed to track allocation: {}", .{err});
+            };
+        }
 
         return self;
     }
 
     pub fn deinit(self: *Buffer) void {
+        // Untrack memory allocation if memory tracker is available
+        if (self.gc.memory_tracker) |tracker| {
+            if (self.tracking_name) |name| {
+                tracker.untrackAllocation(name);
+            }
+        }
+
         if (self.mapped != null) self.unmap();
         self.gc.vkd.destroyBuffer(self.gc.dev, self.buffer, null);
         self.gc.vkd.freeMemory(self.gc.dev, self.memory, null);

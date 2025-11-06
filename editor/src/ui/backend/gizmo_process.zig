@@ -44,7 +44,8 @@ pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_pos: [2]f
                 state.*.active_axis = pick.axis;
                 state.*.dragging = true;
                 state.*.initial_pos = transform.position;
-                state.*.initial_rot = transform.rotation;
+                // Transform.rotation is a quaternion now; store Euler angles for gizmo state
+                state.*.initial_rot = transform.rotation.toEuler();
                 state.*.initial_scale = transform.scale;
 
                 // Initialize drag based on current tool

@@ -35,6 +35,8 @@ const EntityId = ecs.EntityId;
 const Transform = ecs.Transform;
 const MeshRenderer = ecs.MeshRenderer;
 const Camera = ecs.Camera;
+const PointLight = ecs.PointLight;
+const Name = ecs.Name;
 
 const GameObject = @import("game_object.zig").GameObject;
 
@@ -273,25 +275,18 @@ pub const Scene = struct {
         } else {
             log(.INFO, "scene", "Spawning empty object", .{});
         }
-        // TODO(MAINTENANCE): Store name in Name component - LOW PRIORITY
-        // Currently scene.entities ArrayList stores entity IDs separately from ECS
-        // This is inconsistent with ECS architecture.
-        //
-        // Required changes:
-        // - Add engine/src/ecs/components/name.zig with Name component
-        // - Remove scene.entities ArrayList
-        // - Query Name component for entity lookups
-        // - Export Name component in engine/src/ecs.zig
-        //
-        // Benefits: More consistent ECS architecture, easier entity queries by name
-        // Complexity: LOW - simple component addition
-        // Branch: maintenance (simple refactor)
 
         const entity = try self.ecs_world.createEntity();
         try self.entities.append(self.allocator, entity);
 
         const transform = Transform.init();
         try self.ecs_world.emplace(Transform, entity, transform);
+
+        // Add Name component if name provided
+        if (name_opt) |name| {
+            const name_component = try Name.init(self.allocator, name);
+            try self.ecs_world.emplace(Name, entity, name_component);
+        }
 
         const game_object = GameObject{
             .entity_id = entity,
@@ -348,25 +343,17 @@ pub const Scene = struct {
         color: Vec3,
         intensity: f32,
     ) !*GameObject {
-        log(.INFO, "scene", "Spawning point light", .{});
+        log(.INFO, "scene", "Spawning point light (color={d:.2}/{d:.2}/{d:.2}, intensity={d:.2})", .{ 
+            color.x, color.y, color.z, intensity 
+        });
 
-        // TODO(MAINTENANCE): USE PointLight COMPONENT - MEDIUM PRIORITY
-        // PointLight component already exists (engine/src/ecs/components/point_light.zig)
-        // This function should create entity with (Transform + PointLight) components
-        // Currently just creates empty object - needs to actually add PointLight component
-        //
-        // Required changes:
-        // - Import PointLight from engine/src/ecs/components/point_light.zig
-        // - Create PointLight component with provided color and intensity
-        // - Call ecs_world.emplace(PointLight, entity, point_light)
-        // - Ensure PointLight is exported in engine/src/ecs.zig
-        //
-        // Benefits: Lights properly integrated in ECS, can be queried by systems
-        // Complexity: LOW - just add component instantiation
-        // Branch: maintenance
-        _ = color;
-        _ = intensity;
+        // Create entity with Transform and Name
         const light_obj = try self.spawnEmpty("light");
+        
+        // Add PointLight component
+        const point_light = PointLight.initWithColor(color, intensity);
+        try self.ecs_world.emplace(PointLight, light_obj.entity_id, point_light);
+        
         return light_obj;
     }
 

@@ -121,7 +121,7 @@ pub const Swapchain = struct {
             gc.vkd.destroySwapchainKHR(gc.dev, old_handle, null);
         }
 
-        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, extent, .r16g16b16a16_sfloat);
+        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, actual_extent, .r16g16b16a16_sfloat);
         errdefer for (swap_images) |si| si.deinit(gc);
 
         // var next_image_acquired = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
@@ -516,14 +516,14 @@ pub const Swapchain = struct {
         const begin_info = vk.CommandBufferBeginInfo{};
         try self.gc.vkd.beginCommandBuffer(frame_info.command_buffer, &begin_info);
 
-        // Ensure the current swapchain image is ready for rendering as a color attachment.
-        // Use UNDEFINED as old layout to be valid on first use after swapchain creation.
+        // Transition swapchain image from UNDEFINED to GENERAL (only once after creation)
+        // With unified image layouts, GENERAL is optimal for all operations
         const current_image = self.swap_images[self.image_index].image;
         self.gc.transitionImageLayout(
             frame_info.command_buffer,
             current_image,
             .undefined,
-            .color_attachment_optimal,
+            .general, // Unified layout - no more transitions needed!
             .{
                 .aspect_mask = .{ .color_bit = true },
                 .base_mip_level = 0,
@@ -556,12 +556,12 @@ pub const Swapchain = struct {
         // Execute all pending secondary command buffers from worker threads
         try self.gc.executeCollectedSecondaryBuffers(frame_info.command_buffer);
 
-        // Ensure swapchain image is transitioned to PRESENT before presenting
+        // Only transition needed: GENERAL -> PRESENT_SRC for presentation
         const current_image = self.swap_images[self.image_index].image;
         self.gc.transitionImageLayout(
             frame_info.command_buffer,
             current_image,
-            .color_attachment_optimal,
+            .general, // Unified layout
             .present_src_khr,
             .{
                 .aspect_mask = .{ .color_bit = true },
@@ -677,6 +677,15 @@ const SwapImage = struct {
 
         try gc.vkd.bindImageMemory(gc.dev, depth_image, depth_image_memory, 0);
 
+        // Track depth buffer memory allocation
+        if (gc.memory_tracker) |tracker| {
+            var buf: [32]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "swapchain_depth_{x}", .{@intFromEnum(depth_image)}) catch "swapchain_depth_unknown";
+            tracker.trackAllocation(key, mem_reqs.size, .texture) catch |err| {
+                std.log.warn("Failed to track swapchain depth allocation: {}", .{err});
+            };
+        }
+
         const depth_image_view = try gc.vkd.createImageView(gc.dev, &.{
             .flags = .{},
             .image = depth_image,
@@ -692,6 +701,25 @@ const SwapImage = struct {
             },
         }, null);
 
+        // Track estimated swapchain image memory (not directly allocated by us, but still uses GPU memory)
+        // Calculate bytes per pixel outside of runtime control flow
+        const bytes_per_pixel: u32 = switch (format) {
+            .b8g8r8a8_srgb, .b8g8r8a8_unorm, .r8g8b8a8_srgb, .r8g8b8a8_unorm => 4,
+            .a2b10g10r10_unorm_pack32 => 4,
+            .r16g16b16a16_sfloat => 8,
+            else => 4, // Conservative estimate for unknown formats
+        };
+
+        if (gc.memory_tracker) |tracker| {
+            const estimated_size: u64 = @as(u64, extent.width) * @as(u64, extent.height) * bytes_per_pixel;
+
+            var buf: [32]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "swapchain_image_{x}", .{@intFromEnum(image)}) catch "swapchain_image_unknown";
+            tracker.trackAllocation(key, estimated_size, .texture) catch |err| {
+                std.log.warn("Failed to track swapchain image allocation: {}", .{err});
+            };
+        }
+
         return SwapImage{
             .image = image,
             .view = view,
@@ -703,6 +731,19 @@ const SwapImage = struct {
     }
 
     fn deinit(self: *SwapImage, gc: *const GraphicsContext) void {
+        // Untrack memory before freeing
+        if (gc.memory_tracker) |tracker| {
+            var buf: [32]u8 = undefined;
+
+            // Untrack depth buffer
+            const depth_key = std.fmt.bufPrint(&buf, "swapchain_depth_{x}", .{@intFromEnum(self.depth_image)}) catch "swapchain_depth_unknown";
+            tracker.untrackAllocation(depth_key);
+
+            // Untrack swapchain image
+            const image_key = std.fmt.bufPrint(&buf, "swapchain_image_{x}", .{@intFromEnum(self.image)}) catch "swapchain_image_unknown";
+            tracker.untrackAllocation(image_key);
+        }
+
         self.hdr_texture.deinit();
         gc.vkd.destroyImageView(gc.dev, self.depth_image_view, null);
         gc.vkd.freeMemory(gc.dev, self.depth_image_memory, null);

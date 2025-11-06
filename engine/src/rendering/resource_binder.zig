@@ -222,7 +222,7 @@ pub const ResourceBinder = struct {
         sampler: vk.Sampler,
         frame_index: u32,
     ) !void {
-        try self.bindTexture(pipeline_id, set, binding, image_view, sampler, .shader_read_only_optimal, frame_index);
+        try self.bindTexture(pipeline_id, set, binding, image_view, sampler, .general, frame_index);
     }
 
     /// Update descriptor bindings for a specific pipeline and frame

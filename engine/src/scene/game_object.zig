@@ -40,34 +40,14 @@ pub const GameObject = struct {
 
     /// Get rotation (quaternion)
     pub fn getRotation(self: GameObject) ?Quat {
-        _ = self;
-        // Transform stores Euler angles, not quaternions
-        // For now, return identity quaternion
-        // TODO(MAINTENANCE): Implement proper quaternion rotation - LOW PRIORITY
-        // Current issue: Transform stores Euler angles (causes gimbal lock)
-        // Solution: Store quaternion in Transform, convert to/from Euler for editor
-        //
-        // Required changes:
-        // - Update engine/src/ecs/components/transform.zig to store quaternion
-        // - Add Euler<->Quat conversion in engine/src/utils/math.zig
-        // - Implement getRotation(), setRotation(), rotate() methods
-        //
-        // Benefits: Fix rotation interpolation, prevent gimbal lock, proper composition
-        // Complexity: LOW - math utilities + component field change
-        // Branch: maintenance (low risk, self-contained change)
-        return Quat.identity();
+        const transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return null;
+        return transform.rotation;
     }
 
     /// Set rotation (quaternion)
     pub fn setRotation(self: GameObject, rotation: Quat) !void {
-        _ = rotation;
         var transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return error.ComponentNotFound;
-        // TODO(MAINTENANCE): Store Quat in Transform instead of Euler - LOW PRIORITY
-        // Currently Transform stores Euler angles, so we need to convert Quat input to Euler
-        // After Transform refactor to store Quat, this function can directly set transform.rotation
-        // Related: See transform.zig TODO about storing quaternions
-        // Branch: maintenance
-        transform.dirty = true;
+        transform.setRotationQuat(rotation);
     }
 
     /// Get scale
@@ -97,15 +77,8 @@ pub const GameObject = struct {
 
     /// Rotate around axis by angle (radians)
     pub fn rotate(self: GameObject, axis: Vec3, angle: f32) !void {
-        _ = axis;
-        _ = angle;
         var transform = self.scene.ecs_world.get(Transform, self.entity_id) orelse return error.ComponentNotFound;
-        // TODO(MAINTENANCE): Implement quaternion-based rotation - LOW PRIORITY
-        // Currently Transform stores Euler angles (can't properly compose rotations)
-        // After Transform refactor: new_rot = Quat.fromAxisAngle(axis, angle).mul(transform.rotation)
-        // Related: See transform.zig TODO about storing quaternions
-        // Branch: maintenance
-        transform.dirty = true;
+        transform.rotateAxisAngle(axis, angle);
     }
 
     // ==================== Hierarchy ====================

@@ -230,6 +230,12 @@ pub const UILayer = struct {
             self.ui_renderer.renderHierarchy(self.scene);
         }
 
+        // Note: Camera aspect ratio is updated in begin() via ensureViewportTargets().
+        // ImGui computes the new viewport_size during this render() call, which will be
+        // used in the next frame's begin() to create correctly-sized textures and update
+        // the camera projection. This one-frame delay is unavoidable since we can't know
+        // the viewport size until ImGui has laid out the UI.
+
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {
             try pm.beginPass("imgui", frame_info.current_frame, frame_info.command_buffer);
@@ -238,19 +244,7 @@ pub const UILayer = struct {
         // Render ImGui to command buffer
         try self.imgui_context.render(frame_info.command_buffer, self.swapchain, frame_info.current_frame);
 
-        self.swapchain.gc.transitionImageLayout(
-            frame_info.command_buffer,
-            frame_info.color_image,
-            .shader_read_only_optimal,
-            .color_attachment_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // No transition needed - attachment_optimal supports both rendering and sampling
 
         // End GPU timing
         if (self.performance_monitor) |pm| {
@@ -441,12 +435,20 @@ fn findDepthHasStencil(format: vk.Format) bool {
 
 /// Computes desired viewport extent from ImGui viewport size (fallback to swapchain).
 fn computeDesiredExtent(self: *UILayer) vk.Extent2D {
+    // Use viewport size from previous frame (updated during render phase)
+    // This creates textures at the actual viewport resolution, avoiding wasteful overrendering
     const vp_w = self.ui_renderer.viewport_size[0];
     const vp_h = self.ui_renderer.viewport_size[1];
     const has_valid_size = (vp_w >= 1.0 and vp_h >= 1.0);
 
-    const width: u32 = if (has_valid_size) @intFromFloat(@floor(vp_w)) else self.swapchain.extent.width;
-    const height: u32 = if (has_valid_size) @intFromFloat(@floor(vp_h)) else self.swapchain.extent.height;
+    // Fallback to swapchain extent if viewport hasn't been rendered yet
+    var width: u32 = if (has_valid_size) @intFromFloat(@floor(vp_w)) else self.swapchain.extent.width;
+    var height: u32 = if (has_valid_size) @intFromFloat(@floor(vp_h)) else self.swapchain.extent.height;
+
+    // Clamp to swapchain extent to avoid creating textures larger than the surface supports
+    // This handles the case where viewport size from previous frame exceeds new swapchain extent
+    width = @min(width, self.swapchain.extent.width);
+    height = @min(height, self.swapchain.extent.height);
 
     return .{ .width = if (width == 0) 1 else width, .height = if (height == 0) 1 else height };
 }
@@ -487,7 +489,7 @@ fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
             frame_info.command_buffer,
             swap_img.hdr_texture.image,
             .undefined,
-            .color_attachment_optimal,
+            .general, // Unified layout - stays in GENERAL forever
             color_barrier,
         );
     }
@@ -521,7 +523,7 @@ fn recreateLDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
             frame_info.command_buffer,
             ldr_tex.image,
             .undefined,
-            .color_attachment_optimal,
+            .general, // Unified layout - stays in GENERAL forever
             color_barrier,
         );
 
@@ -536,6 +538,8 @@ fn recreateLDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
 fn updateCameraAspect(self: *UILayer) void {
     const aspect = @as(f32, @floatFromInt(self.viewport_extent.width)) /
         @as(f32, @floatFromInt(self.viewport_extent.height));
+    // Update camera's stored aspect ratio so controller doesn't overwrite with old value
+    self.camera.aspectRatio = aspect;
     self.camera.setPerspectiveProjection(zephyr.math.radians(self.camera.fov), aspect, self.camera.nearPlane, self.camera.farPlane);
 }
 

@@ -651,20 +651,7 @@ pub const PathTracingPass = struct {
         // This eliminates 2 image transitions per frame (GENERAL→TRANSFER_SRC→GENERAL)
         // Only transition the frame image (required for presentation)
 
-        // Transition frame image from PRESENT_SRC to TRANSFER_DST_OPTIMAL
-        gc.transitionImageLayout(
-            command_buffer,
-            frame_image,
-            vk.ImageLayout.color_attachment_optimal,
-            vk.ImageLayout.transfer_dst_optimal,
-            .{
-                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // No transition needed - GENERAL layout supports all operations!
 
         // Copy from output texture to swapchain
         // Output texture stays in GENERAL layout (valid for both storage writes and transfer src)
@@ -693,27 +680,14 @@ pub const PathTracingPass = struct {
         gc.vkd.cmdCopyImage(
             command_buffer,
             self.output_texture.image,
-            vk.ImageLayout.general, // Source stays in GENERAL
+            vk.ImageLayout.general, // Source in GENERAL
             frame_image,
-            vk.ImageLayout.transfer_dst_optimal,
+            vk.ImageLayout.general, // Destination also in GENERAL - no transition needed!
             1,
             @ptrCast(&copy_info),
         );
 
-        // Transition swapchain image back to PRESENT_SRC
-        gc.transitionImageLayout(
-            command_buffer,
-            frame_image,
-            vk.ImageLayout.transfer_dst_optimal,
-            vk.ImageLayout.color_attachment_optimal,
-            .{
-                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // No transition needed - both images stay in GENERAL!
     }
 
     /// Resize the output texture when swapchain is recreated

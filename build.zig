@@ -5,16 +5,6 @@ const cimgui = @import("cimgui_zig");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 
-// TODO(MAINTENANCE): SHADER COMPILATION IN BUILD - LOW PRIORITY
-// Currently: shaders compiled at runtime on first use, build succeeds even with shader errors
-// Required: Add shader compilation step (glslc all .vert/.frag/.comp), fail build on errors
-// Branch: maintenance
-
-// TODO(MAINTENANCE): MULTIPLE BUILD CONFIGURATIONS - LOW PRIORITY
-// Currently: single config, no explicit validation layer toggle
-// Required: Add build options (b.buildMode, b.enableAsserts), explicit Debug/Release/ReleaseFast/ReleaseSafe
-// Branch: maintenance
-
 pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -26,6 +16,16 @@ pub fn build(b: *std.Build) !void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+
+    // Build options
+    const enable_validation = b.option(bool, "validation", "Enable Vulkan validation layers (default: true in Debug, false in Release)") orelse (optimize == .Debug);
+    const enable_asserts = b.option(bool, "asserts", "Enable runtime assertions (default: true in Debug/ReleaseSafe)") orelse (optimize == .Debug or optimize == .ReleaseSafe);
+
+    // Create build options module
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_validation_layers", enable_validation);
+    build_options.addOption(bool, "enable_asserts", enable_asserts);
+    build_options.addOption(std.builtin.OptimizeMode, "optimize_mode", optimize);
 
     // ========== VULKAN BINDINGS (shared by engine and editor) ==========
     const registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml");
@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) !void {
 
     // Add dependencies to engine module
     engine_mod.addImport("vulkan", vulkan_zig);
+    engine_mod.addImport("build_options", build_options.createModule());
 
     const obj_mod = b.dependency("zig-obj", .{ .target = target, .optimize = optimize });
     engine_mod.addImport("zig-obj", obj_mod.module("obj"));
@@ -58,6 +59,9 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("editor/src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "build_options", .module = build_options.createModule() },
+        },
     });
 
     const editor = b.addExecutable(.{
