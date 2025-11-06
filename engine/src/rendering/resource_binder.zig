@@ -6,7 +6,10 @@ const Resource = @import("unified_pipeline_system.zig").Resource;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const ShaderReflection = @import("../assets/shader_compiler.zig").ShaderReflection;
+const ManagedBuffer = @import("buffer_manager.zig").ManagedBuffer;
 const log = @import("../utils/log.zig").log;
+
+const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 // ============================================================================
 // TODO: MAJOR REFACTOR - NAMED RESOURCE BINDING & CENTRALIZED MANAGEMENT
@@ -62,6 +65,9 @@ pub const ResourceBinder = struct {
     // Phase 2: Named binding registry
     binding_registry: std.StringHashMap(BindingLocation),
 
+    // Named resource tracking (for generation-based change detection)
+    tracked_resources: std.ArrayList(BoundResource),
+
     /// Named binding location information
     pub const BindingLocation = struct {
         set: u32,
@@ -86,6 +92,7 @@ pub const ResourceBinder = struct {
             .bound_textures = std.HashMap(BindingKey, BoundTexture, BindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .bound_storage_buffers = std.HashMap(BindingKey, BoundStorageBuffer, BindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .binding_registry = std.StringHashMap(BindingLocation).init(allocator),
+            .tracked_resources = .{},
         };
     }
 
@@ -96,6 +103,12 @@ pub const ResourceBinder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.binding_registry.deinit();
+
+        // Clean up tracked resource names
+        for (self.tracked_resources.items) |res| {
+            self.allocator.free(res.name);
+        }
+        self.tracked_resources.deinit(self.allocator);
 
         self.bound_uniform_buffers.deinit();
         self.bound_textures.deinit();
@@ -408,15 +421,13 @@ pub const ResourceBinder = struct {
         try self.bindUniformBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
     }
 
-    /// Bind a storage buffer by name
+    /// Bind a managed storage buffer by name for all frames
+    /// Automatically registers the buffer for generation-based tracking
     pub fn bindStorageBufferNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        buffer: *Buffer,
-        offset: vk.DeviceSize,
-        range: vk.DeviceSize,
-        frame_index: u32,
+        managed_buffer: *const ManagedBuffer,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -428,7 +439,22 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        try self.bindStorageBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
+        // Register for generation tracking (once)
+        try self.registerBufferByName(binding_name, pipeline_id, managed_buffer);
+
+        // Bind the Vulkan buffer handle for all frames using buffer's size
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const frame_index = @as(u32, @intCast(frame_idx));
+            try self.bindStorageBuffer(
+                pipeline_id,
+                location.set,
+                location.binding,
+                @constCast(&managed_buffer.buffer),
+                0, // offset
+                managed_buffer.size, // use buffer's actual size
+                frame_index,
+            );
+        }
     }
 
     /// Bind a texture by name
@@ -477,12 +503,13 @@ pub const ResourceBinder = struct {
     }
 
     /// Bind a texture array by name (for descriptor arrays like uniform sampler2D textures[N])
+    /// Bind a managed texture array with automatic generation tracking
+    /// Registers the ManagedTextureArray for tracking and binds for all frames
     pub fn bindTextureArrayNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        image_infos: []const vk.DescriptorImageInfo,
-        frame_index: u32,
+        managed_textures: *const @import("../ecs/systems/texture_system.zig").ManagedTextureArray,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -494,15 +521,146 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        const resource = Resource{
-            .image_array = image_infos,
+        // Register for generation tracking
+        try self.updateTextureArrayByName(binding_name, pipeline_id, managed_textures);
+
+        // Bind for all frames
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const frame_index = @as(u32, @intCast(frame_idx));
+
+            const resource = Resource{
+                .image_array = managed_textures.descriptor_infos,
+            };
+
+            try self.pipeline_system.bindResource(pipeline_id, location.set, location.binding, resource, frame_index);
+        }
+    }
+
+    // ============================================================================
+    // GENERATION-BASED MANAGED BUFFER TRACKING
+    // ============================================================================
+    //
+    // Systems register their ManagedBuffers by name. ResourceBinder tracks the
+    // generation and automatically rebinds when the buffer changes.
+    //
+    // Usage:
+    //   // In MaterialSystem, just register the buffer reference
+    //   resource_binder.registerBufferByName("MaterialBuffer", pipeline_id, &managed_buffer);
+    //
+    //   // In updateFrame, ResourceBinder checks generation and rebinds if changed
+    //   resource_binder.updateFrame(pipeline_id, frame_index);
+    //
+    // ============================================================================
+
+    /// Register or update a managed buffer for automatic generation tracking
+    /// The buffer will be rebound automatically in updateFrame() if its generation changes
+    pub fn registerBufferByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        managed_buffer: *const @import("buffer_manager.zig").ManagedBuffer,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track buffer '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
         };
 
-        try self.pipeline_system.bindResource(pipeline_id, location.set, location.binding, resource, frame_index);
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource
+                res.resource = .{ .managed_buffer = managed_buffer };
+                res.set = location.set;
+                res.binding = location.binding;
+                // Don't update last_generation - that happens in updateFrame
+                log(.DEBUG, "resource_binder", "Updated tracked buffer '{s}': current gen={}, last bound gen={}", .{
+                    binding_name,
+                    managed_buffer.generation,
+                    res.last_generation,
+                });
+                return;
+            }
+        }
+
+        // Register new tracked resource
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .managed_buffer = managed_buffer },
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+
+        log(.INFO, "resource_binder", "Registered tracked buffer '{s}': gen={}", .{
+            binding_name,
+            managed_buffer.generation,
+        });
+    }
+
+    /// Register a managed texture array for automatic generation tracking
+    fn updateTextureArrayByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        managed_textures: *const @import("../ecs/systems/texture_system.zig").ManagedTextureArray,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track texture array '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        const ManagedTextureArray = @import("../ecs/systems/texture_system.zig").ManagedTextureArray;
+
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource - use offset to generation field
+                res.resource = .{ .texture_array = .{
+                    .ptr = @ptrCast(@constCast(managed_textures)),
+                    .generation_offset = @offsetOf(ManagedTextureArray, "generation"),
+                } };
+                res.set = location.set;
+                res.binding = location.binding;
+                log(.DEBUG, "resource_binder", "Updated tracked texture array '{s}': current gen={}, last bound gen={}", .{
+                    binding_name,
+                    managed_textures.generation,
+                    res.last_generation,
+                });
+                return;
+            }
+        }
+
+        // Register new tracked resource
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .texture_array = .{
+                .ptr = @ptrCast(@constCast(managed_textures)),
+                .generation_offset = @offsetOf(ManagedTextureArray, "generation"),
+            } },
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+
+        log(.INFO, "resource_binder", "Registered tracked texture array '{s}': gen={}", .{
+            binding_name,
+            managed_textures.generation,
+        });
     }
 
     /// Update descriptor bindings for a specific pipeline and frame
     /// Automatically rebinds any buffers whose VkBuffer handle has changed
+    /// AND checks tracked managed buffers for generation changes
     pub fn updateFrame(self: *ResourceBinder, pipeline_id: PipelineId, frame_index: u32) !void {
         // Check all bound storage buffers for this pipeline/frame to see if their handles changed
         var storage_iter = self.bound_storage_buffers.iterator();
@@ -544,6 +702,68 @@ pub const ResourceBinder = struct {
             };
 
             try self.pipeline_system.bindResource(pipeline_id, key.set, key.binding, resource, frame_index);
+        }
+
+        // Check tracked resources for generation changes
+        for (self.tracked_resources.items) |*res| {
+            // Only process resources for this pipeline
+            if (res.pipeline_id.hash != pipeline_id.hash) continue;
+
+            // Get current generation
+            const current_gen = res.getCurrentGeneration();
+
+            // Skip if generation is 0 (resource not created yet)
+            if (current_gen == 0) continue;
+
+            // Check if generation changed
+            if (current_gen == res.last_generation) continue;
+
+            // Rebind based on resource type
+            switch (res.resource) {
+                .managed_buffer => |managed_buffer| {
+                    // Look up binding type
+                    const location = self.lookupBinding(res.name) orelse {
+                        log(.ERROR, "resource_binder", "Tracked resource '{s}' has no registered binding location", .{res.name});
+                        continue;
+                    };
+
+                    // Rebind based on binding type
+                    switch (location.binding_type) {
+                        .storage_buffer => {
+                            try self.bindStorageBuffer(
+                                res.pipeline_id,
+                                res.set,
+                                res.binding,
+                                @constCast(&managed_buffer.buffer),
+                                0,
+                                vk.WHOLE_SIZE,
+                                frame_index,
+                            );
+                        },
+                        .uniform_buffer => {
+                            try self.bindUniformBuffer(
+                                res.pipeline_id,
+                                res.set,
+                                res.binding,
+                                @constCast(&managed_buffer.buffer),
+                                0,
+                                vk.WHOLE_SIZE,
+                                frame_index,
+                            );
+                        },
+                        else => {
+                            log(.WARN, "resource_binder", "Tracked resource '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
+                        },
+                    }
+                },
+                .texture, .texture_array => {
+                    // TODO: Implement texture/texture_array rebinding
+                    log(.WARN, "resource_binder", "Texture rebinding not yet implemented for '{s}'", .{res.name});
+                },
+            }
+
+            // Update the last bound generation
+            res.last_generation = current_gen;
         }
 
         try self.pipeline_system.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
@@ -662,6 +882,48 @@ pub const BoundStorageBuffer = struct {
     buffer: *Buffer,
     offset: vk.DeviceSize,
     range: vk.DeviceSize,
+};
+
+/// Unified resource tracking for generation-based change detection
+const BoundResource = struct {
+    name: []const u8, // Owned by ResourceBinder
+    set: u32,
+    binding: u32,
+    pipeline_id: PipelineId,
+    resource: ResourceVariant,
+    last_generation: u32,
+
+    const ResourceVariant = union(enum) {
+        managed_buffer: *const @import("buffer_manager.zig").ManagedBuffer,
+        texture: TextureResource,
+        texture_array: TextureArrayResource,
+        // acceleration_structure: *const AccelerationStructure, // Future
+    };
+
+    const TextureResource = struct {
+        ptr: *anyopaque, // Points to texture object with generation field
+        generation_offset: usize, // Offset to u32 generation field
+    };
+
+    const TextureArrayResource = struct {
+        ptr: *anyopaque,
+        generation_offset: usize,
+    };
+
+    /// Get current generation of the resource
+    fn getCurrentGeneration(self: *const BoundResource) u32 {
+        return switch (self.resource) {
+            .managed_buffer => |buf| buf.generation,
+            .texture => |tex| blk: {
+                const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(tex.ptr) + tex.generation_offset);
+                break :blk gen_ptr.*;
+            },
+            .texture_array => |arr| blk: {
+                const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(arr.ptr) + arr.generation_offset);
+                break :blk gen_ptr.*;
+            },
+        };
+    }
 };
 
 /// Context for BindingKey HashMap

@@ -33,6 +33,7 @@ pub const ManagedBuffer = struct {
     size: vk.DeviceSize,
     strategy: BufferStrategy,
     created_frame: u64,
+    generation: u32, // Generation counter for tracking updates
     binding_info: ?BindingInfo = null,
 
     pub const BindingInfo = struct {
@@ -119,6 +120,7 @@ pub const BufferManager = struct {
             .size = config.size,
             .strategy = config.strategy,
             .created_frame = self.frame_counter,
+            .generation = 1, // Start at generation 1
         };
 
         // Add to statistics
@@ -184,13 +186,16 @@ pub const BufferManager = struct {
             },
         }
 
+        // Increment generation to signal change
+        managed_buffer.generation += 1;
+
         // Update statistics
         if (self.all_buffers.getPtr(managed_buffer.name)) |stats| {
             stats.last_updated = self.frame_counter;
         }
 
-        log(.DEBUG, "buffer_manager", "Updated buffer '{s}': {} bytes", .{
-            managed_buffer.name, data.len,
+        log(.DEBUG, "buffer_manager", "Updated buffer '{s}': {} bytes, generation {}", .{
+            managed_buffer.name, data.len, managed_buffer.generation,
         });
     }
 

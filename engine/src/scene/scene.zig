@@ -12,8 +12,12 @@ const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
-const MaterialSystem = @import("../ecs/systems/material_system.zig").MaterialSystem;
-const TextureSystem = @import("../ecs/systems/texture_system.zig").TextureSystem;
+const MaterialSystemMod = @import("../ecs/systems/material_system.zig");
+const TextureSystemMod = @import("../ecs/systems/texture_system.zig");
+const TextureSystem = TextureSystemMod.TextureSystem;
+const TextureSet = TextureSystemMod.TextureSet;
+const MaterialSystem = MaterialSystemMod.MaterialSystem;
+const MaterialBufferSet = MaterialSystemMod.MaterialBufferSet;
 const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
@@ -650,6 +654,12 @@ pub const Scene = struct {
         // Link MaterialSystem to TextureSystem for texture index resolution
         self.material_system.?.setTextureSystem(self.texture_system.?);
 
+        // Create default material and texture sets
+        const default_texture_set = try self.texture_system.?.createSet("default");
+        const default_material_set = try self.material_system.?.createSet("default", default_texture_set);
+
+        log(.INFO, "scene", "Created default material and texture sets", .{});
+
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
 
@@ -678,10 +688,9 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             self.asset_manager,
-            self.material_system.?,
-            self.texture_system.?,
             self.ecs_world,
             global_ubo_set,
+            default_material_set,
             hdr_color_format,
             swapchain_depth_format,
             &self.render_system,
@@ -695,7 +704,7 @@ pub const Scene = struct {
         }
 
         // Create PathTracingPass (alternative to raster rendering)
-        const path_tracing_pass = if (self.material_system != null and self.texture_system != null) PathTracingPass.create(
+        const path_tracing_pass = PathTracingPass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
@@ -704,15 +713,14 @@ pub const Scene = struct {
             self.ecs_world,
             self.asset_manager,
             &self.render_system,
-            self.material_system.?,
-            self.texture_system.?,
+            default_material_set,
             hdr_color_format,
             width,
             height,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create PathTracingPass: {}. Path tracing disabled.", .{err});
             break :blk null;
-        } else null;
+        };
 
         // NOTE: Path tracing pass starts disabled (enable via setPathTracingEnabled())
         if (path_tracing_pass) |pass| {

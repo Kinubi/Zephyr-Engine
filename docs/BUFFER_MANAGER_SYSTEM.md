@@ -961,16 +961,26 @@ const material = Material{
 
 ### Phase 4: BaseRenderPass - Zero Boilerplate API (Week 2-3)
 
-**Goal**: Create builder pattern for simple render passes
+**Goal**: Create builder pattern for simple render passes with automatic resource management
 
 See [RENDER_PASS_VISION.md](RENDER_PASS_VISION.md) for full design.
 
+**Prerequisites** (Already Implemented ✅):
+- ✅ **ResourceBinder Automatic Rebinding**: Already detects buffer handle changes in `updateFrame()`
+  - Iterates all bound storage/uniform buffers
+  - Compares current VkBuffer handles with cached handles
+  - Auto-rebinds if handle changed (buffer was recreated by BufferManager)
+  - Only writes descriptors if something actually changed
+  - Works for MaterialSystem, future InstanceBuffer, etc.
+
+**Implementation Tasks**:
 1. ⏳ Create `base_render_pass.zig`
 2. ⏳ Implement `registerShader()` queuing
-3. ⏳ Implement `bind()` queuing
-4. ⏳ Implement `bake()` - creates pipeline + binds resources
-5. ⏳ Add default `updateImpl()` that just calls `updateFrame()`
-6. ⏳ Document usage patterns
+3. ⏳ Implement `bind()` queuing (use existing named binding API)
+4. ⏳ Implement `bake()` - creates pipeline + binds resources once
+5. ⏳ Add default `updateImpl()` that calls `updateFrame()` (auto-rebinding happens here)
+6. ⏳ Leverage existing automatic rebinding - no manual dirty tracking needed
+7. ⏳ Document usage patterns
 
 **Example Usage**:
 ```zig
@@ -978,14 +988,22 @@ const quad_pass = BaseRenderPass.create(allocator, "quad_pass", ...);
 quad_pass.registerShader("quad.vert");
 quad_pass.registerShader("quad.frag");
 quad_pass.bind("GlobalUBO", ubo);
-quad_pass.bind("Textures", textures);
+quad_pass.bind("MaterialBuffer", material_system);  // Auto-rebinds when buffer recreated
+quad_pass.bind("Textures", texture_system);         // Auto-rebinds when descriptor array changes
 quad_pass.bake();
 // Done! RenderGraph calls execute() automatically
+// updateFrame() called each frame - automatically detects and rebinds changed resources
 ```
 
-**Validation**: Can create simple passes without new files, GeometryPass still works as custom pass
+**Key Benefits**:
+- Zero manual dirty tracking (ResourceBinder handles it)
+- No need to track buffer generations (handle comparison does it)
+- Works seamlessly with MaterialSystem, TextureSystem, future InstanceBuffer
+- Passes just call `updateFrame()` once per frame
 
-> **Status**: 🚧 **TODO** - Phase 4 not yet implemented
+**Validation**: Can create simple passes without new files, GeometryPass still works as custom pass, automatic rebinding works
+
+> **Status**: 🚧 **TODO** - Phase 4 not yet implemented, but auto-rebinding foundation is complete
 
 ---
 
