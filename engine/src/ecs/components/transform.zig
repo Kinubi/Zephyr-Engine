@@ -124,35 +124,27 @@ pub const Transform = struct {
         }
     }
 
-    /// Set rotation and mark dirty only if changed
-    /// Set rotation by Euler angles (keeps compatibility)
-    pub fn setRotation(self: *Transform, rot: math.Vec3) void {
-        const q = math.Quat.fromEuler(rot.x, rot.y, rot.z).normalize();
-        // Use epsilon-based comparison to avoid floating-point precision issues
+    /// Helper function to update rotation if it represents a different rotation
+    fn updateRotationIfChanged(self: *Transform, new_rotation: math.Quat) void {
+        const q = new_rotation.normalize();
+        // Use dot product comparison to handle quaternion double-cover (q and -q represent same rotation)
         const epsilon: f32 = 1e-6;
-        const dx = @abs(self.rotation.x - q.x);
-        const dy = @abs(self.rotation.y - q.y);
-        const dz = @abs(self.rotation.z - q.z);
-        const dw = @abs(self.rotation.w - q.w);
-        if (dx > epsilon or dy > epsilon or dz > epsilon or dw > epsilon) {
+        if (!self.rotation.isRotationEqual(q, epsilon)) {
             self.rotation = q;
             self.dirty = true;
         }
     }
 
+    /// Set rotation and mark dirty only if changed
+    /// Set rotation by Euler angles (keeps compatibility)
+    pub fn setRotation(self: *Transform, rot: math.Vec3) void {
+        const q = math.Quat.fromEuler(rot.x, rot.y, rot.z);
+        self.updateRotationIfChanged(q);
+    }
+
     /// Set rotation directly by quaternion
     pub fn setRotationQuat(self: *Transform, rot: math.Quat) void {
-        const q = rot.normalize();
-        // Use epsilon-based comparison to avoid floating-point precision issues
-        const epsilon: f32 = 1e-6;
-        const dx = @abs(self.rotation.x - q.x);
-        const dy = @abs(self.rotation.y - q.y);
-        const dz = @abs(self.rotation.z - q.z);
-        const dw = @abs(self.rotation.w - q.w);
-        if (dx > epsilon or dy > epsilon or dz > epsilon or dw > epsilon) {
-            self.rotation = q;
-            self.dirty = true;
-        }
+        self.updateRotationIfChanged(rot);
     }
 
     /// Set scale and mark dirty only if changed

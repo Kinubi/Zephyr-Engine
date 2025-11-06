@@ -237,10 +237,11 @@ fn uploadViaStaging(
 }
 
 /// Cleanup buffers in ring slot
-fn cleanupRingSlot(slot: *std.ArrayList(ManagedBuffer)) void {
+fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(ManagedBuffer)) void {
     for (slot.items) |managed| {
         managed.buffer.deinit();
-        // Note: name is owned by buffer, freed here
+        // Free the duplicated name string
+        self.allocator.free(managed.name);
     }
     slot.clearRetainingCapacity();
 }

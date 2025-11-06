@@ -245,6 +245,18 @@ pub const Quat = struct {
         return Quat{ .x = self.x * inv, .y = self.y * inv, .z = self.z * inv, .w = self.w * inv };
     }
 
+    /// Dot product of two quaternions
+    pub fn dot(self: Quat, other: Quat) f32 {
+        return self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w;
+    }
+
+    /// Check if two quaternions represent the same rotation
+    /// Quaternions q and -q represent the same rotation, so we check the absolute dot product
+    pub fn isRotationEqual(self: Quat, other: Quat, epsilon: f32) bool {
+        const d = @abs(self.dot(other));
+        return d > (1.0 - epsilon);
+    }
+
     pub fn conjugate(self: Quat) Quat {
         return Quat{ .x = -self.x, .y = -self.y, .z = -self.z, .w = self.w };
     }

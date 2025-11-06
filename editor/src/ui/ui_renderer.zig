@@ -987,9 +987,15 @@ pub const UIRenderer = struct {
                                 const ls = sp.acquire();
                                 defer sp.release(ls);
                                 if (lua.executeLuaBuffer(self.allocator, ls, cmd, 0, @ptrCast(scene_ptr))) |exec_res| {
+                                    defer {
+                                        // Free the message if it was allocated
+                                        if (exec_res.message.len > 0) {
+                                            self.allocator.free(exec_res.message);
+                                        }
+                                    }
                                     if (exec_res.message.len > 0) log(.INFO, "console", "{s}", .{exec_res.message});
-                                } else |_| {
-                                    log(.ERROR, "console", "(execute error)", .{});
+                                } else |err| {
+                                    log(.ERROR, "console", "Lua execution error: {}", .{err});
                                 }
                             } else {
                                 log(.WARN, "console", "(no lua state pool - cannot run synchronously)", .{});
