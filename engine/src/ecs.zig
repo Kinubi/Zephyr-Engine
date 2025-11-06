@@ -32,6 +32,8 @@ pub const updateLightSystem = @import("ecs/systems/light_system.zig").update;
 pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").update;
 pub const updateScriptingSystem = @import("ecs/systems/scripting_system.zig").update;
 pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
+pub const updateTextureSystem = @import("ecs/systems/texture_system.zig").update;
+pub const updateMaterialSystem = @import("ecs/systems/material_system.zig").update;
 
 // Parallel System Execution
 pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;

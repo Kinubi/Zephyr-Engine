@@ -194,48 +194,6 @@ pub const BufferManager = struct {
         });
     }
 
-    /// Bind buffer via ResourceBinder integration
-    /// Bind buffer via ResourceBinder's named binding API
-    /// Automatically detects buffer type (uniform vs storage) and uses appropriate binding method
-    pub fn bindBuffer(
-        self: *BufferManager,
-        managed_buffer: *ManagedBuffer,
-        binding_name: []const u8,
-        frame_index: u32,
-    ) !void {
-        // Determine buffer type from usage flags
-        const is_uniform = managed_buffer.buffer.usage_flags.uniform_buffer_bit;
-        const is_storage = managed_buffer.buffer.usage_flags.storage_buffer_bit;
-
-        if (is_uniform) {
-            try self.resource_binder.bindUniformBufferNamed(
-                binding_name,
-                &managed_buffer.buffer,
-                frame_index,
-            );
-            log(.DEBUG, "buffer_manager", "Bound uniform buffer '{s}' to '{s}'", .{
-                managed_buffer.name,
-                binding_name,
-            });
-        } else if (is_storage) {
-            try self.resource_binder.bindStorageBufferNamed(
-                binding_name,
-                &managed_buffer.buffer,
-                frame_index,
-            );
-            log(.DEBUG, "buffer_manager", "Bound storage buffer '{s}' to '{s}'", .{
-                managed_buffer.name,
-                binding_name,
-            });
-        } else {
-            log(.WARN, "buffer_manager", "Buffer '{s}' has neither uniform nor storage usage flag - cannot bind to '{s}'", .{
-                managed_buffer.name,
-                binding_name,
-            });
-            return error.InvalidBufferUsage;
-        }
-    }
-
     /// Called at frame start to cleanup old buffers
     pub fn beginFrame(self: *BufferManager, frame_index: u32) void {
         self.current_frame = frame_index;

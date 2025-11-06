@@ -25,13 +25,15 @@ pub const AssetLoader = asset_loader.AssetLoader;
 
 const FallbackMeshes = @import("../utils/fallback_meshes.zig").FallbackMeshes;
 
-/// Material structure that matches the shader Material layout
-pub const Material = struct {
-    albedo_texture_id: u32 = 0, // Matches shader: uint albedoTextureIndex
-    roughness: f32 = 0.5, // Matches shader: float roughness
-    metallic: f32 = 0.0, // Matches shader: float metallic
-    emissive: f32 = 0.0, // Matches shader: float emissive
-    emissive_color: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 1.0 }, // Matches shader: vec4/float4 emissive_color
+/// Material structure that matches the shader Material layout (std430)
+pub const Material = extern struct {
+    albedo_texture_id: u32 = 0,
+    roughness_texture_id: u32 = 0,
+    albedo_color: [4]f32 align(16) = [4]f32{ 1.0, 1.0, 1.0, 1.0 },
+    roughness: f32 = 0.5,
+    metallic: f32 = 0.0,
+    emissive: f32 = 0.0,
+    emissive_color: [4]f32 align(16) = [4]f32{ 0.0, 0.0, 0.0, 1.0 },
 };
 
 /// Holder for script source text owned by AssetManager
@@ -90,7 +92,18 @@ pub const FallbackAssets = struct {
     pub fn init(asset_manager: *AssetManager) !FallbackAssets {
         var fallbacks = FallbackAssets{};
 
-        // Try to load each fallback texture, but don't fail if missing
+        // Insert a dummy white texture at index 0 (reserved for "no texture")
+        // This ensures loaded_textures[0] exists and actual textures start at index 1
+        const dummy_texture = try asset_manager.allocator.create(Texture);
+        const white_pixel = [_]u8{ 255, 255, 255, 255 };
+        dummy_texture.* = try Texture.loadFromMemorySingle(
+            asset_manager.loader.graphics_context,
+            &white_pixel,
+            1,
+            1,
+            .r8g8b8a8_srgb,
+        );
+        try asset_manager.loaded_textures.append(asset_manager.allocator, dummy_texture); // Try to load each fallback texture, but don't fail if missing
         fallbacks.missing_texture = asset_manager.loadTextureSync("assets/textures/missing.png") catch |err| blk: {
             log(.WARN, "asset_manager", "Could not load missing.png fallback: {}", .{err});
             break :blk null;
@@ -414,6 +427,7 @@ pub const AssetManager = struct {
         const texture = try self.allocator.create(Texture);
         texture.* = try Texture.initFromFile(self.loader.graphics_context, self.allocator, path, .rgba8);
         try self.loaded_textures.append(self.allocator, texture);
+        // Texture at loaded_textures[0] is dummy, so indices map to loaded_textures[1..N]
         try self.asset_to_texture.put(asset_id, @intCast(self.loaded_textures.items.len - 1));
 
         // Mark as loaded in registry
@@ -554,8 +568,9 @@ pub const AssetManager = struct {
         defer self.textures_mutex.unlock();
 
         try self.loaded_textures.append(self.allocator, texture);
-        log(.INFO, "enhanced_asset_manager", "Added texture asset {} at index {}", .{ asset_id.toU64(), self.loaded_textures.items.len - 1 });
+        // Texture indices start at 1 (0 is reserved for "no texture")
         const index = self.loaded_textures.items.len - 1;
+        log(.INFO, "enhanced_asset_manager", "Added texture asset {} at index {}", .{ asset_id.toU64(), index });
         try self.asset_to_texture.put(asset_id, index);
 
         // Mark texture descriptors as dirty for lazy rebuild

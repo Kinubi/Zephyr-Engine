@@ -16,8 +16,10 @@ struct PointLight {
 };
 
 struct Material {
-    uint albedoTextureIndex;
-    float roughness;
+    uint albedoTextureIndex;        // 0 = use albedo_color, >0 = sample texture
+    uint roughnessTextureIndex;     // 0 = use roughness value, >0 = sample texture
+    vec4 albedo_color;              // Used when albedoTextureIndex == 0 or as tint
+    float roughness;                // Used when roughnessTextureIndex == 0
     float metallic;
     float emissive;
     vec4 emissive_color;
@@ -48,8 +50,25 @@ void main() {
     // Get material for this object
     Material mat = materials[materialIndex];
     
-    // Sample albedo texture
-    vec3 albedo = texture(textures[mat.albedoTextureIndex], uv).rgb;
+    // Sample or use albedo color
+    vec3 albedo;
+    if (mat.albedoTextureIndex == 0) {
+        // No texture - use solid albedo color
+        albedo = mat.albedo_color.rgb;
+    } else {
+        // Sample texture and tint with albedo color
+        albedo = texture(textures[mat.albedoTextureIndex], uv).rgb * mat.albedo_color.rgb;
+    }
+
+    // Sample or use roughness value
+    float roughness;
+    if (mat.roughnessTextureIndex == 0) {
+        // No texture - use roughness value
+        roughness = mat.roughness;
+    } else {
+        // Sample roughness from texture (stored in R channel typically)
+        roughness = texture(textures[mat.roughnessTextureIndex], uv).r;
+    }
 
     // Start with ambient lighting
     vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w;
@@ -66,8 +85,11 @@ void main() {
         vec3 lightDir = normalize(directionToLight);
         float cosAngIncidence = max(dot(surfaceNormal, lightDir), 0.0);
         
+        // Simple roughness-based diffuse (could be enhanced with proper BRDF)
+        float diffuseFactor = cosAngIncidence * (1.0 - roughness * 0.5);
+        
         vec3 lightColor = light.color.xyz * light.color.w * attenuation;
-        diffuseLight += lightColor * cosAngIncidence;
+        diffuseLight += lightColor * diffuseFactor;
     }
 
     // Add emissive contribution if material has it

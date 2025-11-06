@@ -12,7 +12,9 @@ const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
-const MaterialSystem = @import("../rendering/material_system.zig").MaterialSystem;
+const MaterialSystem = @import("../ecs/systems/material_system.zig").MaterialSystem;
+const TextureSystem = @import("../ecs/systems/texture_system.zig").TextureSystem;
+const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
@@ -78,6 +80,10 @@ pub const Scene = struct {
 
     // Scripting system (owned by the Scene)
     scripting_system: ecs.ScriptingSystem,
+
+    // Rendering domain systems (owned by the Scene)
+    material_system: ?*MaterialSystem = null,
+    texture_system: ?*TextureSystem = null,
 
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
@@ -506,6 +512,14 @@ pub const Scene = struct {
         // Deinit scripting system
         self.scripting_system.deinit();
 
+        // Deinit rendering domain systems
+        if (self.texture_system) |ts| {
+            ts.deinit();
+        }
+        if (self.material_system) |ms| {
+            ms.deinit();
+        }
+
         self.light_system.deinit();
         self.render_system.deinit();
         log(.INFO, "scene", "Scene destroyed: {s}", .{self.name});
@@ -584,7 +598,7 @@ pub const Scene = struct {
         self: *Scene,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
-        material_system: *MaterialSystem,
+        buffer_manager: *BufferManager,
         hdr_color_format: vk.Format,
         ldr_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
@@ -593,6 +607,21 @@ pub const Scene = struct {
         width: u32,
         height: u32,
     ) !void {
+
+        // Initialize Material and Texture systems for this scene
+        self.material_system = try MaterialSystem.init(
+            self.allocator,
+            buffer_manager,
+            self.asset_manager,
+        );
+
+        self.texture_system = try TextureSystem.init(
+            self.allocator,
+            self.asset_manager,
+        );
+
+        // Link MaterialSystem to TextureSystem for texture index resolution
+        self.material_system.?.setTextureSystem(self.texture_system.?);
 
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
@@ -622,7 +651,7 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             self.asset_manager,
-            material_system,
+            self.material_system.?,
             self.ecs_world,
             global_ubo_set,
             hdr_color_format,

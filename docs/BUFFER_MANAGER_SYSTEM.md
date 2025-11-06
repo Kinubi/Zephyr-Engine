@@ -841,9 +841,8 @@ pub const GeometryPass = struct {
 6. ✅ Add duplicate binding detection (cross-stage deduplication)
 7. ✅ Integrate `getPipelineReflection()` in UnifiedPipelineSystem
 8. ✅ Wire reflection population into geometry pass setup
-9. ✅ Integrate BufferManager.bindBuffer() with ResourceBinder named binding
-10. ⏳ Update tests to use named binding
-11. ✅ Document naming conventions (automatic from shader reflection)
+9. ⏳ Update tests to use named binding
+10. ✅ Document naming conventions (automatic from shader reflection)
 
 **Validation**: Named binding works alongside numeric binding, automatic shader reflection extracts binding names
 
@@ -856,7 +855,6 @@ pub const GeometryPass = struct {
 - **Deduplication**: Handles same binding appearing in multiple shader stages (vertex + fragment)
 - **Validation**: Returns `error.UnknownBinding` and `error.BindingTypeMismatch` for invalid usage
 - **Pipeline Integration**: `getPipelineReflection()` combines reflection from all shaders in pipeline
-- **BufferManager Integration**: `bindBuffer()` automatically detects buffer type and calls appropriate named binding method
 
 **Observed Results**:
 ```
@@ -877,18 +875,19 @@ pub const GeometryPass = struct {
 2. ✅ Implement material buffer creation via BufferManager
 3. ✅ Connect to AssetManager for data (read-only)
 4. ✅ Implement automatic buffer rebuild when materials change
-5. ✅ Bind via ResourceBinder with named binding "MaterialBuffer"
+5. ✅ Provide `getCurrentBuffer()` for ResourceBinder binding (NO binding logic in MaterialSystem)
 6. ✅ Integrate with Engine core systems
 7. ✅ Test hot-reload and buffer updates
 
 #### TextureSystem  
-1. ⏳ Create `texture_system.zig`
-2. ⏳ Implement texture descriptor array building
-3. ⏳ Connect to AssetManager for texture list (read-only)
-4. ⏳ Implement automatic descriptor array rebuild when textures load
-5. ⏳ Bind via ResourceBinder with named binding "textures"
-6. ⏳ Integrate with Engine core systems
-7. ⏳ Test texture loading and hot-reload
+1. ✅ Create `texture_system.zig`
+2. ✅ Implement texture descriptor array building
+3. ✅ Provide `getTextureIndex(asset_id)` API for MaterialSystem
+4. ✅ Connect to AssetManager for texture list (read-only)
+5. ✅ Implement automatic descriptor array rebuild when textures load
+6. ✅ Provide `getDescriptorArray()` for ResourceBinder binding (NO binding logic in TextureSystem)
+7. ⏳ Integrate with Engine core systems
+8. ⏳ Test texture loading and hot-reload
 
 #### MaterialSystem ↔ TextureSystem Integration
 When materials are created/updated:
@@ -941,8 +940,22 @@ const material = Material{
   - No manual dirty tracking or resource management
 
 **What's Pending**:
-- ⏳ **TextureSystem**: Move texture descriptor array from AssetManager
-- ⏳ **GeometryPass**: Remove texture descriptor management
+- ⏳ **Engine Integration**: Add TextureSystem to Engine core systems
+- ⏳ **MaterialSystem ↔ TextureSystem**: Update MaterialSystem to query texture indices via TextureSystem.getTextureIndex()
+- ⏳ **GeometryPass**: Remove texture descriptor management, use TextureSystem.getDescriptorArray()
+
+**What's Done (November 6, 2025)**:
+- ✅ **TextureSystem**: Created following MaterialSystem pattern
+  - Manages texture descriptor array (NO binding logic)
+  - Provides `getTextureIndex(asset_id)` for MaterialSystem
+  - Provides `getDescriptorArray()` for ResourceBinder
+  - Auto-rebuilds when textures load/unload
+  - Tracks generation counter for cache invalidation
+- ✅ **Clean Separation of Concerns**: Removed binding logic from domain managers
+  - Removed `BufferManager.bindBuffer()` - binding is ResourceBinder's job
+  - Removed `MaterialSystem.bindMaterialBuffer()` - MaterialSystem just provides data
+  - TextureSystem designed without any binding logic from the start
+  - All binding now done exclusively through ResourceBinder
 
 ---
 

@@ -406,7 +406,6 @@ pub const ResourceBinder = struct {
         }
 
         try self.bindUniformBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
-        log(.DEBUG, "resource_binder", "Bound uniform buffer '{s}' to set:{} binding:{}", .{ binding_name, location.set, location.binding });
     }
 
     /// Bind a storage buffer by name
@@ -430,7 +429,6 @@ pub const ResourceBinder = struct {
         }
 
         try self.bindStorageBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
-        log(.DEBUG, "resource_binder", "Bound storage buffer '{s}' to set:{} binding:{}", .{ binding_name, location.set, location.binding });
     }
 
     /// Bind a texture by name
@@ -454,7 +452,6 @@ pub const ResourceBinder = struct {
         }
 
         try self.bindTexture(pipeline_id, location.set, location.binding, image_view, sampler, layout, frame_index);
-        log(.DEBUG, "resource_binder", "Bound texture '{s}' to set:{} binding:{}", .{ binding_name, location.set, location.binding });
     }
 
     /// Convenience function to bind a full uniform buffer by name
@@ -502,7 +499,6 @@ pub const ResourceBinder = struct {
         };
 
         try self.pipeline_system.bindResource(pipeline_id, location.set, location.binding, resource, frame_index);
-        log(.DEBUG, "resource_binder", "Bound texture array '{s}' ({} textures) to set:{} binding:{}", .{ binding_name, image_infos.len, location.set, location.binding });
     }
 
     /// Update descriptor bindings for a specific pipeline and frame

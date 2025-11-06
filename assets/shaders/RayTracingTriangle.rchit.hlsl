@@ -34,10 +34,11 @@ struct Vertex
   float3 normal;
   float2 uv;
 };
-
 struct Material {
-    uint albedoTextureIndex;
-    float roughness;
+    uint albedoTextureIndex;        // 0 = use albedo_color, >0 = sample texture
+    uint roughnessTextureIndex;     // 0 = use roughness value, >0 = sample texture
+    float4 albedo_color;              // Used when albedoTextureIndex == 0 or as tint
+    float roughness;                // Used when roughnessTextureIndex == 0
     float metallic;
     float emissive;
     float4 emissive_color;

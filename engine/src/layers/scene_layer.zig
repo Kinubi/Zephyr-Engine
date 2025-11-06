@@ -55,7 +55,7 @@ pub const SceneLayer = struct {
 
             if (scheduler) |*sched| {
 
-                // Stage 1: Light animation (modifies light transforms)
+                // Stage 1: Independent parallel systems
                 const stage1 = &sched.stages.items[0];
 
                 stage1.addSystem(.{
@@ -69,7 +69,6 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add light animation system: {}", .{err});
                 };
 
-                // Add ScriptingSystem into the SAME stage as LightAnimation to test parallelism
                 stage1.addSystem(.{
                     .name = "ScriptingSystem",
                     .update_fn = ecs.updateScriptingSystem,
@@ -81,9 +80,21 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add scripting system: {}", .{err});
                 };
 
-                // Stage 2: Transform updates (processes all transforms including animated lights)
-                if (sched.addStage("TransformUpdates")) |stage3| {
-                    stage3.addSystem(.{
+                // TextureSystem - manages texture descriptor array (independent)
+                stage1.addSystem(.{
+                    .name = "TextureSystem",
+                    .update_fn = ecs.updateTextureSystem,
+                    .access = .{
+                        .reads = &[_][]const u8{},
+                        .writes = &[_][]const u8{"Textures"}, // Accesses AssetManager, no ECS components
+                    },
+                }) catch |err| {
+                    log(.WARN, "scene_layer", "Failed to add texture system: {}", .{err});
+                };
+
+                // Stage 2: Systems that depend on Stage 1 (TextureSystem)
+                if (sched.addStage("DependentSystems")) |stage2| {
+                    stage2.addSystem(.{
                         .name = "TransformSystem",
                         .update_fn = ecs.updateTransformSystem,
                         .access = .{
@@ -92,6 +103,18 @@ pub const SceneLayer = struct {
                         },
                     }) catch |err| {
                         log(.WARN, "scene_layer", "Failed to add transform system: {}", .{err});
+                    };
+
+                    // MaterialSystem - depends on TextureSystem for texture index resolution
+                    stage2.addSystem(.{
+                        .name = "MaterialSystem",
+                        .update_fn = ecs.updateMaterialSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{"Textures"}, // Reads TextureSystem, no ECS components
+                            .writes = &[_][]const u8{}, // Writes GPU buffers, no ECS components
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
                     };
                 } else |err| {
                     log(.WARN, "scene_layer", "Failed to add stage 2: {}", .{err});
