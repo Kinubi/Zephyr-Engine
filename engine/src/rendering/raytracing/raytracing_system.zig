@@ -187,6 +187,10 @@ pub const RaytracingSystem = struct {
 
         // Clean up existing SBT if it exists
         if (self.shader_binding_table != vk.Buffer.null_handle) {
+            // Untrack existing SBT memory
+            if (self.gc.*.memory_tracker) |tracker| {
+                tracker.untrackAllocation("raytracing_sbt");
+            }
             self.gc.*.vkd.destroyBuffer(self.gc.*.dev, self.shader_binding_table, null);
             self.gc.*.vkd.freeMemory(self.gc.*.dev, self.shader_binding_table_memory, null);
         }
@@ -231,6 +235,13 @@ pub const RaytracingSystem = struct {
 
         self.shader_binding_table_memory = try self.gc.*.vkd.allocateMemory(self.gc.*.dev, &alloc_info, null);
         try self.gc.*.vkd.bindBufferMemory(self.gc.*.dev, self.shader_binding_table, self.shader_binding_table_memory, 0);
+
+        // Track shader binding table memory allocation
+        if (self.gc.*.memory_tracker) |tracker| {
+            tracker.trackAllocation("raytracing_sbt", memory_requirements.size, .buffer) catch |err| {
+                std.log.warn("Failed to track SBT allocation: {}", .{err});
+            };
+        }
 
         // Map memory and copy shader handles
         const mapped_memory = try self.gc.*.vkd.mapMemory(self.gc.*.dev, self.shader_binding_table_memory, 0, sbt_size, .{});
@@ -291,7 +302,9 @@ pub const RaytracingSystem = struct {
                     self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old.buffer) catch |err| {
                         log(.ERROR, "raytracing", "Failed to queue old TLAS buffer: {}", .{err});
                         if (self.gc.memory_tracker) |tracker| {
-                            tracker.untrackAllocation("tlas_structure");
+                            var name_buf: [64]u8 = undefined;
+                            const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{d}", .{@intFromEnum(old.acceleration_structure)}) catch "tlas_unknown";
+                            tracker.untrackAllocation(tlas_name);
                         }
                         var immediate = old.buffer;
                         immediate.deinit();
@@ -336,7 +349,9 @@ pub const RaytracingSystem = struct {
                 log(.ERROR, "raytracing", "Failed to queue old BLAS handle for destruction: {}", .{err});
                 self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
                 if (self.gc.memory_tracker) |tracker| {
-                    tracker.untrackAllocation("blas_structure");
+                    var name_buf: [64]u8 = undefined;
+                    const blas_name = std.fmt.bufPrint(&name_buf, "blas_{d}", .{@intFromEnum(old_blas.acceleration_structure)}) catch "blas_unknown";
+                    tracker.untrackAllocation(blas_name);
                 }
                 var immediate = old_blas.buffer;
                 immediate.deinit();
@@ -347,7 +362,9 @@ pub const RaytracingSystem = struct {
                 log(.ERROR, "raytracing", "Failed to queue old BLAS buffer for destruction: {}", .{err});
                 self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_blas.acceleration_structure, null);
                 if (self.gc.memory_tracker) |tracker| {
-                    tracker.untrackAllocation("blas_structure");
+                    var name_buf: [64]u8 = undefined;
+                    const blas_name = std.fmt.bufPrint(&name_buf, "blas_{d}", .{@intFromEnum(old_blas.acceleration_structure)}) catch "blas_unknown";
+                    tracker.untrackAllocation(blas_name);
                 }
                 var immediate = old_blas.buffer;
                 immediate.deinit();
@@ -494,7 +511,9 @@ pub const RaytracingSystem = struct {
             log(.INFO, "raytracing", "Deinit: destroying TLAS from registry {x}", .{@intFromEnum(entry.acceleration_structure)});
             self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, entry.acceleration_structure, null);
             if (self.gc.memory_tracker) |tracker| {
-                tracker.untrackAllocation("tlas_structure");
+                var name_buf: [64]u8 = undefined;
+                const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{d}", .{@intFromEnum(entry.acceleration_structure)}) catch "tlas_unknown";
+                tracker.untrackAllocation(tlas_name);
             }
             var buf = entry.buffer;
             buf.deinit();
@@ -520,7 +539,13 @@ pub const RaytracingSystem = struct {
         }
 
         // Destroy shader binding table buffer and free its memory
-        if (self.shader_binding_table != .null_handle) self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
+        if (self.shader_binding_table != .null_handle) {
+            // Untrack SBT memory before destroying
+            if (self.gc.memory_tracker) |tracker| {
+                tracker.untrackAllocation("raytracing_sbt");
+            }
+            self.gc.vkd.destroyBuffer(self.gc.dev, self.shader_binding_table, null);
+        }
         if (self.shader_binding_table_memory != .null_handle) self.gc.vkd.freeMemory(self.gc.dev, self.shader_binding_table_memory, null);
     }
 
@@ -528,33 +553,33 @@ pub const RaytracingSystem = struct {
     /// Called after GPU has finished using resources for a particular frame
     fn flushDestroyQueue(self: *RaytracingSystem, queue: *PerFrameDestroyQueue) void {
         // Destroy BLAS acceleration structures and their backing buffers
-        for (queue.blas_handles.items) |handle| {
+        // Process handles and buffers together to match tracking
+        for (queue.blas_handles.items, queue.blas_buffers.items) |handle, *buf| {
             self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-        }
-        queue.blas_handles.clearRetainingCapacity();
-
-        for (queue.blas_buffers.items) |*buf| {
-            // Untrack BLAS memory before destroying
+            // Untrack BLAS memory using unique handle-based name
             if (self.gc.memory_tracker) |tracker| {
-                tracker.untrackAllocation("blas_structure");
+                var name_buf: [64]u8 = undefined;
+                const blas_name = std.fmt.bufPrint(&name_buf, "blas_{d}", .{@intFromEnum(handle)}) catch "blas_unknown";
+                tracker.untrackAllocation(blas_name);
             }
             buf.deinit();
         }
+        queue.blas_handles.clearRetainingCapacity();
         queue.blas_buffers.clearRetainingCapacity();
 
         // Destroy TLAS acceleration structures and their backing buffers
-        for (queue.tlas_handles.items) |handle| {
+        // Process handles and buffers together to match tracking
+        for (queue.tlas_handles.items, queue.tlas_buffers.items) |handle, *buf| {
             self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, handle, null);
-        }
-        queue.tlas_handles.clearRetainingCapacity();
-
-        for (queue.tlas_buffers.items) |*buf| {
-            // Untrack TLAS memory before destroying
+            // Untrack TLAS memory using unique handle-based name
             if (self.gc.memory_tracker) |tracker| {
-                tracker.untrackAllocation("tlas_structure");
+                var name_buf: [64]u8 = undefined;
+                const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{d}", .{@intFromEnum(handle)}) catch "tlas_unknown";
+                tracker.untrackAllocation(tlas_name);
             }
             buf.deinit();
         }
+        queue.tlas_handles.clearRetainingCapacity();
         queue.tlas_buffers.clearRetainingCapacity();
 
         for (queue.tlas_instance_buffers.items) |*buf| {

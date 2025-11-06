@@ -134,28 +134,17 @@ pub const TonemapPass = struct {
 
         // Bind HDR view+sampler from FrameInfo.hdr_texture for current frame
         const hdr_tex = frame_info.hdr_texture orelse return error.InvalidState;
-        const hdr_resource = Resource{ .image = .{
-            .image_view = hdr_tex.image_view,
-            .sampler = hdr_tex.sampler,
-            .layout = .shader_read_only_optimal,
-        } };
+        const hdr_resource = Resource{
+            .image = .{
+                .image_view = hdr_tex.image_view,
+                .sampler = hdr_tex.sampler,
+                .layout = .general, // Unified layout - always GENERAL
+            },
+        };
         try self.pipeline_system.bindResource(self.pipeline, 0, 0, hdr_resource, frame_index);
         try self.resource_binder.updateFrame(self.pipeline, frame_index);
 
-        // Transition HDR image to SHADER_READ_ONLY for sampling
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.hdr_texture.?.image,
-            .color_attachment_optimal,
-            .shader_read_only_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // No transitions needed with unified image layouts!
 
         // Setup dynamic rendering targeting the LDR swapchain image (no depth)
         const rendering = DynamicRenderingHelper.init(
@@ -192,36 +181,7 @@ pub const TonemapPass = struct {
 
         rendering.end(self.graphics_context, cmd);
 
-        // Transition swapchain LDR image from color_attachment_optimal to shader_read_only_optimal
-        // so the UI layer can sample/blit from it
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.color_image,
-            .color_attachment_optimal,
-            .shader_read_only_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
-
-        // Transition HDR image to SHADER_READ_ONLY for sampling
-        self.graphics_context.transitionImageLayout(
-            cmd,
-            frame_info.hdr_texture.?.image,
-            .shader_read_only_optimal,
-            .color_attachment_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // No transitions needed! Images stay in GENERAL layout
     }
 
     fn teardownImpl(base: *RenderPass) void {

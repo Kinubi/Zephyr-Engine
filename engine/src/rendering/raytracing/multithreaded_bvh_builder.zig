@@ -520,13 +520,6 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
         .{ .device_local_bit = true },
     );
 
-    // Track BLAS memory allocation
-    if (builder.gc.memory_tracker) |tracker| {
-        tracker.trackAllocation("blas_structure", size_info.acceleration_structure_size, .blas) catch |err| {
-            log(.WARN, "bvh_builder", "Failed to track BLAS allocation: {}", .{err});
-        };
-    }
-
     // Create acceleration structure
     var as_create_info = vk.AccelerationStructureCreateInfoKHR{
         .s_type = vk.StructureType.acceleration_structure_create_info_khr,
@@ -538,6 +531,15 @@ fn buildBlasSynchronous(builder: *MultithreadedBvhBuilder, geometry: *const Geom
     };
 
     const blas = try builder.gc.vkd.createAccelerationStructureKHR(builder.gc.dev, &as_create_info, null);
+
+    // Track BLAS memory allocation with unique handle-based name
+    if (builder.gc.memory_tracker) |tracker| {
+        var name_buf: [64]u8 = undefined;
+        const blas_name = std.fmt.bufPrint(&name_buf, "blas_{d}", .{@intFromEnum(blas)}) catch "blas_unknown";
+        tracker.trackAllocation(blas_name, size_info.acceleration_structure_size, .blas) catch |err| {
+            log(.WARN, "bvh_builder", "Failed to track BLAS allocation: {}", .{err});
+        };
+    }
 
     // Create scratch buffer
     const scratch_buffer = try Buffer.init(
@@ -686,13 +688,6 @@ pub fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []cons
         .{ .device_local_bit = true },
     );
 
-    // Track TLAS memory allocation
-    if (builder.gc.memory_tracker) |tracker| {
-        tracker.trackAllocation("tlas_structure", tlas_size_info.acceleration_structure_size, .tlas) catch |err| {
-            log(.WARN, "bvh_builder", "Failed to track TLAS allocation: {}", .{err});
-        };
-    }
-
     // Create TLAS acceleration structure
     var tlas_create_info = vk.AccelerationStructureCreateInfoKHR{
         .s_type = vk.StructureType.acceleration_structure_create_info_khr,
@@ -704,6 +699,15 @@ pub fn buildTlasSynchronous(builder: *MultithreadedBvhBuilder, instances: []cons
     };
 
     const tlas = try builder.gc.vkd.createAccelerationStructureKHR(builder.gc.dev, &tlas_create_info, null);
+
+    // Track TLAS memory allocation with unique handle-based name
+    if (builder.gc.memory_tracker) |tracker| {
+        var name_buf: [64]u8 = undefined;
+        const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{d}", .{@intFromEnum(tlas)}) catch "tlas_unknown";
+        tracker.trackAllocation(tlas_name, tlas_size_info.acceleration_structure_size, .tlas) catch |err| {
+            log(.WARN, "bvh_builder", "Failed to track TLAS allocation: {}", .{err});
+        };
+    }
 
     // Create scratch buffer
     const tlas_scratch_buffer = try Buffer.init(

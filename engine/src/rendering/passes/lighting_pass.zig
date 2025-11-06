@@ -227,6 +227,15 @@ pub const LightingPass = struct {
                 0,
             );
 
+            // Track light buffer memory allocation
+            if (self.graphics_context.memory_tracker) |tracker| {
+                var name_buf: [32]u8 = undefined;
+                const key = std.fmt.bufPrint(&name_buf, "light_buffer_{}", .{i}) catch "light_buffer_unknown";
+                tracker.trackAllocation(key, mem_reqs.size, .buffer) catch |err| {
+                    std.log.warn("Failed to track light buffer allocation: {}", .{err});
+                };
+            }
+
             self.light_buffers[i] = buffer;
             self.light_memories[i] = memory;
         }
@@ -327,6 +336,12 @@ pub const LightingPass = struct {
         // Destroy light buffers
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
             if (self.light_buffers[i]) |buffer| {
+                // Untrack light buffer memory before destroying
+                if (self.graphics_context.memory_tracker) |tracker| {
+                    var name_buf: [32]u8 = undefined;
+                    const key = std.fmt.bufPrint(&name_buf, "light_buffer_{}", .{i}) catch "light_buffer_unknown";
+                    tracker.untrackAllocation(key);
+                }
                 self.graphics_context.vkd.destroyBuffer(self.graphics_context.dev, buffer, null);
             }
             if (self.light_memories[i]) |memory| {

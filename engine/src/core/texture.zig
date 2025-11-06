@@ -69,24 +69,17 @@ pub const Texture = struct {
             else => false,
         };
 
-        // Determine appropriate layout based on usage flags
-        if (usage.color_attachment_bit) {
-            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.color_attachment_optimal;
-        } else if (usage.depth_stencil_attachment_bit) {
+        // With VK_KHR_synchronization2 + unified image layouts, use GENERAL everywhere
+        // This is just as efficient as specialized layouts and eliminates transitions
+        if (usage.depth_stencil_attachment_bit) {
             aspect_mask = if (formatHasStencil)
                 (vk.ImageAspectFlags{ .depth_bit = true, .stencil_bit = true })
             else
                 (vk.ImageAspectFlags{ .depth_bit = true });
-            image_layout = vk.ImageLayout.depth_stencil_attachment_optimal;
-        } else if (usage.storage_bit) {
-            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.general;
         } else {
-            // Sampled-only texture (no attachment or storage usage)
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.shader_read_only_optimal;
         }
+        image_layout = vk.ImageLayout.general;
         const image_info = vk.ImageCreateInfo{
             .s_type = vk.StructureType.image_create_info,
             .image_type = .@"2d",
@@ -107,11 +100,11 @@ pub const Texture = struct {
         var image: vk.Image = undefined;
         var memory: vk.DeviceMemory = undefined;
         try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image, &memory);
-        
+
         // Query memory size for tracking
         const mem_reqs = gc.vkd.getImageMemoryRequirements(gc.dev, image);
         const memory_size = mem_reqs.size;
-        
+
         var view_info = vk.ImageViewCreateInfo{
             .s_type = vk.StructureType.image_view_create_info,
             .view_type = vk.ImageViewType.@"2d",
@@ -205,26 +198,17 @@ pub const Texture = struct {
             else => false,
         };
 
-        if (usage.color_attachment_bit) {
-            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.color_attachment_optimal;
-        } else if (usage.depth_stencil_attachment_bit) {
+        // With VK_KHR_synchronization2 + unified image layouts, use GENERAL everywhere
+        // This is just as efficient as specialized layouts and eliminates transitions
+        if (usage.depth_stencil_attachment_bit) {
             aspect_mask = if (formatHasStencil)
                 (vk.ImageAspectFlags{ .depth_bit = true, .stencil_bit = true })
             else
                 (vk.ImageAspectFlags{ .depth_bit = true });
-            image_layout = vk.ImageLayout.depth_stencil_attachment_optimal;
-        } else if (usage.storage_bit) {
-            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.general;
-        } else if (usage.transfer_dst_bit) {
-            // Common for staging destination before sampling
-            aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.transfer_dst_optimal;
         } else {
             aspect_mask = vk.ImageAspectFlags{ .color_bit = true };
-            image_layout = vk.ImageLayout.shader_read_only_optimal;
         }
+        image_layout = vk.ImageLayout.general;
 
         const image_info = vk.ImageCreateInfo{
             .s_type = vk.StructureType.image_create_info,
@@ -553,7 +537,7 @@ pub const Texture = struct {
             .descriptor = vk.DescriptorImageInfo{
                 .sampler = sampler,
                 .image_view = image_view,
-                .image_layout = vk.ImageLayout.shader_read_only_optimal,
+                .image_layout = vk.ImageLayout.general,
             },
             .gc = gc,
         };
@@ -731,7 +715,7 @@ pub const Texture = struct {
             .descriptor = vk.DescriptorImageInfo{
                 .sampler = sampler,
                 .image_view = image_view,
-                .image_layout = vk.ImageLayout.shader_read_only_optimal,
+                .image_layout = vk.ImageLayout.general,
             },
             .gc = gc,
         };
@@ -848,7 +832,7 @@ pub const Texture = struct {
             transition2_cmd,
             texture.image,
             .transfer_dst_optimal,
-            .shader_read_only_optimal,
+            .general,
             .{
                 .aspect_mask = .{ .color_bit = true },
                 .base_mip_level = 0,
@@ -860,7 +844,7 @@ pub const Texture = struct {
         try gc.endSingleTimeCommands(transition2_cmd);
 
         // Update descriptor layout
-        texture.descriptor.image_layout = .shader_read_only_optimal;
+        texture.descriptor.image_layout = .general;
 
         return texture;
     }
@@ -903,7 +887,7 @@ pub const Texture = struct {
                 tracker.untrackAllocation(key);
             }
         }
-        
+
         // Destroy Vulkan resources in reverse order of creation
         self.gc.vkd.destroySampler(self.gc.dev, self.sampler, null);
         self.gc.vkd.destroyImageView(self.gc.dev, self.image_view, null);

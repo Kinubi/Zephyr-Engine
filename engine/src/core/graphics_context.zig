@@ -16,6 +16,7 @@ const required_device_extensions = [_][*:0]const u8{
     vk.extensions.khr_ray_query.name,
     vk.extensions.khr_deferred_host_operations.name,
     vk.extensions.ext_swapchain_maintenance_1.name,
+    vk.extensions.khr_synchronization_2.name,
 };
 
 const optional_device_extensions = [_][*:0]const u8{};
@@ -49,6 +50,7 @@ const apis: []const vk.ApiInfo = &.{
     vk.extensions.khr_acceleration_structure,
     vk.extensions.ext_swapchain_maintenance_1,
     vk.extensions.ext_surface_maintenance_1,
+    vk.extensions.khr_synchronization_2,
 };
 
 /// Next, pass the `apis` to the wrappers to create dispatch tables.
@@ -522,7 +524,6 @@ pub const GraphicsContext = struct {
             .depth_stencil_attachment_optimal => vk.AccessFlags{ .depth_stencil_attachment_write_bit = true, .depth_stencil_attachment_read_bit = true },
             .transfer_src_optimal => vk.AccessFlags{ .transfer_read_bit = true },
             .transfer_dst_optimal => vk.AccessFlags{ .transfer_write_bit = true },
-            .shader_read_only_optimal => vk.AccessFlags{ .shader_read_bit = true },
             .present_src_khr => vk.AccessFlags{},
             else => vk.AccessFlags{},
         };
@@ -536,7 +537,6 @@ pub const GraphicsContext = struct {
             .color_attachment_optimal => vk.PipelineStageFlags{ .color_attachment_output_bit = true },
             .depth_stencil_attachment_optimal => vk.PipelineStageFlags{ .early_fragment_tests_bit = true },
             .transfer_src_optimal, .transfer_dst_optimal => vk.PipelineStageFlags{ .transfer_bit = true },
-            .shader_read_only_optimal => vk.PipelineStageFlags{ .fragment_shader_bit = true },
             .present_src_khr => vk.PipelineStageFlags{ .bottom_of_pipe_bit = true },
             else => vk.PipelineStageFlags{ .all_commands_bit = true },
         };
@@ -1147,7 +1147,7 @@ pub const GraphicsContext = struct {
                 .src_access_mask = vk.AccessFlags{ .transfer_read_bit = true },
                 .dst_access_mask = vk.AccessFlags{ .shader_read_bit = true },
                 .old_layout = vk.ImageLayout.transfer_src_optimal,
-                .new_layout = vk.ImageLayout.shader_read_only_optimal,
+                .new_layout = vk.ImageLayout.general,
                 .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
                 .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
                 .image = image,
@@ -1180,7 +1180,7 @@ pub const GraphicsContext = struct {
             .src_access_mask = vk.AccessFlags{ .transfer_write_bit = true },
             .dst_access_mask = vk.AccessFlags{ .shader_read_bit = true },
             .old_layout = vk.ImageLayout.transfer_dst_optimal,
-            .new_layout = vk.ImageLayout.shader_read_only_optimal,
+            .new_layout = vk.ImageLayout.general,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .image = image,
@@ -1358,6 +1358,12 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .dynamic_rendering = .true,
     };
     vulkan12_features.p_next = &dynamic_rendering_features;
+
+    // Enable synchronization2 features (includes unified image layouts)
+    var sync2_features = vk.PhysicalDeviceSynchronization2Features{
+        .synchronization_2 = .true,
+    };
+    dynamic_rendering_features.p_next = &sync2_features;
 
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);

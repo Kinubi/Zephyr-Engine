@@ -128,7 +128,13 @@ pub const Transform = struct {
     /// Set rotation by Euler angles (keeps compatibility)
     pub fn setRotation(self: *Transform, rot: math.Vec3) void {
         const q = math.Quat.fromEuler(rot.x, rot.y, rot.z).normalize();
-        if (self.rotation.x != q.x or self.rotation.y != q.y or self.rotation.z != q.z or self.rotation.w != q.w) {
+        // Use epsilon-based comparison to avoid floating-point precision issues
+        const epsilon: f32 = 1e-6;
+        const dx = @abs(self.rotation.x - q.x);
+        const dy = @abs(self.rotation.y - q.y);
+        const dz = @abs(self.rotation.z - q.z);
+        const dw = @abs(self.rotation.w - q.w);
+        if (dx > epsilon or dy > epsilon or dz > epsilon or dw > epsilon) {
             self.rotation = q;
             self.dirty = true;
         }
@@ -137,7 +143,13 @@ pub const Transform = struct {
     /// Set rotation directly by quaternion
     pub fn setRotationQuat(self: *Transform, rot: math.Quat) void {
         const q = rot.normalize();
-        if (self.rotation.x != q.x or self.rotation.y != q.y or self.rotation.z != q.z or self.rotation.w != q.w) {
+        // Use epsilon-based comparison to avoid floating-point precision issues
+        const epsilon: f32 = 1e-6;
+        const dx = @abs(self.rotation.x - q.x);
+        const dy = @abs(self.rotation.y - q.y);
+        const dz = @abs(self.rotation.z - q.z);
+        const dw = @abs(self.rotation.w - q.w);
+        if (dx > epsilon or dy > epsilon or dz > epsilon or dw > epsilon) {
             self.rotation = q;
             self.dirty = true;
         }

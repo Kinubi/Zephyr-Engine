@@ -65,13 +65,19 @@ pub fn DenseSet(comptime T: type) type {
             try self.sparse.put(entity, dense_idx);
         }
 
-        /// Get a mutable reference to a component
-        /// Marks component as modified (increments version)
-        pub fn get(self: *Self, entity: EntityId) ?*T {
+        /// Get a mutable reference to a component and mark it as modified
+        /// Increments version for change tracking - use getNoMark() for read-only access
+        pub fn getMut(self: *Self, entity: EntityId) ?*T {
             const idx = self.sparse.get(entity) orelse return null;
             self.global_version +%= 1;
             self.versions.items[idx] = self.global_version;
             return &self.components.items[idx];
+        }
+
+        /// Get a mutable reference to a component (deprecated, use getMut or getNoMark)
+        /// For backwards compatibility - marks component as modified
+        pub fn get(self: *Self, entity: EntityId) ?*T {
+            return self.getMut(entity);
         }
 
         /// Get a mutable reference without marking as modified

@@ -312,32 +312,39 @@ pub const Quat = struct {
 
     /// Convert quaternion to Euler angles (x=pitch, y=yaw, z=roll) in radians.
     /// Uses the same Tait-Bryan X-Y-Z ordering as Quat.fromEuler.
+    /// Direct conversion without matrix construction for better performance.
     pub fn toEuler(self: Quat) Vec3 {
-        const mat = self.toMat4().data;
-        // Access rotation matrix elements using column-major layout
-        const r00 = mat[0];
-        const r10 = mat[1];
-        const r20 = mat[2];
-        const r01 = mat[4];
-        const r11 = mat[5];
-        const r21 = mat[6];
-        const r22 = mat[10];
+        // Direct quaternion-to-Euler conversion using Tait-Bryan X-Y-Z convention
+        // This avoids constructing the full 4x4 rotation matrix
+        const qx = self.x;
+        const qy = self.y;
+        const qz = self.z;
+        const qw = self.w;
+
+        // Calculate matrix elements directly from quaternion components
+        const r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
+        const r10 = 2.0 * (qx * qy + qw * qz);
+        const r20 = 2.0 * (qx * qz - qw * qy);
+        const r21 = 2.0 * (qy * qz + qw * qx);
+        const r22 = 1.0 - 2.0 * (qx * qx + qy * qy);
 
         const sy = -r20;
         var x: f32 = 0;
         var y: f32 = 0;
         var z: f32 = 0;
         const EPS = 1e-6;
-        // Avoid depending on std.math.abs to prevent name-resolution issues; use inline abs
         const sy_abs = if (sy < 0.0) -sy else sy;
         if (sy_abs < 1.0 - EPS) {
             x = std.math.atan2(r21, r22);
             y = std.math.asin(sy);
             z = std.math.atan2(r10, r00);
         } else {
-            // Gimbal lock
+            // Gimbal lock case
             x = 0.0;
             y = if (sy > 0.0) PI / 2.0 else -PI / 2.0;
+            // For gimbal lock, calculate roll differently
+            const r01 = 2.0 * (qx * qy - qw * qz);
+            const r11 = 1.0 - 2.0 * (qx * qx + qz * qz);
             z = std.math.atan2(-r01, r11);
         }
         return Vec3.init(x, y, z);

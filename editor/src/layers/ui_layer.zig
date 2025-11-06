@@ -230,6 +230,12 @@ pub const UILayer = struct {
             self.ui_renderer.renderHierarchy(self.scene);
         }
 
+        // Note: Camera aspect ratio is updated in begin() via ensureViewportTargets().
+        // ImGui computes the new viewport_size during this render() call, which will be
+        // used in the next frame's begin() to create correctly-sized textures and update
+        // the camera projection. This one-frame delay is unavoidable since we can't know
+        // the viewport size until ImGui has laid out the UI.
+
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {
             try pm.beginPass("imgui", frame_info.current_frame, frame_info.command_buffer);
@@ -238,19 +244,7 @@ pub const UILayer = struct {
         // Render ImGui to command buffer
         try self.imgui_context.render(frame_info.command_buffer, self.swapchain, frame_info.current_frame);
 
-        self.swapchain.gc.transitionImageLayout(
-            frame_info.command_buffer,
-            frame_info.color_image,
-            .shader_read_only_optimal,
-            .color_attachment_optimal,
-            .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        );
+        // No transition needed - attachment_optimal supports both rendering and sampling
 
         // End GPU timing
         if (self.performance_monitor) |pm| {
@@ -471,8 +465,6 @@ fn destroyOldViewportTextures(self: *UILayer) void {
 
 /// Recreates HDR textures for all swap images at the given extent.
 fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.Extent2D) !void {
-    log(.INFO, "ui_layer", "Recreating HDR textures at size {}x{}", .{ extent.width, extent.height });
-
     const extent3d = makeExtent3D(extent);
     const color_barrier = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },
@@ -497,7 +489,7 @@ fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
             frame_info.command_buffer,
             swap_img.hdr_texture.image,
             .undefined,
-            .color_attachment_optimal,
+            .general, // Unified layout - stays in GENERAL forever
             color_barrier,
         );
     }
@@ -531,7 +523,7 @@ fn recreateLDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
             frame_info.command_buffer,
             ldr_tex.image,
             .undefined,
-            .color_attachment_optimal,
+            .general, // Unified layout - stays in GENERAL forever
             color_barrier,
         );
 
@@ -546,6 +538,8 @@ fn recreateLDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
 fn updateCameraAspect(self: *UILayer) void {
     const aspect = @as(f32, @floatFromInt(self.viewport_extent.width)) /
         @as(f32, @floatFromInt(self.viewport_extent.height));
+    // Update camera's stored aspect ratio so controller doesn't overwrite with old value
+    self.camera.aspectRatio = aspect;
     self.camera.setPerspectiveProjection(zephyr.math.radians(self.camera.fov), aspect, self.camera.nearPlane, self.camera.farPlane);
 }
 

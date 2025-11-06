@@ -1920,7 +1920,7 @@ pub const Resource = union(enum) {
     image: struct {
         image_view: vk.ImageView,
         sampler: vk.Sampler,
-        layout: vk.ImageLayout = .shader_read_only_optimal,
+        layout: vk.ImageLayout = .general,
     },
     image_array: []const vk.DescriptorImageInfo,
     buffer_array: []const vk.DescriptorBufferInfo,

@@ -157,11 +157,34 @@ pub const World = struct {
         try storage.emplace(entity, value);
     }
 
-    pub fn get(self: *World, comptime T: type, entity: EntityId) ?*T {
+    /// Get a mutable reference to a component and mark it as modified
+    pub fn getMut(self: *World, comptime T: type, entity: EntityId) ?*T {
         const type_name = @typeName(T);
         const storage_ptr = self.storages.get(type_name) orelse return null;
         const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
-        return storage.get(entity);
+        return storage.getMut(entity);
+    }
+
+    /// Get a mutable reference (deprecated, use getMut or getNoMark)
+    /// Marks component as modified for backwards compatibility
+    pub fn get(self: *World, comptime T: type, entity: EntityId) ?*T {
+        return self.getMut(T, entity);
+    }
+
+    /// Get a mutable reference without marking as modified
+    pub fn getNoMark(self: *World, comptime T: type, entity: EntityId) ?*T {
+        const type_name = @typeName(T);
+        const storage_ptr = self.storages.get(type_name) orelse return null;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+        return storage.getNoMark(entity);
+    }
+
+    /// Get a const reference to a component (read-only)
+    pub fn getConst(self: *const World, comptime T: type, entity: EntityId) ?*const T {
+        const type_name = @typeName(T);
+        const storage_ptr = self.storages.get(type_name) orelse return null;
+        const storage: *DenseSet(T) = @ptrCast(@alignCast(storage_ptr));
+        return storage.getConst(entity);
     }
 
     pub fn has(self: *const World, comptime T: type, entity: EntityId) bool {

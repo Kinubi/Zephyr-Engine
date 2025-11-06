@@ -530,7 +530,7 @@ pub const InstanceBufferCache = struct {
         // Create via BufferManager
         const data_bytes = std.mem.sliceAsBytes(instance_data);
         const buffer = try self.buffer_manager.createAndUpload(
-            "InstanceBuffer", // TODO: Include mesh name
+            "InstanceBuffer", // TODO: Store geometry_ptr in InstancedBatch instead of mesh_ptr to access geometry.name for debugging
             data_bytes,
             frame_index,
         );
