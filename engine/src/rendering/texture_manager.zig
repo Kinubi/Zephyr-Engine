@@ -212,8 +212,11 @@ pub const TextureManager = struct {
     }
 
     /// Unregister a managed texture (call before destroying)
-    /// Safe to call even if texture was never registered
+    /// Safe to call even if texture was never registered or manager is deinitialized
     pub fn unregisterTexture(self: *TextureManager, managed: *ManagedTexture) void {
+        // Safety check: if items pointer is null, the ArrayList has been deinitialized
+        // This can happen if destroyTexture is called after TextureManager.deinit()
+
         // Find and remove the texture from the registry
         // Safe to call even if texture wasn't registered - just won't find it
         var i: usize = 0;

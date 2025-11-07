@@ -300,17 +300,6 @@ pub const Engine = struct {
             ms.deinit();
         }
 
-        log(.INFO, "engine", "Cleaning up TextureManager...", .{});
-        if (self.texture_manager) |tm| {
-            tm.deinit();
-            self.allocator.destroy(tm);
-        }
-
-        log(.INFO, "engine", "Cleaning up BufferManager...", .{});
-        if (self.buffer_manager) |bm| {
-            bm.deinit();
-        }
-
         log(.INFO, "engine", "Cleaning up ResourceBinder...", .{});
         if (self.resource_binder) |rb| {
             rb.deinit();
@@ -366,10 +355,20 @@ pub const Engine = struct {
         log(.INFO, "engine", "Cleaning up Swapchain...", .{});
         self.swapchain.deinit();
 
-        // Graphics context
-        log(.INFO, "engine", "Cleaning up GraphicsContext...", .{});
-        self.graphics_context.deinit();
+        log(.INFO, "engine", "Cleaning up TextureManager...", .{});
+        if (self.texture_manager) |tm| {
+            tm.deinit();
+            self.allocator.destroy(tm);
+        }
 
+        log(.INFO, "engine", "Cleaning up BufferManager...", .{});
+        if (self.buffer_manager) |bm| {
+            bm.deinit();
+
+            // Graphics context
+            log(.INFO, "engine", "Cleaning up GraphicsContext...", .{});
+            self.graphics_context.deinit();
+        }
         // Memory tracker (print statistics before cleanup)
         log(.INFO, "engine", "Cleaning up MemoryTracker...", .{});
         if (self.memory_tracker) |tracker| {
