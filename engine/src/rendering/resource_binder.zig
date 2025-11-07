@@ -7,45 +7,40 @@ const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const ShaderReflection = @import("../assets/shader_compiler.zig").ShaderReflection;
 const ManagedBuffer = @import("buffer_manager.zig").ManagedBuffer;
+const ManagedTextureArray = @import("../ecs/systems/material_system.zig").ManagedTextureArray;
+const ManagedTLAS = @import("raytracing/raytracing_system.zig").ManagedTLAS;
 const log = @import("../utils/log.zig").log;
 
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 // ============================================================================
-// TODO: MAJOR REFACTOR - NAMED RESOURCE BINDING & CENTRALIZED MANAGEMENT
+// RESOURCE BINDING SYSTEM - GENERATION-BASED AUTOMATIC REBINDING
 // ============================================================================
 //
-// GOAL: Simplify render passes by moving resource management here
+// STATUS: ✅ IMPLEMENTED (November 2025)
 //
-// 1. NAMED RESOURCE BINDING API
-//    Replace numeric binding indices with descriptive names:
+// FEATURES:
+// 1. ✅ NAMED RESOURCE BINDING API
+//    - bindUniformBufferNamed() / bindStorageBufferNamed() for buffers
+//    - bindTextureNamed() / bindTextureArrayNamed() for textures
+//    - bindAccelerationStructureNamed() for ray tracing
+//    - Names resolved from shader reflection
 //
-//    Before:
-//      resource_binder.bindUniformBuffer(pipeline, 0, 2, light_buffer, ...);
+// 2. ✅ GENERATION-BASED TRACKING
+//    - Each resource (buffer, texture, TLAS) has a generation counter
+//    - Generation increments when resource handle changes (recreation)
+//    - updateFrame() automatically rebinds when generation changes
+//    - Avoids unnecessary descriptor updates (data-only changes don't increment)
 //
-//    After:
-//      resource_binder.bindBuffer("LightBuffer", light_buffer);
-//      resource_binder.bindTexture("AlbedoMap", albedo_texture);
-//      resource_binder.bindStorageBuffer("ParticleData", particle_buffer);
+// 3. ✅ AUTOMATIC RESOURCE VALIDATION
+//    - Warning if binding name doesn't exist in shader
+//    - Validation errors caught at bind time
+//    - Per-frame generation tracking
 //
-//    Implementation:
-//    - Add StringHashMap([]const u8, BindingLocation) for name->binding lookup
-//    - Cache string hashes for performance
-//    - Load binding names from shader reflection or config file
-//
-// 2. CENTRALIZED RESOURCE MANAGEMENT
-//    Move resource lifetime tracking OUT of render passes:
-//    - Track texture updates/invalidation
-//    - Track buffer recreation/resizing
-//    - Automatically rebind resources when pipelines change
-//    - Handle descriptor set invalidation
-//
-//    Render passes should ONLY contain rendering logic, not resource checks!
-//
-// 3. AUTOMATIC RESOURCE VALIDATION
-//    - Warn if binding name doesn't exist in shader
-//    - Error if required binding is missing before draw
-//    - Track which resources are "dirty" and need rebinding
+// FUTURE ENHANCEMENTS:
+// - Automatic validation of required bindings before draw
+// - Descriptor set pooling and caching
+// - Multi-threaded descriptor allocation
 //
 // ============================================================================
 
@@ -399,14 +394,12 @@ pub const ResourceBinder = struct {
     // ============================================================================
 
     /// Bind a uniform buffer by name
+    /// Takes a ManagedBuffer, binds for all frames, and tracks generation changes
     pub fn bindUniformBufferNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        buffer: *Buffer,
-        offset: vk.DeviceSize,
-        range: vk.DeviceSize,
-        frame_index: u32,
+        managed_buffer: *const ManagedBuffer,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -418,7 +411,27 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        try self.bindUniformBuffer(pipeline_id, location.set, location.binding, buffer, offset, range, frame_index);
+        // Register for generation tracking (once)
+        try self.registerBufferByName(binding_name, pipeline_id, managed_buffer);
+
+        if (managed_buffer.generation == 0) {
+            // Buffer not created yet - skip initial bind, updateFrame will bind it later
+            return;
+        }
+
+        // Bind the Vulkan buffer handle for all frames using buffer's size
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const frame_index = @as(u32, @intCast(frame_idx));
+            try self.bindUniformBuffer(
+                pipeline_id,
+                location.set,
+                location.binding,
+                @constCast(&managed_buffer.buffer),
+                0, // offset
+                managed_buffer.size, // use buffer's actual size
+                frame_index,
+            );
+        }
     }
 
     /// Bind a managed storage buffer by name for all frames
@@ -444,7 +457,6 @@ pub const ResourceBinder = struct {
 
         if (managed_buffer.generation == 0) {
             // Buffer not created yet - skip initial bind, updateFrame will bind it later
-            log(.DEBUG, "resource_binder", "Registered '{s}' but skipping initial bind - generation 0 (not ready)", .{binding_name});
             return;
         }
 
@@ -484,6 +496,49 @@ pub const ResourceBinder = struct {
         }
 
         try self.bindTexture(pipeline_id, location.set, location.binding, image_view, sampler, layout, frame_index);
+    }
+
+    /// Bind an acceleration structure (TLAS) by name for all frames
+    /// Automatically registers the TLAS for generation-based tracking
+    pub fn bindAccelerationStructureNamed(
+        self: *ResourceBinder,
+        pipeline_id: PipelineId,
+        binding_name: []const u8,
+        managed_tlas: *const ManagedTLAS,
+    ) !void {
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        // Note: There's no specific acceleration_structure type in BindingType yet
+        // Acceleration structures are typically storage images or special descriptors
+        // We'll skip type validation for now since it's a special case
+
+        // Register for generation tracking
+        try self.registerAccelerationStructureByName(binding_name, pipeline_id, managed_tlas);
+
+        if (managed_tlas.generation == 0) {
+            // TLAS not created yet - skip initial bind, updateFrame will bind it later
+            return;
+        }
+
+        // Bind the acceleration structure for all frames
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const frame_index = @as(u32, @intCast(frame_idx));
+
+            const resource = Resource{
+                .acceleration_structure = managed_tlas.acceleration_structure,
+            };
+
+            try self.pipeline_system.bindResource(
+                pipeline_id,
+                location.set,
+                location.binding,
+                resource,
+                frame_index,
+            );
+        }
     }
 
     /// Convenience function to bind a full uniform buffer by name
@@ -532,7 +587,6 @@ pub const ResourceBinder = struct {
 
         // Don't bind if generation is 0 (not created yet) or if descriptor array is empty - updateFrame will bind it later
         if (managed_textures.generation == 0 or managed_textures.descriptor_infos.len == 0) {
-            log(.DEBUG, "resource_binder", "Registered '{s}' but skipping initial bind - generation {} with {} descriptors (not ready)", .{ binding_name, managed_textures.generation, managed_textures.descriptor_infos.len });
             return;
         }
 
@@ -588,11 +642,6 @@ pub const ResourceBinder = struct {
                 res.set = location.set;
                 res.binding = location.binding;
                 // Don't update last_generation - that happens in updateFrame
-                log(.DEBUG, "resource_binder", "Updated tracked buffer '{s}': current gen={}, last bound gen={}", .{
-                    binding_name,
-                    managed_buffer.generation,
-                    res.last_generation,
-                });
                 return;
             }
         }
@@ -619,15 +668,13 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         binding_name: []const u8,
         pipeline_id: PipelineId,
-        managed_textures: *const @import("../ecs/systems/material_system.zig").ManagedTextureArray,
+        managed_textures: *const ManagedTextureArray,
     ) !void {
         // Look up the binding location
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Cannot track texture array '{s}': binding not found", .{binding_name});
             return error.UnknownBinding;
         };
-
-        const ManagedTextureArray = @import("../ecs/systems/material_system.zig").ManagedTextureArray;
 
         // Check if we're already tracking this resource
         for (self.tracked_resources.items) |*res| {
@@ -641,11 +688,6 @@ pub const ResourceBinder = struct {
                 } };
                 res.set = location.set;
                 res.binding = location.binding;
-                log(.DEBUG, "resource_binder", "Updated tracked texture array '{s}': current gen={}, last bound gen={}", .{
-                    binding_name,
-                    managed_textures.generation,
-                    res.last_generation,
-                });
                 return;
             }
         }
@@ -667,6 +709,55 @@ pub const ResourceBinder = struct {
         log(.INFO, "resource_binder", "Registered tracked texture array '{s}': gen={}", .{
             binding_name,
             managed_textures.generation,
+        });
+    }
+
+    /// Register a managed TLAS (acceleration structure) for automatic generation tracking
+    fn registerAccelerationStructureByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        managed_tlas: *const ManagedTLAS,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track acceleration structure '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource
+                res.resource = .{ .acceleration_structure = .{
+                    .ptr = @ptrCast(@constCast(managed_tlas)),
+                    .generation_offset = @offsetOf(ManagedTLAS, "generation"),
+                } };
+                res.set = location.set;
+                res.binding = location.binding;
+                return;
+            }
+        }
+
+        // Register new tracked resource
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .acceleration_structure = .{
+                .ptr = @ptrCast(@constCast(managed_tlas)),
+                .generation_offset = @offsetOf(ManagedTLAS, "generation"),
+            } },
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+
+        log(.INFO, "resource_binder", "Registered tracked acceleration structure '{s}': gen={}", .{
+            binding_name,
+            managed_tlas.generation,
         });
     }
 
@@ -730,13 +821,6 @@ pub const ResourceBinder = struct {
             // Check if generation changed
             if (current_gen == res.last_generation) continue;
 
-            log(.DEBUG, "resource_binder", "Detected generation change for '{s}': {} -> {} (pipeline: {})", .{
-                res.name,
-                res.last_generation,
-                current_gen,
-                pipeline_id.hash,
-            });
-
             // Rebind based on resource type
             switch (res.resource) {
                 .managed_buffer => |managed_buffer| {
@@ -781,12 +865,11 @@ pub const ResourceBinder = struct {
                 },
                 .texture_array => |arr| {
                     // Cast back to ManagedTextureArray to access descriptor_infos
-                    const ManagedTextureArray = @import("../ecs/systems/material_system.zig").ManagedTextureArray;
+
                     const managed_textures: *const ManagedTextureArray = @ptrCast(@alignCast(arr.ptr));
 
                     // Don't rebind if descriptor array is empty
                     if (managed_textures.descriptor_infos.len == 0) {
-                        log(.DEBUG, "resource_binder", "Skipping rebind of '{s}' - empty descriptor array", .{res.name});
                         continue;
                     }
 
@@ -812,6 +895,38 @@ pub const ResourceBinder = struct {
                         res.last_generation,
                         current_gen,
                         managed_textures.descriptor_infos.len,
+                    });
+                },
+                .acceleration_structure => |as| {
+                    // Cast back to ManagedTLAS to access acceleration_structure handle
+                    const managed_tlas: *const ManagedTLAS = @ptrCast(@alignCast(as.ptr));
+
+                    // Don't rebind if TLAS not created yet
+                    if (managed_tlas.acceleration_structure == vk.AccelerationStructureKHR.null_handle) {
+                        continue;
+                    }
+
+                    // Rebind the acceleration structure for ALL frames
+                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                        const bind_frame = @as(u32, @intCast(frame_idx));
+
+                        const resource = Resource{
+                            .acceleration_structure = managed_tlas.acceleration_structure,
+                        };
+
+                        try self.pipeline_system.bindResource(
+                            res.pipeline_id,
+                            res.set,
+                            res.binding,
+                            resource,
+                            bind_frame,
+                        );
+                    }
+
+                    log(.INFO, "resource_binder", "Rebound acceleration structure '{s}' for all frames (generation {} -> {})", .{
+                        res.name,
+                        res.last_generation,
+                        current_gen,
                     });
                 },
                 .texture => {
@@ -955,7 +1070,7 @@ const BoundResource = struct {
         managed_buffer: *const @import("buffer_manager.zig").ManagedBuffer,
         texture: TextureResource,
         texture_array: TextureArrayResource,
-        // acceleration_structure: *const AccelerationStructure, // Future
+        acceleration_structure: AccelerationStructureResource,
     };
 
     const TextureResource = struct {
@@ -968,6 +1083,11 @@ const BoundResource = struct {
         generation_offset: usize,
     };
 
+    const AccelerationStructureResource = struct {
+        ptr: *anyopaque, // Points to ManagedTLAS
+        generation_offset: usize, // Offset to u32 generation field
+    };
+
     /// Get current generation of the resource
     fn getCurrentGeneration(self: *const BoundResource) u32 {
         return switch (self.resource) {
@@ -978,6 +1098,10 @@ const BoundResource = struct {
             },
             .texture_array => |arr| blk: {
                 const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(arr.ptr) + arr.generation_offset);
+                break :blk gen_ptr.*;
+            },
+            .acceleration_structure => |as| blk: {
+                const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(as.ptr) + as.generation_offset);
                 break :blk gen_ptr.*;
             },
         };

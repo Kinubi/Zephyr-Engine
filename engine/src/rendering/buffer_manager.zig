@@ -131,10 +131,6 @@ pub const BufferManager = struct {
             .last_updated = self.frame_counter,
         });
 
-        log(.DEBUG, "buffer_manager", "Created buffer '{s}': {} bytes, strategy: {}", .{
-            config.name, config.size, config.strategy,
-        });
-
         return managed;
     }
 
@@ -186,17 +182,14 @@ pub const BufferManager = struct {
             },
         }
 
-        // Increment generation to signal change
-        managed_buffer.generation += 1;
+        // Note: Generation is NOT incremented on data updates
+        // Generation only increments when the buffer handle changes (recreation)
+        // Data updates don't require descriptor set rebinding
 
         // Update statistics
         if (self.all_buffers.getPtr(managed_buffer.name)) |stats| {
             stats.last_updated = self.frame_counter;
         }
-
-        log(.DEBUG, "buffer_manager", "Updated buffer '{s}': {} bytes, generation {}", .{
-            managed_buffer.name, data.len, managed_buffer.generation,
-        });
     }
 
     /// Called at frame start to cleanup old buffers
@@ -212,19 +205,17 @@ pub const BufferManager = struct {
     /// Queue buffer for deferred destruction
     pub fn destroyBuffer(self: *BufferManager, managed_buffer: ManagedBuffer) !void {
         const slot = &self.deferred_buffers[self.current_frame];
-        
+
         // Duplicate the name string since the original may be freed before cleanup
         const owned_name = try self.allocator.dupe(u8, managed_buffer.name);
-        
+
         var buffer_copy = managed_buffer;
         buffer_copy.name = owned_name;
-        
+
         try slot.append(self.allocator, buffer_copy);
 
         // Remove from statistics
         _ = self.all_buffers.remove(managed_buffer.name);
-
-        log(.DEBUG, "buffer_manager", "Queued buffer '{s}' for destruction", .{managed_buffer.name});
     }
 
     /// Print memory statistics
@@ -279,14 +270,17 @@ pub const BufferManager = struct {
 
         // Copy from staging to destination buffer using graphics context
         try self.graphics_context.copyFromStagingBuffer(dst.buffer, &staging, data.len);
-
-        log(.DEBUG, "buffer_manager", "Staging upload completed for {} bytes", .{data.len});
     }
 
     /// Cleanup buffers in ring slot
     fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(ManagedBuffer)) void {
         for (slot.items) |*managed| {
+            // Clear tracking name before deinit to prevent use-after-free
+            // (the buffer's tracking_name points to managed.name which we'll free)
+            managed.buffer.tracking_name = null;
+
             managed.buffer.deinit();
+
             // Free the duplicated name string
             self.allocator.free(managed.name);
         }

@@ -211,9 +211,14 @@ pub const LightVolumePass = struct {
     fn updateDescriptors(self: *LightVolumePass) !void {
         // Bind global UBO and light SSBO for all frames
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+            const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
+
+            // Skip if buffer not created yet (generation 0)
+            if (ubo_managed_buffer.generation == 0) continue;
+
             const ubo_resource = Resource{
                 .buffer = .{
-                    .buffer = self.global_ubo_set.buffers[frame_idx].buffer,
+                    .buffer = ubo_managed_buffer.buffer.buffer,
                     .offset = 0,
                     .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
                 },

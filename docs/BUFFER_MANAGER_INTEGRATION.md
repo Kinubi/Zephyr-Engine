@@ -1,17 +1,61 @@
 # BufferManager Integration Guide
 
+**Status**: ✅ **COMPLETE** - Phase 8 implemented (November 2025)
+
 ## Overview
 
-The BufferManager system has been implemented and is ready for integration into the rendering pipeline. This guide shows how to migrate from direct Buffer usage to managed buffer lifecycle.
+The BufferManager system has been successfully integrated into the rendering pipeline with generation-based tracking for automatic descriptor rebinding. This guide documents the final implementation and best practices.
 
 ## Key Features Implemented
 
 - ✅ **Strategy-based buffer creation** (device_local, host_visible, host_cached)
 - ✅ **Ring buffer cleanup system** for frame-safe destruction 
+- ✅ **Generation tracking** for automatic descriptor rebinding
 - ✅ **Memory tracking integration** via statistics system
 - ✅ **Staging buffer uploads** for device-local buffers
-- ✅ **ResourceBinder integration points** (placeholder implementation)
+- ✅ **ResourceBinder integration** with named binding API
+- ✅ **GlobalUBO migration** to BufferManager with per-frame buffers
 - ✅ **Comprehensive API** matching the design specification
+
+## Generation Tracking System
+
+### How It Works
+
+**Generation Counter**: Each ManagedBuffer has a `generation` field that tracks when the buffer handle changes.
+
+**Key Principles**:
+- Generation starts at **1** when buffer is created
+- Generation **stays constant** during normal operation
+- Generation **only increments** if buffer is recreated (new VkBuffer handle)
+- Data updates via `updateBuffer()` do NOT increment generation
+
+**Why This Design?**
+- Buffer data can be updated without changing the VkBuffer handle
+- Descriptor sets can be reused when only data changes
+- Only new buffer handles require descriptor rebinding
+- Eliminates unnecessary descriptor updates every frame
+
+### Example
+
+```zig
+// Buffer created with generation 1
+var ubo = try buffer_manager.createBuffer(.{
+    .name = "GlobalUBO",
+    .size = @sizeOf(GlobalUboData),
+    .strategy = .host_visible,
+    .usage = .{ .uniform_buffer_bit = true },
+}, frame_index);
+// ubo.generation == 1
+
+// Many frames later...
+for (0..1000) |_| {
+    try buffer_manager.updateBuffer(&ubo, &new_data, frame_index);
+    // ubo.generation STILL == 1 (same VkBuffer)
+}
+
+// ResourceBinder sees generation hasn't changed
+// -> No descriptor rebinding needed
+```
 
 ## Migration Steps
 
@@ -95,27 +139,109 @@ try buffer_manager.updateBuffer(&uniform_buffer, matrix_data, frame_index);
 
 ### Current Rendering Passes
 
-The BufferManager can be integrated into existing passes:
+The BufferManager has been integrated into existing passes:
 
-1. **Geometry Pass**: Use device-local buffers for static mesh data
-2. **Lighting Pass**: Replace uniform buffer creation with managed buffers  
-3. **UI Pass**: Use host-visible buffers for dynamic UI elements
-4. **Particle System**: Use managed buffers for particle data updates
+1. **Geometry Pass**: Uses BufferManager for GlobalUBO with generation tracking
+2. **Lighting Pass**: Uses managed buffers with per-frame tracking
+3. **Particle System**: Uses managed buffers for particle data
+4. **Path Tracing**: Uses BufferManager for ray tracing buffers
 
 ### ResourceBinder Integration
 
-The placeholder ResourceBinder integration needs completion:
+✅ **COMPLETE**: ResourceBinder now fully integrated with BufferManager:
 
 ```zig
-// TODO: Complete this integration in bindBuffer method
-pub fn bindBuffer(self: *BufferManager, managed_buffer: *ManagedBuffer, binding_name: []const u8, frame_index: u32) !void {
-    // Get descriptor info
-    const descriptor_info = managed_buffer.getDescriptorInfo();
+// Bind uniform buffer with automatic generation tracking
+pub fn bindUniformBufferNamed(
+    self: *ResourceBinder,
+    pipeline_id: PipelineId,
+    binding_name: []const u8,
+    managed_buffer: ManagedBuffer,
+) !void {
+    // Automatically binds for ALL frames
+    // Registers buffer for generation tracking
+    // updateFrame() will rebind if generation changes
+}
+
+// Example usage in render pass
+try resource_binder.bindUniformBufferNamed(
+    pipeline_id,
+    "GlobalUbo",
+    global_ubo.getBuffer(frame_index),
+);
+```
+
+## GlobalUBO Implementation
+
+### Architecture
+
+GlobalUboSet now uses BufferManager with per-frame buffers:
+
+```zig
+pub const GlobalUboSet = struct {
+    buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer,
+    buffer_manager: *BufferManager,
     
-    // Bind via ResourceBinder named binding
-    try self.resource_binder.bindBuffer(binding_name, descriptor_info);
+    pub fn init(buffer_manager: *BufferManager) !GlobalUboSet {
+        var self = GlobalUboSet{
+            .buffers = undefined,
+            .buffer_manager = buffer_manager,
+        };
+        
+        // Create all 3 buffers upfront (one per frame)
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            self.buffers[i] = try buffer_manager.createBuffer(.{
+                .name = "GlobalUBO",
+                .size = @sizeOf(GlobalUbo),
+                .strategy = .host_visible,
+                .usage = .{ .uniform_buffer_bit = true },
+            }, @intCast(i));
+        }
+        
+        return self;
+    }
     
-    // Store binding info for debugging
+    pub fn update(self: *GlobalUboSet, data: GlobalUbo, frame_index: u32) !void {
+        // Just update buffer data - no recreation
+        const data_bytes = std.mem.asBytes(&data);
+        try self.buffer_manager.updateBuffer(
+            &self.buffers[frame_index],
+            data_bytes,
+            frame_index,
+        );
+        // Generation stays at 1 - no rebinding needed
+    }
+    
+    pub fn getBuffer(self: *GlobalUboSet, frame_index: u32) ManagedBuffer {
+        return self.buffers[frame_index];
+    }
+};
+```
+
+### Key Design Decisions
+
+1. **Per-frame buffers created once**: All 3 buffers created in `init()`, not lazily
+2. **Just update data**: `update()` only writes new data, doesn't recreate buffers
+3. **Generation stays constant**: Buffer handle never changes, generation stays at 1
+4. **No descriptor rebinding**: Same VkBuffer used for entire application lifetime
+
+### Benefits
+
+- **Cleaner API**: No more manual buffer creation in passes
+- **Automatic cleanup**: BufferManager handles destruction
+- **Type safety**: ManagedBuffer wraps Buffer with metadata
+- **Performance**: No unnecessary descriptor updates (generation tracking)
+- **Consistency**: All buffers managed the same way
+
+## Next Steps
+
+With Phase 8 complete, the system is ready for:
+
+1. **BaseRenderPass**: Zero-boilerplate render pass API using ResourceBinder
+2. **Additional buffer types**: Instance buffers, material buffers, etc.
+3. **Advanced features**: Buffer resizing, recreation with generation increment
+4. **Performance profiling**: Measure descriptor update overhead savings
+
     managed_buffer.binding_info = .{
         .set = descriptor_set,
         .binding = binding_point,

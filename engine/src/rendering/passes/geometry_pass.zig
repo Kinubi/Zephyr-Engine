@@ -219,8 +219,6 @@ pub const GeometryPass = struct {
 
     /// Bind resources once during setup - ResourceBinder tracks changes automatically
     fn bindResources(self: *GeometryPass) !void {
-        const GlobalUbo = @import("../frameinfo.zig").GlobalUbo;
-
         // Bind material buffer (generation tracked automatically)
         try self.resource_binder.bindStorageBufferNamed(
             self.geometry_pipeline,
@@ -235,19 +233,16 @@ pub const GeometryPass = struct {
             self.material_bindings.texture_array,
         );
 
-        // Bind resources for all frames using named binding
+        // Bind global UBO for all frames (generation tracked automatically)
+        // Takes array of 3 ManagedBuffers (one per frame-in-flight)
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            const frame_index = @as(u32, @intCast(frame_idx));
+            const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
 
-            // Bind global UBO using named binding "GlobalUbo"
-            const ubo_buffer = &self.global_ubo_set.buffers[frame_idx];
+            // Register each frame's UBO for generation tracking
             try self.resource_binder.bindUniformBufferNamed(
                 self.geometry_pipeline,
                 "GlobalUbo",
-                ubo_buffer,
-                0, // offset
-                @sizeOf(GlobalUbo),
-                frame_index,
+                ubo_managed_buffer,
             );
         }
     }

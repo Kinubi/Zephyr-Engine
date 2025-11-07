@@ -8,6 +8,8 @@ const ThreadPoolMod = @import("../../threading/thread_pool.zig");
 
 const RenderData = @import("../../rendering/render_data_types.zig");
 const RenderSystem = @import("../../ecs/systems/render_system.zig").RenderSystem;
+const MeshRenderer = @import("../../ecs/components/mesh_renderer.zig").MeshRenderer;
+const Transform = @import("../../ecs/components/transform.zig").Transform;
 const World = @import("../../ecs/world.zig").World;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -309,8 +311,6 @@ pub const RaytracingSystem = struct {
     /// ECS-driven update: Query MeshRenderer components and build acceleration structure sets from them
     /// This follows the ECS philosophy: systems query components, not explicit API calls
     pub fn updateFromECS(self: *RaytracingSystem, world: *World, asset_manager: *AssetManager) !void {
-        const MeshRenderer = @import("../../ecs/components/mesh_renderer.zig").MeshRenderer;
-        const Transform = @import("../../ecs/components/transform.zig").Transform;
 
         // Query all entities with MeshRenderer components
         var mesh_view = try world.view(MeshRenderer);

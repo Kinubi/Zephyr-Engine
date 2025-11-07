@@ -369,15 +369,10 @@ pub const AssetManager = struct {
 
         // Check if this material already exists
         if (self.registry.getAssetByPath(material_path)) |existing_metadata| {
-            const albedo_path = if (self.registry.getAsset(albedo_texture_id)) |a| a.path else "unknown";
-            log(.DEBUG, "asset_manager", "[TRACE] Reusing existing material: {} (albedo_tex={}, path={s})", .{ existing_metadata.id.toU64(), albedo_texture_id.toU64(), albedo_path });
             return existing_metadata.id;
         }
 
         const material_asset_id = try self.registry.registerAsset(material_path, .material);
-
-        const albedo_path = if (self.registry.getAsset(albedo_texture_id)) |a| a.path else "unknown";
-        log(.DEBUG, "asset_manager", "[TRACE] Creating new material: {} (albedo_tex={}, path={s})", .{ material_asset_id.toU64(), albedo_texture_id.toU64(), albedo_path });
 
         // Create the material object
         const material = try self.allocator.create(Material);
@@ -562,8 +557,6 @@ pub const AssetManager = struct {
         // Register or get existing asset ID
         const asset_id = try self.registry.registerAsset(file_path, asset_type);
 
-        log(.DEBUG, "asset_manager", "[TRACE] loadAssetAsync: path={s}, assetId={}", .{ file_path, asset_id.toU64() });
-
         // Register with hot reload manager if available
         if (self.hot_reload_manager) |hot_reload| {
             hot_reload.registerAsset(asset_id, file_path, asset_type) catch |err| {
@@ -575,7 +568,6 @@ pub const AssetManager = struct {
         if (self.registry.getAsset(asset_id)) |metadata| {
             if (metadata.state == .loaded or metadata.state == .staged or metadata.state == .loading) {
                 _ = self.stats.cache_hits.fetchAdd(1, .monotonic);
-                log(.DEBUG, "asset_manager", "[TRACE] Asset already loaded/loading: path={s}, assetId={}, state={}", .{ file_path, asset_id.toU64(), metadata.state });
                 return asset_id;
             }
         }
@@ -625,13 +617,10 @@ pub const AssetManager = struct {
         self.textures_mutex.lock();
         defer self.textures_mutex.unlock();
 
-        // Get asset path for logging
-        const asset_path = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else "unknown";
-        log(.DEBUG, "asset_manager", "[TRACE] addLoadedTexture: path={s}, assetId={}", .{ asset_path, asset_id.toU64() });
-
         // Check if this asset already has a texture index (replacing fallback)
         if (self.asset_to_texture.get(asset_id)) |existing_index| {
             // Replace the existing texture at this index
+            const asset_path = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else "unknown";
             log(.INFO, "enhanced_asset_manager", "[TRACE] Replacing texture at index {} for asset {} (path={s})", .{ existing_index, asset_id.toU64(), asset_path });
             self.loaded_textures.items[existing_index] = texture;
         } else {
@@ -639,6 +628,7 @@ pub const AssetManager = struct {
             try self.loaded_textures.append(self.allocator, texture);
             // Texture indices start at 1 (0 is reserved for "no texture")
             const index = self.loaded_textures.items.len - 1;
+            const asset_path = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else "unknown";
             log(.INFO, "enhanced_asset_manager", "[TRACE] Added texture asset {} at index {} (path={s})", .{ asset_id.toU64(), index, asset_path });
             try self.asset_to_texture.put(asset_id, index);
         }
@@ -750,19 +740,15 @@ pub const AssetManager = struct {
     /// This is the SAFE way to access assets that might still be loading
     pub fn getAssetIdForRendering(self: *AssetManager, asset_id: AssetId) AssetId {
         const asset = self.registry.getAsset(asset_id);
-        const asset_path = if (asset) |a| a.path else "unknown";
         switch (asset.?.state) {
             .loaded => {
                 // Return actual asset if loaded
-                log(.DEBUG, "asset_manager", "[TRACE] getAssetIdForRendering: assetId={} (path={s}) -> loaded, returning same ID", .{ asset_id.toU64(), asset_path });
                 return asset_id;
             },
             .staged => {
                 // Show loading indicator while asset loads
                 const fallback_id = self.fallbacks.getFallback(.staged, asset.?.asset_type);
                 if (fallback_id) |fb_id| {
-                    const fb_path = if (self.registry.getAsset(fb_id)) |fb| fb.path else "unknown";
-                    log(.DEBUG, "asset_manager", "[TRACE] getAssetIdForRendering: assetId={} (path={s}) -> staged, returning fallback {} (path={s})", .{ asset_id.toU64(), asset_path, fb_id.toU64(), fb_path });
                     return fb_id;
                 }
                 // Fallback to missing if no loading asset
@@ -773,8 +759,6 @@ pub const AssetManager = struct {
                 // Show loading indicator while asset loads
                 const fallback_id = self.fallbacks.getFallback(.loading, asset.?.asset_type);
                 if (fallback_id) |fb_id| {
-                    const fb_path = if (self.registry.getAsset(fb_id)) |fb| fb.path else "unknown";
-                    log(.DEBUG, "asset_manager", "[TRACE] getAssetIdForRendering: assetId={} (path={s}) -> loading, returning fallback {} (path={s})", .{ asset_id.toU64(), asset_path, fb_id.toU64(), fb_path });
                     return fb_id;
                 }
                 // Fallback to missing if no loading asset

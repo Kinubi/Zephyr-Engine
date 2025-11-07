@@ -340,13 +340,17 @@ pub const PathTracingPass = struct {
             // Update vertex/index buffer info from geometries
             try frame_data.updateFromGeometries(.{ .geometries = rt_data.geometries });
 
-            // Get global UBO buffer for this frame
-            const global_ubo_buffer_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+            // Get global UBO ManagedBuffer for this frame
+            const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
+
+            // Skip if buffer not created yet (generation 0)
+            if (ubo_managed_buffer.generation == 0) continue;
+
             const global_resource = Resource{
                 .buffer = .{
-                    .buffer = global_ubo_buffer_info.buffer,
-                    .offset = global_ubo_buffer_info.offset,
-                    .range = global_ubo_buffer_info.range,
+                    .buffer = ubo_managed_buffer.buffer.buffer,
+                    .offset = 0,
+                    .range = ubo_managed_buffer.size,
                 },
             };
 
@@ -437,12 +441,13 @@ pub const PathTracingPass = struct {
         // Per-frame geometry buffers: reuse existing arrays; they are rebuilt on geometry changes via full updateDescriptors()
         const frame_data = &self.per_frame[frame_idx];
 
-        // Global UBO for this frame
-        const global_info = self.global_ubo_set.buffers[frame_idx].descriptor_info;
+        // Global UBO ManagedBuffer for this frame
+        const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
+
         const global_resource = Resource{ .buffer = .{
-            .buffer = global_info.buffer,
-            .offset = global_info.offset,
-            .range = global_info.range,
+            .buffer = ubo_managed_buffer.buffer.buffer,
+            .offset = 0,
+            .range = ubo_managed_buffer.size,
         } };
 
         // Bind resources for this frame only

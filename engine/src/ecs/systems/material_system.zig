@@ -272,7 +272,7 @@ pub const MaterialSystem = struct {
             material_set.material_buffer_index = @intCast(gpu_materials.items.len);
 
             try gpu_materials.append(self.allocator, gpu_mat);
-        }        // Check if texture set changed (compare sorted texture IDs and actual descriptors)
+        } // Check if texture set changed (compare sorted texture IDs and actual descriptors)
         var current_texture_ids = std.ArrayList(u64){};
         defer current_texture_ids.deinit(self.allocator);
 
@@ -311,7 +311,6 @@ pub const MaterialSystem = struct {
                     const last_descriptor = set_data.texture_array.descriptor_infos[idx];
                     // Compare image views (main indicator that texture loaded)
                     if (current_descriptor.?.image_view != last_descriptor.image_view) {
-                        log(.DEBUG, "material_system", "[{s}] Texture {} descriptor changed (loaded)", .{ set_name, asset_id_u64 });
                         break :blk true;
                     }
                 }
@@ -327,8 +326,6 @@ pub const MaterialSystem = struct {
             // Update tracking
             set_data.last_texture_ids.clearRetainingCapacity();
             try set_data.last_texture_ids.appendSlice(self.allocator, current_texture_ids.items);
-
-            log(.DEBUG, "material_system", "[{s}] Textures changed - rebuilt array with {} textures", .{ set_name, next_texture_idx });
         }
 
         // Check if materials changed
@@ -347,12 +344,6 @@ pub const MaterialSystem = struct {
             // Update tracking
             set_data.last_materials.clearRetainingCapacity();
             try set_data.last_materials.appendSlice(self.allocator, gpu_materials.items);
-
-            log(.DEBUG, "material_system", "[{s}] Materials changed - uploaded {} materials", .{ set_name, gpu_materials.items.len });
-        }
-
-        if (textures_changed or materials_changed) {
-            log(.DEBUG, "material_system", "[{s}] Built {} materials with {} textures", .{ set_name, gpu_materials.items.len, next_texture_idx });
         }
     }
 
@@ -475,7 +466,6 @@ pub const MaterialSystem = struct {
         const gop = try self.material_sets.getOrPut(set_name);
         if (!gop.found_existing) {
             gop.value_ptr.* = MaterialSetData.init(self.allocator);
-            log(.DEBUG, "material_system", "Created empty material set: {s}", .{set_name});
         }
 
         const set_data = gop.value_ptr;

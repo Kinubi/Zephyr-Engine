@@ -234,7 +234,7 @@ pub const App = struct {
         c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
 
         global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator);
+        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator, self.engine.getBufferManager().?);
 
         try scene.initRenderGraph(
             gc,

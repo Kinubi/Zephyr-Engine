@@ -147,6 +147,7 @@ pub const BufferManager = struct {
         size: vk.DeviceSize,
         strategy: BufferStrategy,
         created_frame: u64,
+        generation: u32,  // Tracks buffer handle changes for descriptor rebinding
         binding_info: ?BindingInfo = null,
         
         pub const BindingInfo = struct {
@@ -248,6 +249,49 @@ fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(ManagedBuffer)) vo
     slot.clearRetainingCapacity();
 }
 ```
+
+#### Generation Tracking
+
+**Purpose**: Track when a buffer's Vulkan handle changes, requiring descriptor set rebinding.
+
+**Key Principles**:
+- **Generation starts at 1** when buffer is created
+- **Generation stays constant** during buffer lifetime (data updates don't increment)
+- **Generation only increments** if buffer is recreated with a new Vulkan handle
+- **ResourceBinder tracks generations** to automatically rebind when handle changes
+
+**Why Not Increment on Data Updates?**
+- Buffer data can be updated via `map()`/`unmap()` without changing the VkBuffer handle
+- The same descriptor can be reused - it points to the same buffer memory
+- Only recreating the buffer (new `vkCreateBuffer`) requires descriptor rebinding
+- This avoids unnecessary descriptor updates every frame
+
+**Example**:
+```zig
+// Buffer created with generation 1
+var ubo = try buffer_manager.createBuffer(.{
+    .name = "GlobalUBO",
+    .size = @sizeOf(GlobalUboData),
+    .strategy = .host_visible,
+    .usage = .{ .uniform_buffer_bit = true },
+}, frame_index);
+// ubo.generation == 1
+
+// Data updates don't change generation
+for (0..1000) |_| {
+    try buffer_manager.updateBuffer(&ubo, &new_data, frame_index);
+    // ubo.generation still == 1 (same VkBuffer handle)
+}
+
+// Only recreation would increment generation
+// (currently not implemented as buffers are created once)
+```
+
+**Integration with ResourceBinder**:
+- Resources (buffers, textures, acceleration structures) registered with current generation
+- `updateFrame()` checks if generation changed since last bind
+- Automatic rebinding only when necessary (handle changed)
+- Reduces descriptor update overhead
 
 ---
 
@@ -1061,16 +1105,33 @@ quad_pass.bake();
 
 ### Phase 8: GlobalUBO Migration (Week 4)
 
-**Goal**: Migrate GlobalUboSet to use BufferManager
+**Goal**: Migrate GlobalUboSet to use BufferManager with generation tracking
 
-1. ⏳ Update GlobalUboSet to use BufferManager internally
-2. ⏳ Use `host_visible` strategy (per-frame updates)
-3. ⏳ Test all passes still get correct UBO data
-4. ⏳ Remove direct Buffer.init() calls from GlobalUboSet
+1. ✅ Updated GlobalUboSet to use BufferManager internally
+2. ✅ Uses `host_visible` strategy (per-frame updates)
+3. ✅ Per-frame ManagedBuffer[3] created once, just updated
+4. ✅ Buffers registered with ResourceBinder for generation tracking
+5. ✅ Removed direct Buffer.init() calls from GlobalUboSet
+6. ✅ Updated bindUniformBufferNamed to bind all frames internally
+7. ✅ Fixed segfault in cleanup (tracking_name cleared before deinit)
+8. ✅ Added acceleration structure support to ResourceBinder
+9. ✅ Generation tracking: buffers start at gen 1, stays constant (no increment on data updates)
 
-**Validation**: UBO updates work, camera movement smooth
+**Validation**: 
+- ✅ UBO updates work correctly
+- ✅ Camera movement smooth
+- ✅ No segfaults on cleanup
+- ✅ Generations stay constant (buffer handle doesn't change)
+- ✅ All render passes updated to new API
 
-> **Status**: 🚧 **TODO** - Phase 8 not yet implemented
+> **Status**: ✅ **COMPLETE** - Phase 8 implemented and tested (November 2025)
+>
+> **Key Changes**:
+> - GlobalUboSet now uses BufferManager with ManagedBuffer[3]
+> - Buffers created once in init(), updated via updateBuffer()
+> - Generation tracking: starts at 1, remains constant for lifetime
+> - ResourceBinder handles: buffers, textures, texture arrays, acceleration structures
+> - API consistency: bindUniformBufferNamed matches bindStorageBufferNamed pattern
 
 ---
 
@@ -1553,61 +1614,78 @@ try buffer_manager.defragment(idle_time_ms);
 
 **Production Ready**: Successfully tested with textured.vert/frag geometry pass
 
-### ✅ **PHASE 3 COMPLETE** - MaterialSystem & TextureSystem Integration (November 7, 2025)
+### ✅ **PHASE 3 COMPLETE** - Pure ECS Material System (November 7, 2025)
 
 **Completed Work:**
-- ✅ **MaterialSystem with Named Sets**: Domain manager for material GPU buffers
-  - Creates/updates buffers via BufferManager
-  - Separates GPU resources from AssetManager CPU data
-  - HashMap-based named material sets ("default", "characters", etc.)
-  - Automatic rebuild on material changes (count or texture updates)
-  - Tracks TextureSystem generation for texture index synchronization
+- ✅ **MaterialSystem with String-Based Named Sets**: Domain manager for material GPU buffers
+  - Pure ECS component system (AlbedoMaterial, RoughnessMaterial, MetallicMaterial, etc.)
+  - String-based material sets via HashMap ("opaque", "transparent", custom sets)
+  - Per-set GPU resources: ManagedBuffer + ManagedTextureArray
+  - Automatic rebuild on material changes or texture loading
+  - Generation-based texture array rebinding
+  - Descriptor comparison for async texture loading detection
+  - Material index fix: Uses material_buffer_index from MaterialSet component (per-set index)
   - Frame-safe buffer destruction with deferred cleanup
-  - Dirty flag system for efficient rebuild tracking
-  - Generation=0 guard (doesn't rebuild until textures ready)
   
-- ✅ **TextureSystem with Named Sets**: Domain manager for texture descriptor arrays
-  - HashMap-based named texture sets with independent descriptor arrays
-  - **Index 0 reservation**: White dummy texture at index 0 in every set
-  - User textures start at index 1+ (proper offset handling)
-  - Automatic rebuild when textures load or descriptors change
-  - Generation counter for dependent systems (MaterialSystem)
-  - Waits for all textures to load before building descriptor array
+- ✅ **Removed TextureSystem Dependency**: MaterialSystem is now purely ECS-driven
+  - Each material set manages its own texture array
+  - No global texture system - textures scoped to material sets
+  - Entities use AlbedoMaterial/RoughnessMaterial/etc. components
+  - MaterialSet component stores set membership and material_buffer_index
   
-- ✅ **Material-to-Set Population**:
-  - `spawnProp()` adds materials to sets during entity creation
-  - `updateTextureForEntity()` adds materials during runtime texture assignment
-  - Textures automatically added to linked texture set
-  - Proper initialization order (initRenderGraph before spawnProp)
-  
-- ✅ **Deferred Buffer Destruction**:
-  - Buffer names duplicated when queued for destruction
-  - Prevents segfaults from dangling pointers
-  - Safe cleanup across multiple frames
-  - Ring buffer pattern with per-frame destruction queues
+- ✅ **Render Pipeline Updates**:
+  - GameStateSnapshot queries MaterialSet for material_buffer_index
+  - RenderSystem uses material_buffer_index from MaterialSet component
+  - All cache building paths updated (extractRenderables, workers, cache builders)
+  - Shader now references correct per-set material index
   
 - ✅ **ResourceBinder Auto-Rebinding**: 
-  - `updateFrame()` automatically detects VkBuffer handle changes
-  - Rebinds changed buffers without manual tracking
-  - Passes only call `updateFrame()` - no resource management
-  - Texture array rebinding with generation tracking
+  - `updateFrame()` automatically detects texture array generation changes
+  - Rebinds ManagedTextureArray when descriptor_infos change
+  - Tracks generation per resource for zero-overhead change detection
+  - Passes only call `updateFrame()` - no manual resource management
   
 - ✅ **Integration Verified**:
   - No validation errors
   - Clean shutdown with proper cleanup
   - Materials update correctly when textures load asynchronously
-  - Texture indices resolve correctly (0 = white dummy, 1+ = user textures)
-  - Runtime texture assignment works (drag-and-drop)
-  - Materials render with correct textures on startup
+  - Textures render correctly with proper material indices
+  - Multiple generations detected and rebound successfully (1→2→3)
+
+### ✅ **PHASE 3.1 COMPLETED** - Material Component System Integration (November 7, 2025)
+
+**Major Architectural Change - Pure ECS Material System**:
+- ✅ **Removed TextureSystem Dependency**: MaterialSystem now pure ECS component-driven
+- ✅ **String-Based Material Sets**: Changed from enum to HashMap([]const u8, MaterialSetData)
+- ✅ **Per-Set GPU Resources**: Each material set has own ManagedBuffer + ManagedTextureArray
+- ✅ **Material Component Integration**: Entity materials stored in AlbedoMaterial/RoughnessMaterial/etc. ECS components
+- ✅ **Generation-Based Rebinding**: ResourceBinder automatically detects and rebinds texture array changes
+- ✅ **Async Texture Loading**: MaterialSystem detects descriptor changes when textures finish loading asynchronously
+- ✅ **Material Index Fix**: Updated render pipeline to use material_buffer_index from MaterialSet component (per-set index, not global)
+- ✅ **Rendering Verified**: Textures rendering correctly with proper material-to-texture-to-GPU mapping
+
+**Implementation Details**:
+- MaterialSystem queries ECS components (AlbedoMaterial, etc.) to build per-set material buffers
+- Each set maintains own texture array with dynamic texture loading detection
+- ResourceBinder tracks generation changes for automatic texture array rebinding
+- Shader uses material_buffer_index from MaterialSet component for correct per-set material lookup
+- All entity render paths (snapshot, extraction, cache building) updated to use per-set indices
+
+**Files Modified**:
+- `engine/src/ecs/systems/material_system.zig` - Pure ECS, string-based sets, per-set resources
+- `engine/src/threading/game_state_snapshot.zig` - EntityRenderData includes material_buffer_index
+- `engine/src/ecs/systems/render_system.zig` - RenderableEntity uses material_buffer_index from MaterialSet
+- `engine/src/rendering/resource_binder.zig` - Generation-based texture array rebinding
+- `engine/src/ecs/components/material_set.zig` - Changed to string-based set_name
 
 ### ⏳ **REMAINING WORK** - Phases 4-9 (TODO)
 
 **What Still Needs Implementation:**
+- 🚧 **UI Integration**: Update scene_hierarchy_panel.zig to use ECS material components instead of deprecated updateTextureForEntity()
 - 🚧 **BaseRenderPass**: Convenience API for simple passes
   - `registerShader()` / `bind()` / `bake()` pattern
   - Zero-boilerplate pass creation
   - See RENDER_PASS_VISION.md for design
-- 🚧 **TextureDescriptorManager**: Moving texture descriptors out of AssetManager
 - 🚧 **Instanced Rendering**: RenderSystem batching and GeometryPass updates
 - 🚧 **Shader Updates**: SSBO bindings and `gl_InstanceIndex` usage
 - 🚧 **GlobalUBO Migration**: Complete BufferManager integration for UBOs
