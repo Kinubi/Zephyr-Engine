@@ -195,7 +195,7 @@ pub const Scene = struct {
         try self.ecs_world.emplace(Transform, entity, transform);
 
         // Add MeshRenderer component (just references the model)
-        const mesh_renderer = MeshRenderer.initModelOnly(model_id);
+        const mesh_renderer = MeshRenderer.init(model_id);
         try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
 
         // Add MaterialSet component
@@ -259,9 +259,6 @@ pub const Scene = struct {
         const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
         const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
 
-        // 2. Create a material from the texture (synchronous helper created on AssetManager)
-        const material_id = try self.asset_manager.createMaterial(texture_id);
-
         // Ensure Transform exists and mark dirty so render/compute systems will update GPU state
         if (!self.ecs_world.has(Transform, entity)) {
             const transform = Transform.init();
@@ -276,10 +273,9 @@ pub const Scene = struct {
         if (self.ecs_world.has(MeshRenderer, entity)) {
             const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
             mr.setModel(model_id);
-            mr.setMaterial(material_id);
             mr.setTexture(texture_id);
         } else {
-            const mesh_renderer = MeshRenderer.initWithTexture(model_id, material_id, texture_id);
+            const mesh_renderer = MeshRenderer.initWithTexture(model_id, texture_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
         }
 
@@ -300,7 +296,7 @@ pub const Scene = struct {
             mr.setModel(model_id);
         } else {
             // Create a model-only renderer (material will be provided by material system)
-            const mesh_renderer = MeshRenderer.initModelOnly(model_id);
+            const mesh_renderer = MeshRenderer.init(model_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
         }
 

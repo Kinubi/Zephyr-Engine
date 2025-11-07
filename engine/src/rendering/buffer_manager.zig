@@ -55,6 +55,7 @@ pub const BufferManager = struct {
 
     // Ring buffers for frame-safe cleanup
     deferred_buffers: [MAX_FRAMES_IN_FLIGHT]std.ArrayList(*ManagedBuffer),
+    stale_buffers: [MAX_FRAMES_IN_FLIGHT]std.ArrayList(Buffer), // Old Buffer objects from resizing
     current_frame: u32 = 0,
     frame_counter: u64 = 0,
 
@@ -76,6 +77,7 @@ pub const BufferManager = struct {
             .graphics_context = graphics_context,
             .resource_binder = resource_binder,
             .deferred_buffers = undefined,
+            .stale_buffers = undefined,
             .all_buffers = std.StringHashMap(BufferStats).init(allocator),
             .managed_buffers = std.ArrayList(*ManagedBuffer){},
         };
@@ -83,6 +85,10 @@ pub const BufferManager = struct {
         // Initialize ring buffer arrays
         for (&self.deferred_buffers) |*slot| {
             slot.* = std.ArrayList(*ManagedBuffer){};
+        }
+
+        for (&self.stale_buffers) |*slot| {
+            slot.* = std.ArrayList(Buffer){};
         }
 
         log(.INFO, "buffer_manager", "BufferManager initialized", .{});
@@ -93,6 +99,14 @@ pub const BufferManager = struct {
         // Clean up all deferred buffers
         for (&self.deferred_buffers) |*slot| {
             self.cleanupRingSlot(slot);
+            slot.deinit(self.allocator);
+        }
+
+        // Clean up all stale buffers
+        for (&self.stale_buffers) |*slot| {
+            for (slot.items) |*buffer| {
+                buffer.deinit();
+            }
             slot.deinit(self.allocator);
         }
 
@@ -143,12 +157,6 @@ pub const BufferManager = struct {
 
         // Automatically register for tracking
         try self.registerBuffer(managed);
-
-        log(.INFO, "buffer_manager", "Created and registered buffer '{s}' (size: {}, strategy: {})", .{
-            config.name,
-            config.size,
-            config.strategy,
-        });
 
         return managed;
     }
@@ -229,8 +237,9 @@ pub const BufferManager = struct {
             new_size,
         });
 
-        // Destroy the old Vulkan buffer
-        managed_buffer.buffer.deinit();
+        // Defer destruction of old buffer - it may still be referenced by descriptor sets
+        const old_buffer = managed_buffer.buffer;
+        try self.stale_buffers[self.current_frame].append(self.allocator, old_buffer);
 
         // Create new buffer with same strategy but new size
         const config = BufferConfig{
@@ -281,6 +290,13 @@ pub const BufferManager = struct {
     pub fn beginFrame(self: *BufferManager, frame_index: u32) void {
         self.current_frame = frame_index;
         self.frame_counter += 1;
+
+        // Cleanup stale buffers from resizing
+        const stale_slot = &self.stale_buffers[frame_index];
+        for (stale_slot.items) |*buffer| {
+            buffer.deinit();
+        }
+        stale_slot.clearRetainingCapacity();
 
         // Cleanup buffers that are now safe to destroy
         const cleanup_slot = &self.deferred_buffers[frame_index];

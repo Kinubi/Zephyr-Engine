@@ -196,7 +196,6 @@ pub const AssetLoader = struct {
         try self.asset_manager.addLoadedTexture(staging.asset_id, texture);
         self.registry.markAsLoaded(staging.asset_id, staging.image_data.len);
         self.asset_manager.texture_descriptors_dirty = true;
-        self.asset_manager.materials_dirty = true;
 
         // Mark asset as loaded
 

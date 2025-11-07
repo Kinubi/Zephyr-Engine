@@ -83,7 +83,6 @@ pub const GameObject = @import("scene/game_object.zig").GameObject;
 pub const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 pub const AssetRegistry = @import("assets/asset_registry.zig").AssetRegistry;
 pub const AssetLoader = @import("assets/asset_loader.zig").AssetLoader;
-pub const Material = @import("assets/asset_manager.zig").Material;
 pub const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
 
 // Re-export commonly used asset-related types so downstream modules (editor)

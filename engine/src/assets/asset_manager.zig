@@ -25,17 +25,6 @@ pub const AssetLoader = asset_loader.AssetLoader;
 
 const FallbackMeshes = @import("../utils/fallback_meshes.zig").FallbackMeshes;
 
-/// Material structure that matches the shader Material layout (std430)
-pub const Material = extern struct {
-    albedo_texture_id: u32 = 0,
-    roughness_texture_id: u32 = 0,
-    albedo_color: [4]f32 align(16) = [4]f32{ 1.0, 1.0, 1.0, 1.0 },
-    roughness: f32 = 0.5,
-    metallic: f32 = 0.0,
-    emissive: f32 = 0.0,
-    emissive_color: [4]f32 align(16) = [4]f32{ 0.0, 0.0, 0.0, 1.0 },
-};
-
 /// Holder for script source text owned by AssetManager
 const ScriptHolder = struct {
     source: []const u8,
@@ -247,17 +236,12 @@ pub const AssetManager = struct {
     // Core asset storage - actual loaded assets
     loaded_textures: std.ArrayList(*Texture), // Array of loaded texture pointers
     loaded_models: std.ArrayList(*Model), // Array of loaded model pointers
-    loaded_materials: std.ArrayList(*Material), // Array of loaded material pointers
     // Loaded script assets (source text stored in heap-owned buffers)
     loaded_scripts: std.ArrayList(*ScriptHolder),
-    material_buffer: ?Buffer = null, // Optional material buffer created on demand
-    material_buffer_mutex: std.Thread.Mutex = std.Thread.Mutex{},
-    stale_material_buffers: std.ArrayList(Buffer) = std.ArrayList(Buffer){},
 
     // Asset ID to array index mappings
     asset_to_texture: std.AutoHashMap(AssetId, usize), // AssetId -> texture array index
     asset_to_model: std.AutoHashMap(AssetId, usize), // AssetId -> model array index
-    asset_to_material: std.AutoHashMap(AssetId, usize), // AssetId -> material array index
     asset_to_script: std.AutoHashMap(AssetId, usize), // AssetId -> script array index
 
     // Enhanced hot reloading (heap allocated to avoid move/copy issues)
@@ -273,22 +257,15 @@ pub const AssetManager = struct {
     // Texture dirty flag - set by GPU worker when textures are loaded, checked for lazy rebuild
     texture_descriptors_dirty: bool = true,
 
-    // Dirty flags for resource updates
-    materials_dirty: bool = true,
-
     // External flags for renderers - signal when buffers/descriptors have been updated
-    materials_updated: bool = false,
     texture_descriptors_updated: bool = false,
 
     // Async update flags to track pending work
-    material_buffer_updating: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     texture_descriptors_updating: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // State tracking for transition detection (like scene_bridge pattern)
     last_texture_dirty: bool = false,
     last_texture_updating: bool = false,
-    last_material_dirty: bool = false,
-    last_material_updating: bool = false,
 
     // Thread safety for concurrent asset loading
     models_mutex: std.Thread.Mutex = std.Thread.Mutex{},
@@ -319,14 +296,11 @@ pub const AssetManager = struct {
             .fallbacks = FallbackAssets{}, // Initialize empty first
             .loaded_textures = std.ArrayList(*Texture){},
             .loaded_models = std.ArrayList(*Model){},
-            .loaded_materials = std.ArrayList(*Material){},
             .loaded_scripts = std.ArrayList(*ScriptHolder){},
             .asset_to_texture = std.AutoHashMap(AssetId, usize).init(allocator),
             .asset_to_model = std.AutoHashMap(AssetId, usize).init(allocator),
-            .asset_to_material = std.AutoHashMap(AssetId, usize).init(allocator),
             .asset_to_script = std.AutoHashMap(AssetId, usize).init(allocator),
             .pending_requests = std.AutoHashMap(AssetId, LoadRequest).init(allocator),
-            .stale_material_buffers = std.ArrayList(Buffer){},
         };
         const loader = try allocator.create(AssetLoader);
         loader.* = try AssetLoader.init(allocator, registry, graphics_context, thread_pool, self);
@@ -337,90 +311,6 @@ pub const AssetManager = struct {
 
         log(.INFO, "enhanced_asset_manager", "Enhanced asset manager initialized with thread pool", .{});
         return self;
-    }
-
-    /// Create a material synchronously
-    /// Creates a material with the given texture asset ID
-    /// Create a material with full PBR parameters
-    /// Reuses existing materials with identical parameters
-    pub fn createMaterialWithParams(
-        self: *AssetManager,
-        albedo_texture_id: AssetId,
-        roughness_texture_id: AssetId,
-        albedo_color: [4]f32,
-        roughness: f32,
-        metallic: f32,
-        emissive: f32,
-    ) !AssetId {
-        // Create a unique material path based on parameters
-        const material_path = try std.fmt.allocPrint(
-            self.allocator,
-            "material://{d}_{d}_{d}_{d}_{d}_{d}",
-            .{
-                albedo_texture_id.toU64(),
-                roughness_texture_id.toU64(),
-                @as(u32, @bitCast(roughness)),
-                @as(u32, @bitCast(metallic)),
-                @as(u32, @bitCast(emissive)),
-                @as(u32, @bitCast(albedo_color[0])), // Hash first component for uniqueness
-            },
-        );
-        defer self.allocator.free(material_path);
-
-        // Check if this material already exists
-        if (self.registry.getAssetByPath(material_path)) |existing_metadata| {
-            return existing_metadata.id;
-        }
-
-        const material_asset_id = try self.registry.registerAsset(material_path, .material);
-
-        // Create the material object
-        const material = try self.allocator.create(Material);
-
-        // Convert AssetIds to u32
-        const albedo_u32 = if (albedo_texture_id.toU64() > std.math.maxInt(u32))
-            0
-        else
-            @as(u32, @intCast(albedo_texture_id.toU64()));
-
-        const roughness_u32 = if (roughness_texture_id.toU64() > std.math.maxInt(u32))
-            0
-        else
-            @as(u32, @intCast(roughness_texture_id.toU64()));
-
-        material.* = Material{
-            .albedo_texture_id = albedo_u32,
-            .roughness_texture_id = roughness_u32,
-            .albedo_color = albedo_color,
-            .roughness = roughness,
-            .metallic = metallic,
-            .emissive = emissive,
-        };
-
-        // Add it to the loaded materials
-        try self.addLoadedMaterial(material_asset_id, material);
-
-        return material_asset_id;
-    }
-
-    pub fn createMaterialSync(self: *AssetManager, albedo_texture_id: AssetId) !AssetId {
-        // Use the full params version with defaults
-        return try self.createMaterialWithParams(
-            albedo_texture_id,
-            AssetId.invalid, // No roughness texture
-            [4]f32{ 1.0, 1.0, 1.0, 1.0 }, // White albedo tint
-            0.5, // Default roughness
-            0.0, // Non-metallic
-            0.0, // No emission
-        );
-    }
-
-    /// Add a loaded material to the asset manager
-    pub fn addLoadedMaterial(self: *AssetManager, asset_id: AssetId, material: *Material) !void {
-        const index = self.loaded_materials.items.len;
-        try self.loaded_materials.append(self.allocator, material);
-        try self.asset_to_material.put(asset_id, index);
-        self.materials_dirty = true; // Mark materials as dirty when added
     }
 
     /// Add loaded script source to the manager (called by AssetLoader)
@@ -454,11 +344,6 @@ pub const AssetManager = struct {
             }
         }
         return null;
-    }
-
-    /// Create a material asset asynchronously
-    pub fn createMaterial(self: *AssetManager, albedo_texture_id: AssetId) !AssetId {
-        return try self.createMaterialSync(albedo_texture_id);
     }
 
     /// Load a texture synchronously (like original asset manager)
@@ -514,11 +399,6 @@ pub const AssetManager = struct {
         }
         self.loaded_models.deinit(self.allocator);
 
-        for (self.loaded_materials.items) |material| {
-            self.allocator.destroy(material);
-        }
-        self.loaded_materials.deinit(self.allocator);
-
         // Clean up loaded scripts
         for (self.loaded_scripts.items) |script_holder| {
             // Free the duplicated source buffer
@@ -532,17 +412,8 @@ pub const AssetManager = struct {
         // Clean up mappings
         self.asset_to_texture.deinit();
         self.asset_to_model.deinit();
-        self.asset_to_material.deinit();
         self.asset_to_script.deinit();
         self.pending_requests.deinit();
-
-        self.flushStaleMaterialBuffers();
-        self.stale_material_buffers.deinit(self.allocator);
-
-        // Clean up material buffer
-        if (self.material_buffer) |*buffer| {
-            buffer.deinit();
-        }
 
         // Clean up texture descriptors
         if (self.texture_image_infos.len > 0) {
@@ -635,7 +506,6 @@ pub const AssetManager = struct {
 
         // Mark texture descriptors as dirty for lazy rebuild
         self.texture_descriptors_dirty = true;
-        self.materials_dirty = true; // Recompute material buffer once real texture is available
 
         // Complete the request
         self.completeRequest(asset_id, true);
@@ -890,108 +760,6 @@ pub const AssetManager = struct {
     /// Get fallback asset for given type
     pub fn getFallbackAsset(self: *AssetManager, fallback_type: FallbackType, asset_type: AssetType) ?AssetId {
         return self.fallbacks.getFallback(fallback_type, asset_type);
-    }
-
-    /// Create material buffer from loaded materials
-    pub fn createMaterialBuffer(self: *AssetManager, graphics_context: *GraphicsContext) !void {
-        if (self.loaded_materials.items.len == 0) {
-            log(.WARN, "asset_manager", "No loaded materials to create material buffer", .{});
-            return;
-        }
-
-        self.material_buffer_mutex.lock();
-        defer self.material_buffer_mutex.unlock();
-
-        const required_count: u32 = @intCast(self.loaded_materials.items.len);
-        const required_bytes: vk.DeviceSize = @intCast(@sizeOf(Material) * self.loaded_materials.items.len);
-
-        var buffer_ptr: *Buffer = undefined;
-        var needs_new_buffer = true;
-        var retire_buffer: ?Buffer = null;
-
-        if (self.material_buffer) |*existing| {
-            const reusable = existing.instance_size == @sizeOf(Material) and existing.instance_count >= required_count;
-            if (reusable) {
-                needs_new_buffer = false;
-                buffer_ptr = existing;
-                if (existing.mapped == null) {
-                    try existing.map(existing.buffer_size, 0);
-                }
-                existing.instance_count = required_count;
-            } else {
-                retire_buffer = existing.*;
-            }
-        }
-
-        if (needs_new_buffer) {
-            var new_buffer = try Buffer.init(
-                graphics_context,
-                @sizeOf(Material),
-                required_count,
-                .{
-                    .storage_buffer_bit = true,
-                },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
-            );
-
-            try new_buffer.map(new_buffer.buffer_size, 0);
-            new_buffer.instance_count = required_count;
-
-            self.material_buffer = new_buffer;
-            buffer_ptr = &self.material_buffer.?;
-
-            if (retire_buffer) |retired_value| {
-                var retired = retired_value;
-                if (retired.mapped != null) {
-                    retired.unmap();
-                }
-                try self.stale_material_buffers.append(self.allocator, retired);
-            }
-        }
-
-        if (!needs_new_buffer) {
-            // Ensure descriptor reflects current range when reusing
-            buffer_ptr.descriptor_info = .{ .buffer = buffer_ptr.buffer, .offset = 0, .range = vk.WHOLE_SIZE };
-        }
-        buffer_ptr.instance_count = required_count;
-
-        // Convert material pointers to material data with resolved texture indices
-        var material_data = try self.allocator.alloc(Material, self.loaded_materials.items.len);
-        defer self.allocator.free(material_data);
-
-        for (self.loaded_materials.items, 0..) |material_ptr, i| {
-            // Copy the base material
-            material_data[i] = material_ptr.*;
-
-            // Resolve the albedo_texture_id to an actual texture index
-            const texture_asset_id = AssetId.fromU64(@as(u64, @intCast(material_ptr.albedo_texture_id)));
-
-            const resolved_texture_id = self.getAssetIdForRendering(texture_asset_id);
-            if (texture_asset_id == AssetId.fromU64(11)) {
-                // Use default texture if albedo_texture_id is 0
-            }
-
-            // Get the texture index from the resolved asset ID
-            const texture_index = self.asset_to_texture.get(resolved_texture_id) orelse 0;
-            material_data[i].albedo_texture_id = @as(u32, @intCast(texture_index));
-        }
-
-        buffer_ptr.writeToBuffer(std.mem.sliceAsBytes(material_data), required_bytes, 0);
-
-        log(.INFO, "enhanced asset_manager", "Created material buffer with {d} materials (texture IDs resolved)", .{self.loaded_materials.items.len});
-    }
-
-    pub fn flushStaleMaterialBuffers(self: *AssetManager) void {
-        self.material_buffer_mutex.lock();
-        defer self.material_buffer_mutex.unlock();
-
-        if (self.stale_material_buffers.items.len == 0) return;
-
-        for (self.stale_material_buffers.items) |*buffer| {
-            buffer.deinit();
-        }
-
-        self.stale_material_buffers.clearRetainingCapacity();
     }
 
     /// Begin a new frame - checks for async work completion and queues updates

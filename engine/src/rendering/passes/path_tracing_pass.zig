@@ -331,7 +331,8 @@ pub const PathTracingPass = struct {
             self.path_tracing_pipeline,
             "vertex_buffer",
             geometry_buffers.vertex_infos.items,
-            geometry_buffers,
+            &geometry_buffers.vertex_infos,
+            &geometry_buffers.generation,
         );
 
         // Bind index buffers (registers for tracking even if empty)
@@ -339,7 +340,8 @@ pub const PathTracingPass = struct {
             self.path_tracing_pipeline,
             "index_buffer",
             geometry_buffers.index_infos.items,
-            geometry_buffers,
+            &geometry_buffers.index_infos,
+            &geometry_buffers.generation,
         );
     }
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {

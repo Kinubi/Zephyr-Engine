@@ -38,7 +38,6 @@ pub const GameStateSnapshot = struct {
         entity_id: ecs.EntityId,
         transform: Math.Mat4x4, // World transform matrix
         model_asset: AssetId,
-        material_asset: ?AssetId,
         material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
         texture_asset: ?AssetId,
         layer: u8,
@@ -133,7 +132,6 @@ pub fn captureSnapshot(
             .entity_id = entity,
             .transform = world_matrix,
             .model_asset = renderer.model_asset.?,
-            .material_asset = renderer.material_asset,
             .material_buffer_index = material_buffer_index,
             .texture_asset = renderer.texture_asset,
             .layer = renderer.layer,

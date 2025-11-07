@@ -139,7 +139,6 @@ pub const ResourceBinder = struct {
         // New binding - allocate and register
         const owned_name = try self.allocator.dupe(u8, name);
         try self.binding_registry.put(owned_name, location);
-        log(.INFO, "resource_binder", "Registered binding '{s}' -> set:{} binding:{} type:{}", .{ name, location.set, location.binding, location.binding_type });
     }
 
     /// Look up a binding location by name
@@ -162,7 +161,6 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         reflection: ShaderReflection,
     ) !void {
-        const initial_count = self.binding_registry.count();
 
         // Register uniform buffers
         for (reflection.uniform_buffers.items) |ub| {
@@ -222,11 +220,6 @@ pub const ResourceBinder = struct {
             };
             try self.registerBinding(as.name, location);
         }
-
-        const final_count = self.binding_registry.count();
-        const registered_count = final_count - initial_count;
-        log(.INFO, "resource_binder", "Populated {} unique bindings from shader reflection ({} total entries)", .{ registered_count, reflection.uniform_buffers.items.len + reflection.storage_buffers.items.len +
-            reflection.textures.items.len + reflection.storage_images.items.len + reflection.samplers.items.len });
     }
 
     /// Bind a uniform buffer to a pipeline
@@ -668,7 +661,8 @@ pub const ResourceBinder = struct {
         pipeline_id: PipelineId,
         binding_name: []const u8,
         buffer_infos: []const vk.DescriptorBufferInfo,
-        geometry_buffers_ptr: *const anyopaque,
+        buffer_infos_arraylist: *const std.ArrayList(vk.DescriptorBufferInfo),
+        generation_ptr: *const u32,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -680,27 +674,22 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        // Register for generation tracking (assuming generation field is at same offset for ManagedGeometryBuffers)
-        // The ManagedGeometryBuffers struct has generation as field index 2 (after vertex_infos, index_infos)
-        const ManagedGeometryBuffers = @import("raytracing/raytracing_system.zig").ManagedGeometryBuffers;
-        const generation_offset = @offsetOf(ManagedGeometryBuffers, "generation");
-
         // Check if already tracked, update if found
         for (self.tracked_resources.items) |*res| {
             if (res.pipeline_id.hash == pipeline_id.hash and
                 std.mem.eql(u8, res.name, binding_name))
             {
-                // Update the pointer (in case geometry buffers moved)
+                // Update the pointers (in case arraylist moved)
                 res.resource = .{
                     .buffer_array = .{
-                        .ptr = @constCast(geometry_buffers_ptr),
-                        .generation_offset = generation_offset,
+                        .buffer_infos_ptr = buffer_infos_arraylist,
+                        .generation_ptr = generation_ptr,
                     },
                 };
                 // Don't update last_generation - let updateFrame detect the change
-                
+
                 log(.INFO, "resource_binder", "Updated tracked buffer array '{s}', {} buffers", .{ binding_name, buffer_infos.len });
-                
+
                 // Bind immediately if we have data
                 if (buffer_infos.len > 0) {
                     for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
@@ -716,7 +705,7 @@ pub const ResourceBinder = struct {
         // Not found, add new tracked resource
         const name_copy = try self.allocator.dupe(u8, binding_name);
         log(.INFO, "resource_binder", "Registered buffer array '{s}' for tracking, {} buffers", .{ binding_name, buffer_infos.len });
-        
+
         try self.tracked_resources.append(self.allocator, BoundResource{
             .name = name_copy,
             .set = location.set,
@@ -724,8 +713,8 @@ pub const ResourceBinder = struct {
             .pipeline_id = pipeline_id,
             .resource = .{
                 .buffer_array = .{
-                    .ptr = @constCast(geometry_buffers_ptr),
-                    .generation_offset = generation_offset,
+                    .buffer_infos_ptr = buffer_infos_arraylist,
+                    .generation_ptr = generation_ptr,
                 },
             },
             .last_generation = 0, // Will be updated on first updateFrame call
@@ -733,7 +722,6 @@ pub const ResourceBinder = struct {
 
         // Bind immediately only if we have data
         if (buffer_infos.len == 0) {
-            log(.DEBUG, "resource_binder", "Buffer array '{s}' registered but empty - will bind when populated", .{binding_name});
             return;
         }
 
@@ -802,11 +790,6 @@ pub const ResourceBinder = struct {
             .pipeline_id = pipeline_id,
             .resource = .{ .managed_buffer = managed_buffer },
             .last_generation = 0, // Will bind on first updateFrame
-        });
-
-        log(.INFO, "resource_binder", "Registered tracked buffer '{s}': gen={}", .{
-            binding_name,
-            managed_buffer.generation,
         });
     }
 
@@ -1138,29 +1121,17 @@ pub const ResourceBinder = struct {
                             bind_frame,
                         );
                     }
-
-                    log(.INFO, "resource_binder", "Rebound acceleration structure '{s}' for all frames (generation {} -> {})", .{
-                        res.name,
-                        res.last_generation,
-                        current_gen,
-                    });
                 },
                 .buffer_array => |arr| {
-                    // Cast back to ManagedGeometryBuffers to access buffer_infos
-                    const ManagedGeometryBuffers = @import("raytracing/raytracing_system.zig").ManagedGeometryBuffers;
-                    const geometry_buffers: *const ManagedGeometryBuffers = @ptrCast(@alignCast(arr.ptr));
+                    // Get buffer infos directly from the ArrayList pointer
+                    const buffer_infos = arr.buffer_infos_ptr.items;
 
                     // Don't rebind if buffer array is empty
-                    const buffer_infos = if (std.mem.eql(u8, res.name, "vertex_buffer"))
-                        geometry_buffers.vertex_infos.items
-                    else if (std.mem.eql(u8, res.name, "index_buffer"))
-                        geometry_buffers.index_infos.items
-                    else
-                        &[_]vk.DescriptorBufferInfo{};
-
                     if (buffer_infos.len == 0) {
                         continue;
                     }
+
+                    log(.INFO, "resource_binder", "Rebinding buffer array '{s}' with {} buffers (generation changed)", .{ res.name, buffer_infos.len });
 
                     // Rebind the buffer array for ALL frames
                     for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
@@ -1178,13 +1149,6 @@ pub const ResourceBinder = struct {
                             bind_frame,
                         );
                     }
-
-                    log(.INFO, "resource_binder", "Rebound buffer array '{s}' for all frames (generation {} -> {}, {} buffers)", .{
-                        res.name,
-                        res.last_generation,
-                        current_gen,
-                        buffer_infos.len,
-                    });
                 },
                 .texture => {
                     // TODO: Implement single texture rebinding
@@ -1353,8 +1317,8 @@ const BoundResource = struct {
     };
 
     const BufferArrayResource = struct {
-        ptr: *anyopaque, // Points to ManagedGeometryBuffers or similar
-        generation_offset: usize, // Offset to u32 generation field
+        buffer_infos_ptr: *const std.ArrayList(vk.DescriptorBufferInfo),
+        generation_ptr: *const u32,
     };
 
     /// Get current generation of the resource
@@ -1375,8 +1339,7 @@ const BoundResource = struct {
                 break :blk gen_ptr.*;
             },
             .buffer_array => |arr| blk: {
-                const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(arr.ptr) + arr.generation_offset);
-                break :blk gen_ptr.*;
+                break :blk arr.generation_ptr.*;
             },
         };
     }

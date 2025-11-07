@@ -106,7 +106,6 @@ pub const RenderSystem = struct {
     /// Combined data from Transform + MeshRenderer
     pub const RenderableEntity = struct {
         model_asset: AssetTypeId,
-        material_asset: ?AssetTypeId,
         material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
         texture_asset: ?AssetTypeId,
         world_matrix: math.Mat4x4,
@@ -226,7 +225,6 @@ pub const RenderSystem = struct {
             // Create renderable entry
             try renderables.append(self.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
-                .material_asset = renderer.material_asset,
                 .material_buffer_index = material_buffer_index,
                 .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
@@ -277,7 +275,6 @@ pub const RenderSystem = struct {
             // Create renderable entry directly into worker-local buffer
             out.append(ctx.system.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
-                .material_asset = renderer.material_asset,
                 .material_buffer_index = material_buffer_index,
                 .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,

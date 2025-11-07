@@ -134,7 +134,7 @@ pub const ManagedGeometryBuffers = struct {
         log(.INFO, "raytracing", "Updating geometry buffers: {} geometries", .{rt_data.geometries.len});
 
         // Populate vertex and index buffer info arrays
-        for (rt_data.geometries, 0..) |geometry, i| {
+        for (rt_data.geometries) |geometry| {
             const mesh = geometry.mesh_ptr;
 
             // Add vertex buffer info
@@ -152,8 +152,6 @@ pub const ManagedGeometryBuffers = struct {
                 .range = mesh.index_buffer.?.buffer_size,
             };
             self.index_infos.appendAssumeCapacity(index_info);
-
-            log(.DEBUG, "raytracing", "  Geometry {}: vertex_buf={}, index_buf={}", .{ i, vertex_info.buffer, index_info.buffer });
         }
 
         // Increment generation to trigger descriptor rebinding
