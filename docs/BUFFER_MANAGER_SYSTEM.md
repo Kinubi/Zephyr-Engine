@@ -1553,30 +1553,52 @@ try buffer_manager.defragment(idle_time_ms);
 
 **Production Ready**: Successfully tested with textured.vert/frag geometry pass
 
-### ✅ **PHASE 3 COMPLETE** - MaterialSystem & TextureSystem Integration
+### ✅ **PHASE 3 COMPLETE** - MaterialSystem & TextureSystem Integration (November 7, 2025)
 
 **Completed Work:**
-- ✅ **MaterialSystem**: Domain manager for material GPU buffers
+- ✅ **MaterialSystem with Named Sets**: Domain manager for material GPU buffers
   - Creates/updates buffers via BufferManager
   - Separates GPU resources from AssetManager CPU data
+  - HashMap-based named material sets ("default", "characters", etc.)
   - Automatic rebuild on material changes (count or texture updates)
   - Tracks TextureSystem generation for texture index synchronization
-  - Frame-safe buffer destruction
-- ✅ **TextureSystem**: Domain manager for texture descriptor arrays
-  - Creates/updates descriptor arrays via BufferManager
-  - Manages texture index 0 as reserved (white dummy texture)
+  - Frame-safe buffer destruction with deferred cleanup
+  - Dirty flag system for efficient rebuild tracking
+  - Generation=0 guard (doesn't rebuild until textures ready)
+  
+- ✅ **TextureSystem with Named Sets**: Domain manager for texture descriptor arrays
+  - HashMap-based named texture sets with independent descriptor arrays
+  - **Index 0 reservation**: White dummy texture at index 0 in every set
+  - User textures start at index 1+ (proper offset handling)
   - Automatic rebuild when textures load or descriptors change
   - Generation counter for dependent systems (MaterialSystem)
-  - Proper 1:1 mapping between loaded_textures and descriptor array
+  - Waits for all textures to load before building descriptor array
+  
+- ✅ **Material-to-Set Population**:
+  - `spawnProp()` adds materials to sets during entity creation
+  - `updateTextureForEntity()` adds materials during runtime texture assignment
+  - Textures automatically added to linked texture set
+  - Proper initialization order (initRenderGraph before spawnProp)
+  
+- ✅ **Deferred Buffer Destruction**:
+  - Buffer names duplicated when queued for destruction
+  - Prevents segfaults from dangling pointers
+  - Safe cleanup across multiple frames
+  - Ring buffer pattern with per-frame destruction queues
+  
 - ✅ **ResourceBinder Auto-Rebinding**: 
   - `updateFrame()` automatically detects VkBuffer handle changes
   - Rebinds changed buffers without manual tracking
   - Passes only call `updateFrame()` - no resource management
+  - Texture array rebinding with generation tracking
+  
 - ✅ **Integration Verified**:
   - No validation errors
   - Clean shutdown with proper cleanup
   - Materials update correctly when textures load asynchronously
-  - Texture indices resolve correctly (0 = solid color, 1+ = sampled texture)
+  - Texture indices resolve correctly (0 = white dummy, 1+ = user textures)
+  - Runtime texture assignment works (drag-and-drop)
+  - Materials render with correct textures on startup
 
 ### ⏳ **REMAINING WORK** - Phases 4-9 (TODO)
 

@@ -63,19 +63,32 @@
 
 ---
 
-## IMMEDIATE TODO: Wire Up Material Population
+## NEXT PRIORITIES
 
-### Problem
+### 1. Path Tracing Integration (NEXT)
+- Convert PathTracingPass to use material_set
+- Test ray tracing with new texture indexing
+- Verify material buffer binding in ray tracing shaders
 
-```zig
-// Scene creates sets
-const texture_set = try texture_system.createSet("default");
-const material_set = try material_system.createSet("default", texture_set);
+### 2. Performance Testing
+- Measure rebuild frequency
+- Profile dirty flag checks
+- Optimize texture set rebuilds
 
-// But sets are empty! material_set.material_ids.items.len == 0
-// So rebuildMaterialSet() is never called
-// Generation stays 0, descriptors are black
-```
+### 3. Multi-Set Support
+- Test creating multiple material/texture sets
+- Verify independent generation tracking
+- Scene-specific or level-specific sets
+
+---
+
+## ~~COMPLETED: Material Population~~ ✅
+
+### Problem (SOLVED)
+
+~~Scene creates sets but they were empty, causing black textures.~~
+
+**Solution Implemented**: Explicit material-to-set assignment via `spawnProp()`
 
 ### Solution Options
 

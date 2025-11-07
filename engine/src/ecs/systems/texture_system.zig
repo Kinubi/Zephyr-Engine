@@ -236,10 +236,57 @@ pub const TextureSystem = struct {
     }
 
     /// Check if textures changed and rebuild if needed
-    /// Called internally - rebuilds all texture sets if dirty
+    /// ECS-driven update: Query MeshRenderer components and build texture sets from them
+    /// This follows the ECS philosophy: systems query components, not explicit API calls
+    fn updateFromECS(self: *TextureSystem, world: *World) !void {
+        const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
+        
+        // Query all entities with MeshRenderer components
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+        
+        // Track which textures we've seen this frame
+        var seen_textures = std.AutoHashMap(u64, void).init(self.allocator);
+        defer seen_textures.deinit();
+        
+        // Scan all MeshRenderer components
+        while (iter.next()) |entry| {
+            const mesh_renderer = entry.component;
+            
+            // Get effective texture (override or from material)
+            const texture_id = mesh_renderer.texture_asset orelse blk: {
+                // If no texture override, get from material
+                const mat_id = mesh_renderer.material_asset orelse continue;
+                if (self.asset_manager.getMaterialIndex(mat_id)) |mat_index| {
+                    if (mat_index < self.asset_manager.loaded_materials.items.len) {
+                        const material = self.asset_manager.loaded_materials.items[mat_index];
+                        if (material.albedo_texture_id != 0) {
+                            break :blk AssetId.fromU64(@as(u64, @intCast(material.albedo_texture_id)));
+                        }
+                    }
+                }
+                continue;
+            };
+            
+            // Track that we've seen this texture
+            try seen_textures.put(texture_id.toU64(), {});
+            
+            // Add texture to "default" set (or could use mesh_renderer.layer for set name)
+            const set_name = "default"; // TODO: Could derive from layer or other component data
+            
+            // Add texture if not already present
+            try self.addTextureToSet(set_name, texture_id);
+        }
+        
+        // Now call the standard rebuild logic
+        try self.updateInternal();
+    }
+
+    /// Check if textures changed and rebuild if needed
     fn updateInternal(self: *TextureSystem) !void {
-        // Check if textures are marked dirty
-        if (self.asset_manager.texture_descriptors_dirty) {
+        const textures_dirty = self.asset_manager.texture_descriptors_dirty;
+
+        if (textures_dirty) {
             // Rebuild all texture sets
             var it = self.texture_sets.iterator();
             while (it.next()) |entry| {
@@ -301,6 +348,7 @@ pub const TextureSystem = struct {
 
 /// Free update function for SystemScheduler compatibility
 /// Updates texture descriptor array when textures load/unload
+/// ECS Philosophy: Queries MeshRenderer components and builds texture sets from them
 pub fn update(world: *World, dt: f32) !void {
     _ = dt;
 
@@ -310,6 +358,7 @@ pub fn update(world: *World, dt: f32) !void {
 
     // Get texture system from scene
     if (scene.texture_system) |texture_system| {
-        try texture_system.updateInternal();
+        // ECS-driven update: Query all MeshRenderer components and populate texture sets
+        try texture_system.updateFromECS(world);
     }
 }

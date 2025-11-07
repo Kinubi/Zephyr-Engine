@@ -182,6 +182,62 @@ pub const MaterialSystem = struct {
         }
     }
 
+    /// ECS-driven update: Query MeshRenderer components and build material sets from them
+    /// This follows the ECS philosophy: systems query components, not explicit API calls
+    fn updateFromECS(self: *MaterialSystem, world: *World, frame_index: u32) !void {
+        const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
+        
+        // Query all entities with MeshRenderer components
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+        
+        // For each set, track which materials we've seen this frame
+        var seen_materials = std.AutoHashMap(u64, void).init(self.allocator);
+        defer seen_materials.deinit();
+        
+        // Scan all MeshRenderer components
+        while (iter.next()) |entry| {
+            const mesh_renderer = entry.component;
+            
+            // Skip if no material asset
+            const material_id = mesh_renderer.material_asset orelse continue;
+            
+            // Track that we've seen this material
+            try seen_materials.put(material_id.toU64(), {});
+            
+            // Add material to "default" set (or could use mesh_renderer.layer for set name)
+            const set_name = "default"; // TODO: Could derive from layer or other component data
+            
+            // Ensure set exists (linked to default texture set)
+            const set = self.getSet(set_name) orelse blk: {
+                // Need texture system to create set
+                if (self.texture_system) |tex_sys| {
+                    const tex_set = tex_sys.getSet("default") orelse break :blk null;
+                    break :blk try self.createSet(set_name, tex_set);
+                } else {
+                    break :blk null;
+                }
+            } orelse continue;
+            
+            // Check if material already in set
+            var already_added = false;
+            for (set.material_ids.items) |existing_id| {
+                if (existing_id.toU64() == material_id.toU64()) {
+                    already_added = true;
+                    break;
+                }
+            }
+            
+            // Add material if not already present
+            if (!already_added) {
+                try self.addMaterialToSet(set_name, material_id);
+            }
+        }
+        
+        // Now call the standard rebuild logic
+        try self.updateInternal(frame_index);
+    }
+
     /// Check if materials changed and rebuild if needed
     /// Called internally with frame_index
     fn updateInternal(self: *MaterialSystem, frame_index: u32) !void {
@@ -402,6 +458,7 @@ pub const MaterialSystem = struct {
 
 /// Free update function for SystemScheduler compatibility
 /// Updates material buffer when materials change
+/// ECS Philosophy: Queries MeshRenderer components and builds material sets from them
 pub fn update(world: *World, dt: f32) !void {
     _ = dt;
 
@@ -411,7 +468,7 @@ pub fn update(world: *World, dt: f32) !void {
 
     // Get material system from scene
     if (scene.material_system) |material_system| {
-        // Frame index doesn't matter for deferred destruction - using 0
-        try material_system.updateInternal(0);
+        // ECS-driven update: Query all MeshRenderer components and populate material sets
+        try material_system.updateFromECS(world, 0);
     }
 }

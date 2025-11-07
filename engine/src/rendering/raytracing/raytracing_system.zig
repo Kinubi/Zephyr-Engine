@@ -8,6 +8,8 @@ const ThreadPoolMod = @import("../../threading/thread_pool.zig");
 
 const RenderData = @import("../../rendering/render_data_types.zig");
 const RenderSystem = @import("../../ecs/systems/render_system.zig").RenderSystem;
+const World = @import("../../ecs/world.zig").World;
+const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 // Import the new multithreaded BVH builder
 const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
@@ -50,6 +52,7 @@ const PerFrameDestroyQueue = struct {
 
 /// TLAS Registry: Double-buffered TLAS for safe lifecycle management
 /// Similar to BLAS registry, but single entry since we only have one scene TLAS
+/// NOTE: This is the OLD system - will be replaced by AccelerationStructureSet
 const TlasRegistry = struct {
     current: std.atomic.Value(?*TlasEntry) = std.atomic.Value(?*TlasEntry).init(null),
 
@@ -63,11 +66,82 @@ const TlasRegistry = struct {
     };
 };
 
+// ==================== NEW: Acceleration Structure Sets ====================
+
+/// Managed TLAS with generation tracking
+/// Parallel structure to ManagedBuffer and ManagedTextureArray
+pub const ManagedTLAS = struct {
+    acceleration_structure: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
+    buffer: Buffer = undefined,
+    instance_buffer: Buffer = undefined,
+    device_address: vk.DeviceAddress = 0,
+    instance_count: u32 = 0,
+    
+    // Generation tracking (increments when TLAS rebuilt)
+    generation: u32 = 0,  // 0 = not created yet (lazy init pattern)
+    
+    name: []const u8,
+    created_frame: u32 = 0,
+    build_time_ns: u64 = 0,
+};
+
+/// Geometry reference for BLAS (simplified - stores buffer references)
+pub const BlasHandle = struct {
+    vertex_buffer: vk.Buffer,
+    index_buffer: vk.Buffer,
+    vertex_count: u32,
+    index_count: u32,
+    vertex_stride: u32,
+    transform: [12]f32,
+};
+
+/// Named acceleration structure set
+/// A collection of BLAS (geometries) with a TLAS (scene)
+pub const AccelerationStructureSet = struct {
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    
+    // Geometry handles for this set (BLAS references)
+    blas_handles: std.ArrayList(BlasHandle),
+    
+    // TLAS for this set (scene)
+    tlas: ManagedTLAS,
+    
+    // Tracking
+    dirty: bool = true,  // Marks set as needing rebuild
+    
+    // Cooldown frames after TLAS rebuild (allows descriptor rebinding)
+    rebuild_cooldown_frames: u32 = 0,
+    
+    fn init(allocator: std.mem.Allocator, name: []const u8) AccelerationStructureSet {
+        return .{
+            .allocator = allocator,
+            .name = name,
+            .blas_handles = std.ArrayList(BlasHandle).init(allocator),
+            .tlas = .{
+                .name = name,
+                .generation = 0,  // Starts at 0 (not created yet)
+                .created_frame = 0,
+            },
+            .dirty = true,
+        };
+    }
+    
+    fn deinit(self: *AccelerationStructureSet) void {
+        self.blas_list.deinit(self.allocator);
+    }
+};
+
+// ==========================================================================
+
 /// Enhanced Raytracing system with multithreaded BVH building
 pub const RaytracingSystem = struct {
     gc: *GraphicsContext, // Use 'gc' for consistency with Swapchain
 
-    // TLAS Registry: atomic pointer to current TLAS
+    // NEW: Named acceleration structure sets (like MaterialBufferSet/TextureSet)
+    as_sets: std.StringHashMap(AccelerationStructureSet),
+
+    // OLD: TLAS Registry (will be deprecated in favor of as_sets)
     // When new TLAS arrives: get old, store new, queue old for destruction
     // Always know which TLAS to destroy - no handle juggling needed
     tlas_registry: TlasRegistry = .{},
@@ -92,6 +166,7 @@ pub const RaytracingSystem = struct {
 
     /// Cooldown frames after a TLAS pickup to allow all frames-in-flight to
     /// rebind their descriptor sets before spawning another TLAS build.
+    /// NOTE: This will move into AccelerationStructureSet (per-set cooldown)
     tlas_rebuild_cooldown_frames: u32 = 0,
 
     /// Enhanced init with multithreaded BVH support
@@ -115,6 +190,7 @@ pub const RaytracingSystem = struct {
 
         return RaytracingSystem{
             .gc = gc,
+            .as_sets = std.StringHashMap(AccelerationStructureSet).init(allocator),
             .bvh_builder = bvh_builder,
             .bvh_build_in_progress = false,
             .per_frame_destroy = per_frame_destroy,
@@ -124,6 +200,189 @@ pub const RaytracingSystem = struct {
             .shader_binding_table_memory = vk.DeviceMemory.null_handle,
         };
     }
+
+    // ========================================================================
+    // Acceleration Structure Set Management API
+    // ========================================================================
+
+    /// Create or get an acceleration structure set by name
+    pub fn createSet(self: *RaytracingSystem, name: []const u8) !*AccelerationStructureSet {
+        const allocator = self.renderer.allocator;
+        
+        // Check if set already exists
+        if (self.as_sets.getPtr(name)) |existing_set| {
+            return existing_set;
+        }
+
+        // Create new set
+        const set_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(set_name);
+
+        const set = AccelerationStructureSet{
+            .name = set_name,
+            .tlas = .{}, // generation = 0, not created yet
+            .blas_handles = std.ArrayList(BlasHandle).init(allocator),
+            .dirty = true, // New sets are dirty
+            .rebuild_cooldown_frames = 0,
+        };
+
+        try self.as_sets.put(set_name, set);
+        
+        log(.INFO, "RaytracingSystem", "Created acceleration structure set '{s}'", .{name});
+        return self.as_sets.getPtr(set_name).?;
+    }
+
+    /// Get an acceleration structure set by name (returns null if not found)
+    pub fn getSet(self: *RaytracingSystem, name: []const u8) ?*AccelerationStructureSet {
+        return self.as_sets.getPtr(name);
+    }
+
+    /// Add geometry to an acceleration structure set
+    pub fn addGeometryToSet(
+        self: *RaytracingSystem,
+        set_name: []const u8,
+        vertex_buffer: vk.Buffer,
+        index_buffer: vk.Buffer,
+        vertex_count: u32,
+        index_count: u32,
+        vertex_stride: u32,
+        transform: [12]f32,
+    ) !void {
+        const set = try self.createSet(set_name);
+        
+        const blas_handle = BlasHandle{
+            .vertex_buffer = vertex_buffer,
+            .index_buffer = index_buffer,
+            .vertex_count = vertex_count,
+            .index_count = index_count,
+            .vertex_stride = vertex_stride,
+            .transform = transform,
+        };
+
+        try set.blas_handles.append(blas_handle);
+        set.dirty = true;
+        
+        log(.DEBUG, "RaytracingSystem", "Added geometry to set '{s}' (vertices: {}, indices: {})", 
+            .{set_name, vertex_count, index_count});
+    }
+
+    /// Mark a set as dirty (needs rebuild)
+    pub fn markSetDirty(self: *RaytracingSystem, set_name: []const u8) void {
+        if (self.getSet(set_name)) |set| {
+            set.dirty = true;
+            log(.DEBUG, "RaytracingSystem", "Marked set '{s}' as dirty", .{set_name});
+        }
+    }
+
+    /// Rebuild an acceleration structure set (builds TLAS from BLAS handles)
+    pub fn rebuildSet(self: *RaytracingSystem, set_name: []const u8) !void {
+        const set = self.getSet(set_name) orelse {
+            log(.WARN, "RaytracingSystem", "Cannot rebuild set '{s}': not found", .{set_name});
+            return;
+        };
+
+        if (!set.dirty) {
+            log(.DEBUG, "RaytracingSystem", "Set '{s}' is not dirty, skipping rebuild", .{set_name});
+            return;
+        }
+
+        if (set.rebuild_cooldown_frames > 0) {
+            log(.DEBUG, "RaytracingSystem", "Set '{s}' is in cooldown ({} frames remaining)", 
+                .{set_name, set.rebuild_cooldown_frames});
+            return;
+        }
+
+        if (set.blas_handles.items.len == 0) {
+            log(.WARN, "RaytracingSystem", "Cannot rebuild set '{s}': no geometries", .{set_name});
+            return;
+        }
+
+        log(.INFO, "RaytracingSystem", "Rebuilding acceleration structure set '{s}' ({} geometries)", 
+            .{set_name, set.blas_handles.items.len});
+
+        // TODO: Spawn worker to build TLAS from BLAS handles
+        // For now, mark as not dirty and increment generation
+        set.dirty = false;
+        set.tlas.generation += 1;
+        set.rebuild_cooldown_frames = 2; // Wait 2 frames before allowing rebuild
+        
+        log(.INFO, "RaytracingSystem", "Set '{s}' rebuilt (generation: {})", 
+            .{set_name, set.tlas.generation});
+    }
+
+    /// ECS-driven update: Query MeshRenderer components and build acceleration structure sets from them
+    /// This follows the ECS philosophy: systems query components, not explicit API calls
+    pub fn updateFromECS(self: *RaytracingSystem, world: *World, asset_manager: *AssetManager) !void {
+        const MeshRenderer = @import("../../ecs/components/mesh_renderer.zig").MeshRenderer;
+        const Transform = @import("../../ecs/components/transform.zig").Transform;
+        
+        // Query all entities with MeshRenderer components
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+        
+        // Scan all entities and extract geometry for BLAS
+        while (iter.next()) |entry| {
+            const mesh_renderer = entry.component;
+            
+            // Get transform for this entity (default to identity if missing)
+            const transform = world.get(Transform, entry.entity) orelse continue;
+            
+            // Skip if not renderable
+            if (!mesh_renderer.hasValidAssets()) continue;
+            
+            // Get model asset
+            const model_id = mesh_renderer.model_asset orelse continue;
+            
+            // Get mesh data from asset manager
+            if (asset_manager.getMeshByAssetId(model_id)) |mesh_data| {
+                // Extract transform matrix (convert to [12]f32 for BLAS)
+                const mat = transform.getTransformMatrix();
+                const transform_array = [12]f32{
+                    mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
+                    mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3],
+                    mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3],
+                };
+                
+                // Add geometry to "default" set (or could use mesh_renderer.layer for set name)
+                const set_name = "default"; // TODO: Could derive from layer or other component data
+                
+                try self.addGeometryToSet(
+                    set_name,
+                    mesh_data.vertex_buffer,
+                    mesh_data.index_buffer,
+                    mesh_data.vertex_count,
+                    mesh_data.index_count,
+                    mesh_data.vertex_stride,
+                    transform_array,
+                );
+            }
+        }
+        
+        // Now update all sets (rebuild dirty ones)
+        try self.updateAccelerationStructureSets();
+    }
+
+    /// Update all acceleration structure sets (call once per frame)
+    pub fn updateAccelerationStructureSets(self: *RaytracingSystem) !void {
+        var iter = self.as_sets.iterator();
+        while (iter.next()) |entry| {
+            const set = entry.value_ptr;
+            
+            // Decrement cooldown
+            if (set.rebuild_cooldown_frames > 0) {
+                set.rebuild_cooldown_frames -= 1;
+            }
+            
+            // Rebuild dirty sets
+            if (set.dirty and set.rebuild_cooldown_frames == 0) {
+                try self.rebuildSet(set.name);
+            }
+        }
+    }
+
+    // ========================================================================
+    // Legacy API (to be removed after migration)
+    // ========================================================================
 
     /// Update the Shader Binding Table when the pipeline changes
     pub fn updateShaderBindingTable(self: *RaytracingSystem, pipeline: vk.Pipeline) !void {
@@ -505,6 +764,33 @@ pub const RaytracingSystem = struct {
         self.gc.vkd.deviceWaitIdle(self.gc.dev) catch |err| {
             log(.WARN, "raytracing", "Failed to wait for device idle during deinit: {}", .{err});
         };
+
+        // Clean up acceleration structure sets
+        var iter = self.as_sets.iterator();
+        while (iter.next()) |entry| {
+            const set = entry.value_ptr;
+            
+            // Destroy TLAS if created
+            if (set.tlas.generation > 0) {
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, set.tlas.acceleration_structure, null);
+                if (self.gc.memory_tracker) |tracker| {
+                    var name_buf: [128]u8 = undefined;
+                    const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{s}", .{set.name}) catch "tlas_unknown";
+                    tracker.untrackAllocation(tlas_name);
+                }
+                var buf = set.tlas.buffer;
+                buf.deinit();
+                var inst_buf = set.tlas.instance_buffer;
+                inst_buf.deinit();
+            }
+            
+            // Free BLAS handles
+            set.blas_handles.deinit(self.allocator);
+            
+            // Free set name
+            self.allocator.free(set.name);
+        }
+        self.as_sets.deinit();
 
         // Clean up TLAS registry - destroy the current TLAS if it exists
         if (self.tlas_registry.current.load(.acquire)) |entry| {
