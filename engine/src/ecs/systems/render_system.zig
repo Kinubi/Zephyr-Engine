@@ -18,6 +18,7 @@ const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
 const Scene = @import("../../scene/scene.zig").Scene;
 const ecs = @import("../world.zig");
+const components = @import("../../ecs.zig"); // Import to access MaterialSet component
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
@@ -106,6 +107,7 @@ pub const RenderSystem = struct {
     pub const RenderableEntity = struct {
         model_asset: AssetTypeId,
         material_asset: ?AssetTypeId,
+        material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
         texture_asset: ?AssetTypeId,
         world_matrix: math.Mat4x4,
         layer: u8,
@@ -217,10 +219,15 @@ pub const RenderSystem = struct {
             const transform = world.get(Transform, entry.entity);
             const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
 
+            // Get material buffer index from MaterialSet component
+            const material_set = world.get(components.MaterialSet, entry.entity);
+            const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+
             // Create renderable entry
             try renderables.append(self.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_asset = renderer.material_asset,
+                .material_buffer_index = material_buffer_index,
                 .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
@@ -263,10 +270,15 @@ pub const RenderSystem = struct {
             const transform = ctx.world.get(Transform, entity);
             const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
 
+            // Get material buffer index from MaterialSet component
+            const material_set = ctx.world.get(components.MaterialSet, entity);
+            const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+
             // Create renderable entry directly into worker-local buffer
             out.append(ctx.system.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_asset = renderer.material_asset,
+                .material_buffer_index = material_buffer_index,
                 .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
@@ -479,11 +491,10 @@ pub const RenderSystem = struct {
         for (entities) |entity_data| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
 
+            // Use material_buffer_index from MaterialSet component
             var material_index: u32 = 0;
-            if (entity_data.material_asset) |material_asset_id| {
-                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (entity_data.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -655,11 +666,10 @@ pub const RenderSystem = struct {
         for (ctx.entities[ctx.start_idx..ctx.end_idx]) |entity_data| {
             const model = ctx.asset_manager.getModel(entity_data.model_asset) orelse continue;
 
+            // Get material_buffer_index from MaterialSet component instead of AssetManager
             var material_index: u32 = 0;
-            if (entity_data.material_asset) |material_asset_id| {
-                if (ctx.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (entity_data.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -939,11 +949,10 @@ pub const RenderSystem = struct {
         for (renderables) |renderable| {
             const model = asset_manager.getModel(renderable.model_asset) orelse continue;
 
+            // Use material_buffer_index from MaterialSet component
             var material_index: u32 = 0;
-            if (renderable.material_asset) |material_asset_id| {
-                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (renderable.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -1011,11 +1020,10 @@ pub const RenderSystem = struct {
         for (ctx.renderables[ctx.start_idx..ctx.end_idx]) |renderable| {
             const model = ctx.asset_manager.getModel(renderable.model_asset) orelse continue;
 
+            // Use material_buffer_index from MaterialSet component
             var material_index: u32 = 0;
-            if (renderable.material_asset) |material_asset_id| {
-                if (ctx.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (renderable.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {

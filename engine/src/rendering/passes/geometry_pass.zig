@@ -15,10 +15,8 @@ const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
-const MaterialSystemMod = @import("../../ecs/systems/material_system.zig");
-const MaterialSystem = MaterialSystemMod.MaterialSystem;
-const MaterialBufferSet = MaterialSystemMod.MaterialBufferSet;
-const TextureSystem = @import("../../ecs/systems/texture_system.zig").TextureSystem;
+const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
+const MaterialBindings = @import("../../ecs/systems/material_system.zig").MaterialBindings;
 const vertex_formats = @import("../vertex_formats.zig");
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
@@ -47,8 +45,8 @@ pub const GeometryPass = struct {
     ecs_world: *World,
     global_ubo_set: *GlobalUboSet,
 
-    // Material set for this pass (contains materials + linked textures)
-    material_set: *MaterialBufferSet,
+    // Material bindings for this pass (opaque handle)
+    material_bindings: MaterialBindings,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -73,7 +71,7 @@ pub const GeometryPass = struct {
         asset_manager: *AssetManager,
         ecs_world: *World,
         global_ubo_set: *GlobalUboSet,
-        material_set: *MaterialBufferSet,
+        material_bindings: MaterialBindings,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
         render_system: *RenderSystem,
@@ -93,7 +91,7 @@ pub const GeometryPass = struct {
             .asset_manager = asset_manager,
             .ecs_world = ecs_world,
             .global_ubo_set = global_ubo_set,
-            .material_set = material_set,
+            .material_bindings = material_bindings,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .render_system = render_system,
@@ -227,15 +225,14 @@ pub const GeometryPass = struct {
         try self.resource_binder.bindStorageBufferNamed(
             self.geometry_pipeline,
             "MaterialBuffer",
-            &self.material_set.buffer,
+            self.material_bindings.material_buffer,
         );
 
-        // Bind texture array from material set (generation tracked automatically)
-        const managed_textures = self.material_set.getManagedTextures();
+        // Bind texture array from material bindings (generation tracked automatically)
         try self.resource_binder.bindTextureArrayNamed(
             self.geometry_pipeline,
             "textures",
-            managed_textures,
+            self.material_bindings.texture_array,
         );
 
         // Bind resources for all frames using named binding
@@ -252,25 +249,6 @@ pub const GeometryPass = struct {
                 @sizeOf(GlobalUbo),
                 frame_index,
             );
-            const texture_image_infos: []const vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{};
-            if (texture_image_infos.len > 0) {
-                var textures_ready = true;
-                for (texture_image_infos) |info| {
-                    if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) {
-                        textures_ready = false;
-                        break;
-                    }
-                }
-
-                if (textures_ready) {
-                    try self.resource_binder.bindTextureArrayNamed(
-                        self.geometry_pipeline,
-                        "textures",
-                        texture_image_infos,
-                        frame_index,
-                    );
-                }
-            }
         }
     }
 

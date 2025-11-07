@@ -19,6 +19,16 @@ pub const PointLight = @import("ecs/components/point_light.zig").PointLight;
 pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").ParticleEmitter;
 pub const Name = @import("ecs/components/name.zig").Name;
 
+// Material Components
+pub const MaterialSet = @import("ecs/components/material_set.zig").MaterialSet;
+const material_props = @import("ecs/components/material_properties.zig");
+pub const AlbedoMaterial = material_props.AlbedoMaterial;
+pub const RoughnessMaterial = material_props.RoughnessMaterial;
+pub const MetallicMaterial = material_props.MetallicMaterial;
+pub const NormalMaterial = material_props.NormalMaterial;
+pub const EmissiveMaterial = material_props.EmissiveMaterial;
+pub const OcclusionMaterial = material_props.OcclusionMaterial;
+
 // Systems
 pub const TransformSystem = @import("ecs/systems/transform_system.zig").TransformSystem;
 pub const RenderSystem = @import("ecs/systems/render_system.zig").RenderSystem;
@@ -32,7 +42,6 @@ pub const updateLightSystem = @import("ecs/systems/light_system.zig").update;
 pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").update;
 pub const updateScriptingSystem = @import("ecs/systems/scripting_system.zig").update;
 pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
-pub const updateTextureSystem = @import("ecs/systems/texture_system.zig").update;
 pub const updateMaterialSystem = @import("ecs/systems/material_system.zig").update;
 
 // Parallel System Execution

@@ -850,6 +850,27 @@ pub const AssetManager = struct {
         return self.texture_image_infos;
     }
 
+    /// Get a texture descriptor for a specific asset ID
+    pub fn getTextureDescriptor(self: *AssetManager, asset_id: AssetId) ?vk.DescriptorImageInfo {
+        if (self.getTexture(asset_id)) |texture| {
+            return texture.descriptor;
+        }
+        return null;
+    }
+
+    /// Get white dummy texture descriptor (fallback)
+    pub fn getWhiteDummyTextureDescriptor(self: *AssetManager) vk.DescriptorImageInfo {
+        // Try to get the "missing" fallback texture
+        if (self.fallbacks.getFallback(.missing, .texture)) |fallback_id| {
+            if (self.getTextureDescriptor(fallback_id)) |descriptor| {
+                return descriptor;
+            }
+        }
+
+        // Ultimate fallback - return zeroed descriptor
+        return std.mem.zeroes(vk.DescriptorImageInfo);
+    }
+
     /// Get performance statistics
     pub fn getStatistics(self: *AssetManager) struct {
         total_requests: u64,

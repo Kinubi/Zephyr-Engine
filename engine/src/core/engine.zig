@@ -20,7 +20,6 @@ const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const MaterialSystem = @import("../ecs/systems/material_system.zig").MaterialSystem;
-const TextureSystem = @import("../ecs/systems/texture_system.zig").TextureSystem;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
 const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const ecs = @import("../ecs.zig");
@@ -63,7 +62,6 @@ pub const Engine = struct {
     resource_binder: ?*ResourceBinder = null,
     buffer_manager: ?*BufferManager = null,
     material_system: ?*MaterialSystem = null,
-    texture_system: ?*TextureSystem = null,
 
     // Asset and file systems
     file_watcher: ?*FileWatcher = null,
@@ -283,12 +281,6 @@ pub const Engine = struct {
         if (self.performance_monitor) |pm| {
             pm.deinit();
             self.allocator.destroy(pm);
-        }
-
-        // Rendering systems (cleanup in reverse order of initialization)
-        log(.INFO, "engine", "Cleaning up TextureSystem...", .{});
-        if (self.texture_system) |ts| {
-            ts.deinit();
         }
 
         log(.INFO, "engine", "Cleaning up MaterialSystem...", .{});
@@ -612,6 +604,15 @@ pub const Engine = struct {
         try self.ecs_world.?.registerComponent(ecs.ParticleEmitter);
         try self.ecs_world.?.registerComponent(ecs.ScriptComponent);
 
+        // Register material components
+        try self.ecs_world.?.registerComponent(ecs.MaterialSet);
+        try self.ecs_world.?.registerComponent(ecs.AlbedoMaterial);
+        try self.ecs_world.?.registerComponent(ecs.RoughnessMaterial);
+        try self.ecs_world.?.registerComponent(ecs.MetallicMaterial);
+        try self.ecs_world.?.registerComponent(ecs.NormalMaterial);
+        try self.ecs_world.?.registerComponent(ecs.EmissiveMaterial);
+        try self.ecs_world.?.registerComponent(ecs.OcclusionMaterial);
+
         // Initialize BufferManager with full integration
         self.buffer_manager = try BufferManager.init(
             self.allocator,
@@ -619,20 +620,14 @@ pub const Engine = struct {
             self.resource_binder.?,
         );
 
-        // Initialize MaterialSystem
+        // Initialize MaterialSystem (handles both materials and textures now)
         self.material_system = try MaterialSystem.init(
             self.allocator,
             self.buffer_manager.?,
             self.asset_manager.?,
         );
 
-        // Initialize TextureSystem
-        self.texture_system = try TextureSystem.init(
-            self.allocator,
-            self.asset_manager.?,
-        );
-
-        log(.INFO, "engine", "Core systems initialized (AssetManager, ShaderManager, UnifiedPipelineSystem, ResourceBinder, BufferManager, MaterialSystem, TextureSystem, ECS)", .{});
+        log(.INFO, "engine", "Core systems initialized (AssetManager, ShaderManager, UnifiedPipelineSystem, ResourceBinder, BufferManager, MaterialSystem, ECS)", .{});
     }
 
     // === Rendering System Accessors ===
@@ -660,11 +655,6 @@ pub const Engine = struct {
     /// Get the material system instance
     pub fn getMaterialSystem(self: *Engine) ?*MaterialSystem {
         return self.material_system;
-    }
-
-    /// Get the texture system instance
-    pub fn getTextureSystem(self: *Engine) ?*TextureSystem {
-        return self.texture_system;
     }
 
     /// Get the ECS world instance

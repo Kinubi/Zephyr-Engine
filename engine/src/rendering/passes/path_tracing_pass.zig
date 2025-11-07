@@ -16,9 +16,8 @@ const Texture = @import("../../core/texture.zig").Texture;
 const RaytracingSystem = @import("../raytracing/raytracing_system.zig").RaytracingSystem;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
-const MaterialSystemMod = @import("../../ecs/systems/material_system.zig");
-const MaterialSystem = MaterialSystemMod.MaterialSystem;
-const MaterialBufferSet = MaterialSystemMod.MaterialBufferSet;
+const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
+const MaterialBindings = @import("../../ecs/systems/material_system.zig").MaterialBindings;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const Mesh = @import("../mesh.zig").Mesh;
@@ -101,8 +100,8 @@ pub const PathTracingPass = struct {
     asset_manager: *AssetManager,
     render_system: *RenderSystem,
 
-    // Material set for path tracing
-    material_set: *MaterialBufferSet,
+    // Material bindings for path tracing (opaque handle)
+    material_bindings: MaterialBindings,
 
     // Path tracing pipeline
     path_tracing_pipeline: PipelineId = undefined,
@@ -141,7 +140,7 @@ pub const PathTracingPass = struct {
         ecs_world: *World,
         asset_manager: *AssetManager,
         render_system: *RenderSystem,
-        material_set: *MaterialBufferSet,
+        material_bindings: MaterialBindings,
         swapchain_format: vk.Format,
         width: u32,
         height: u32,
@@ -196,7 +195,7 @@ pub const PathTracingPass = struct {
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
             .render_system = render_system,
-            .material_set = material_set,
+            .material_bindings = material_bindings,
             .rt_system = rt_system,
             .output_texture = output_texture,
             .width = width,
@@ -286,8 +285,8 @@ pub const PathTracingPass = struct {
             self.allocator.free(rt_data.materials);
         }
 
-        // Get material buffer info from material set
-        const buffer = &self.material_set.buffer;
+        // Get material buffer info from material bindings
+        const buffer = self.material_bindings.material_buffer;
         const material_info = if (buffer.generation > 0)
             buffer.buffer.descriptor_info
         else
@@ -297,9 +296,8 @@ pub const PathTracingPass = struct {
                 .range = 0,
             };
 
-        // Get texture array from material set's linked texture set
-        const managed_textures = self.material_set.getManagedTextures();
-        const texture_image_infos = managed_textures.descriptor_infos;
+        // Get texture array from material bindings
+        const texture_image_infos = self.material_bindings.texture_array.descriptor_infos;
         const textures_ready = blk: {
             if (texture_image_infos.len == 0) break :blk false;
             for (texture_image_infos) |info| {
@@ -401,8 +399,8 @@ pub const PathTracingPass = struct {
     fn updateDescriptorsForFrame(self: *PathTracingPass, target_frame: u32) !void {
         const frame_idx: usize = @intCast(target_frame);
 
-        // Material buffer from material set
-        const material_buffer = &self.material_set.buffer;
+        // Material buffer from material bindings
+        const material_buffer = self.material_bindings.material_buffer;
         const material_info = if (material_buffer.generation > 0)
             material_buffer.buffer.descriptor_info
         else
@@ -414,9 +412,8 @@ pub const PathTracingPass = struct {
             .range = material_info.range,
         } };
 
-        // Textures array from material set's linked texture set
-        const managed_textures = self.material_set.getManagedTextures();
-        const texture_image_infos = managed_textures.descriptor_infos;
+        // Textures array from material bindings
+        const texture_image_infos = self.material_bindings.texture_array.descriptor_infos;
         const textures_ready = blk: {
             if (texture_image_infos.len == 0) break :blk false;
             for (texture_image_infos) |info| {

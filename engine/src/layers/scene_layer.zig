@@ -79,17 +79,16 @@ pub const SceneLayer = struct {
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add scripting system: {}", .{err});
                 };
-
-                // TextureSystem - manages texture descriptor array (independent)
+                // MaterialSystem - depends on TextureSystem for texture index resolution
                 stage1.addSystem(.{
-                    .name = "TextureSystem",
-                    .update_fn = ecs.updateTextureSystem,
+                    .name = "MaterialSystem",
+                    .update_fn = ecs.updateMaterialSystem,
                     .access = .{
-                        .reads = &[_][]const u8{},
-                        .writes = &[_][]const u8{"Textures"}, // Accesses AssetManager, no ECS components
+                        .reads = &[_][]const u8{"Textures"}, // Reads TextureSystem, no ECS components
+                        .writes = &[_][]const u8{}, // Writes GPU buffers, no ECS components
                     },
                 }) catch |err| {
-                    log(.WARN, "scene_layer", "Failed to add texture system: {}", .{err});
+                    log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
                 };
 
                 // Stage 2: Systems that depend on Stage 1 (TextureSystem)
@@ -103,18 +102,6 @@ pub const SceneLayer = struct {
                         },
                     }) catch |err| {
                         log(.WARN, "scene_layer", "Failed to add transform system: {}", .{err});
-                    };
-
-                    // MaterialSystem - depends on TextureSystem for texture index resolution
-                    stage2.addSystem(.{
-                        .name = "MaterialSystem",
-                        .update_fn = ecs.updateMaterialSystem,
-                        .access = .{
-                            .reads = &[_][]const u8{"Textures"}, // Reads TextureSystem, no ECS components
-                            .writes = &[_][]const u8{}, // Writes GPU buffers, no ECS components
-                        },
-                    }) catch |err| {
-                        log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
                     };
                 } else |err| {
                     log(.WARN, "scene_layer", "Failed to add stage 2: {}", .{err});

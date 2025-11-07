@@ -515,7 +515,7 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        managed_textures: *const @import("../ecs/systems/texture_system.zig").ManagedTextureArray,
+        managed_textures: *const @import("../ecs/systems/material_system.zig").ManagedTextureArray,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -619,7 +619,7 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         binding_name: []const u8,
         pipeline_id: PipelineId,
-        managed_textures: *const @import("../ecs/systems/texture_system.zig").ManagedTextureArray,
+        managed_textures: *const @import("../ecs/systems/material_system.zig").ManagedTextureArray,
     ) !void {
         // Look up the binding location
         const location = self.lookupBinding(binding_name) orelse {
@@ -627,7 +627,7 @@ pub const ResourceBinder = struct {
             return error.UnknownBinding;
         };
 
-        const ManagedTextureArray = @import("../ecs/systems/texture_system.zig").ManagedTextureArray;
+        const ManagedTextureArray = @import("../ecs/systems/material_system.zig").ManagedTextureArray;
 
         // Check if we're already tracking this resource
         for (self.tracked_resources.items) |*res| {
@@ -730,6 +730,13 @@ pub const ResourceBinder = struct {
             // Check if generation changed
             if (current_gen == res.last_generation) continue;
 
+            log(.DEBUG, "resource_binder", "Detected generation change for '{s}': {} -> {} (pipeline: {})", .{
+                res.name,
+                res.last_generation,
+                current_gen,
+                pipeline_id.hash,
+            });
+
             // Rebind based on resource type
             switch (res.resource) {
                 .managed_buffer => |managed_buffer| {
@@ -774,7 +781,7 @@ pub const ResourceBinder = struct {
                 },
                 .texture_array => |arr| {
                     // Cast back to ManagedTextureArray to access descriptor_infos
-                    const ManagedTextureArray = @import("../ecs/systems/texture_system.zig").ManagedTextureArray;
+                    const ManagedTextureArray = @import("../ecs/systems/material_system.zig").ManagedTextureArray;
                     const managed_textures: *const ManagedTextureArray = @ptrCast(@alignCast(arr.ptr));
 
                     // Don't rebind if descriptor array is empty

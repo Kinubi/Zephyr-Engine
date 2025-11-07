@@ -13,11 +13,9 @@ const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const MaterialSystemMod = @import("../ecs/systems/material_system.zig");
-const TextureSystemMod = @import("../ecs/systems/texture_system.zig");
-const TextureSystem = TextureSystemMod.TextureSystem;
-const TextureSet = TextureSystemMod.TextureSet;
+// NOTE: TextureSystem deprecated - MaterialSystem now handles texture descriptors
 const MaterialSystem = MaterialSystemMod.MaterialSystem;
-const MaterialBufferSet = MaterialSystemMod.MaterialBufferSet;
+// NOTE: MaterialBufferSet deprecated - MaterialSystem now directly queries components
 const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
@@ -87,7 +85,7 @@ pub const Scene = struct {
 
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
-    texture_system: ?*TextureSystem = null,
+    // NOTE: TextureSystem deprecated - MaterialSystem now handles texture descriptors
 
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
@@ -136,11 +134,19 @@ pub const Scene = struct {
     pub const MaterialParams = struct {
         albedo_texture_path: ?[]const u8 = null,
         roughness_texture_path: ?[]const u8 = null,
+        metallic_texture_path: ?[]const u8 = null,
+        normal_texture_path: ?[]const u8 = null,
+        emissive_texture_path: ?[]const u8 = null,
+
         albedo_color: [4]f32 = [4]f32{ 1.0, 1.0, 1.0, 1.0 },
         roughness: f32 = 0.5,
         metallic: f32 = 0.0,
         emissive: f32 = 0.0,
-        material_set_name: []const u8 = "default", // Which material set to add this material to
+        normal_strength: f32 = 1.0,
+        emissive_color: [3]f32 = [3]f32{ 1.0, 1.0, 1.0 },
+
+        set_name: []const u8 = "opaque", // Material set name (e.g., "opaque", "transparent", "character")
+        shader_variant: []const u8 = "pbr_standard",
     };
 
     pub fn spawnProp(
@@ -163,21 +169,20 @@ pub const Scene = struct {
         else
             AssetId.invalid;
 
-        // 3. Create material - this registers the material with AssetManager
-        //    MaterialSystem will later read it and upload to GPU buffer
-        const material_id = try self.asset_manager.createMaterialWithParams(
-            albedo_texture_id,
-            roughness_texture_id,
-            material_params.albedo_color,
-            material_params.roughness,
-            material_params.metallic,
-            material_params.emissive,
-        );
+        const metallic_texture_id = if (material_params.metallic_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
 
-        // 4. Add material to the specified material set (this also adds its textures to the linked texture set)
-        if (self.material_system) |mat_sys| {
-            try mat_sys.addMaterialToSet(material_params.material_set_name, material_id);
-        }
+        const normal_texture_id = if (material_params.normal_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
+
+        const emissive_texture_id = if (material_params.emissive_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
 
         // Create ECS entity
         const entity = try self.ecs_world.createEntity();
@@ -187,12 +192,42 @@ pub const Scene = struct {
         const transform = Transform.init();
         try self.ecs_world.emplace(Transform, entity, transform);
 
-        // Add MeshRenderer component
-        var mesh_renderer = MeshRenderer.init(model_id, material_id);
-        if (albedo_texture_id.toU64() != 0) {
-            mesh_renderer.setTexture(albedo_texture_id);
-        }
+        // Add MeshRenderer component (just references the model)
+        const mesh_renderer = MeshRenderer.initModelOnly(model_id);
         try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
+
+        // Add MaterialSet component
+        const material_set = ecs.MaterialSet{
+            .set_name = material_params.set_name,
+            .shader_variant = material_params.shader_variant,
+        };
+        try self.ecs_world.emplace(ecs.MaterialSet, entity, material_set);
+
+        // Add material property components (only if textures are provided)
+        if (albedo_texture_id.toU64() != 0) {
+            const albedo_mat = ecs.AlbedoMaterial.initWithTint(albedo_texture_id, material_params.albedo_color);
+            try self.ecs_world.emplace(ecs.AlbedoMaterial, entity, albedo_mat);
+        }
+
+        if (roughness_texture_id.toU64() != 0) {
+            const roughness_mat = ecs.RoughnessMaterial.initWithFactor(roughness_texture_id, material_params.roughness);
+            try self.ecs_world.emplace(ecs.RoughnessMaterial, entity, roughness_mat);
+        }
+
+        if (metallic_texture_id.toU64() != 0) {
+            const metallic_mat = ecs.MetallicMaterial.initWithFactor(metallic_texture_id, material_params.metallic);
+            try self.ecs_world.emplace(ecs.MetallicMaterial, entity, metallic_mat);
+        }
+
+        if (normal_texture_id.toU64() != 0) {
+            const normal_mat = ecs.NormalMaterial.initWithStrength(normal_texture_id, material_params.normal_strength);
+            try self.ecs_world.emplace(ecs.NormalMaterial, entity, normal_mat);
+        }
+
+        if (emissive_texture_id.toU64() != 0) {
+            const emissive_mat = ecs.EmissiveMaterial.initFull(emissive_texture_id, material_params.emissive_color, material_params.emissive);
+            try self.ecs_world.emplace(ecs.EmissiveMaterial, entity, emissive_mat);
+        }
 
         // Create GameObject wrapper
         const game_object = GameObject{
@@ -273,35 +308,17 @@ pub const Scene = struct {
     }
 
     /// Convenience: update only the texture (and material) for an entity
+    /// DEPRECATED: This uses old asset-based materials. Use material components instead.
     pub fn updateTextureForEntity(
         self: *Scene,
         entity: EntityId,
         texture_path: []const u8,
     ) !void {
-        if (!self.ecs_world.isValid(entity)) return error.InvalidArgument;
-        const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
-        const material_id = try self.asset_manager.createMaterial(texture_id);
-
-        // Add material to the default material set (this also adds its textures to the texture set)
-        if (self.material_system) |mat_sys| {
-            try mat_sys.addMaterialToSet("default", material_id);
-        }
-
-        if (self.ecs_world.has(MeshRenderer, entity)) {
-            const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
-            mr.setMaterial(material_id);
-            mr.setTexture(texture_id);
-        } else {
-            // No renderer present - create default model-only renderer with texture as override
-            // Use a fallback model if none available
-            const fallback_model = self.asset_manager.getFallbackAsset(.default, AssetType.mesh) orelse return error.AssetLoadFailed;
-            const mesh_renderer = MeshRenderer.initWithTexture(fallback_model, material_id, texture_id);
-            try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
-        }
-
-        if (self.ecs_world.get(Transform, entity)) |transform| {
-            transform.dirty = true;
-        }
+        _ = self;
+        _ = entity;
+        _ = texture_path;
+        log(.WARN, "scene", "updateTextureForEntity is DEPRECATED - use material components instead", .{});
+        return error.DeprecatedFunction;
     }
 
     /// Spawn a character (currently same as prop, will add physics/AI later)
@@ -555,9 +572,7 @@ pub const Scene = struct {
         self.scripting_system.deinit();
 
         // Deinit rendering domain systems
-        if (self.texture_system) |ts| {
-            ts.deinit();
-        }
+        // NOTE: TextureSystem deprecated - removed
         if (self.material_system) |ms| {
             ms.deinit();
         }
@@ -650,26 +665,15 @@ pub const Scene = struct {
         height: u32,
     ) !void {
 
-        // Initialize Material and Texture systems for this scene
+        // Initialize Material system for this scene
+        // MaterialSystem now directly queries ECS components and builds GPU resources
         self.material_system = try MaterialSystem.init(
             self.allocator,
             buffer_manager,
             self.asset_manager,
         );
 
-        self.texture_system = try TextureSystem.init(
-            self.allocator,
-            self.asset_manager,
-        );
-
-        // Link MaterialSystem to TextureSystem for texture index resolution
-        self.material_system.?.setTextureSystem(self.texture_system.?);
-
-        // Create default material and texture sets
-        const default_texture_set = try self.texture_system.?.createSet("default");
-        const default_material_set = try self.material_system.?.createSet("default", default_texture_set);
-
-        log(.INFO, "scene", "Created default material and texture sets", .{});
+        log(.INFO, "scene", "Initialized material system (ECS-driven)", .{});
 
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
@@ -694,6 +698,8 @@ pub const Scene = struct {
         }
 
         // Create and add GeometryPass
+        // Pass material bindings (opaque handle - GeometryPass doesn't need MaterialSystem awareness)
+        const opaque_bindings = try self.material_system.?.getBindings("opaque");
         const geometry_pass = GeometryPass.create(
             self.allocator,
             graphics_context,
@@ -701,7 +707,7 @@ pub const Scene = struct {
             self.asset_manager,
             self.ecs_world,
             global_ubo_set,
-            default_material_set,
+            opaque_bindings,
             hdr_color_format,
             swapchain_depth_format,
             &self.render_system,
@@ -715,6 +721,8 @@ pub const Scene = struct {
         }
 
         // Create PathTracingPass (alternative to raster rendering)
+        // Pass material bindings (opaque handle)
+        const path_tracing_bindings = try self.material_system.?.getBindings("opaque");
         const path_tracing_pass = PathTracingPass.create(
             self.allocator,
             graphics_context,
@@ -724,7 +732,7 @@ pub const Scene = struct {
             self.ecs_world,
             self.asset_manager,
             &self.render_system,
-            default_material_set,
+            path_tracing_bindings,
             hdr_color_format,
             width,
             height,
