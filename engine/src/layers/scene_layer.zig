@@ -79,19 +79,19 @@ pub const SceneLayer = struct {
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add scripting system: {}", .{err});
                 };
-                // MaterialSystem - depends on TextureSystem for texture index resolution
+                // MaterialSystem - builds GPU material buffers
                 stage1.addSystem(.{
                     .name = "MaterialSystem",
                     .update_fn = ecs.updateMaterialSystem,
                     .access = .{
-                        .reads = &[_][]const u8{"Textures"}, // Reads TextureSystem, no ECS components
+                        .reads = &[_][]const u8{}, // Reads asset textures, no ECS components
                         .writes = &[_][]const u8{}, // Writes GPU buffers, no ECS components
                     },
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
                 };
 
-                // Stage 2: Systems that depend on Stage 1 (TextureSystem)
+                // Stage 2: Systems that depend on Stage 1
                 if (sched.addStage("DependentSystems")) |stage2| {
                     stage2.addSystem(.{
                         .name = "TransformSystem",

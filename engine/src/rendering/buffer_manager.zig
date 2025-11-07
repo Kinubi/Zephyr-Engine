@@ -54,12 +54,15 @@ pub const BufferManager = struct {
     resource_binder: *ResourceBinder,
 
     // Ring buffers for frame-safe cleanup
-    deferred_buffers: [MAX_FRAMES_IN_FLIGHT]std.ArrayList(ManagedBuffer),
+    deferred_buffers: [MAX_FRAMES_IN_FLIGHT]std.ArrayList(*ManagedBuffer),
     current_frame: u32 = 0,
     frame_counter: u64 = 0,
 
     // Global registry for debugging
     all_buffers: std.StringHashMap(BufferStats),
+
+    // Registry of all managed buffers for tracking
+    managed_buffers: std.ArrayList(*ManagedBuffer),
 
     /// Initialize BufferManager with ResourceBinder integration
     pub fn init(
@@ -74,11 +77,12 @@ pub const BufferManager = struct {
             .resource_binder = resource_binder,
             .deferred_buffers = undefined,
             .all_buffers = std.StringHashMap(BufferStats).init(allocator),
+            .managed_buffers = std.ArrayList(*ManagedBuffer){},
         };
 
         // Initialize ring buffer arrays
         for (&self.deferred_buffers) |*slot| {
-            slot.* = std.ArrayList(ManagedBuffer){};
+            slot.* = std.ArrayList(*ManagedBuffer){};
         }
 
         log(.INFO, "buffer_manager", "BufferManager initialized", .{});
@@ -92,17 +96,19 @@ pub const BufferManager = struct {
             slot.deinit(self.allocator);
         }
 
+        self.managed_buffers.deinit(self.allocator);
         self.all_buffers.deinit();
         self.allocator.destroy(self);
         log(.INFO, "buffer_manager", "BufferManager deinitialized", .{});
     }
 
     /// Create buffer with specified strategy
+    /// Returns a pointer to the managed buffer which is automatically registered.
     pub fn createBuffer(
         self: *BufferManager,
         config: BufferConfig,
         _: u32, // frame_index currently unused but reserved for future frame tracking
-    ) !ManagedBuffer {
+    ) !*ManagedBuffer {
         // Duplicate the name for ownership
         const owned_name = try self.allocator.dupe(u8, config.name);
         errdefer self.allocator.free(owned_name);
@@ -114,7 +120,11 @@ pub const BufferManager = struct {
             .host_cached => try self.createHostCachedBuffer(config),
         };
 
-        const managed = ManagedBuffer{
+        // Allocate the managed buffer on the heap so we can track it
+        const managed = try self.allocator.create(ManagedBuffer);
+        errdefer self.allocator.destroy(managed);
+
+        managed.* = ManagedBuffer{
             .buffer = buffer,
             .name = owned_name,
             .size = config.size,
@@ -131,6 +141,15 @@ pub const BufferManager = struct {
             .last_updated = self.frame_counter,
         });
 
+        // Automatically register for tracking
+        try self.registerBuffer(managed);
+
+        log(.INFO, "buffer_manager", "Created and registered buffer '{s}' (size: {}, strategy: {})", .{
+            config.name,
+            config.size,
+            config.strategy,
+        });
+
         return managed;
     }
 
@@ -140,7 +159,7 @@ pub const BufferManager = struct {
         name: []const u8,
         data: []const u8,
         frame_index: u32,
-    ) !ManagedBuffer {
+    ) !*ManagedBuffer {
         const config = BufferConfig{
             .name = name,
             .size = data.len,
@@ -148,8 +167,8 @@ pub const BufferManager = struct {
             .usage = .{ .vertex_buffer_bit = true, .transfer_dst_bit = true },
         };
 
-        var managed = try self.createBuffer(config, frame_index);
-        try self.updateBuffer(&managed, data, frame_index);
+        const managed = try self.createBuffer(config, frame_index);
+        try self.updateBuffer(managed, data, frame_index);
 
         return managed;
     }
@@ -192,6 +211,72 @@ pub const BufferManager = struct {
         }
     }
 
+    /// Resize an existing buffer by recreating the underlying Vulkan buffer
+    /// Keeps the ManagedBuffer pointer stable but increments generation for rebinding
+    pub fn resizeBuffer(
+        self: *BufferManager,
+        managed_buffer: *ManagedBuffer,
+        new_size: vk.DeviceSize,
+        usage: vk.BufferUsageFlags,
+    ) !void {
+        if (new_size == managed_buffer.size) {
+            return; // No resize needed
+        }
+
+        log(.INFO, "buffer_manager", "Resizing buffer '{s}' from {} to {} bytes", .{
+            managed_buffer.name,
+            managed_buffer.size,
+            new_size,
+        });
+
+        // Destroy the old Vulkan buffer
+        managed_buffer.buffer.deinit();
+
+        // Create new buffer with same strategy but new size
+        const config = BufferConfig{
+            .name = managed_buffer.name,
+            .size = new_size,
+            .strategy = managed_buffer.strategy,
+            .usage = usage,
+        };
+
+        managed_buffer.buffer = switch (config.strategy) {
+            .device_local => try self.createDeviceLocalBuffer(config),
+            .host_visible => try self.createHostVisibleBuffer(config),
+            .host_cached => try self.createHostCachedBuffer(config),
+        };
+
+        // Update managed buffer metadata
+        managed_buffer.size = new_size;
+        managed_buffer.generation += 1; // Increment generation to trigger descriptor rebinding
+
+        // Update statistics
+        if (self.all_buffers.getPtr(managed_buffer.name)) |stats| {
+            stats.size = new_size;
+            stats.last_updated = self.frame_counter;
+        }
+    }
+
+    /// Register a managed buffer for tracking
+    pub fn registerBuffer(self: *BufferManager, managed: *ManagedBuffer) !void {
+        try self.managed_buffers.append(self.allocator, managed);
+    }
+
+    /// Unregister a managed buffer (call before destroying)
+    /// Safe to call even if buffer was never registered
+    pub fn unregisterBuffer(self: *BufferManager, managed: *ManagedBuffer) void {
+        // Find and remove the buffer from the registry
+        var i: usize = 0;
+        while (i < self.managed_buffers.items.len) {
+            if (self.managed_buffers.items[i] == managed) {
+                _ = self.managed_buffers.swapRemove(i);
+                return;
+            }
+            i += 1;
+        }
+        // Buffer not found in registry - this is OK
+    }
+
     /// Called at frame start to cleanup old buffers
     pub fn beginFrame(self: *BufferManager, frame_index: u32) void {
         self.current_frame = frame_index;
@@ -203,16 +288,15 @@ pub const BufferManager = struct {
     }
 
     /// Queue buffer for deferred destruction
-    pub fn destroyBuffer(self: *BufferManager, managed_buffer: ManagedBuffer) !void {
+    pub fn destroyBuffer(self: *BufferManager, managed_buffer: *ManagedBuffer) !void {
+        log(.INFO, "buffer_manager", "Destroying buffer '{s}'", .{managed_buffer.name});
+
+        // Unregister from tracking list
+        self.unregisterBuffer(managed_buffer);
+
+        // Add to deferred cleanup slot
         const slot = &self.deferred_buffers[self.current_frame];
-
-        // Duplicate the name string since the original may be freed before cleanup
-        const owned_name = try self.allocator.dupe(u8, managed_buffer.name);
-
-        var buffer_copy = managed_buffer;
-        buffer_copy.name = owned_name;
-
-        try slot.append(self.allocator, buffer_copy);
+        try slot.append(self.allocator, managed_buffer);
 
         // Remove from statistics
         _ = self.all_buffers.remove(managed_buffer.name);
@@ -273,16 +357,19 @@ pub const BufferManager = struct {
     }
 
     /// Cleanup buffers in ring slot
-    fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(ManagedBuffer)) void {
-        for (slot.items) |*managed| {
+    fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(*ManagedBuffer)) void {
+        for (slot.items) |managed| {
             // Clear tracking name before deinit to prevent use-after-free
             // (the buffer's tracking_name points to managed.name which we'll free)
             managed.buffer.tracking_name = null;
 
             managed.buffer.deinit();
 
-            // Free the duplicated name string
+            // Free the name string
             self.allocator.free(managed.name);
+
+            // Free the managed buffer itself
+            self.allocator.destroy(managed);
         }
         slot.clearRetainingCapacity();
     }

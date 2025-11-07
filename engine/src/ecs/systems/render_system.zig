@@ -832,6 +832,19 @@ pub const RenderSystem = struct {
             }
         }
 
+        // Clear transform dirty flags ONLY for entities with MeshRenderer
+        // This allows cameras and lights to move freely without triggering TLAS rebuilds
+        // Only mesh transforms should cause geometry updates
+        {
+            var mesh_view_clear = try world.view(MeshRenderer);
+            var mesh_iter_clear = mesh_view_clear.iterator();
+            while (mesh_iter_clear.next()) |entry| {
+                if (world.get(Transform, entry.entity)) |transform| {
+                    transform.dirty = false;
+                }
+            }
+        }
+
         // Update tracking state
         self.last_renderable_count = current_renderable_count;
         self.last_geometry_count = current_geometry_count;
@@ -842,13 +855,16 @@ pub const RenderSystem = struct {
             const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
 
             self.renderables_dirty = true;
-            self.transform_only_change = is_transform_only; // Only mark descriptors dirty if geometry actually changed (not just transforms)
+            self.transform_only_change = is_transform_only;
             if (!is_transform_only) {
                 self.raster_descriptors_dirty = true;
                 self.raytracing_descriptors_dirty = true;
             }
 
             try self.rebuildCaches(world, asset_manager);
+        } else {
+            // No changes - clear the transform_only flag
+            self.transform_only_change = false;
         }
     }
 
@@ -907,18 +923,8 @@ pub const RenderSystem = struct {
             log(.INFO, "render_system", "Approaching frame budget: {d:.2}ms / {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, budget_ms, extraction_time_ms, cache_build_time_ms });
         }
 
-        // Clear dirty flags only for renderable entities (not lights, cameras, etc.)
-        var mesh_view_clear = try world.view(MeshRenderer);
-        var mesh_iter_clear = mesh_view_clear.iterator();
-        var cleared_count: usize = 0;
-        while (mesh_iter_clear.next()) |entry| {
-            if (world.get(Transform, entry.entity)) |transform| {
-                if (transform.dirty) {
-                    cleared_count += 1;
-                }
-                transform.dirty = false;
-            }
-        }
+        // Note: Transform dirty flags are cleared in checkForChanges() after checking them
+        // This ensures ALL transforms (including cameras, lights) get cleared
     }
 
     /// Single-threaded cache building
@@ -1341,6 +1347,18 @@ pub fn update(world: *World, dt: f32) !void {
         }
     }
 
+    // Clear transform dirty flags ONLY for entities with MeshRenderer
+    // This allows cameras and lights to move freely without triggering TLAS rebuilds
+    {
+        var mesh_view_clear = try world.view(MeshRenderer);
+        var iter_clear = mesh_view_clear.iterator();
+        while (iter_clear.next()) |entry_clear| {
+            if (world.get(Transform, entry_clear.entity)) |transform| {
+                transform.dirty = false;
+            }
+        }
+    }
+
     // Update tracking
     self.last_renderable_count = current_renderable_count;
     self.last_geometry_count = current_geometry_count;
@@ -1354,6 +1372,9 @@ pub fn update(world: *World, dt: f32) !void {
             self.raytracing_descriptors_dirty = true;
         }
         try self.rebuildCaches(world, asset_manager);
+    } else {
+        // No changes - clear the transform_only flag
+        self.transform_only_change = false;
     }
 }
 

@@ -35,6 +35,7 @@ struct Vertex
   float2 uv;
 };
 
+// Material structure matching the raster shaders
 struct Material {
     uint albedo_idx;
     uint roughness_idx;

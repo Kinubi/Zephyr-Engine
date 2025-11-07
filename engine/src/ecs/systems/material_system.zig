@@ -48,24 +48,52 @@ pub const MaterialBindings = struct {
 /// Per-set GPU resources
 const MaterialSetData = struct {
     allocator: std.mem.Allocator,
-    material_buffer: ManagedBuffer,
+    material_buffer: *ManagedBuffer,
     texture_array: ManagedTextureArray,
 
     // Tracking for change detection
     last_texture_ids: std.ArrayList(u64),
     last_materials: std.ArrayList(GPUMaterial),
 
-    pub fn init(allocator: std.mem.Allocator) MaterialSetData {
+    pub fn init(allocator: std.mem.Allocator, buffer_manager: *BufferManager) !MaterialSetData {
+        // Create an empty material buffer (1 dummy material) so binding is always valid
+        const empty_material = GPUMaterial{
+            .albedo_idx = 0,
+            .roughness_idx = 0,
+            .metallic_idx = 0,
+            .normal_idx = 0,
+            .emissive_idx = 0,
+            .occlusion_idx = 0,
+            .albedo_tint = [4]f32{ 1.0, 0.0, 1.0, 1.0 }, // Magenta to indicate uninitialized
+            .roughness_factor = 1.0,
+            .metallic_factor = 0.0,
+            .normal_strength = 1.0,
+            .emissive_intensity = 0.0,
+            .emissive_color = [3]f32{ 0.0, 0.0, 0.0 },
+            .occlusion_strength = 1.0,
+        };
+
+        const buffer_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_empty", .{});
+        defer allocator.free(buffer_name);
+
+        const BufferConfig = buffer_manager_module.BufferConfig;
+        const material_buffer = try buffer_manager.createBuffer(
+            BufferConfig{
+                .name = buffer_name,
+                .size = @sizeOf(GPUMaterial),
+                .strategy = .device_local,
+                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+            },
+            0, // frame_index
+        );
+
+        // Upload the dummy material
+        const bytes: []const u8 = std.mem.asBytes(&empty_material);
+        try buffer_manager.updateBuffer(material_buffer, bytes, 0);
+
         return .{
             .allocator = allocator,
-            .material_buffer = .{
-                .buffer = undefined,
-                .name = "MaterialBuffer",
-                .size = 0,
-                .generation = 0,
-                .strategy = .device_local,
-                .created_frame = 0,
-            },
+            .material_buffer = material_buffer,
             .texture_array = .{},
             .last_texture_ids = std.ArrayList(u64){},
             .last_materials = std.ArrayList(GPUMaterial){},
@@ -83,11 +111,9 @@ const MaterialSetData = struct {
         self.last_materials.deinit(self.allocator);
 
         // Clean up material buffer
-        if (self.material_buffer.generation > 0) {
-            buffer_manager.destroyBuffer(self.material_buffer) catch |err| {
-                log(.WARN, "material_system", "Failed to destroy material buffer: {}", .{err});
-            };
-        }
+        buffer_manager.destroyBuffer(self.material_buffer) catch |err| {
+            log(.WARN, "material_system", "Failed to destroy material buffer: {}", .{err});
+        };
     }
 };
 
@@ -182,7 +208,7 @@ pub const MaterialSystem = struct {
         // Get or create set data
         const gop = try self.material_sets.getOrPut(set_name);
         if (!gop.found_existing) {
-            gop.value_ptr.* = MaterialSetData.init(self.allocator);
+            gop.value_ptr.* = try MaterialSetData.init(self.allocator, self.buffer_manager);
         }
         var set_data = gop.value_ptr;
 
@@ -419,41 +445,26 @@ pub const MaterialSystem = struct {
     fn uploadMaterialBuffer(self: *MaterialSystem, set_data: *MaterialSetData, set_name: []const u8, materials: []const GPUMaterial) !void {
         const size = materials.len * @sizeOf(GPUMaterial);
 
-        const BufferConfig = buffer_manager_module.BufferConfig;
+        // Only resize if we need MORE space (never shrink to avoid excessive resizes)
+        if (set_data.material_buffer.size < size) {
+            log(.INFO, "material_system", "Resizing material buffer for set '{s}' from {} to {} bytes", .{
+                set_name,
+                set_data.material_buffer.size,
+                size,
+            });
 
-        const buffer_name = try std.fmt.allocPrint(self.allocator, "MaterialBuffer_{s}", .{set_name});
-        defer self.allocator.free(buffer_name);
-
-        // Create or update buffer
-        if (set_data.material_buffer.generation == 0) {
-            // Create new buffer
-            set_data.material_buffer = try self.buffer_manager.createBuffer(
-                BufferConfig{
-                    .name = buffer_name,
-                    .size = size,
-                    .strategy = .device_local,
-                    .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-                },
-                0, // frame_index
-            );
-        } else if (set_data.material_buffer.size != size) {
-            // Resize buffer
-            try self.buffer_manager.destroyBuffer(set_data.material_buffer);
-            set_data.material_buffer = try self.buffer_manager.createBuffer(
-                BufferConfig{
-                    .name = buffer_name,
-                    .size = size,
-                    .strategy = .device_local,
-                    .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-                },
-                0, // frame_index
+            // Resize the buffer (keeps pointer stable, increments generation for rebinding)
+            try self.buffer_manager.resizeBuffer(
+                set_data.material_buffer,
+                size,
+                .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
             );
         }
 
-        // Upload data
+        // Upload data (only upload what we need, even if buffer is larger)
         const bytes: []const u8 = std.mem.sliceAsBytes(materials);
         try self.buffer_manager.updateBuffer(
-            &set_data.material_buffer,
+            set_data.material_buffer,
             bytes,
             0, // frame_index
         );
@@ -465,12 +476,12 @@ pub const MaterialSystem = struct {
     pub fn getBindings(self: *MaterialSystem, set_name: []const u8) !MaterialBindings {
         const gop = try self.material_sets.getOrPut(set_name);
         if (!gop.found_existing) {
-            gop.value_ptr.* = MaterialSetData.init(self.allocator);
+            gop.value_ptr.* = try MaterialSetData.init(self.allocator, self.buffer_manager);
         }
 
         const set_data = gop.value_ptr;
         return MaterialBindings{
-            .material_buffer = &set_data.material_buffer,
+            .material_buffer = set_data.material_buffer,
             .texture_array = &set_data.texture_array,
         };
     }

@@ -20,6 +20,7 @@ const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const MaterialSystem = @import("../ecs/systems/material_system.zig").MaterialSystem;
+const TextureManager = @import("../rendering/texture_manager.zig").TextureManager;
 const ShaderManager = @import("../assets/shader_manager.zig").ShaderManager;
 const FileWatcher = @import("../utils/file_watcher.zig").FileWatcher;
 const ecs = @import("../ecs.zig");
@@ -62,6 +63,7 @@ pub const Engine = struct {
     resource_binder: ?*ResourceBinder = null,
     buffer_manager: ?*BufferManager = null,
     material_system: ?*MaterialSystem = null,
+    texture_manager: ?*TextureManager = null,
 
     // Asset and file systems
     file_watcher: ?*FileWatcher = null,
@@ -148,10 +150,20 @@ pub const Engine = struct {
         // Note: Applications should call registerRenderingSystems() after creating their own systems
         engine.buffer_manager = null; // Will be initialized when rendering systems are registered
 
-        // 4. Create swapchain
+        // 3.5. Initialize TextureManager BEFORE Swapchain (swapchain needs it for HDR textures)
+        engine.texture_manager = try allocator.create(TextureManager);
+        errdefer allocator.destroy(engine.texture_manager.?);
+        engine.texture_manager.?.* = try TextureManager.init(
+            allocator,
+            &engine.graphics_context,
+        );
+        log(.INFO, "engine", "TextureManager initialized early for swapchain HDR textures", .{});
+
+        // 4. Create swapchain (now with TextureManager available)
         engine.swapchain = try Swapchain.init(
             &engine.graphics_context,
             allocator,
+            engine.texture_manager.?,
             .{
                 .width = config.window.width,
                 .height = config.window.height,
@@ -286,6 +298,12 @@ pub const Engine = struct {
         log(.INFO, "engine", "Cleaning up MaterialSystem...", .{});
         if (self.material_system) |ms| {
             ms.deinit();
+        }
+
+        log(.INFO, "engine", "Cleaning up TextureManager...", .{});
+        if (self.texture_manager) |tm| {
+            tm.deinit();
+            self.allocator.destroy(tm);
         }
 
         log(.INFO, "engine", "Cleaning up BufferManager...", .{});
@@ -620,6 +638,12 @@ pub const Engine = struct {
             self.resource_binder.?,
         );
 
+        // TextureManager was already initialized in Engine.init() before Swapchain
+        // Just connect it to RenderLayer for update callbacks
+        if (self.texture_manager) |tm| {
+            self.render_layer.setTextureManager(tm);
+        }
+
         // Initialize MaterialSystem (handles both materials and textures now)
         self.material_system = try MaterialSystem.init(
             self.allocator,
@@ -655,6 +679,11 @@ pub const Engine = struct {
     /// Get the material system instance
     pub fn getMaterialSystem(self: *Engine) ?*MaterialSystem {
         return self.material_system;
+    }
+
+    /// Get the texture manager instance
+    pub fn getTextureManager(self: *Engine) ?*TextureManager {
+        return self.texture_manager;
     }
 
     /// Get the ECS world instance

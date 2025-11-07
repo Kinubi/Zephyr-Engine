@@ -17,12 +17,12 @@ pub const GlobalUboSet = struct {
     allocator: std.mem.Allocator,
 
     // One ManagedBuffer per frame-in-flight
-    frame_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer,
+    frame_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer,
 
     pub fn init(gc: *GraphicsContext, allocator: std.mem.Allocator, buffer_manager: *BufferManager) !GlobalUboSet {
         _ = gc; // No longer needed - BufferManager handles GraphicsContext
 
-        var frame_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer = undefined;
+        var frame_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = undefined;
 
         // Create all frame buffers upfront (one per frame-in-flight)
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
@@ -48,7 +48,7 @@ pub const GlobalUboSet = struct {
     /// Just updates the existing buffer, doesn't recreate it
     pub fn update(self: *GlobalUboSet, frame: usize, ubo: *GlobalUbo) void {
         const frame_index = @as(u32, @intCast(frame));
-        const frame_buffer = &self.frame_buffers[frame];
+        const frame_buffer = self.frame_buffers[frame];
         const data = std.mem.asBytes(ubo);
 
         // Update buffer contents (increments generation automatically)
@@ -59,14 +59,14 @@ pub const GlobalUboSet = struct {
 
     /// Get the ManagedBuffer for a specific frame (for ResourceBinder)
     pub fn getBuffer(self: *GlobalUboSet, frame: usize) *ManagedBuffer {
-        return &self.frame_buffers[frame];
+        return self.frame_buffers[frame];
     }
 
     pub fn deinit(self: *GlobalUboSet) void {
         // Destroy all frame buffers via BufferManager
-        for (&self.frame_buffers) |*buffer| {
+        for (self.frame_buffers) |buffer| {
             if (buffer.generation > 0) {
-                self.buffer_manager.destroyBuffer(buffer.*) catch |err| {
+                self.buffer_manager.destroyBuffer(buffer) catch |err| {
                     std.debug.print("Failed to destroy UBO buffer: {}\n", .{err});
                 };
             }

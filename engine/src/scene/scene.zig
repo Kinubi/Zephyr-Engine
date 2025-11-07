@@ -11,6 +11,8 @@ const AssetType = AssetManagerMod.AssetType;
 const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const TextureManager = @import("../rendering/texture_manager.zig").TextureManager;
+const Swapchain = @import("../core/swapchain.zig").Swapchain;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const MaterialSystemMod = @import("../ecs/systems/material_system.zig");
 // NOTE: TextureSystem deprecated - MaterialSystem now handles texture descriptors
@@ -85,7 +87,7 @@ pub const Scene = struct {
 
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
-    // NOTE: TextureSystem deprecated - MaterialSystem now handles texture descriptors
+    // NOTE: TextureSystem moved to Engine - it manages infrastructure textures (HDR/LDR)
 
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
@@ -572,7 +574,7 @@ pub const Scene = struct {
         self.scripting_system.deinit();
 
         // Deinit rendering domain systems
-        // NOTE: TextureSystem deprecated - removed
+        // NOTE: TextureSystem now owned by Engine
         if (self.material_system) |ms| {
             ms.deinit();
         }
@@ -656,9 +658,8 @@ pub const Scene = struct {
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
         buffer_manager: *BufferManager,
-        hdr_color_format: vk.Format,
-        ldr_color_format: vk.Format,
-        swapchain_depth_format: vk.Format,
+        texture_manager: *TextureManager,
+        swapchain: *Swapchain,
         thread_pool: *ThreadPool,
         global_ubo_set: *GlobalUboSet,
         width: u32,
@@ -708,8 +709,8 @@ pub const Scene = struct {
             self.ecs_world,
             global_ubo_set,
             opaque_bindings,
-            hdr_color_format,
-            swapchain_depth_format,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
             &self.render_system,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
@@ -732,8 +733,9 @@ pub const Scene = struct {
             self.ecs_world,
             self.asset_manager,
             &self.render_system,
+            texture_manager,
             path_tracing_bindings,
-            hdr_color_format,
+            swapchain,
             width,
             height,
         ) catch |err| blk: {
@@ -753,8 +755,8 @@ pub const Scene = struct {
             pipeline_system,
             self.ecs_world,
             global_ubo_set,
-            hdr_color_format,
-            swapchain_depth_format,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create LightVolumePass: {}. Point light rendering disabled.", .{err});
             break :blk null;
@@ -770,8 +772,8 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             global_ubo_set,
-            hdr_color_format,
-            swapchain_depth_format,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
             10000, // Max 10,000 particles
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create ParticlePass: {}. Particle rendering disabled.", .{err});
@@ -791,7 +793,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
-            ldr_color_format,
+            swapchain.surface_format.format,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create TonemapPass: {}. Final tonemapping disabled.", .{err});
             break :blk null;

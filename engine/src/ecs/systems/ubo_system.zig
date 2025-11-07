@@ -20,7 +20,7 @@ pub const UBOSystem = struct {
     buffer_manager: *BufferManager,
 
     // One buffer per frame-in-flight
-    frame_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer,
+    frame_buffers: [MAX_FRAMES_IN_FLIGHT]?*ManagedBuffer,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -29,50 +29,40 @@ pub const UBOSystem = struct {
     ) !*UBOSystem {
         const self = try allocator.create(UBOSystem);
 
-        // Initialize all frame buffers with generation=0
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            self.frame_buffers[i] = .{
-                .buffer = undefined,
-                .name = "GlobalUBO",
-                .size = ubo_size,
-                .generation = 0,
-                .strategy = .host_visible, // UBOs are typically host-visible for fast updates
-                .created_frame = 0,
-            };
-        }
-
+        // Initialize all frame buffers as null - they will be created on first use
         self.* = .{
             .allocator = allocator,
             .buffer_manager = buffer_manager,
-            .frame_buffers = self.frame_buffers,
+            .frame_buffers = [_]?*ManagedBuffer{null} ** MAX_FRAMES_IN_FLIGHT,
         };
 
-        log(.INFO, "ubo_system", "UBOSystem initialized with {} buffers of {} bytes each", .{ MAX_FRAMES_IN_FLIGHT, ubo_size });
+        _ = ubo_size; // Size will be determined on first update
+
+        log(.INFO, "ubo_system", "UBOSystem initialized", .{});
         return self;
     }
 
     /// Get the buffer for a specific frame index
-    pub fn getBuffer(self: *UBOSystem, frame_index: u32) *ManagedBuffer {
-        return &self.frame_buffers[frame_index];
+    pub fn getBuffer(self: *UBOSystem, frame_index: u32) ?*ManagedBuffer {
+        return self.frame_buffers[frame_index];
     }
 
     /// Update a frame's UBO data
-    /// Creates the buffer on first call (generation 0->1), otherwise updates existing buffer
+    /// Creates the buffer on first call, otherwise updates existing buffer
     pub fn updateFrameData(
         self: *UBOSystem,
         frame_index: u32,
         data: []const u8,
     ) !void {
-        const frame_buffer = &self.frame_buffers[frame_index];
+        const frame_buffer_opt = &self.frame_buffers[frame_index];
 
-        if (data.len != frame_buffer.size) {
-            log(.ERROR, "ubo_system", "Data size mismatch: expected {} bytes, got {}", .{ frame_buffer.size, data.len });
-            return error.SizeMismatch;
-        }
-
-        // Check if buffer exists (generation > 0)
-        if (frame_buffer.generation > 0) {
-            // Buffer exists - update it
+        // Check if buffer exists
+        if (frame_buffer_opt.*) |frame_buffer| {
+            // Buffer exists - validate size and update
+            if (data.len != frame_buffer.size) {
+                log(.ERROR, "ubo_system", "Data size mismatch: expected {} bytes, got {}", .{ frame_buffer.size, data.len });
+                return error.SizeMismatch;
+            }
             try self.buffer_manager.updateBuffer(frame_buffer, data, frame_index);
         } else {
             // First time - create the buffer
@@ -83,16 +73,16 @@ pub const UBOSystem = struct {
                 .usage = .{ .uniform_buffer_bit = true, .transfer_dst_bit = true },
             };
 
-            frame_buffer.* = try self.buffer_manager.createBuffer(buffer_config, frame_index);
-            try self.buffer_manager.updateBuffer(frame_buffer, data, frame_index);
+            frame_buffer_opt.* = try self.buffer_manager.createBuffer(buffer_config, frame_index);
+            try self.buffer_manager.updateBuffer(frame_buffer_opt.*.?, data, frame_index);
         }
     }
 
     pub fn deinit(self: *UBOSystem) void {
         // Destroy all frame buffers
-        for (&self.frame_buffers) |*buffer| {
-            if (buffer.generation > 0) {
-                self.buffer_manager.destroyBuffer(buffer.*) catch |err| {
+        for (self.frame_buffers) |buffer_opt| {
+            if (buffer_opt) |buffer| {
+                self.buffer_manager.destroyBuffer(buffer) catch |err| {
                     log(.WARN, "ubo_system", "Failed to destroy UBO buffer on deinit: {}", .{err});
                 };
             }
