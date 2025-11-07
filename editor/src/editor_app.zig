@@ -95,7 +95,6 @@ pub const App = struct {
     var frame_counter: u64 = 0; // Global frame counter for scheduling (should track rendered frames, not game loop iterations)
     var thread_pool: *ThreadPool = undefined;
     var asset_manager: *AssetManager = undefined;
-    var file_watcher: *FileWatcher = undefined;
 
     var last_performance_report: f64 = 0.0; // Track when we last printed performance stats
 
@@ -141,22 +140,6 @@ pub const App = struct {
         // Initialize scheduled assets system
         scheduled_assets = std.ArrayList(ScheduledAsset){};
 
-        // ==================== Initialize Thread Pool ====================
-        // Initialize Thread Pool FIRST (needed by Engine if render thread enabled)
-        thread_pool = try self.allocator.create(ThreadPool);
-        thread_pool.* = try ThreadPool.init(self.allocator, 16); // Max 16 workers
-        errdefer {
-            thread_pool.deinit();
-            self.allocator.destroy(thread_pool);
-        }
-
-        // Register application-specific subsystems with thread pool
-        // NOTE: System-specific subsystems are automatically registered by the systems themselves:
-        //   - "hot_reload" → FileWatcher.init()
-        //   - "bvh_building" → MultithreadedBvhBuilder.init()
-        //   - "ecs_update" → World.init()
-        //   - "render_extraction" → RenderSystem.init()
-
         // ==================== Initialize Engine ====================
         // Engine handles: window, graphics context, swapchain, command buffers, base layers
         log(.INFO, "app", "Initializing engine core systems...", .{});
@@ -174,7 +157,7 @@ pub const App = struct {
             .enable_validation = false,
             .enable_performance_monitoring = true,
             .enable_render_thread = true, // Phase 2.1 complete: prepare/update/render separation
-            .thread_pool = thread_pool, // Pass thread pool to engine
+            .max_worker_threads = 8, // ThreadPool configuration
             .cvar_registry = if (cvar_reg) |reg| @ptrCast(reg) else null,
         });
         errdefer self.engine.deinit();
@@ -187,11 +170,10 @@ pub const App = struct {
         const window = self.engine.getWindow();
         const performance_monitor = self.engine.performance_monitor;
 
-        // Register custom application work subsystem (for ad-hoc tasks)
-        //   - "ecs_update" → World.init()
-        //   - "render_extraction" → RenderSystem.init()
+        // Get ThreadPool from engine for custom application work
+        thread_pool = self.engine.getThreadPool();
 
-        // Register custom work subsystem for ad-hoc tasks
+        // Register custom application work subsystem (for ad-hoc tasks)
         try thread_pool.registerSubsystem(.{
             .name = "custom_work",
             .min_workers = 1,
@@ -200,53 +182,25 @@ pub const App = struct {
             .work_item_type = .custom,
         });
 
-        // Start the thread pool with initial workers
-        try thread_pool.start(8); // Start with 8 workers
+        // ==================== Initialize Core Rendering Systems via Engine ====================
+        // Initialize all core rendering systems through the engine (includes FileWatcher)
+        try self.engine.initRenderingSystems();
 
-        // ==================== Initialize ECS System ====================
-        log(.INFO, "app", "Initializing ECS system with ThreadPool support...", .{});
-        new_ecs_world = try new_ecs.World.init(self.allocator, thread_pool);
-        errdefer new_ecs_world.deinit();
-
-        // Register all ECS components
-        try new_ecs_world.registerComponent(new_ecs.ParticleComponent);
-        try new_ecs_world.registerComponent(new_ecs.ParticleEmitter);
-        try new_ecs_world.registerComponent(new_ecs.Transform);
-        try new_ecs_world.registerComponent(new_ecs.MeshRenderer);
-        try new_ecs_world.registerComponent(new_ecs.Camera);
-        try new_ecs_world.registerComponent(new_ecs.ScriptComponent);
-        log(.INFO, "app", "Registered ECS components: ParticleComponent, ParticleEmitter, Transform, MeshRenderer, Camera", .{});
-
-        // Initialize ECS systems
-        transform_system = new_ecs.TransformSystem.init(self.allocator);
-        log(.INFO, "app", "Initialized ECS systems: TransformSystem", .{});
-
+        // ==================== Get ECS System from Engine ====================
+        new_ecs_world = self.engine.getECSWorld().?.*;
         new_ecs_enabled = true;
-        log(.INFO, "app", "ECS system initialized with {} particles", .{PARTICLE_MAX});
+        // Initialize editor-specific ECS systems
+        transform_system = new_ecs.TransformSystem.init(self.allocator);
+        log(.INFO, "app", "ECS system available from engine, initialized editor systems", .{});
 
-        // ==================== Initialize Asset Manager ====================
-        asset_manager = try AssetManager.init(self.allocator, gc, thread_pool);
+        // Get convenient references to engine-managed systems
+        asset_manager = self.engine.getAssetManager().?;
+        shader_manager = self.engine.getShaderManager().?.*;
+        unified_pipeline_system = self.engine.getUnifiedPipelineSystem().?.*;
+        resource_binder = self.engine.getResourceBinder().?.*;
 
-        // Create application-owned FileWatcher and hand it to hot-reload systems
-        file_watcher = try self.allocator.create(FileWatcher);
-        file_watcher.* = try FileWatcher.init(self.allocator, thread_pool);
-        try file_watcher.start();
-
-        // Initialize Shader Manager for hot reload and compilation
-        shader_manager = try ShaderManager.init(self.allocator, thread_pool, file_watcher);
-        try shader_manager.addShaderDirectory("assets/shaders");
-        // Don't watch assets/shaders/cached - we don't want to recompile cache files
-        try shader_manager.start();
-        log(.INFO, "app", "Shader hot reload system initialized", .{});
-
-        // ==================== Initialize Unified Pipeline System ====================
-        unified_pipeline_system = try UnifiedPipelineSystem.init(self.allocator, gc, &shader_manager);
-        resource_binder = ResourceBinder.init(self.allocator, &unified_pipeline_system);
-
-        // Connect pipeline system to shader manager for hot reload
-        shader_manager.setPipelineSystem(&unified_pipeline_system);
-
-        log(.INFO, "app", "Unified pipeline system initialized", .{});
+        // FileWatcher is now owned by engine - no need to store reference
+        log(.INFO, "app", "Core rendering systems initialized via engine", .{});
 
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
@@ -274,43 +228,77 @@ pub const App = struct {
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
 
+        // Initialize RenderGraph BEFORE spawning props (so MaterialSystem exists)
+        var window_width: c_int = 0;
+        var window_height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
+
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator, self.engine.getBufferManager().?);
+
+        try scene.initRenderGraph(
+            gc,
+            self.engine.getUnifiedPipelineSystem().?,
+            self.engine.getBufferManager().?,
+            self.engine.getTextureManager().?,
+            swapchain,
+            thread_pool,
+            global_ubo_set,
+            @intCast(window_width),
+            @intCast(window_height),
+        );
+
+        log(.INFO, "app", "Scene render graph initialized", .{});
+
         // Cornell Box dimensions - smaller and pushed back so camera can see it
         const box_size: f32 = 2.0; // Smaller box
         const half_size = box_size / 2.0;
         const box_offset_z: f32 = 3.0; // Push box away from camera
 
         // Floor (white)
-        const floor = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const floor = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/missing.png",
+        });
         try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
-        const ceiling = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const ceiling = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/missing.png",
+        });
         try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
         // Back wall (white)
-        const back_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/missing.png");
+        const back_wall = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/error.png",
+        });
         try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
         // Left wall (red) - using error.png for red color
-        const left_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/error.png");
+        const left_wall = try scene.spawnProp("assets/models/cube.obj", .{
+            .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+        });
         try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
-        const right_wall = try scene.spawnProp("assets/models/cube.obj", "assets/textures/default.png");
+        const right_wall = try scene.spawnProp("assets/models/cube.obj", .{});
         try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
-        // Second vase (right side) - flat vase
-        const vase2 = try scene.spawnProp("assets/models/flat_vase.obj", "assets/textures/granitesmooth1-albedo.png");
+        // Second vase (right side) - flat vase with PBR material
+        const vase2 = try scene.spawnProp("assets/models/flat_vase.obj", .{
+            .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+            .roughness_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-roughness3.png",
+            .roughness = 1.0, // Use full roughness from texture
+        });
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
         // Attach a small script that moves the vase gradually each frame
@@ -360,29 +348,8 @@ pub const App = struct {
 
         log(.INFO, "app", "Scene v2: Lights added successfully", .{});
 
-        asset_manager.beginFrame();
-        // Initialize RenderGraph for scene
-        // Get window dimensions for path tracing pass
-        var window_width: c_int = 0;
-        var window_height: c_int = 0;
-        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
-
-        // --- Use new GlobalUboSet abstraction ---
-        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator);
-
-        try scene.initRenderGraph(
-            gc,
-            &unified_pipeline_system,
-            swapchain.hdr_format, // HDR color format for render passes
-            swapchain.surface_format.format, // LDR color format (swapchain format) for tonemap
-            try swapchain.depthFormat(),
-            thread_pool,
-            global_ubo_set,
-            @intCast(window_width),
-            @intCast(window_height),
-        );
-        log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
+        // NOTE: TextureSystem and MaterialSystem now handle their own updates
+        // (RenderGraph already initialized above before spawning props)
 
         // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
         try scene.addParticleEmitter(
@@ -405,7 +372,7 @@ pub const App = struct {
 
         // ==================== Initialize ImGui ====================
         log(.INFO, "app", "Initializing ImGui...", .{});
-        imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, &unified_pipeline_system);
+        imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, self.engine.getUnifiedPipelineSystem().?);
 
         ui_renderer = UIRenderer.init(self.allocator);
         log(.INFO, "app", "ImGui initialized", .{});
@@ -435,12 +402,11 @@ pub const App = struct {
     }
 
     pub fn update(self: *App) !bool {
-        // Reset AssetManager dirty flags at frame start
-        // Async completion will set them back to true during the frame
-        asset_manager.beginFrame();
+        // NOTE: TextureSystem and MaterialSystem now handle their own updates
+        // No need for AssetManager.beginFrame() anymore
 
         // Process deferred pipeline destroys for hot reload safety
-        unified_pipeline_system.processDeferredDestroys();
+        self.engine.getUnifiedPipelineSystem().?.processDeferredDestroys();
 
         // Increment frame counter for scheduling
         // In render thread mode, use the slowest thread's frame count (the bottleneck)
@@ -458,7 +424,9 @@ pub const App = struct {
             if (!scheduled_asset.loaded and frame_counter >= scheduled_asset.frame) {
                 log(.INFO, "app", "Loading scheduled asset at frame {}: {s}", .{ frame_counter, scheduled_asset.model_path });
 
-                var loaded_object = try scene.spawnProp(scheduled_asset.model_path, scheduled_asset.texture_path);
+                var loaded_object = try scene.spawnProp(scheduled_asset.model_path, .{
+                    .albedo_texture_path = scheduled_asset.texture_path,
+                });
                 try loaded_object.setPosition(scheduled_asset.position);
                 try loaded_object.setScale(scheduled_asset.scale);
 
@@ -528,40 +496,22 @@ pub const App = struct {
 
         global_ubo_set.deinit();
 
-        // Clean up unified systems
-        resource_binder.deinit();
-        unified_pipeline_system.deinit();
-
         // Clean up Scene v2
         if (scene_enabled) {
             scene.deinit();
             log(.INFO, "app", "Scene v2 cleaned up", .{});
         }
 
-        shader_manager.deinit();
-        asset_manager.deinit();
-        file_watcher.deinit();
+        // FileWatcher and ThreadPool are now managed by engine
+        log(.INFO, "app", "FileWatcher and ThreadPool managed by engine", .{});
 
-        // Clean up ECS system
-        if (new_ecs_enabled) {
-            // No editor-owned scripting userdata to clear; Scene deinit handles system shutdown.
-
-            new_ecs_world.deinit();
-            log(.INFO, "app", "ECS system cleaned up", .{});
-        }
-
-        // Clean up engine FIRST (may need thread pool for render thread shutdown)
-        // Engine handles: window, graphics context, swapchain, layers, render thread
+        // Clean up engine (handles all core systems including ThreadPool and FileWatcher)
+        // Engine handles: window, graphics context, swapchain, layers, render thread, threading
         self.engine.deinit();
-        log(.INFO, "app", "Engine shut down", .{});
+        log(.INFO, "app", "Engine shut down (including ThreadPool and FileWatcher)", .{});
 
         // Save and cleanup global CVar registry (persists archived CVars to disk)
         zephyr.cvar.deinitGlobal();
         log(.INFO, "app", "CVar system shut down (archived CVars saved)", .{});
-
-        // Now safe to shutdown thread pool (engine no longer needs it)
-        thread_pool.deinit();
-        self.allocator.destroy(thread_pool);
-        log(.INFO, "app", "Thread pool shut down", .{});
     }
 };

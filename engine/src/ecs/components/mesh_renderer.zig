@@ -2,14 +2,12 @@ const std = @import("std");
 const AssetId = @import("../../assets/asset_types.zig").AssetId;
 
 /// MeshRenderer component for ECS entities
-/// References Model and Material assets via AssetId from Phase 1 Asset Manager
+/// References Model asset via AssetId from Asset Manager
+/// Material properties are defined via MaterialSystem ECS components
 /// Used by RenderSystem to extract renderable geometry and feed to GenericRenderer
 pub const MeshRenderer = struct {
     /// Model asset reference (vertex/index buffers)
     model_asset: ?AssetId = null,
-
-    /// Material asset reference (textures, properties)
-    material_asset: ?AssetId = null,
 
     /// Optional texture override (if different from material's texture)
     texture_asset: ?AssetId = null,
@@ -26,11 +24,10 @@ pub const MeshRenderer = struct {
     /// Whether this mesh receives shadows
     receives_shadows: bool = true,
 
-    /// Create a MeshRenderer with model and material
-    pub fn init(model: AssetId, material: AssetId) MeshRenderer {
+    /// Create a MeshRenderer with model
+    pub fn init(model: AssetId) MeshRenderer {
         return .{
             .model_asset = model,
-            .material_asset = material,
             .texture_asset = null,
             .enabled = true,
             .layer = 0,
@@ -39,25 +36,11 @@ pub const MeshRenderer = struct {
         };
     }
 
-    /// Create a MeshRenderer with model, material, and texture override
-    pub fn initWithTexture(model: AssetId, material: AssetId, texture: AssetId) MeshRenderer {
+    /// Create a MeshRenderer with model and texture override
+    pub fn initWithTexture(model: AssetId, texture: AssetId) MeshRenderer {
         return .{
             .model_asset = model,
-            .material_asset = material,
             .texture_asset = texture,
-            .enabled = true,
-            .layer = 0,
-            .casts_shadows = true,
-            .receives_shadows = true,
-        };
-    }
-
-    /// Create a MeshRenderer with only a model (material will be default)
-    pub fn initModelOnly(model: AssetId) MeshRenderer {
-        return .{
-            .model_asset = model,
-            .material_asset = null,
-            .texture_asset = null,
             .enabled = true,
             .layer = 0,
             .casts_shadows = true,
@@ -68,11 +51,6 @@ pub const MeshRenderer = struct {
     /// Set the model asset
     pub fn setModel(self: *MeshRenderer, model: AssetId) void {
         self.model_asset = model;
-    }
-
-    /// Set the material asset
-    pub fn setMaterial(self: *MeshRenderer, material: AssetId) void {
-        self.material_asset = material;
     }
 
     /// Set the texture override
@@ -144,7 +122,6 @@ pub const MeshRenderer = struct {
         // Note: world_matrix will be filled by RenderSystem when it queries Transform
         const renderable = RenderableEntity{
             .model_asset = self.model_asset.?,
-            .material_asset = self.material_asset,
             .texture_asset = self.getTextureAsset(),
             .world_matrix = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }, // Identity placeholder
             .layer = self.layer,
@@ -163,14 +140,12 @@ pub const MeshRenderer = struct {
 // Tests
 // ============================================================================
 
-test "MeshRenderer: init with model and material" {
+test "MeshRenderer: init with model" {
     const model_id: AssetId = @enumFromInt(1);
-    const material_id: AssetId = @enumFromInt(2);
 
-    const renderer = MeshRenderer.init(model_id, material_id);
+    const renderer = MeshRenderer.init(model_id);
 
     try std.testing.expect(renderer.model_asset != null);
-    try std.testing.expect(renderer.material_asset != null);
     try std.testing.expect(renderer.texture_asset == null);
     try std.testing.expect(renderer.enabled);
     try std.testing.expectEqual(@as(u8, 0), renderer.layer);
@@ -178,35 +153,20 @@ test "MeshRenderer: init with model and material" {
 
 test "MeshRenderer: init with texture override" {
     const model_id: AssetId = @enumFromInt(1);
-    const material_id: AssetId = @enumFromInt(2);
     const texture_id: AssetId = @enumFromInt(3);
 
-    const renderer = MeshRenderer.initWithTexture(model_id, material_id, texture_id);
+    const renderer = MeshRenderer.initWithTexture(model_id, texture_id);
 
     try std.testing.expect(renderer.model_asset != null);
-    try std.testing.expect(renderer.material_asset != null);
     try std.testing.expect(renderer.texture_asset != null);
     try std.testing.expectEqual(texture_id, renderer.texture_asset.?);
 }
 
-test "MeshRenderer: model only init" {
-    const model_id: AssetId = @enumFromInt(1);
-
-    const renderer = MeshRenderer.initModelOnly(model_id);
-
-    try std.testing.expect(renderer.model_asset != null);
-    try std.testing.expect(renderer.material_asset == null);
-    try std.testing.expect(renderer.texture_asset == null);
-}
-
 test "MeshRenderer: setters" {
-    var renderer = MeshRenderer.init(@enumFromInt(1), @enumFromInt(2));
+    var renderer = MeshRenderer.init(@enumFromInt(1));
 
     renderer.setModel(@enumFromInt(10));
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(10)), renderer.model_asset.?);
-
-    renderer.setMaterial(@enumFromInt(20));
-    try std.testing.expectEqual(@as(AssetId, @enumFromInt(20)), renderer.material_asset.?);
 
     renderer.setTexture(@enumFromInt(30));
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(30)), renderer.texture_asset.?);
@@ -219,7 +179,7 @@ test "MeshRenderer: setters" {
 }
 
 test "MeshRenderer: hasValidAssets checks enabled and model" {
-    var renderer = MeshRenderer.init(@enumFromInt(1), @enumFromInt(2));
+    var renderer = MeshRenderer.init(@enumFromInt(1));
     try std.testing.expect(renderer.hasValidAssets());
 
     renderer.setEnabled(false);
@@ -231,7 +191,7 @@ test "MeshRenderer: hasValidAssets checks enabled and model" {
 }
 
 test "MeshRenderer: getTextureAsset returns override or null" {
-    var renderer = MeshRenderer.init(@enumFromInt(1), @enumFromInt(2));
+    var renderer = MeshRenderer.init(@enumFromInt(1));
     try std.testing.expect(renderer.getTextureAsset() == null);
 
     renderer.setTexture(@enumFromInt(30));
@@ -239,7 +199,7 @@ test "MeshRenderer: getTextureAsset returns override or null" {
 }
 
 test "MeshRenderer: render extraction" {
-    const renderer = MeshRenderer.init(@enumFromInt(1), @enumFromInt(2));
+    const renderer = MeshRenderer.init(@enumFromInt(1));
 
     var renderables: std.ArrayList(MeshRenderer.RenderableEntity) = .{};
     defer renderables.deinit(std.testing.allocator);
@@ -253,11 +213,10 @@ test "MeshRenderer: render extraction" {
 
     try std.testing.expectEqual(@as(usize, 1), renderables.items.len);
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(1)), renderables.items[0].model_asset);
-    try std.testing.expectEqual(@as(AssetId, @enumFromInt(2)), renderables.items[0].material_asset.?);
 }
 
 test "MeshRenderer: disabled renderer not extracted" {
-    var renderer = MeshRenderer.init(@enumFromInt(1), @enumFromInt(2));
+    var renderer = MeshRenderer.init(@enumFromInt(1));
     renderer.setEnabled(false);
 
     var renderables: std.ArrayList(MeshRenderer.RenderableEntity) = .{};

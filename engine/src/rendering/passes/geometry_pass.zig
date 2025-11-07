@@ -15,6 +15,8 @@ const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
+const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
+const MaterialBindings = @import("../../ecs/systems/material_system.zig").MaterialBindings;
 const vertex_formats = @import("../vertex_formats.zig");
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
@@ -27,11 +29,9 @@ const RenderSystem = ecs.RenderSystem;
 // Global UBO
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
-// TODO: SIMPLIFY RENDER PASS - Remove all texture/material buffer update checks
-// TODO: Move resource lifetime management to ResourceBinder
-// TODO: Passes should only focus on rendering logic, not resource management
-
 /// GeometryPass renders opaque ECS entities using dynamic rendering
+/// Uses automatic resource management: binds resources once in setup,
+/// ResourceBinder + BufferManager handle updates behind the scenes
 /// Outputs: color target (RGBA16F) + depth buffer (D32)
 pub const GeometryPass = struct {
     base: RenderPass,
@@ -44,6 +44,9 @@ pub const GeometryPass = struct {
     asset_manager: *AssetManager,
     ecs_world: *World,
     global_ubo_set: *GlobalUboSet,
+
+    // Material bindings for this pass (opaque handle)
+    material_bindings: MaterialBindings,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -58,10 +61,6 @@ pub const GeometryPass = struct {
     cached_pipeline_handle: vk.Pipeline = .null_handle,
     cached_pipeline_layout: vk.PipelineLayout = .null_handle,
 
-    // Hot reload state
-    resources_need_setup: bool = false,
-    descriptor_dirty_flags: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{true} ** MAX_FRAMES_IN_FLIGHT,
-
     // Shared render system (pointer to scene's render system)
     render_system: *RenderSystem,
 
@@ -72,6 +71,7 @@ pub const GeometryPass = struct {
         asset_manager: *AssetManager,
         ecs_world: *World,
         global_ubo_set: *GlobalUboSet,
+        material_bindings: MaterialBindings,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
         render_system: *RenderSystem,
@@ -91,6 +91,7 @@ pub const GeometryPass = struct {
             .asset_manager = asset_manager,
             .ecs_world = ecs_world,
             .global_ubo_set = global_ubo_set,
+            .material_bindings = material_bindings,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .render_system = render_system,
@@ -121,8 +122,8 @@ pub const GeometryPass = struct {
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
         self.cached_pipeline_layout = self.pipeline_system.getPipelineLayout(self.geometry_pipeline) catch return false;
 
-        // Mark resources as needing setup
-        self.resources_need_setup = true;
+        // Bind resources after recovery
+        self.bindResources() catch return false;
         self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
 
         log(.INFO, "geometry_pass", "Recovery setup complete", .{});
@@ -181,8 +182,16 @@ pub const GeometryPass = struct {
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
         self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
-        // Mark resources as needing setup
-        self.resources_need_setup = true;
+        // Populate ResourceBinder with shader reflection data
+        if (try self.pipeline_system.getPipelineReflection(self.geometry_pipeline)) |reflection| {
+            var mut_reflection = reflection;
+            try self.resource_binder.populateFromReflection(mut_reflection);
+            mut_reflection.deinit(self.allocator);
+        }
+
+        // Bind resources once during setup - ResourceBinder will track updates automatically
+        try self.bindResources();
+
         self.pipeline_system.markPipelineResourcesDirty(self.geometry_pipeline);
 
         log(.INFO, "geometry_pass", "Setup complete (color: {}, depth: {})", .{ self.color_target.toInt(), self.depth_buffer.toInt() });
@@ -190,106 +199,48 @@ pub const GeometryPass = struct {
 
     pub fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         const self: *GeometryPass = @fieldParentPtr("base", base);
-        _ = frame_info;
 
         const pipeline_entry = self.pipeline_system.pipelines.get(self.geometry_pipeline) orelse return;
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
 
         if (pipeline_rebuilt) {
-            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, clearing resource binder cache", .{});
+            log(.INFO, "geometry_pass", "Pipeline hot-reloaded, rebinding resources", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
             self.cached_pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
             self.resource_binder.clearPipeline(self.geometry_pipeline);
+
+            // Rebind after hot reload
+            try self.bindResources();
         }
 
-        // Check if assets were updated (materials or textures)
-        const assets_updated = self.asset_manager.materials_updated or self.asset_manager.texture_descriptors_updated;
-
-        // Check if render system detected geometry changes (sets flag for both raster and RT)
-        // OPTIMIZATION: Only rebind descriptors if geometry actually changed (not just transforms)
-        const geometry_changed = self.render_system.raster_descriptors_dirty;
-
-        if (assets_updated or pipeline_rebuilt or self.resources_need_setup or geometry_changed) {
-            try self.updateDescriptors();
-            self.resources_need_setup = false;
-
-            // Clear the raster flag after updating descriptors
-            self.render_system.raster_descriptors_dirty = false;
-        }
+        // Update descriptors - checks for generation changes and rebinds if needed
+        try self.resource_binder.updateFrame(self.geometry_pipeline, frame_info.current_frame);
     }
 
-    /// Bind material buffer and texture array from AssetManager to all frames
-    fn updateDescriptors(self: *GeometryPass) !void {
-        // Bind global UBO for all frames (Set 0, Binding 0 - determined by shader reflection)
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            const ubo_resource = Resource{
-                .buffer = .{
-                    .buffer = self.global_ubo_set.buffers[frame_idx].buffer,
-                    .offset = 0,
-                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
-                },
-            };
+    /// Bind resources once during setup - ResourceBinder tracks changes automatically
+    fn bindResources(self: *GeometryPass) !void {
+        // Bind material buffer (generation tracked automatically)
+        // Can be null initially - will be bound when materials are created
+        try self.resource_binder.bindStorageBufferNamed(
+            self.geometry_pipeline,
+            "MaterialBuffer",
+            self.material_bindings.material_buffer,
+        );
 
-            try self.pipeline_system.bindResource(
-                self.geometry_pipeline,
-                0, // Set 0
-                0, // Binding 0
-                ubo_resource,
-                @intCast(frame_idx),
-            );
-        }
+        // Bind texture array from material bindings (generation tracked automatically)
+        try self.resource_binder.bindTextureArrayNamed(
+            self.geometry_pipeline,
+            "textures",
+            self.material_bindings.texture_array,
+        );
 
-        // Bind material buffer for all frames
-        if (self.asset_manager.material_buffer) |buffer| {
-            const material_resource = Resource{
-                .buffer = .{
-                    .buffer = buffer.buffer,
-                    .offset = 0,
-                    .range = buffer.buffer_size,
-                },
-            };
-
-            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                try self.pipeline_system.bindResource(
-                    self.geometry_pipeline,
-                    1,
-                    0,
-                    material_resource,
-                    @intCast(frame_idx),
-                );
-            }
-        }
-
-        // Bind texture array for all frames
-        const texture_image_infos = self.asset_manager.getTextureDescriptorArray();
-        var textures_ready = false;
-        if (texture_image_infos.len > 0) {
-            textures_ready = true;
-            for (texture_image_infos) |info| {
-                if (info.sampler == vk.Sampler.null_handle or info.image_view == vk.ImageView.null_handle) {
-                    textures_ready = false;
-                    break;
-                }
-            }
-        }
-
-        if (textures_ready) {
-            const textures_resource = Resource{ .image_array = texture_image_infos };
-
-            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                try self.pipeline_system.bindResource(
-                    self.geometry_pipeline,
-                    1,
-                    1,
-                    textures_resource,
-                    @intCast(frame_idx),
-                );
-            }
-        }
-
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            try self.resource_binder.updateFrame(self.geometry_pipeline, @as(u32, @intCast(frame_idx)));
-        }
+        // Bind global UBO for all frames (generation tracked automatically)
+        // Takes array of 3 ManagedBuffers (one per frame-in-flight)
+        try self.resource_binder.bindUniformBufferNamed(
+            self.geometry_pipeline,
+            "GlobalUbo",
+            self.global_ubo_set.frame_buffers,
+        );
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {

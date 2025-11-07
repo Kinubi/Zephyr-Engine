@@ -13,6 +13,8 @@ const ViewportPicker = @import("../ui/viewport_picker.zig");
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const Swapchain = zephyr.Swapchain;
 const Texture = zephyr.Texture;
+const ManagedTexture = zephyr.ManagedTexture;
+const TextureManager = zephyr.TextureManager;
 const GraphicsContext = zephyr.GraphicsContext;
 const vk = @import("vulkan");
 const Scene = zephyr.Scene;
@@ -37,8 +39,8 @@ pub const UILayer = struct {
     show_ui_panels: bool = true, // Hide all panels except viewport when false
     current_fps: f32 = 0.0,
 
-    // LDR tonemapped viewport texture for UI display (per-frame)
-    viewport_ldr: [MAX_FRAMES_IN_FLIGHT]?Texture = [_]?Texture{null} ** MAX_FRAMES_IN_FLIGHT,
+    // LDR tonemapped viewport texture for UI display (per-frame, managed with generation tracking)
+    viewport_ldr: [MAX_FRAMES_IN_FLIGHT]?*ManagedTexture = [_]?*ManagedTexture{null} ** MAX_FRAMES_IN_FLIGHT,
     viewport_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     viewport_imgui_id: c.ImTextureID = 0,
     viewport_sampler: vk.Sampler = .null_handle,
@@ -86,10 +88,17 @@ pub const UILayer = struct {
 
     fn detach(base: *Layer) void {
         const self: *UILayer = @fieldParentPtr("base", base);
+
+        // Get TextureManager from swapchain
+        const texture_manager = self.swapchain.texture_manager orelse {
+            log(.WARN, "ui_layer", "Cannot destroy viewport textures: TextureManager not set", .{});
+            return;
+        };
+
         // Destroy per-frame viewport LDR textures
         inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (self.viewport_ldr[i]) |*ldrt| {
-                ldrt.deinit();
+            if (self.viewport_ldr[i]) |managed_tex| {
+                texture_manager.destroyTexture(managed_tex);
                 self.viewport_ldr[i] = null;
             }
         }
@@ -108,12 +117,12 @@ pub const UILayer = struct {
 
         // Update frame_info with current HDR texture (may have been recreated during resize)
         const mutable_frame_info: *FrameInfo = @constCast(frame_info);
-        mutable_frame_info.hdr_texture = self.swapchain.currentHdrTexture();
+        mutable_frame_info.hdr_texture = &self.swapchain.currentHdrTexture().texture;
 
         // Configure frame_info to render to viewport-sized LDR texture (not swapchain)
-        if (self.viewport_ldr[frame_info.current_frame]) |*ldr_tex| {
-            mutable_frame_info.color_image = ldr_tex.image;
-            mutable_frame_info.color_image_view = ldr_tex.image_view;
+        if (self.viewport_ldr[frame_info.current_frame]) |managed_ldr| {
+            mutable_frame_info.color_image = managed_ldr.texture.image;
+            mutable_frame_info.color_image_view = managed_ldr.texture.image_view;
             mutable_frame_info.extent = self.viewport_extent;
         }
 
@@ -453,82 +462,80 @@ fn computeDesiredExtent(self: *UILayer) vk.Extent2D {
     return .{ .width = if (width == 0) 1 else width, .height = if (height == 0) 1 else height };
 }
 
-/// Destroys existing LDR viewport textures.
-fn destroyOldViewportTextures(self: *UILayer) void {
-    inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        if (self.viewport_ldr[i]) |*ldr_tex| {
-            ldr_tex.deinit();
-            self.viewport_ldr[i] = null;
-        }
-    }
-}
-
-/// Recreates HDR textures for all swap images at the given extent.
+/// Resizes HDR textures for all swap images at the given extent.
 fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.Extent2D) !void {
+    _ = frame_info;
     const extent3d = makeExtent3D(extent);
-    const color_barrier = vk.ImageSubresourceRange{
-        .aspect_mask = .{ .color_bit = true },
-        .base_mip_level = 0,
-        .level_count = 1,
-        .base_array_layer = 0,
-        .layer_count = 1,
-    };
 
+    // Get TextureManager from swapchain
+    const texture_manager = self.swapchain.texture_manager orelse return error.TextureManagerNotSet;
+
+    // Resize all HDR textures to new extent
     for (self.swapchain.swap_images) |*swap_img| {
-        swap_img.hdr_texture.deinit();
-        swap_img.hdr_texture = try Texture.init(
-            self.swapchain.gc,
-            self.swapchain.hdr_format,
-            extent3d,
-            .{ .color_attachment_bit = true, .sampled_bit = true, .transfer_dst_bit = true },
-            .{ .@"1_bit" = true },
-        );
-
-        // New texture starts undefined, transition to color_attachment_optimal
-        self.swapchain.gc.transitionImageLayout(
-            frame_info.command_buffer,
-            swap_img.hdr_texture.image,
-            .undefined,
-            .general, // Unified layout - stays in GENERAL forever
-            color_barrier,
-        );
+        try swap_img.hdr_texture.resize(texture_manager, extent3d, self.swapchain.hdr_format);
     }
 }
 
-/// Recreates LDR textures (one per frame in flight) at the given extent.
-/// Uses the swapchain's surface format. Transitions to color_attachment_optimal.
+/// Creates or resizes LDR textures (one per frame in flight) at the given extent.
+/// On first call, creates new textures linked to HDR. On subsequent calls, just resizes.
 /// Returns an array of texture pointers for ImGui registration.
-fn recreateLDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.Extent2D) ![MAX_FRAMES_IN_FLIGHT]*Texture {
+fn ensureLDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.Extent2D) ![MAX_FRAMES_IN_FLIGHT]*Texture {
     const extent3d = makeExtent3D(extent);
-    const color_barrier = vk.ImageSubresourceRange{
-        .aspect_mask = .{ .color_bit = true },
-        .base_mip_level = 0,
-        .level_count = 1,
-        .base_array_layer = 0,
-        .layer_count = 1,
-    };
+    const texture_manager = self.swapchain.texture_manager orelse return error.TextureManagerNotSet;
 
     var textures_ldr: [MAX_FRAMES_IN_FLIGHT]*Texture = undefined;
 
-    inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        const ldr_tex = try Texture.init(
-            self.swapchain.gc,
-            self.swapchain.surface_format.format,
-            extent3d,
-            .{ .color_attachment_bit = true, .sampled_bit = true },
-            .{ .@"1_bit" = true },
-        );
+    // Check if we need to create or resize
+    const need_create = self.viewport_ldr[0] == null;
 
-        self.swapchain.gc.transitionImageLayout(
-            frame_info.command_buffer,
-            ldr_tex.image,
-            .undefined,
-            .general, // Unified layout - stays in GENERAL forever
-            color_barrier,
-        );
+    if (need_create) {
+        // First time: create new ManagedTextures with HDR linkage
+        const color_barrier = vk.ImageSubresourceRange{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        };
 
-        self.viewport_ldr[i] = ldr_tex;
-        textures_ldr[i] = &self.viewport_ldr[i].?;
+        inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            var name_buf: [64]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "viewport_ldr_{}", .{i});
+
+            const managed_ldr = try texture_manager.createTexture(.{
+                .name = name,
+                .format = self.swapchain.surface_format.format,
+                .extent = extent3d,
+                .usage = .{ .color_attachment_bit = true, .sampled_bit = true },
+                .samples = .{ .@"1_bit" = true },
+                // No resize_source - LDR textures resize independently in ensureViewportTargets
+            });
+
+            // Transition to general layout
+            self.swapchain.gc.transitionImageLayout(
+                frame_info.command_buffer,
+                managed_ldr.texture.image,
+                .undefined,
+                .general, // Unified layout - stays in GENERAL forever
+                color_barrier,
+            );
+
+            self.viewport_ldr[i] = managed_ldr;
+
+            // No need to register - we'll resize manually in ensureViewportTargets
+
+            textures_ldr[i] = &self.viewport_ldr[i].?.texture;
+        }
+    } else {
+        // Subsequent times: resize existing textures manually
+        inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            if (self.viewport_ldr[i]) |managed_ldr| {
+                try managed_ldr.resize(texture_manager, extent3d, self.swapchain.surface_format.format);
+                textures_ldr[i] = &managed_ldr.texture;
+            } else {
+                return error.MissingLDRTexture;
+            }
+        }
     }
 
     return textures_ldr;
@@ -544,34 +551,55 @@ fn updateCameraAspect(self: *UILayer) void {
 }
 
 /// Ensures HDR and LDR viewport textures exist and match the current viewport size.
-/// Recreates all textures if viewport size has changed.
-/// Returns true if textures were recreated, false if already up to date.
+/// Both HDR and LDR textures are manually resized to match viewport.
+/// Returns true if textures were created/resized, false if already up to date.
 fn ensureViewportTargets(self: *UILayer, frame_info: *const FrameInfo) !bool {
     const desired_extent = computeDesiredExtent(self);
 
-    // Early exit if textures already match desired size
-    if (self.viewport_extent.width == desired_extent.width and
-        self.viewport_extent.height == desired_extent.height and
-        self.viewport_ldr[0] != null)
-    {
+    // Check if we need to create LDR textures for the first time
+    const need_create = self.viewport_ldr[0] == null;
+
+    if (need_create) {
+        // First time: create HDR and LDR textures
+        try recreateHDRTextures(self, frame_info, desired_extent);
+
+        const ldr_texture_array = try ensureLDRTextures(self, frame_info, desired_extent);
+
+        // Register LDR textures with ImGui
+        self.viewport_imgui_id = try self.imgui_context.vulkan_backend.addPerFrameTextures(ldr_texture_array);
+        self.ui_renderer.viewport_texture_id = self.viewport_imgui_id;
+
+        self.viewport_extent = desired_extent;
+        updateCameraAspect(self);
+
+        return true;
+    }
+
+    // Calculate size difference
+    const width_diff = if (desired_extent.width > self.viewport_extent.width)
+        desired_extent.width - self.viewport_extent.width
+    else
+        self.viewport_extent.width - desired_extent.width;
+
+    const height_diff = if (desired_extent.height > self.viewport_extent.height)
+        desired_extent.height - self.viewport_extent.height
+    else
+        self.viewport_extent.height - desired_extent.height;
+
+    // Only resize if change is significant (> 8 pixels) to avoid memory thrashing
+    const resize_threshold: u32 = 8;
+    if (width_diff <= resize_threshold and height_diff <= resize_threshold) {
         return false;
     }
 
-    // Clean up old textures
-    destroyOldViewportTextures(self);
-
-    // Recreate HDR textures (one per swap image)
+    // Size changed significantly: resize both HDR and LDR textures
     try recreateHDRTextures(self, frame_info, desired_extent);
+    const ldr_texture_array = try ensureLDRTextures(self, frame_info, desired_extent);
 
-    // Create new LDR textures (one per frame in flight)
-    const ldr_texture_array = try recreateLDRTextures(self, frame_info, desired_extent);
+    // Update ImGui descriptors with new image views
+    try self.imgui_context.vulkan_backend.updatePerFrameTextureDescriptors(self.viewport_imgui_id, ldr_texture_array);
 
-    // Register LDR textures with ImGui
-    self.viewport_imgui_id = try self.imgui_context.vulkan_backend.addPerFrameTextures(ldr_texture_array);
     self.viewport_extent = desired_extent;
-    self.ui_renderer.viewport_texture_id = self.viewport_imgui_id;
-
-    // Update camera projection for new aspect ratio
     updateCameraAspect(self);
 
     return true;

@@ -11,7 +11,14 @@ const AssetType = AssetManagerMod.AssetType;
 const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
+const TextureManager = @import("../rendering/texture_manager.zig").TextureManager;
+const Swapchain = @import("../core/swapchain.zig").Swapchain;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
+const MaterialSystemMod = @import("../ecs/systems/material_system.zig");
+// NOTE: TextureSystem deprecated - MaterialSystem now handles texture descriptors
+const MaterialSystem = MaterialSystemMod.MaterialSystem;
+// NOTE: MaterialBufferSet deprecated - MaterialSystem now directly queries components
+const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
@@ -78,6 +85,10 @@ pub const Scene = struct {
     // Scripting system (owned by the Scene)
     scripting_system: ecs.ScriptingSystem,
 
+    // Rendering domain systems (owned by the Scene)
+    material_system: ?*MaterialSystem = null,
+    // NOTE: TextureSystem moved to Engine - it manages infrastructure textures (HDR/LDR)
+
     // Performance monitoring
     performance_monitor: ?*PerformanceMonitor = null,
 
@@ -121,21 +132,59 @@ pub const Scene = struct {
     }
 
     /// Spawn a static prop with mesh and texture
+    /// Material parameters for spawnProp
+    pub const MaterialParams = struct {
+        albedo_texture_path: ?[]const u8 = null,
+        roughness_texture_path: ?[]const u8 = null,
+        metallic_texture_path: ?[]const u8 = null,
+        normal_texture_path: ?[]const u8 = null,
+        emissive_texture_path: ?[]const u8 = null,
+
+        albedo_color: [4]f32 = [4]f32{ 1.0, 1.0, 1.0, 1.0 },
+        roughness: f32 = 0.5,
+        metallic: f32 = 0.0,
+        emissive: f32 = 0.0,
+        normal_strength: f32 = 1.0,
+        emissive_color: [3]f32 = [3]f32{ 1.0, 1.0, 1.0 },
+
+        set_name: []const u8 = "opaque", // Material set name (e.g., "opaque", "transparent", "character")
+        shader_variant: []const u8 = "pbr_standard",
+    };
+
     pub fn spawnProp(
         self: *Scene,
         model_path: []const u8,
-        texture_path: []const u8,
+        material_params: MaterialParams,
     ) !*GameObject {
 
         // 1. Load model mesh
         const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
 
-        // 2. Load texture
-        const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
+        // 2. Load textures (if provided)
+        const albedo_texture_id = if (material_params.albedo_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
 
-        // 3. Create material from texture - this registers the material with AssetManager
-        //    which will later upload it to the GPU material buffer
-        const material_id = try self.asset_manager.createMaterial(texture_id);
+        const roughness_texture_id = if (material_params.roughness_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
+
+        const metallic_texture_id = if (material_params.metallic_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
+
+        const normal_texture_id = if (material_params.normal_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
+
+        const emissive_texture_id = if (material_params.emissive_texture_path) |path|
+            try self.asset_manager.loadAssetAsync(path, AssetType.texture, LoadPriority.high)
+        else
+            AssetId.invalid;
 
         // Create ECS entity
         const entity = try self.ecs_world.createEntity();
@@ -145,10 +194,42 @@ pub const Scene = struct {
         const transform = Transform.init();
         try self.ecs_world.emplace(Transform, entity, transform);
 
-        // Add MeshRenderer component
-        var mesh_renderer = MeshRenderer.init(model_id, material_id);
-        mesh_renderer.setTexture(texture_id);
+        // Add MeshRenderer component (just references the model)
+        const mesh_renderer = MeshRenderer.init(model_id);
         try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
+
+        // Add MaterialSet component
+        const material_set = ecs.MaterialSet{
+            .set_name = material_params.set_name,
+            .shader_variant = material_params.shader_variant,
+        };
+        try self.ecs_world.emplace(ecs.MaterialSet, entity, material_set);
+
+        // Add material property components (only if textures are provided)
+        if (albedo_texture_id.toU64() != 0) {
+            const albedo_mat = ecs.AlbedoMaterial.initWithTint(albedo_texture_id, material_params.albedo_color);
+            try self.ecs_world.emplace(ecs.AlbedoMaterial, entity, albedo_mat);
+        }
+
+        if (roughness_texture_id.toU64() != 0) {
+            const roughness_mat = ecs.RoughnessMaterial.initWithFactor(roughness_texture_id, material_params.roughness);
+            try self.ecs_world.emplace(ecs.RoughnessMaterial, entity, roughness_mat);
+        }
+
+        if (metallic_texture_id.toU64() != 0) {
+            const metallic_mat = ecs.MetallicMaterial.initWithFactor(metallic_texture_id, material_params.metallic);
+            try self.ecs_world.emplace(ecs.MetallicMaterial, entity, metallic_mat);
+        }
+
+        if (normal_texture_id.toU64() != 0) {
+            const normal_mat = ecs.NormalMaterial.initWithStrength(normal_texture_id, material_params.normal_strength);
+            try self.ecs_world.emplace(ecs.NormalMaterial, entity, normal_mat);
+        }
+
+        if (emissive_texture_id.toU64() != 0) {
+            const emissive_mat = ecs.EmissiveMaterial.initFull(emissive_texture_id, material_params.emissive_color, material_params.emissive);
+            try self.ecs_world.emplace(ecs.EmissiveMaterial, entity, emissive_mat);
+        }
 
         // Create GameObject wrapper
         const game_object = GameObject{
@@ -178,9 +259,6 @@ pub const Scene = struct {
         const model_id = try self.asset_manager.loadAssetAsync(model_path, AssetType.mesh, LoadPriority.high);
         const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
 
-        // 2. Create a material from the texture (synchronous helper created on AssetManager)
-        const material_id = try self.asset_manager.createMaterial(texture_id);
-
         // Ensure Transform exists and mark dirty so render/compute systems will update GPU state
         if (!self.ecs_world.has(Transform, entity)) {
             const transform = Transform.init();
@@ -195,10 +273,9 @@ pub const Scene = struct {
         if (self.ecs_world.has(MeshRenderer, entity)) {
             const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
             mr.setModel(model_id);
-            mr.setMaterial(material_id);
             mr.setTexture(texture_id);
         } else {
-            const mesh_renderer = MeshRenderer.initWithTexture(model_id, material_id, texture_id);
+            const mesh_renderer = MeshRenderer.initWithTexture(model_id, texture_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
         }
 
@@ -219,7 +296,7 @@ pub const Scene = struct {
             mr.setModel(model_id);
         } else {
             // Create a model-only renderer (material will be provided by material system)
-            const mesh_renderer = MeshRenderer.initModelOnly(model_id);
+            const mesh_renderer = MeshRenderer.init(model_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
         }
 
@@ -229,30 +306,17 @@ pub const Scene = struct {
     }
 
     /// Convenience: update only the texture (and material) for an entity
+    /// DEPRECATED: This uses old asset-based materials. Use material components instead.
     pub fn updateTextureForEntity(
         self: *Scene,
         entity: EntityId,
         texture_path: []const u8,
     ) !void {
-        if (!self.ecs_world.isValid(entity)) return error.InvalidArgument;
-        const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
-        const material_id = try self.asset_manager.createMaterial(texture_id);
-
-        if (self.ecs_world.has(MeshRenderer, entity)) {
-            const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
-            mr.setMaterial(material_id);
-            mr.setTexture(texture_id);
-        } else {
-            // No renderer present - create default model-only renderer with texture as override
-            // Use a fallback model if none available
-            const fallback_model = self.asset_manager.getFallbackAsset(.default, AssetType.mesh) orelse return error.AssetLoadFailed;
-            const mesh_renderer = MeshRenderer.initWithTexture(fallback_model, material_id, texture_id);
-            try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
-        }
-
-        if (self.ecs_world.get(Transform, entity)) |transform| {
-            transform.dirty = true;
-        }
+        _ = self;
+        _ = entity;
+        _ = texture_path;
+        log(.WARN, "scene", "updateTextureForEntity is DEPRECATED - use material components instead", .{});
+        return error.DeprecatedFunction;
     }
 
     /// Spawn a character (currently same as prop, will add physics/AI later)
@@ -343,17 +407,15 @@ pub const Scene = struct {
         color: Vec3,
         intensity: f32,
     ) !*GameObject {
-        log(.INFO, "scene", "Spawning point light (color={d:.2}/{d:.2}/{d:.2}, intensity={d:.2})", .{ 
-            color.x, color.y, color.z, intensity 
-        });
+        log(.INFO, "scene", "Spawning point light (color={d:.2}/{d:.2}/{d:.2}, intensity={d:.2})", .{ color.x, color.y, color.z, intensity });
 
         // Create entity with Transform and Name
         const light_obj = try self.spawnEmpty("light");
-        
+
         // Add PointLight component
         const point_light = PointLight.initWithColor(color, intensity);
         try self.ecs_world.emplace(PointLight, light_obj.entity_id, point_light);
-        
+
         return light_obj;
     }
 
@@ -507,6 +569,12 @@ pub const Scene = struct {
         // Deinit scripting system
         self.scripting_system.deinit();
 
+        // Deinit rendering domain systems
+        // NOTE: TextureSystem now owned by Engine
+        if (self.material_system) |ms| {
+            ms.deinit();
+        }
+
         self.light_system.deinit();
         self.render_system.deinit();
         log(.INFO, "scene", "Scene destroyed: {s}", .{self.name});
@@ -585,14 +653,24 @@ pub const Scene = struct {
         self: *Scene,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
-        hdr_color_format: vk.Format,
-        ldr_color_format: vk.Format,
-        swapchain_depth_format: vk.Format,
+        buffer_manager: *BufferManager,
+        texture_manager: *TextureManager,
+        swapchain: *Swapchain,
         thread_pool: *ThreadPool,
         global_ubo_set: *GlobalUboSet,
         width: u32,
         height: u32,
     ) !void {
+
+        // Initialize Material system for this scene
+        // MaterialSystem now directly queries ECS components and builds GPU resources
+        self.material_system = try MaterialSystem.init(
+            self.allocator,
+            buffer_manager,
+            self.asset_manager,
+        );
+
+        log(.INFO, "scene", "Initialized material system (ECS-driven)", .{});
 
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
@@ -617,6 +695,8 @@ pub const Scene = struct {
         }
 
         // Create and add GeometryPass
+        // Pass material bindings (opaque handle - GeometryPass doesn't need MaterialSystem awareness)
+        const opaque_bindings = try self.material_system.?.getBindings("opaque");
         const geometry_pass = GeometryPass.create(
             self.allocator,
             graphics_context,
@@ -624,8 +704,9 @@ pub const Scene = struct {
             self.asset_manager,
             self.ecs_world,
             global_ubo_set,
-            hdr_color_format,
-            swapchain_depth_format,
+            opaque_bindings,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
             &self.render_system,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
@@ -637,6 +718,8 @@ pub const Scene = struct {
         }
 
         // Create PathTracingPass (alternative to raster rendering)
+        // Pass material bindings (opaque handle)
+        const path_tracing_bindings = try self.material_system.?.getBindings("opaque");
         const path_tracing_pass = PathTracingPass.create(
             self.allocator,
             graphics_context,
@@ -646,7 +729,9 @@ pub const Scene = struct {
             self.ecs_world,
             self.asset_manager,
             &self.render_system,
-            hdr_color_format,
+            texture_manager,
+            path_tracing_bindings,
+            swapchain,
             width,
             height,
         ) catch |err| blk: {
@@ -666,8 +751,8 @@ pub const Scene = struct {
             pipeline_system,
             self.ecs_world,
             global_ubo_set,
-            hdr_color_format,
-            swapchain_depth_format,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create LightVolumePass: {}. Point light rendering disabled.", .{err});
             break :blk null;
@@ -683,8 +768,8 @@ pub const Scene = struct {
             graphics_context,
             pipeline_system,
             global_ubo_set,
-            hdr_color_format,
-            swapchain_depth_format,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
             10000, // Max 10,000 particles
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create ParticlePass: {}. Particle rendering disabled.", .{err});
@@ -704,7 +789,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
-            ldr_color_format,
+            swapchain.surface_format.format,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create TonemapPass: {}. Final tonemapping disabled.", .{err});
             break :blk null;

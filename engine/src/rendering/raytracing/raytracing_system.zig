@@ -7,13 +7,18 @@ const log = @import("../../utils/log.zig").log;
 const ThreadPoolMod = @import("../../threading/thread_pool.zig");
 
 const RenderData = @import("../../rendering/render_data_types.zig");
-const RenderSystem = @import("../../ecs/systems/render_system.zig").RenderSystem;
+const RaytracingData = RenderData.RaytracingData;
+const RenderSystem = @import("../../ecs//systems/render_system.zig").RenderSystem;
+const MeshRenderer = @import("../../ecs/components/mesh_renderer.zig").MeshRenderer;
+const Transform = @import("../../ecs/components/transform.zig").Transform;
+const World = @import("../../ecs/world.zig").World;
+const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
-// Import the new multithreaded BVH builder
-const MultithreadedBvhBuilder = @import("multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
-const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
-const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
-const TlasWorker = @import("tlas_worker.zig");
+// Import the new multithreaded BVH builder (still in rendering/raytracing/)
+const MultithreadedBvhBuilder = @import("../../rendering/raytracing/multithreaded_bvh_builder.zig").MultithreadedBvhBuilder;
+const BlasResult = @import("../../rendering/raytracing/multithreaded_bvh_builder.zig").BlasResult;
+const InstanceData = @import("../../rendering/raytracing/multithreaded_bvh_builder.zig").InstanceData;
+const TlasWorker = @import("../../rendering/raytracing/tlas_worker.zig");
 const TlasJob = TlasWorker.TlasJob;
 const ThreadPool = ThreadPoolMod.ThreadPool;
 
@@ -48,29 +53,173 @@ const PerFrameDestroyQueue = struct {
     }
 };
 
-/// TLAS Registry: Double-buffered TLAS for safe lifecycle management
-/// Similar to BLAS registry, but single entry since we only have one scene TLAS
-const TlasRegistry = struct {
-    current: std.atomic.Value(?*TlasEntry) = std.atomic.Value(?*TlasEntry).init(null),
+// ==================== Acceleration Structure Sets ====================
 
-    const TlasEntry = struct {
-        acceleration_structure: vk.AccelerationStructureKHR,
-        buffer: Buffer,
-        instance_buffer: Buffer,
-        device_address: vk.DeviceAddress,
-        instance_count: u32,
-        build_time_ns: u64,
-    };
+/// Managed TLAS with generation tracking
+/// Parallel structure to ManagedBuffer and ManagedTextureArray
+pub const ManagedTLAS = struct {
+    acceleration_structure: vk.AccelerationStructureKHR = vk.AccelerationStructureKHR.null_handle,
+    buffer: Buffer = .{
+        .gc = undefined,
+        .buffer = vk.Buffer.null_handle,
+        .memory = vk.DeviceMemory.null_handle,
+        .buffer_size = 0,
+        .instance_size = 0,
+        .instance_count = 0,
+        .alignment_size = 0,
+        .usage_flags = .{},
+        .memory_property_flags = .{},
+        .mapped = null,
+        .descriptor_info = undefined,
+        .tracking_name = null,
+    },
+    instance_buffer: Buffer = .{
+        .gc = undefined,
+        .buffer = vk.Buffer.null_handle,
+        .memory = vk.DeviceMemory.null_handle,
+        .buffer_size = 0,
+        .instance_size = 0,
+        .instance_count = 0,
+        .alignment_size = 0,
+        .usage_flags = .{},
+        .memory_property_flags = .{},
+        .mapped = null,
+        .descriptor_info = undefined,
+        .tracking_name = null,
+    },
+    device_address: vk.DeviceAddress = 0,
+    instance_count: u32 = 0,
+
+    // Generation tracking (increments when TLAS rebuilt)
+    generation: u32 = 0, // 0 = not created yet (lazy init pattern)
+
+    name: []const u8,
+    created_frame: u32 = 0,
+    build_time_ns: u64 = 0,
 };
+
+/// Managed geometry buffers (vertex/index arrays) with generation tracking
+/// These are descriptor buffer info arrays that get updated when geometries change
+pub const ManagedGeometryBuffers = struct {
+    vertex_infos: std.ArrayList(vk.DescriptorBufferInfo),
+    index_infos: std.ArrayList(vk.DescriptorBufferInfo),
+    generation: u32 = 0, // Increments when buffers change
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) ManagedGeometryBuffers {
+        return .{
+            .vertex_infos = std.ArrayList(vk.DescriptorBufferInfo){},
+            .index_infos = std.ArrayList(vk.DescriptorBufferInfo){},
+            .generation = 0,
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *ManagedGeometryBuffers) void {
+        self.vertex_infos.deinit(self.allocator);
+        self.index_infos.deinit(self.allocator);
+    }
+
+    /// Update geometry buffers from raytracing data
+    /// Populates vertex_infos and index_infos arrays with buffer descriptors
+    fn updateFromGeometries(self: *ManagedGeometryBuffers, rt_data: RaytracingData) !void {
+        // Clear existing arrays
+        self.vertex_infos.clearRetainingCapacity();
+        self.index_infos.clearRetainingCapacity();
+
+        // Reserve capacity for all geometries
+        try self.vertex_infos.ensureTotalCapacity(self.allocator, rt_data.geometries.len);
+        try self.index_infos.ensureTotalCapacity(self.allocator, rt_data.geometries.len);
+
+        log(.INFO, "raytracing", "Updating geometry buffers: {} geometries", .{rt_data.geometries.len});
+
+        // Populate vertex and index buffer info arrays
+        for (rt_data.geometries) |geometry| {
+            const mesh = geometry.mesh_ptr;
+
+            // Add vertex buffer info
+            const vertex_info = vk.DescriptorBufferInfo{
+                .buffer = mesh.vertex_buffer.?.buffer,
+                .offset = 0,
+                .range = mesh.vertex_buffer.?.buffer_size,
+            };
+            self.vertex_infos.appendAssumeCapacity(vertex_info);
+
+            // Add index buffer info
+            const index_info = vk.DescriptorBufferInfo{
+                .buffer = mesh.index_buffer.?.buffer,
+                .offset = 0,
+                .range = mesh.index_buffer.?.buffer_size,
+            };
+            self.index_infos.appendAssumeCapacity(index_info);
+        }
+
+        // Increment generation to trigger descriptor rebinding
+        self.generation += 1;
+        log(.INFO, "raytracing", "Geometry buffers updated, generation now: {}", .{self.generation});
+    }
+};
+
+/// Geometry reference for BLAS (simplified - stores buffer references)
+pub const BlasHandle = struct {
+    vertex_buffer: vk.Buffer,
+    index_buffer: vk.Buffer,
+    vertex_count: u32,
+    index_count: u32,
+    vertex_stride: u32,
+    transform: [12]f32,
+};
+
+/// Named acceleration structure set
+/// A collection of BLAS (geometries) with a TLAS (scene)
+pub const AccelerationStructureSet = struct {
+    allocator: std.mem.Allocator,
+    name: []const u8,
+
+    // Geometry handles for this set (BLAS references)
+    blas_handles: std.ArrayList(BlasHandle),
+
+    // TLAS for this set (scene)
+    tlas: ManagedTLAS,
+
+    // Geometry buffers (vertex/index arrays) with generation tracking
+    geometry_buffers: ManagedGeometryBuffers,
+
+    // Tracking
+    dirty: bool = true, // Marks set as needing rebuild
+
+    // Cooldown frames after TLAS rebuild (allows descriptor rebinding)
+    rebuild_cooldown_frames: u32 = 0,
+
+    fn init(allocator: std.mem.Allocator, name: []const u8) AccelerationStructureSet {
+        return .{
+            .allocator = allocator,
+            .name = name,
+            .blas_handles = std.ArrayList(BlasHandle).init(allocator),
+            .tlas = .{
+                .name = name,
+                .generation = 0, // Starts at 0 (not created yet)
+                .created_frame = 0,
+            },
+            .geometry_buffers = ManagedGeometryBuffers.init(allocator),
+            .dirty = true,
+        };
+    }
+
+    fn deinit(self: *AccelerationStructureSet) void {
+        self.blas_handles.deinit();
+        self.geometry_buffers.deinit();
+    }
+};
+
+// ==========================================================================
 
 /// Enhanced Raytracing system with multithreaded BVH building
 pub const RaytracingSystem = struct {
     gc: *GraphicsContext, // Use 'gc' for consistency with Swapchain
 
-    // TLAS Registry: atomic pointer to current TLAS
-    // When new TLAS arrives: get old, store new, queue old for destruction
-    // Always know which TLAS to destroy - no handle juggling needed
-    tlas_registry: TlasRegistry = .{},
+    // NEW: Named acceleration structure sets (like MaterialBufferSet/TextureSet)
+    as_sets: std.StringHashMap(AccelerationStructureSet),
 
     // Multithreaded BVH system
     bvh_builder: *MultithreadedBvhBuilder = undefined,
@@ -92,6 +241,7 @@ pub const RaytracingSystem = struct {
 
     /// Cooldown frames after a TLAS pickup to allow all frames-in-flight to
     /// rebind their descriptor sets before spawning another TLAS build.
+    /// NOTE: This will move into AccelerationStructureSet (per-set cooldown)
     tlas_rebuild_cooldown_frames: u32 = 0,
 
     /// Enhanced init with multithreaded BVH support
@@ -115,15 +265,195 @@ pub const RaytracingSystem = struct {
 
         return RaytracingSystem{
             .gc = gc,
+            .as_sets = std.StringHashMap(AccelerationStructureSet).init(allocator),
             .bvh_builder = bvh_builder,
             .bvh_build_in_progress = false,
             .per_frame_destroy = per_frame_destroy,
             .allocator = allocator,
-            .tlas_registry = .{}, // Registry starts empty (null)
             .shader_binding_table = vk.Buffer.null_handle,
             .shader_binding_table_memory = vk.DeviceMemory.null_handle,
         };
     }
+
+    // ========================================================================
+    // Acceleration Structure Set Management API
+    // ========================================================================
+
+    /// Create or get an acceleration structure set by name
+    pub fn createSet(self: *RaytracingSystem, name: []const u8) !*AccelerationStructureSet {
+        // Check if set already exists
+        if (self.as_sets.getPtr(name)) |existing_set| {
+            return existing_set;
+        }
+
+        // Create new set
+        const set_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(set_name);
+
+        const set = AccelerationStructureSet{
+            .allocator = self.allocator,
+            .name = set_name,
+            .tlas = .{
+                .name = set_name, // ManagedTLAS needs a name
+                .generation = 0, // Not created yet
+            },
+            .blas_handles = std.ArrayList(BlasHandle){},
+            .geometry_buffers = ManagedGeometryBuffers.init(self.allocator),
+            .dirty = true, // New sets are dirty
+            .rebuild_cooldown_frames = 0,
+        };
+
+        try self.as_sets.put(set_name, set);
+
+        log(.INFO, "RaytracingSystem", "Created acceleration structure set '{s}'", .{name});
+        return self.as_sets.getPtr(set_name).?;
+    }
+
+    /// Get an acceleration structure set by name (returns null if not found)
+    pub fn getSet(self: *RaytracingSystem, name: []const u8) ?*AccelerationStructureSet {
+        return self.as_sets.getPtr(name);
+    }
+
+    /// Add geometry to an acceleration structure set
+    pub fn addGeometryToSet(
+        self: *RaytracingSystem,
+        set_name: []const u8,
+        vertex_buffer: vk.Buffer,
+        index_buffer: vk.Buffer,
+        vertex_count: u32,
+        index_count: u32,
+        vertex_stride: u32,
+        transform: [12]f32,
+    ) !void {
+        const set = try self.createSet(set_name);
+
+        const blas_handle = BlasHandle{
+            .vertex_buffer = vertex_buffer,
+            .index_buffer = index_buffer,
+            .vertex_count = vertex_count,
+            .index_count = index_count,
+            .vertex_stride = vertex_stride,
+            .transform = transform,
+        };
+
+        try set.blas_handles.append(blas_handle);
+        set.dirty = true;
+
+        log(.DEBUG, "RaytracingSystem", "Added geometry to set '{s}' (vertices: {}, indices: {})", .{ set_name, vertex_count, index_count });
+    }
+
+    /// Mark a set as dirty (needs rebuild)
+    pub fn markSetDirty(self: *RaytracingSystem, set_name: []const u8) void {
+        if (self.getSet(set_name)) |set| {
+            set.dirty = true;
+            log(.DEBUG, "RaytracingSystem", "Marked set '{s}' as dirty", .{set_name});
+        }
+    }
+
+    /// Rebuild an acceleration structure set (builds TLAS from BLAS handles)
+    pub fn rebuildSet(self: *RaytracingSystem, set_name: []const u8) !void {
+        const set = self.getSet(set_name) orelse {
+            log(.WARN, "RaytracingSystem", "Cannot rebuild set '{s}': not found", .{set_name});
+            return;
+        };
+
+        if (!set.dirty) {
+            log(.DEBUG, "RaytracingSystem", "Set '{s}' is not dirty, skipping rebuild", .{set_name});
+            return;
+        }
+
+        if (set.rebuild_cooldown_frames > 0) {
+            log(.DEBUG, "RaytracingSystem", "Set '{s}' is in cooldown ({} frames remaining)", .{ set_name, set.rebuild_cooldown_frames });
+            return;
+        }
+
+        if (set.blas_handles.items.len == 0) {
+            log(.WARN, "RaytracingSystem", "Cannot rebuild set '{s}': no geometries", .{set_name});
+            return;
+        }
+
+        log(.INFO, "RaytracingSystem", "Rebuilding acceleration structure set '{s}' ({} geometries)", .{ set_name, set.blas_handles.items.len });
+
+        // TODO: Spawn worker to build TLAS from BLAS handles
+        // For now, mark as not dirty and increment generation
+        set.dirty = false;
+        set.tlas.generation += 1;
+        set.rebuild_cooldown_frames = 2; // Wait 2 frames before allowing rebuild
+
+        log(.INFO, "RaytracingSystem", "Set '{s}' rebuilt (generation: {})", .{ set_name, set.tlas.generation });
+    }
+
+    /// ECS-driven update: Query MeshRenderer components and build acceleration structure sets from them
+    /// This follows the ECS philosophy: systems query components, not explicit API calls
+    pub fn updateFromECS(self: *RaytracingSystem, world: *World, asset_manager: *AssetManager) !void {
+
+        // Query all entities with MeshRenderer components
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+
+        // Scan all entities and extract geometry for BLAS
+        while (iter.next()) |entry| {
+            const mesh_renderer = entry.component;
+
+            // Get transform for this entity (default to identity if missing)
+            const transform = world.get(Transform, entry.entity) orelse continue;
+
+            // Skip if not renderable
+            if (!mesh_renderer.hasValidAssets()) continue;
+
+            // Get model asset
+            const model_id = mesh_renderer.model_asset orelse continue;
+
+            // Get mesh data from asset manager
+            if (asset_manager.getMeshByAssetId(model_id)) |mesh_data| {
+                // Extract transform matrix (convert to [12]f32 for BLAS)
+                const mat = transform.getTransformMatrix();
+                const transform_array = [12]f32{
+                    mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
+                    mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3],
+                    mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3],
+                };
+
+                // Add geometry to "default" set (or could use mesh_renderer.layer for set name)
+                const set_name = "default"; // TODO: Could derive from layer or other component data
+
+                try self.addGeometryToSet(
+                    set_name,
+                    mesh_data.vertex_buffer,
+                    mesh_data.index_buffer,
+                    mesh_data.vertex_count,
+                    mesh_data.index_count,
+                    mesh_data.vertex_stride,
+                    transform_array,
+                );
+            }
+        }
+
+        // Now update all sets (rebuild dirty ones)
+        try self.updateAccelerationStructureSets();
+    }
+
+    /// Update all acceleration structure sets (call once per frame)
+    pub fn updateAccelerationStructureSets(self: *RaytracingSystem) !void {
+        var iter = self.as_sets.iterator();
+        while (iter.next()) |entry| {
+            const set = entry.value_ptr;
+
+            // Decrement cooldown
+            if (set.rebuild_cooldown_frames > 0) {
+                set.rebuild_cooldown_frames -= 1;
+            }
+
+            // Rebuild dirty sets
+            if (set.dirty and set.rebuild_cooldown_frames == 0) {
+                try self.rebuildSet(set.name);
+            }
+        }
+    }
+
+    // ========================================================================
+    // Legacy API (to be removed after migration)
+    // ========================================================================
 
     /// Update the Shader Binding Table when the pipeline changes
     pub fn updateShaderBindingTable(self: *RaytracingSystem, pipeline: vk.Pipeline) !void {
@@ -276,49 +606,67 @@ pub const RaytracingSystem = struct {
         if (self.bvh_build_in_progress) {
             if (self.bvh_builder.tryPickupCompletedTlas()) |tlas_result| {
                 // TLAS build completed successfully!
-                // Create heap-allocated TLAS entry for the registry
-                const new_entry = try self.allocator.create(TlasRegistry.TlasEntry);
-                new_entry.* = .{
-                    .acceleration_structure = tlas_result.acceleration_structure,
-                    .buffer = tlas_result.buffer,
-                    .instance_buffer = tlas_result.instance_buffer,
-                    .device_address = tlas_result.device_address,
-                    .instance_count = tlas_result.instance_count,
-                    .build_time_ns = tlas_result.build_time_ns,
-                };
+                // Update the ManagedTLAS in the "default" acceleration structure set
+                // This is the SINGLE source of truth for TLAS lifecycle management
+                const default_set = try self.createSet("default");
 
-                // Atomically swap: get old TLAS, store new TLAS
-                const old_entry = self.tlas_registry.current.swap(new_entry, .acq_rel);
+                // If TLAS already exists (generation > 1 means we've built at least twice),
+                // save the OLD handles BEFORE updating to the new ones
+                if (default_set.tlas.generation > 1) {
+                    // Save old handles before overwriting
+                    const old_as = default_set.tlas.acceleration_structure;
+                    const old_buffer = default_set.tlas.buffer;
+                    const old_instance_buffer = default_set.tlas.instance_buffer;
 
-                // Queue old TLAS for destruction (if it existed)
-                if (old_entry) |old| {
-                    // Queue handle for destruction
-                    self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, old.acceleration_structure) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue old TLAS handle: {}", .{err});
-                        self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old.acceleration_structure, null);
+                    // Queue old managed TLAS for destruction
+                    self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, old_as) catch |err| {
+                        log(.ERROR, "raytracing", "Failed to queue old managed TLAS handle: {}", .{err});
+                        self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old_as, null);
                     };
 
-                    // Queue buffers for destruction
-                    self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old.buffer) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue old TLAS buffer: {}", .{err});
-                        if (self.gc.memory_tracker) |tracker| {
-                            var name_buf: [64]u8 = undefined;
-                            const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{d}", .{@intFromEnum(old.acceleration_structure)}) catch "tlas_unknown";
-                            tracker.untrackAllocation(tlas_name);
-                        }
-                        var immediate = old.buffer;
-                        immediate.deinit();
-                    };
+                    // Only queue buffers if they have valid handles
+                    if (old_buffer.buffer != vk.Buffer.null_handle) {
+                        self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old_buffer) catch |err| {
+                            log(.ERROR, "raytracing", "Failed to queue old managed TLAS buffer: {}", .{err});
+                            var immediate = old_buffer;
+                            immediate.deinit();
+                        };
+                    }
 
-                    self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, old.instance_buffer) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue old TLAS instance buffer: {}", .{err});
-                        var immediate = old.instance_buffer;
-                        immediate.deinit();
-                    };
-
-                    // Free the old entry struct itself
-                    self.allocator.destroy(old);
+                    if (old_instance_buffer.buffer != vk.Buffer.null_handle) {
+                        self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, old_instance_buffer) catch |err| {
+                            log(.ERROR, "raytracing", "Failed to queue old managed TLAS instance buffer: {}", .{err});
+                            var immediate = old_instance_buffer;
+                            immediate.deinit();
+                        };
+                    }
                 }
+
+                // Update ManagedTLAS with new data
+                default_set.tlas.acceleration_structure = tlas_result.acceleration_structure;
+                default_set.tlas.buffer = tlas_result.buffer;
+                default_set.tlas.instance_buffer = tlas_result.instance_buffer;
+                default_set.tlas.device_address = tlas_result.device_address;
+                default_set.tlas.instance_count = tlas_result.instance_count;
+                default_set.tlas.build_time_ns = tlas_result.build_time_ns;
+                default_set.tlas.created_frame = frame_index;
+                default_set.tlas.generation += 1; // Increment generation for descriptor rebinding
+
+                // Update geometry buffers (vertex/index arrays) with current raytracing data
+                const rt_data = try render_system.getRaytracingData();
+                defer {
+                    self.allocator.free(rt_data.instances);
+                    self.allocator.free(rt_data.geometries);
+                    self.allocator.free(rt_data.materials);
+                }
+                try default_set.geometry_buffers.updateFromGeometries(rt_data);
+
+                log(.INFO, "raytracing", "TLAS rebuilt: generation={}, instance_count={}, build_time={}ns, geometries={}", .{
+                    default_set.tlas.generation,
+                    tlas_result.instance_count,
+                    tlas_result.build_time_ns,
+                    rt_data.geometries.len,
+                });
 
                 // Mark build as no longer in progress
                 self.bvh_build_in_progress = false;
@@ -376,8 +724,12 @@ pub const RaytracingSystem = struct {
         }
 
         // Check if we need to spawn a TLAS worker for either transform-only or geometry changes
-        const is_transform_only = render_system.transform_only_change and render_system.renderables_dirty;
-        const rebuild_needed = try render_system.checkBvhRebuildNeeded();
+        // Only rebuild if:
+        // 1. Geometry actually changed (geo_changed = true from descriptors dirty)
+        // 2. OR mesh transforms changed (transform_only AND renderables_dirty)
+        // Don't rebuild just because renderables_dirty is true - that could be raster-only changes
+        const mesh_transforms_changed = render_system.transform_only_change and render_system.renderables_dirty;
+        const rebuild_needed = geo_changed or mesh_transforms_changed;
 
         // Decrement cooldown if active
         if (self.tlas_rebuild_cooldown_frames > 0) {
@@ -385,14 +737,33 @@ pub const RaytracingSystem = struct {
         }
 
         // Force rebuild overrides everything (except in-progress builds)
-        const wants_rebuild = self.force_rebuild or is_transform_only or rebuild_needed or geo_changed;
+        const wants_rebuild = self.force_rebuild or rebuild_needed;
         const can_spawn_new_build = self.tlas_rebuild_cooldown_frames == 0 and !self.bvh_build_in_progress;
+
+        // DEBUG: Log why we're rebuilding
+        if (wants_rebuild and can_spawn_new_build) {
+            log(.INFO, "raytracing", "🔨 TLAS rebuild - force:{} mesh_xform:{} (xform_flag:{} renderable_flag:{}) geo:{} cooldown:{}", .{
+                self.force_rebuild,
+                mesh_transforms_changed,
+                render_system.transform_only_change,
+                render_system.renderables_dirty,
+                geo_changed,
+                self.tlas_rebuild_cooldown_frames,
+            });
+        }
 
         if (wants_rebuild and can_spawn_new_build) {
             // Clear force flag when we actually start the build
             if (self.force_rebuild) {
                 self.force_rebuild = false;
             }
+
+            // Clear renderables_dirty flag so we don't rebuild again next frame
+            // This flag gets set by RenderSystem.checkForChanges() and needs to be cleared
+            // immediately when we consume it (spawn TLAS build)
+            render_system.renderables_dirty = false;
+            render_system.transform_only_change = false;
+
             // Get current raytracing data
             const rt_data = try render_system.getRaytracingData();
             defer {
@@ -489,15 +860,37 @@ pub const RaytracingSystem = struct {
     /// Returns null if no TLAS has been built yet
     /// This is safe to call from any thread and stable for the entire frame
     pub fn getTlas(self: *const RaytracingSystem) ?vk.AccelerationStructureKHR {
-        if (self.tlas_registry.current.load(.acquire)) |entry| {
-            return entry.acceleration_structure;
+        if (self.getSet("default")) |set| {
+            if (set.tlas.generation > 0) {
+                return set.tlas.acceleration_structure;
+            }
         }
         return null;
     }
 
     /// Check if TLAS is valid/available
     pub fn isTlasValid(self: *const RaytracingSystem) bool {
-        return self.tlas_registry.current.load(.acquire) != null;
+        if (self.getSet("default")) |set| {
+            return set.tlas.generation > 0;
+        }
+        return false;
+    }
+
+    /// Get ManagedTLAS for a specific set (returns null if not found or not created yet)
+    /// This provides generation tracking for descriptor rebinding
+    pub fn getManagedTLAS(self: *RaytracingSystem, set_name: []const u8) ?*ManagedTLAS {
+        if (self.getSet(set_name)) |set| {
+            // Only return if TLAS has been created (generation > 0)
+            if (set.tlas.generation > 0) {
+                return &set.tlas;
+            }
+        }
+        return null;
+    }
+
+    /// Get ManagedTLAS for the default set
+    pub fn getDefaultManagedTLAS(self: *RaytracingSystem) ?*ManagedTLAS {
+        return self.getManagedTLAS("default");
     }
 
     pub fn deinit(self: *RaytracingSystem) void {
@@ -506,22 +899,35 @@ pub const RaytracingSystem = struct {
             log(.WARN, "raytracing", "Failed to wait for device idle during deinit: {}", .{err});
         };
 
-        // Clean up TLAS registry - destroy the current TLAS if it exists
-        if (self.tlas_registry.current.load(.acquire)) |entry| {
-            log(.INFO, "raytracing", "Deinit: destroying TLAS from registry {x}", .{@intFromEnum(entry.acceleration_structure)});
-            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, entry.acceleration_structure, null);
-            if (self.gc.memory_tracker) |tracker| {
-                var name_buf: [64]u8 = undefined;
-                const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{d}", .{@intFromEnum(entry.acceleration_structure)}) catch "tlas_unknown";
-                tracker.untrackAllocation(tlas_name);
+        // Clean up acceleration structure sets
+        var iter = self.as_sets.iterator();
+        while (iter.next()) |entry| {
+            const set = entry.value_ptr;
+
+            // Destroy TLAS if created
+            if (set.tlas.generation > 0) {
+                self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, set.tlas.acceleration_structure, null);
+                if (self.gc.memory_tracker) |tracker| {
+                    var name_buf: [128]u8 = undefined;
+                    const tlas_name = std.fmt.bufPrint(&name_buf, "tlas_{s}", .{set.name}) catch "tlas_unknown";
+                    tracker.untrackAllocation(tlas_name);
+                }
+                var buf = set.tlas.buffer;
+                buf.deinit();
+                var inst_buf = set.tlas.instance_buffer;
+                inst_buf.deinit();
             }
-            var buf = entry.buffer;
-            buf.deinit();
-            var inst_buf = entry.instance_buffer;
-            inst_buf.deinit();
-            self.allocator.destroy(entry);
-            _ = self.tlas_registry.current.swap(null, .release);
+
+            // Free BLAS handles
+            set.blas_handles.deinit(self.allocator);
+
+            // Free geometry buffers
+            set.geometry_buffers.deinit();
+
+            // Free set name
+            self.allocator.free(set.name);
         }
+        self.as_sets.deinit();
 
         // Flush all per-frame destruction queues (old resources queued for deferred destruction)
         log(.INFO, "raytracing", "Deinit: flushing per-frame destruction queues", .{});

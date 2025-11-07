@@ -575,13 +575,6 @@ pub const SceneHierarchyPanel = struct {
             c.ImGui_Text("Model: None");
         }
 
-        if (mesh_renderer.material_asset) |material_id| {
-            const material_u64: u64 = @intFromEnum(material_id);
-            c.ImGui_Text("Material ID: %llu", material_u64);
-        } else {
-            c.ImGui_Text("Material: None");
-        }
-
         if (mesh_renderer.texture_asset) |tex_id| {
             const texture_u64: u64 = @intFromEnum(tex_id);
             c.ImGui_Text("Texture ID: %llu", texture_u64);

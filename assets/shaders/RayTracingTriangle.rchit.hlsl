@@ -35,12 +35,22 @@ struct Vertex
   float2 uv;
 };
 
+// Material structure matching the raster shaders
 struct Material {
-    uint albedoTextureIndex;
-    float roughness;
-    float metallic;
-    float emissive;
-    float4 emissive_color;
+    uint albedo_idx;
+    uint roughness_idx;
+    uint metallic_idx;
+    uint normal_idx;
+    uint emissive_idx;
+    uint occlusion_idx;
+    
+    float4 albedo_tint;
+    float roughness_factor;
+    float metallic_factor;
+    float normal_strength;
+    float emissive_intensity;
+    float3 emissive_color;
+    float occlusion_strength;
 };
 
 
@@ -83,12 +93,26 @@ void main(
 
     if (customIndex >= 0) {
         Material mat = material_buffer[customIndex];
-        Texture2D tex = texture_buffer[mat.albedoTextureIndex];
 
         float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
    
-        float3 albedo = tex.SampleLevel(sampler0, uv, 0).rgb;
-        p.hitValue = float4(albedo.r, albedo.g, albedo.b, 1.0) + (mat.emissive_color * mat.emissive);
+        // Sample albedo texture if present, otherwise use tint
+        float3 albedo;
+        if (mat.albedo_idx == 0) {
+            albedo = mat.albedo_tint.rgb;
+        } else {
+            Texture2D albedoTex = texture_buffer[mat.albedo_idx];
+            albedo = albedoTex.SampleLevel(sampler0, uv, 0).rgb * mat.albedo_tint.rgb;
+        }
+        
+        // Sample emissive texture if present
+        float3 emissive = mat.emissive_color * mat.emissive_intensity;
+        if (mat.emissive_idx != 0) {
+            Texture2D emissiveTex = texture_buffer[mat.emissive_idx];
+            emissive *= emissiveTex.SampleLevel(sampler0, uv, 0).rgb;
+        }
+        
+        p.hitValue = float4(albedo + emissive, mat.albedo_tint.a);
     } else {
         p.hitValue = float4(normal * 0.5 + 0.5, 1.0);
     }

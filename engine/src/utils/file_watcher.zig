@@ -60,7 +60,7 @@ pub const FileWatcher = struct {
             .work_item_type = .hot_reload,
         });
         log(.INFO, "file_watcher", "Registered hot_reload subsystem with thread pool", .{});
-        
+
         return FileWatcher{
             .allocator = allocator,
             .watched_paths = std.HashMap([]const u8, WatchedPath, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
@@ -164,6 +164,10 @@ pub const FileWatcher = struct {
         if (!self.running) return;
         self.running = false;
         log(.INFO, "file_watcher", "FileWatcher stopping", .{});
+        
+        // Wait for the worker thread to exit its loop
+        // The worker sleeps for 100ms, so wait a bit longer to ensure it exits
+        std.Thread.sleep(150 * std.time.ns_per_ms);
     }
 
     /// Main watcher thread function - polls for file changes

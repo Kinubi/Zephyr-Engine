@@ -18,6 +18,7 @@ const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
 const Scene = @import("../../scene/scene.zig").Scene;
 const ecs = @import("../world.zig");
+const components = @import("../../ecs.zig"); // Import to access MaterialSet component
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
@@ -105,7 +106,7 @@ pub const RenderSystem = struct {
     /// Combined data from Transform + MeshRenderer
     pub const RenderableEntity = struct {
         model_asset: AssetTypeId,
-        material_asset: ?AssetTypeId,
+        material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
         texture_asset: ?AssetTypeId,
         world_matrix: math.Mat4x4,
         layer: u8,
@@ -217,10 +218,14 @@ pub const RenderSystem = struct {
             const transform = world.get(Transform, entry.entity);
             const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
 
+            // Get material buffer index from MaterialSet component
+            const material_set = world.get(components.MaterialSet, entry.entity);
+            const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+
             // Create renderable entry
             try renderables.append(self.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
-                .material_asset = renderer.material_asset,
+                .material_buffer_index = material_buffer_index,
                 .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
@@ -263,10 +268,14 @@ pub const RenderSystem = struct {
             const transform = ctx.world.get(Transform, entity);
             const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
 
+            // Get material buffer index from MaterialSet component
+            const material_set = ctx.world.get(components.MaterialSet, entity);
+            const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+
             // Create renderable entry directly into worker-local buffer
             out.append(ctx.system.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
-                .material_asset = renderer.material_asset,
+                .material_buffer_index = material_buffer_index,
                 .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
@@ -479,11 +488,10 @@ pub const RenderSystem = struct {
         for (entities) |entity_data| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
 
+            // Use material_buffer_index from MaterialSet component
             var material_index: u32 = 0;
-            if (entity_data.material_asset) |material_asset_id| {
-                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (entity_data.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -655,11 +663,10 @@ pub const RenderSystem = struct {
         for (ctx.entities[ctx.start_idx..ctx.end_idx]) |entity_data| {
             const model = ctx.asset_manager.getModel(entity_data.model_asset) orelse continue;
 
+            // Get material_buffer_index from MaterialSet component instead of AssetManager
             var material_index: u32 = 0;
-            if (entity_data.material_asset) |material_asset_id| {
-                if (ctx.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (entity_data.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -822,6 +829,19 @@ pub const RenderSystem = struct {
             }
         }
 
+        // Clear transform dirty flags ONLY for entities with MeshRenderer
+        // This allows cameras and lights to move freely without triggering TLAS rebuilds
+        // Only mesh transforms should cause geometry updates
+        {
+            var mesh_view_clear = try world.view(MeshRenderer);
+            var mesh_iter_clear = mesh_view_clear.iterator();
+            while (mesh_iter_clear.next()) |entry| {
+                if (world.get(Transform, entry.entity)) |transform| {
+                    transform.dirty = false;
+                }
+            }
+        }
+
         // Update tracking state
         self.last_renderable_count = current_renderable_count;
         self.last_geometry_count = current_geometry_count;
@@ -832,13 +852,16 @@ pub const RenderSystem = struct {
             const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
 
             self.renderables_dirty = true;
-            self.transform_only_change = is_transform_only; // Only mark descriptors dirty if geometry actually changed (not just transforms)
+            self.transform_only_change = is_transform_only;
             if (!is_transform_only) {
                 self.raster_descriptors_dirty = true;
                 self.raytracing_descriptors_dirty = true;
             }
 
             try self.rebuildCaches(world, asset_manager);
+        } else {
+            // No changes - clear the transform_only flag
+            self.transform_only_change = false;
         }
     }
 
@@ -897,18 +920,8 @@ pub const RenderSystem = struct {
             log(.INFO, "render_system", "Approaching frame budget: {d:.2}ms / {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, budget_ms, extraction_time_ms, cache_build_time_ms });
         }
 
-        // Clear dirty flags only for renderable entities (not lights, cameras, etc.)
-        var mesh_view_clear = try world.view(MeshRenderer);
-        var mesh_iter_clear = mesh_view_clear.iterator();
-        var cleared_count: usize = 0;
-        while (mesh_iter_clear.next()) |entry| {
-            if (world.get(Transform, entry.entity)) |transform| {
-                if (transform.dirty) {
-                    cleared_count += 1;
-                }
-                transform.dirty = false;
-            }
-        }
+        // Note: Transform dirty flags are cleared in checkForChanges() after checking them
+        // This ensures ALL transforms (including cameras, lights) get cleared
     }
 
     /// Single-threaded cache building
@@ -939,11 +952,10 @@ pub const RenderSystem = struct {
         for (renderables) |renderable| {
             const model = asset_manager.getModel(renderable.model_asset) orelse continue;
 
+            // Use material_buffer_index from MaterialSet component
             var material_index: u32 = 0;
-            if (renderable.material_asset) |material_asset_id| {
-                if (asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (renderable.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -1011,11 +1023,10 @@ pub const RenderSystem = struct {
         for (ctx.renderables[ctx.start_idx..ctx.end_idx]) |renderable| {
             const model = ctx.asset_manager.getModel(renderable.model_asset) orelse continue;
 
+            // Use material_buffer_index from MaterialSet component
             var material_index: u32 = 0;
-            if (renderable.material_asset) |material_asset_id| {
-                if (ctx.asset_manager.getMaterialIndex(material_asset_id)) |mat_idx| {
-                    material_index = @intCast(mat_idx);
-                }
+            if (renderable.material_buffer_index) |idx| {
+                material_index = idx;
             }
 
             for (model.meshes.items) |model_mesh| {
@@ -1333,6 +1344,18 @@ pub fn update(world: *World, dt: f32) !void {
         }
     }
 
+    // Clear transform dirty flags ONLY for entities with MeshRenderer
+    // This allows cameras and lights to move freely without triggering TLAS rebuilds
+    {
+        var mesh_view_clear = try world.view(MeshRenderer);
+        var iter_clear = mesh_view_clear.iterator();
+        while (iter_clear.next()) |entry_clear| {
+            if (world.get(Transform, entry_clear.entity)) |transform| {
+                transform.dirty = false;
+            }
+        }
+    }
+
     // Update tracking
     self.last_renderable_count = current_renderable_count;
     self.last_geometry_count = current_geometry_count;
@@ -1346,6 +1369,9 @@ pub fn update(world: *World, dt: f32) !void {
             self.raytracing_descriptors_dirty = true;
         }
         try self.rebuildCaches(world, asset_manager);
+    } else {
+        // No changes - clear the transform_only flag
+        self.transform_only_change = false;
     }
 }
 

@@ -617,6 +617,43 @@ pub const ImGuiVulkanBackend = struct {
         return texture_id;
     }
 
+    /// Update existing per-frame texture descriptors after a texture resize
+    /// This updates the descriptor sets in place without allocating new ones
+    pub fn updatePerFrameTextureDescriptors(
+        self: *ImGuiVulkanBackend,
+        texture_id: c.ImTextureID,
+        textures: [MAX_FRAMES_IN_FLIGHT]*Texture,
+    ) !void {
+        // Get the existing descriptor sets
+        const desc_sets = self.texture_descriptor_sets.get(texture_id) orelse return error.TextureNotFound;
+
+        // Update each descriptor set with the new texture info
+        var writes: [MAX_FRAMES_IN_FLIGHT]vk.WriteDescriptorSet = undefined;
+        var image_infos: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorImageInfo = undefined;
+        inline for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            const di = textures[i].getDescriptorInfo();
+            image_infos[i] = vk.DescriptorImageInfo{
+                .sampler = di.sampler,
+                .image_view = di.image_view,
+                .image_layout = vk.ImageLayout.general,
+            };
+            writes[i] = vk.WriteDescriptorSet{
+                .dst_set = desc_sets[i],
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .combined_image_sampler,
+                .p_image_info = @ptrCast(&image_infos[i]),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            };
+        }
+        self.gc.vkd.updateDescriptorSets(self.gc.dev, MAX_FRAMES_IN_FLIGHT, &writes, 0, null);
+
+        // Update the texture map with the new first texture pointer
+        try self.texture_map.put(texture_id, textures[0]);
+    }
+
     /// Create a texture from raw RGBA8 pixel data
     /// Uses synchronous command execution to ensure texture is ready immediately
     /// This is the public API for loading textures (icons, images, etc.)
