@@ -442,6 +442,12 @@ pub const ResourceBinder = struct {
         // Register for generation tracking (once)
         try self.registerBufferByName(binding_name, pipeline_id, managed_buffer);
 
+        if (managed_buffer.generation == 0) {
+            // Buffer not created yet - skip initial bind, updateFrame will bind it later
+            log(.DEBUG, "resource_binder", "Registered '{s}' but skipping initial bind - generation 0 (not ready)", .{binding_name});
+            return;
+        }
+
         // Bind the Vulkan buffer handle for all frames using buffer's size
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const frame_index = @as(u32, @intCast(frame_idx));
@@ -521,8 +527,14 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        // Register for generation tracking
+        // Always register for generation tracking
         try self.updateTextureArrayByName(binding_name, pipeline_id, managed_textures);
+
+        // Don't bind if generation is 0 (not created yet) or if descriptor array is empty - updateFrame will bind it later
+        if (managed_textures.generation == 0 or managed_textures.descriptor_infos.len == 0) {
+            log(.DEBUG, "resource_binder", "Registered '{s}' but skipping initial bind - generation {} with {} descriptors (not ready)", .{ binding_name, managed_textures.generation, managed_textures.descriptor_infos.len });
+            return;
+        }
 
         // Bind for all frames
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
@@ -727,38 +739,77 @@ pub const ResourceBinder = struct {
                         continue;
                     };
 
-                    // Rebind based on binding type
-                    switch (location.binding_type) {
-                        .storage_buffer => {
-                            try self.bindStorageBuffer(
-                                res.pipeline_id,
-                                res.set,
-                                res.binding,
-                                @constCast(&managed_buffer.buffer),
-                                0,
-                                vk.WHOLE_SIZE,
-                                frame_index,
-                            );
-                        },
-                        .uniform_buffer => {
-                            try self.bindUniformBuffer(
-                                res.pipeline_id,
-                                res.set,
-                                res.binding,
-                                @constCast(&managed_buffer.buffer),
-                                0,
-                                vk.WHOLE_SIZE,
-                                frame_index,
-                            );
-                        },
-                        else => {
-                            log(.WARN, "resource_binder", "Tracked resource '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
-                        },
+                    // Rebind for ALL frames
+                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                        const bind_frame = @as(u32, @intCast(frame_idx));
+
+                        switch (location.binding_type) {
+                            .storage_buffer => {
+                                try self.bindStorageBuffer(
+                                    res.pipeline_id,
+                                    res.set,
+                                    res.binding,
+                                    @constCast(&managed_buffer.buffer),
+                                    0,
+                                    vk.WHOLE_SIZE,
+                                    bind_frame,
+                                );
+                            },
+                            .uniform_buffer => {
+                                try self.bindUniformBuffer(
+                                    res.pipeline_id,
+                                    res.set,
+                                    res.binding,
+                                    @constCast(&managed_buffer.buffer),
+                                    0,
+                                    vk.WHOLE_SIZE,
+                                    bind_frame,
+                                );
+                            },
+                            else => {
+                                log(.WARN, "resource_binder", "Tracked resource '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
+                            },
+                        }
                     }
                 },
-                .texture, .texture_array => {
-                    // TODO: Implement texture/texture_array rebinding
-                    log(.WARN, "resource_binder", "Texture rebinding not yet implemented for '{s}'", .{res.name});
+                .texture_array => |arr| {
+                    // Cast back to ManagedTextureArray to access descriptor_infos
+                    const ManagedTextureArray = @import("../ecs/systems/texture_system.zig").ManagedTextureArray;
+                    const managed_textures: *const ManagedTextureArray = @ptrCast(@alignCast(arr.ptr));
+
+                    // Don't rebind if descriptor array is empty
+                    if (managed_textures.descriptor_infos.len == 0) {
+                        log(.DEBUG, "resource_binder", "Skipping rebind of '{s}' - empty descriptor array", .{res.name});
+                        continue;
+                    }
+
+                    // Rebind the texture array for ALL frames
+                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                        const bind_frame = @as(u32, @intCast(frame_idx));
+
+                        const resource = Resource{
+                            .image_array = managed_textures.descriptor_infos,
+                        };
+
+                        try self.pipeline_system.bindResource(
+                            res.pipeline_id,
+                            res.set,
+                            res.binding,
+                            resource,
+                            bind_frame,
+                        );
+                    }
+
+                    log(.INFO, "resource_binder", "Rebound texture array '{s}' for all frames (generation {} -> {}, {} textures)", .{
+                        res.name,
+                        res.last_generation,
+                        current_gen,
+                        managed_textures.descriptor_infos.len,
+                    });
+                },
+                .texture => {
+                    // TODO: Implement single texture rebinding
+                    log(.WARN, "resource_binder", "Single texture rebinding not yet implemented for '{s}'", .{res.name});
                 },
             }
 

@@ -131,9 +131,10 @@ pub const TextureSystem = struct {
         const set = self.getSet(set_name) orelse return null;
 
         // Find the index of this texture in the set's texture list
+        // Note: descriptor array has white dummy at index 0, so real textures are at indices 1..N
         for (set.texture_ids.items, 0..) |id, i| {
             if (id.toU64() == texture_id.toU64()) {
-                return @intCast(i);
+                return @intCast(i + 1); // +1 because index 0 is the white dummy
             }
         }
 
@@ -149,31 +150,57 @@ pub const TextureSystem = struct {
             return;
         }
 
+        // Lock textures for thread-safe access
+        self.asset_manager.textures_mutex.lock();
+        defer self.asset_manager.textures_mutex.unlock();
+
+        // First pass: Check if ALL textures are loaded
+        var all_loaded = true;
+        for (set.texture_ids.items) |texture_id| {
+            if (self.asset_manager.asset_to_texture.get(texture_id)) |tex_index| {
+                if (tex_index >= self.asset_manager.loaded_textures.items.len) {
+                    all_loaded = false;
+                    break;
+                }
+            } else {
+                // Texture not loaded yet
+                all_loaded = false;
+                break;
+            }
+        }
+
+        if (!all_loaded) {
+            log(.DEBUG, "texture_system", "Texture set '{s}' has unloaded textures, skipping rebuild", .{set_name});
+            return; // Don't rebuild until all textures are loaded
+        }
+
         // Free old descriptor array
         if (set.managed_textures.descriptor_infos.len > 0) {
             self.allocator.free(set.managed_textures.descriptor_infos);
         }
 
         // Build new descriptor array for this set
-        const infos = try self.allocator.alloc(vk.DescriptorImageInfo, set.texture_ids.items.len);
+        // Index 0 is ALWAYS the white dummy texture (loaded_textures[0])
+        // Indices 1..N are the textures in texture_ids
+        const infos = try self.allocator.alloc(vk.DescriptorImageInfo, set.texture_ids.items.len + 1);
 
-        // Lock textures for thread-safe access
-        self.asset_manager.textures_mutex.lock();
-        defer self.asset_manager.textures_mutex.unlock();
+        // Index 0: White dummy texture (reserved for "no texture" - texture ID 0)
+        if (self.asset_manager.loaded_textures.items.len > 0) {
+            infos[0] = self.asset_manager.loaded_textures.items[0].getDescriptorInfo();
+        } else {
+            log(.ERROR, "texture_system", "No white dummy texture at loaded_textures[0]!", .{});
+            infos[0] = std.mem.zeroes(vk.DescriptorImageInfo);
+        }
 
+        // Indices 1..N: User textures from texture_ids
         for (set.texture_ids.items, 0..) |texture_id, i| {
-            // Find the texture in AssetManager's loaded textures by index
+            // We already checked all textures exist, so this should always succeed
             if (self.asset_manager.asset_to_texture.get(texture_id)) |tex_index| {
-                if (tex_index < self.asset_manager.loaded_textures.items.len) {
-                    infos[i] = self.asset_manager.loaded_textures.items[tex_index].getDescriptorInfo();
-                } else {
-                    log(.WARN, "texture_system", "Texture index {} out of bounds for set '{s}'", .{ tex_index, set_name });
-                    infos[i] = std.mem.zeroes(vk.DescriptorImageInfo);
-                }
+                infos[i + 1] = self.asset_manager.loaded_textures.items[tex_index].getDescriptorInfo();
             } else {
-                log(.WARN, "texture_system", "Texture {} not found in AssetManager for set '{s}'", .{ texture_id.toU64(), set_name });
-                // Use a default/empty descriptor
-                infos[i] = std.mem.zeroes(vk.DescriptorImageInfo);
+                // This shouldn't happen after our check, but handle it gracefully
+                log(.ERROR, "texture_system", "Texture {} disappeared during rebuild of set '{s}'", .{ texture_id.toU64(), set_name });
+                infos[i + 1] = std.mem.zeroes(vk.DescriptorImageInfo);
             }
         }
 
@@ -181,11 +208,19 @@ pub const TextureSystem = struct {
         set.managed_textures.generation += 1;
         set.managed_textures.size = infos.len * @sizeOf(vk.DescriptorImageInfo);
 
-        log(.INFO, "texture_system", "Rebuilt texture set '{s}': {} textures, generation {}", .{
+        log(.INFO, "texture_system", "Rebuilt texture set '{s}': {} textures (index 0 = white dummy, indices 1-{}), generation {}", .{
             set_name,
+            set.texture_ids.items.len,
             set.texture_ids.items.len,
             set.managed_textures.generation,
         });
+
+        // Debug: Log texture IDs in this set
+        log(.DEBUG, "texture_system", "Texture set '{s}' contents:", .{set_name});
+        log(.DEBUG, "texture_system", "  [0] White dummy (reserved)", .{});
+        for (set.texture_ids.items, 0..) |tex_id, idx| {
+            log(.DEBUG, "texture_system", "  [{}] AssetId: {}", .{ idx + 1, tex_id.toU64() });
+        }
     }
 
     /// Get descriptor array for a specific texture set

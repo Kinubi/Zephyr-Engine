@@ -228,6 +228,29 @@ pub const App = struct {
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
 
+        // Initialize RenderGraph BEFORE spawning props (so MaterialSystem exists)
+        var window_width: c_int = 0;
+        var window_height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
+
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator);
+
+        try scene.initRenderGraph(
+            gc,
+            self.engine.getUnifiedPipelineSystem().?,
+            self.engine.getBufferManager().?,
+            swapchain.hdr_format,
+            swapchain.surface_format.format,
+            try swapchain.depthFormat(),
+            thread_pool,
+            global_ubo_set,
+            @intCast(window_width),
+            @intCast(window_height),
+        );
+
+        log(.INFO, "app", "Scene render graph initialized", .{});
+
         // Cornell Box dimensions - smaller and pushed back so camera can see it
         const box_size: f32 = 2.0; // Smaller box
         const half_size = box_size / 2.0;
@@ -327,29 +350,7 @@ pub const App = struct {
         log(.INFO, "app", "Scene v2: Lights added successfully", .{});
 
         // NOTE: TextureSystem and MaterialSystem now handle their own updates
-        // Initialize RenderGraph for scene
-        // Get window dimensions for path tracing pass
-        var window_width: c_int = 0;
-        var window_height: c_int = 0;
-        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
-
-        // --- Use new GlobalUboSet abstraction ---
-        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator);
-
-        try scene.initRenderGraph(
-            gc,
-            self.engine.getUnifiedPipelineSystem().?,
-            self.engine.getBufferManager().?,
-            swapchain.hdr_format, // HDR color format for render passes
-            swapchain.surface_format.format, // LDR color format (swapchain format) for tonemap
-            try swapchain.depthFormat(),
-            thread_pool,
-            global_ubo_set,
-            @intCast(window_width),
-            @intCast(window_height),
-        );
-        log(.INFO, "app", "Scene v2 RenderGraph initialized", .{});
+        // (RenderGraph already initialized above before spawning props)
 
         // Add particle emitter to vase2 (AFTER render graph is initialized so particle compute pass exists)
         try scene.addParticleEmitter(

@@ -23,6 +23,7 @@ pub const MaterialBufferSet = struct {
     material_ids: std.ArrayList(AssetId), // Which materials belong to this set
     texture_set: *TextureSet, // Which texture set to use for lookups
     last_texture_generation: u32 = 0,
+    dirty: bool = false, // Set to true when materials in this set need rebuilding
 
     fn init(allocator: std.mem.Allocator, name: []const u8, texture_set: *TextureSet) MaterialBufferSet {
         return .{
@@ -37,6 +38,7 @@ pub const MaterialBufferSet = struct {
             },
             .material_ids = std.ArrayList(AssetId){},
             .texture_set = texture_set,
+            .dirty = false,
         };
     }
 
@@ -112,6 +114,14 @@ pub const MaterialSystem = struct {
         return self.material_sets.getPtr(name);
     }
 
+    /// Mark a material set as dirty (needs rebuilding)
+    pub fn markSetDirty(self: *MaterialSystem, set_name: []const u8) void {
+        if (self.getSet(set_name)) |set| {
+            set.dirty = true;
+            log(.DEBUG, "material_system", "Marked material set '{s}' as dirty", .{set_name});
+        }
+    }
+
     /// Add a material to a named set
     /// Automatically adds the material's textures to the linked texture set
     pub fn addMaterialToSet(self: *MaterialSystem, set_name: []const u8, material_id: AssetId) !void {
@@ -125,6 +135,7 @@ pub const MaterialSystem = struct {
         }
 
         try set.material_ids.append(self.allocator, material_id);
+        set.dirty = true; // Mark set dirty since we added a material
         log(.DEBUG, "material_system", "Added material {} to set '{s}' (now {} materials)", .{ material_id.toU64(), set_name, set.material_ids.items.len });
 
         // Automatically add material's textures to the linked texture set
@@ -133,7 +144,7 @@ pub const MaterialSystem = struct {
             if (self.asset_manager.getMaterialIndex(material_id)) |mat_index| {
                 if (mat_index < self.asset_manager.loaded_materials.items.len) {
                     const material_ptr = self.asset_manager.loaded_materials.items[mat_index];
-                    
+
                     // Add albedo texture if present
                     if (material_ptr.albedo_texture_id != 0) {
                         const albedo_id = AssetId.fromU64(@as(u64, @intCast(material_ptr.albedo_texture_id)));
@@ -176,22 +187,6 @@ pub const MaterialSystem = struct {
     fn updateInternal(self: *MaterialSystem, frame_index: u32) !void {
         const materials_dirty = self.asset_manager.materials_dirty;
 
-        // Auto-populate "default" set with all loaded materials if it exists and is empty
-        if (materials_dirty) {
-            if (self.getSet("default")) |default_set| {
-                if (default_set.material_ids.items.len == 0 and self.asset_manager.loaded_materials.items.len > 0) {
-                    log(.INFO, "material_system", "Auto-populating default material set with {} materials", .{self.asset_manager.loaded_materials.items.len});
-
-                    // Get material IDs from asset_to_material map
-                    var mat_it = self.asset_manager.asset_to_material.iterator();
-                    while (mat_it.next()) |mat_entry| {
-                        const material_id = mat_entry.key_ptr.*;
-                        try self.addMaterialToSet("default", material_id);
-                    }
-                }
-            }
-        }
-
         // Rebuild each material set if dirty
         var it = self.material_sets.iterator();
         while (it.next()) |entry| {
@@ -201,16 +196,19 @@ pub const MaterialSystem = struct {
             // Check if linked texture set has changed
             const texture_gen_changed = set.texture_set.managed_textures.generation != set.last_texture_generation;
 
-            if (materials_dirty or texture_gen_changed) {
+            // Rebuild if: global materials_dirty OR texture gen changed OR set-specific dirty flag
+            if (materials_dirty or texture_gen_changed or set.dirty) {
                 if (set.material_ids.items.len > 0) {
                     try self.rebuildMaterialSet(set_name, frame_index);
                     set.last_texture_generation = set.texture_set.managed_textures.generation;
+                    set.dirty = false; // Clear dirty flag after rebuild
                 } else {
                     // No materials in set - reset to generation 0 if buffer was created
                     if (set.buffer.generation > 0) {
                         try self.buffer_manager.destroyBuffer(set.buffer);
                         set.buffer.generation = 0;
                     }
+                    set.dirty = false; // Clear dirty flag
                 }
             }
         }
@@ -230,6 +228,12 @@ pub const MaterialSystem = struct {
     ) !void {
         var set = self.getSet(set_name) orelse return error.MaterialSetNotFound;
         if (set.material_ids.items.len == 0) return;
+
+        // Check if the linked texture set has been built (generation > 0 means descriptors are ready)
+        if (set.texture_set.managed_textures.generation == 0) {
+            log(.DEBUG, "material_system", "Texture set '{s}' not ready (generation 0), skipping material rebuild", .{set.texture_set.name});
+            return; // Don't rebuild materials until texture descriptors are ready
+        }
 
         // Gather materials from AssetManager that belong to this set
         var material_data = try self.allocator.alloc(Material, set.material_ids.items.len);
@@ -259,8 +263,13 @@ pub const MaterialSystem = struct {
                 // Resolve albedo texture (0 = no texture, use solid color)
                 if (material_data[i].albedo_texture_id != 0) {
                     const albedo_asset_id = AssetId.fromU64(@as(u64, @intCast(material_data[i].albedo_texture_id)));
-                    const albedo_index = texture_system.getTextureIndexInSet(set.texture_set.name, albedo_asset_id) orelse 0;
-                    material_data[i].albedo_texture_id = albedo_index;
+                    if (texture_system.getTextureIndexInSet(set.texture_set.name, albedo_asset_id)) |albedo_index| {
+                        log(.DEBUG, "material_system", "Material {}: Resolved albedo texture {} -> index {} in set '{s}'", .{ i, albedo_asset_id.toU64(), albedo_index, set.texture_set.name });
+                        material_data[i].albedo_texture_id = albedo_index;
+                    } else {
+                        log(.WARN, "material_system", "Material {}: Albedo texture {} NOT FOUND in set '{s}' - using index 0", .{ i, albedo_asset_id.toU64(), set.texture_set.name });
+                        material_data[i].albedo_texture_id = 0;
+                    }
                 } else {
                     material_data[i].albedo_texture_id = 0;
                 }
@@ -268,8 +277,13 @@ pub const MaterialSystem = struct {
                 // Resolve roughness texture (0 = no texture, use roughness value)
                 if (material_data[i].roughness_texture_id != 0) {
                     const roughness_asset_id = AssetId.fromU64(@as(u64, @intCast(material_data[i].roughness_texture_id)));
-                    const roughness_index = texture_system.getTextureIndexInSet(set.texture_set.name, roughness_asset_id) orelse 0;
-                    material_data[i].roughness_texture_id = roughness_index;
+                    if (texture_system.getTextureIndexInSet(set.texture_set.name, roughness_asset_id)) |roughness_index| {
+                        log(.DEBUG, "material_system", "Material {}: Resolved roughness texture {} -> index {} in set '{s}'", .{ i, roughness_asset_id.toU64(), roughness_index, set.texture_set.name });
+                        material_data[i].roughness_texture_id = roughness_index;
+                    } else {
+                        log(.WARN, "material_system", "Material {}: Roughness texture {} NOT FOUND in set '{s}' - using index 0", .{ i, roughness_asset_id.toU64(), set.texture_set.name });
+                        material_data[i].roughness_texture_id = 0;
+                    }
                 } else {
                     material_data[i].roughness_texture_id = 0;
                 }
@@ -307,21 +321,18 @@ pub const MaterialSystem = struct {
                     data_bytes.len,
                 });
 
-                // Destroy the old Vulkan buffer
-                set.buffer.buffer.deinit();
+                // Queue the old buffer for deferred destruction (safe for in-flight frames)
+                try self.buffer_manager.destroyBuffer(set.buffer);
 
-                // Create new Vulkan buffer with new size
-                set.buffer.buffer = try Buffer.initNamed(
-                    self.buffer_manager.graphics_context,
-                    data_bytes.len,
-                    1,
-                    .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-                    .{ .device_local_bit = true },
-                    set.buffer.name,
-                );
+                // Create new buffer with new size
+                const buffer_config = buffer_manager_module.BufferConfig{
+                    .name = set.buffer.name,
+                    .size = data_bytes.len,
+                    .strategy = .device_local,
+                    .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                };
 
-                // Update the size field
-                set.buffer.size = data_bytes.len;
+                set.buffer = try self.buffer_manager.createBuffer(buffer_config, frame_index);
 
                 // Upload the data (this will increment generation)
                 try self.buffer_manager.updateBuffer(&set.buffer, data_bytes, frame_index);

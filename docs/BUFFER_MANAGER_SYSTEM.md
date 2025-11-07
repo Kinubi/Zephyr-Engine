@@ -1643,3 +1643,99 @@ This refactor provides a solid foundation for:
 
 **Branch**: `feature/buffer-manager` 🚧 **ACTIVE**  
 **Next Steps**: Implement Phase 3 (MaterialSystem) to move material buffer management from AssetManager to BufferManager
+
+---
+
+## Material and Texture Sets Architecture
+
+### Overview
+
+The Material and Texture systems have been refactored to support **named sets** for independent resource collections. This enables different render passes to use separate material/texture sets without interference.
+
+### Key Concepts
+
+#### MaterialBufferSet
+A named collection of materials with their GPU buffer:
+```zig
+pub const MaterialBufferSet = struct {
+    allocator: std.mem.Allocator,
+    buffer: ManagedBuffer,              // GPU buffer (generation-tracked)
+    material_ids: std.ArrayList(AssetId), // Which materials belong to this set
+    texture_set: *TextureSet,            // Linked texture set for lookups
+    last_texture_generation: u32 = 0,    // Track texture changes
+};
+```
+
+#### TextureSet
+A named collection of textures with descriptor array:
+```zig
+pub const TextureSet = struct {
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    texture_ids: std.ArrayList(AssetId),    // Which textures belong to this set
+    managed_textures: ManagedTextureArray,  // Descriptor array with generation tracking
+};
+
+pub const ManagedTextureArray = struct {
+    descriptor_infos: []vk.DescriptorImageInfo,
+    generation: u32,          // Increments when array rebuilt
+    name: []const u8,
+    size: usize = 0,
+    created_frame: u32 = 0,
+};
+```
+
+### Implementation Priority
+
+1. **IMMEDIATE**: Wire up material-to-set population (fix black textures)
+2. **HIGH**: Apply pattern to TLAS/BLAS in RaytracingSystem  
+3. **MEDIUM**: Refactor UBO management to use BufferManager
+4. **LOW**: Consider other resources (SSBOs, compute buffers) for same pattern
+
+---
+
+## Material and Texture Sets Architecture
+
+### Overview
+
+The Material and Texture systems have been refactored to support **named sets** for independent resource collections. This enables different render passes to use separate material/texture sets without interference.
+
+### Key Concepts
+
+#### MaterialBufferSet
+A named collection of materials with their GPU buffer:
+```zig
+pub const MaterialBufferSet = struct {
+    allocator: std.mem.Allocator,
+    buffer: ManagedBuffer,              // GPU buffer (generation-tracked)
+    material_ids: std.ArrayList(AssetId), // Which materials belong to this set
+    texture_set: *TextureSet,            // Linked texture set for lookups
+    last_texture_generation: u32 = 0,    // Track texture changes
+};
+```
+
+#### TextureSet
+A named collection of textures with descriptor array:
+```zig
+pub const TextureSet = struct {
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    texture_ids: std.ArrayList(AssetId),    // Which textures belong to this set
+    managed_textures: ManagedTextureArray,  // Descriptor array with generation tracking
+};
+
+pub const ManagedTextureArray = struct {
+    descriptor_infos: []vk.DescriptorImageInfo,
+    generation: u32,          // Increments when array rebuilt
+    name: []const u8,
+    size: usize = 0,
+    created_frame: u32 = 0,
+};
+```
+
+### Implementation Priority
+
+1. **IMMEDIATE**: Wire up material-to-set population (fix black textures)
+2. **HIGH**: Apply pattern to TLAS/BLAS in RaytracingSystem  
+3. **MEDIUM**: Refactor UBO management to use BufferManager
+4. **LOW**: Consider other resources (SSBOs, compute buffers) for same pattern

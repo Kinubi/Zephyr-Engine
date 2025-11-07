@@ -212,7 +212,14 @@ pub const BufferManager = struct {
     /// Queue buffer for deferred destruction
     pub fn destroyBuffer(self: *BufferManager, managed_buffer: ManagedBuffer) !void {
         const slot = &self.deferred_buffers[self.current_frame];
-        try slot.append(self.allocator, managed_buffer);
+        
+        // Duplicate the name string since the original may be freed before cleanup
+        const owned_name = try self.allocator.dupe(u8, managed_buffer.name);
+        
+        var buffer_copy = managed_buffer;
+        buffer_copy.name = owned_name;
+        
+        try slot.append(self.allocator, buffer_copy);
 
         // Remove from statistics
         _ = self.all_buffers.remove(managed_buffer.name);

@@ -140,6 +140,7 @@ pub const Scene = struct {
         roughness: f32 = 0.5,
         metallic: f32 = 0.0,
         emissive: f32 = 0.0,
+        material_set_name: []const u8 = "default", // Which material set to add this material to
     };
 
     pub fn spawnProp(
@@ -172,6 +173,11 @@ pub const Scene = struct {
             material_params.metallic,
             material_params.emissive,
         );
+
+        // 4. Add material to the specified material set (this also adds its textures to the linked texture set)
+        if (self.material_system) |mat_sys| {
+            try mat_sys.addMaterialToSet(material_params.material_set_name, material_id);
+        }
 
         // Create ECS entity
         const entity = try self.ecs_world.createEntity();
@@ -275,6 +281,11 @@ pub const Scene = struct {
         if (!self.ecs_world.isValid(entity)) return error.InvalidArgument;
         const texture_id = try self.asset_manager.loadAssetAsync(texture_path, AssetType.texture, LoadPriority.high);
         const material_id = try self.asset_manager.createMaterial(texture_id);
+
+        // Add material to the default material set (this also adds its textures to the texture set)
+        if (self.material_system) |mat_sys| {
+            try mat_sys.addMaterialToSet("default", material_id);
+        }
 
         if (self.ecs_world.has(MeshRenderer, entity)) {
             const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
