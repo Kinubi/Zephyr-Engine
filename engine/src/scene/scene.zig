@@ -24,6 +24,8 @@ const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
+const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
+const render_data_types = @import("../rendering/render_data_types.zig");
 
 const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
 const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
@@ -31,6 +33,7 @@ const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").Lig
 const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
 const TonemapPass = @import("../rendering/passes/tonemap_pass.zig").TonemapPass;
+const BaseRenderPass = @import("../rendering/passes/base_render_pass.zig").BaseRenderPass;
 const vertex_formats = @import("../rendering/vertex_formats.zig");
 
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
@@ -697,20 +700,139 @@ pub const Scene = struct {
         // Create and add GeometryPass
         // Pass material bindings (opaque handle - GeometryPass doesn't need MaterialSystem awareness)
         const opaque_bindings = try self.material_system.?.getBindings("opaque");
-        const geometry_pass = GeometryPass.create(
-            self.allocator,
-            graphics_context,
-            pipeline_system,
-            self.asset_manager,
-            self.ecs_world,
-            global_ubo_set,
-            opaque_bindings,
-            swapchain.hdr_format,
-            try swapchain.depthFormat(),
-            &self.render_system,
-        ) catch |err| blk: {
-            log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
-            break :blk null;
+
+        // OLD: Custom GeometryPass implementation (200+ lines of boilerplate)
+        // const geometry_pass = GeometryPass.create(
+        //     self.allocator,
+        //     graphics_context,
+        //     pipeline_system,
+        //     self.asset_manager,
+        //     self.ecs_world,
+        //     global_ubo_set,
+        //     opaque_bindings,
+        //     swapchain.hdr_format,
+        //     try swapchain.depthFormat(),
+        //     &self.render_system,
+        // ) catch |err| blk: {
+        //     log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
+        //     break :blk null;
+        // };
+
+        // NEW: BaseRenderPass - zero boilerplate!
+
+        const RenderSystemType = ecs.RenderSystem;
+
+        const geometry_pass = blk: {
+            // Push constant structure matching geometry shaders
+            const GeometryPushConstants = extern struct {
+                transform: [16]f32,
+                normal_matrix: [16]f32,
+                material_index: u32,
+            };
+
+            // Render data extractor: get opaque objects from RenderSystem
+            const getOpaqueGeometry = struct {
+                fn extract(render_system: *RenderSystemType, ctx: ?*anyopaque) BaseRenderPass.RenderData {
+                    _ = ctx;
+                    const raster_data = render_system.getRasterData() catch {
+                        return .{};
+                    };
+                    // Pass pointer and length since anyopaque can't be sliced
+                    return .{
+                        .objects = raster_data.objects.ptr,
+                        .objects_len = raster_data.objects.len,
+                    };
+                }
+            }.extract;
+
+            // Push constant generator: convert RenderableObject to push constants
+            const generatePushConstants = struct {
+                fn generate(object_ptr: *const anyopaque, out_buffer: []u8) void {
+                    const object: *const render_data_types.RasterizationData.RenderableObject = @ptrCast(@alignCast(object_ptr));
+                    const push: *GeometryPushConstants = @ptrCast(@alignCast(out_buffer.ptr));
+                    push.* = .{
+                        .transform = object.transform,
+                        .normal_matrix = object.transform, // TODO: Compute proper normal matrix
+                        .material_index = object.material_index,
+                    };
+                }
+            }.generate;
+
+            // Create pass with push constant configuration
+            const pass = BaseRenderPass.create(
+                self.allocator,
+                "geometry_pass",
+                graphics_context,
+                pipeline_system,
+                &self.render_system,
+                .{
+                    .color_formats = &[_]vk.Format{swapchain.hdr_format},
+                    .depth_format = try swapchain.depthFormat(),
+                    .cull_mode = .{ .back_bit = true },
+                    .depth_test = true,
+                    .depth_write = true,
+                    .blend_enable = false,
+                    .vertex_input_bindings = vertex_formats.mesh_bindings[0..],
+                    .vertex_input_attributes = vertex_formats.mesh_attributes[0..],
+                    .push_constant_size = @sizeOf(GeometryPushConstants),
+                    .push_constant_stages = .{ .vertex_bit = true, .fragment_bit = true },
+                },
+            ) catch |err| {
+                log(.WARN, "scene", "Failed to create BaseRenderPass GeometryPass: {}. Geometry rendering disabled.", .{err});
+                break :blk null;
+            };
+
+            // Register shaders
+            pass.registerShader("assets/shaders/textured.vert") catch |err| {
+                log(.WARN, "scene", "Failed to register vertex shader: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+            pass.registerShader("assets/shaders/textured.frag") catch |err| {
+                log(.WARN, "scene", "Failed to register fragment shader: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+
+            // Bind resources (uses named binding from shader reflection)
+            pass.bind("GlobalUbo", global_ubo_set.frame_buffers) catch |err| {
+                log(.WARN, "scene", "Failed to bind GlobalUbo: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+            pass.bind("MaterialBuffer", opaque_bindings.material_buffer) catch |err| {
+                log(.WARN, "scene", "Failed to bind MaterialBuffer: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+            pass.bind("textures", opaque_bindings.texture_array) catch |err| {
+                log(.WARN, "scene", "Failed to bind textures: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+
+            // Register render data extractor
+            pass.setRenderDataFn(getOpaqueGeometry, null) catch |err| {
+                log(.WARN, "scene", "Failed to set render data function: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+
+            // Register push constant generator
+            pass.setPushConstantFn(generatePushConstants) catch |err| {
+                log(.WARN, "scene", "Failed to set push constant function: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+
+            // Bake pipeline and bind resources
+            pass.bake() catch |err| {
+                log(.WARN, "scene", "Failed to bake GeometryPass: {}", .{err});
+                pass.destroy();
+                break :blk null;
+            };
+
+            break :blk pass;
         };
 
         if (geometry_pass) |pass| {
