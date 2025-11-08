@@ -1,7 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;

@@ -2,7 +2,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -20,14 +19,11 @@ const MaterialBindings = @import("../../ecs/systems/material_system.zig").Materi
 const vertex_formats = @import("../vertex_formats.zig");
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
-
-// ECS imports
 const ecs = @import("../../ecs.zig");
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
-
-// Global UBO
-const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
 /// GeometryPass renders opaque ECS entities using dynamic rendering
 /// Uses automatic resource management: binds resources once in setup,

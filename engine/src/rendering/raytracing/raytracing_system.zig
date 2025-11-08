@@ -243,6 +243,8 @@ pub const RaytracingSystem = struct {
     /// rebind their descriptor sets before spawning another TLAS build.
     /// NOTE: This will move into AccelerationStructureSet (per-set cooldown)
     tlas_rebuild_cooldown_frames: u32 = 0,
+    last_cooldown_decrement_frame: u32 = 0, // Track which frame last decremented cooldown
+    last_tlas_pickup_frame: u32 = std.math.maxInt(u32), // Track which frame last picked up a TLAS (to prevent multiple pickups per frame)
 
     /// Enhanced init with multithreaded BVH support
     pub fn init(
@@ -602,9 +604,16 @@ pub const RaytracingSystem = struct {
     ) !bool {
         const frame_index = frame_info.current_frame;
 
+        // Track if we completed a TLAS in THIS update() call to prevent immediate respawn
+        var completed_tlas_this_call = false;
+
         // FIRST: Check if TLAS worker has completed and pick up the result
-        if (self.bvh_build_in_progress) {
+        // Only pick up once per frame to prevent rapid successive rebuilds
+        if (self.bvh_build_in_progress and self.last_tlas_pickup_frame != frame_index) {
             if (self.bvh_builder.tryPickupCompletedTlas()) |tlas_result| {
+                self.last_tlas_pickup_frame = frame_index; // Mark this frame as having picked up a TLAS
+                completed_tlas_this_call = true; // Mark completion in THIS call
+
                 // TLAS build completed successfully!
                 // Update the ManagedTLAS in the "default" acceleration structure set
                 // This is the SINGLE source of truth for TLAS lifecycle management
@@ -650,7 +659,11 @@ pub const RaytracingSystem = struct {
                 default_set.tlas.instance_count = tlas_result.instance_count;
                 default_set.tlas.build_time_ns = tlas_result.build_time_ns;
                 default_set.tlas.created_frame = frame_index;
-                default_set.tlas.generation += 1; // Increment generation for descriptor rebinding
+
+                // Increment generation immediately
+                // The cooldown system ensures frames don't overlap, and descriptor updates
+                // happen per-frame in updateFrame(), so this is safe
+                default_set.tlas.generation += 1;
 
                 // Update geometry buffers (vertex/index arrays) with current raytracing data
                 const rt_data = try render_system.getRaytracingData();
@@ -676,8 +689,9 @@ pub const RaytracingSystem = struct {
                     // Skip cooldown to allow immediate rebuild
                     self.tlas_rebuild_cooldown_frames = 0;
                 } else {
-                    // Start cooldown so descriptor sets for all frames can rebind
-                    self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT;
+                    // Start cooldown to prevent rapid rebuilds that cause flashing
+                    // Use longer cooldown than MAX_FRAMES_IN_FLIGHT to batch updates
+                    self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT * 3; // 9 frames ~= 150ms at 60fps
                 }
 
                 return true;
@@ -731,26 +745,15 @@ pub const RaytracingSystem = struct {
         const mesh_transforms_changed = render_system.transform_only_change and render_system.renderables_dirty;
         const rebuild_needed = geo_changed or mesh_transforms_changed;
 
-        // Decrement cooldown if active
-        if (self.tlas_rebuild_cooldown_frames > 0) {
+        // Decrement cooldown if active (but only once per frame!)
+        if (self.tlas_rebuild_cooldown_frames > 0 and self.last_cooldown_decrement_frame != frame_index) {
             self.tlas_rebuild_cooldown_frames -= 1;
+            self.last_cooldown_decrement_frame = frame_index;
         }
 
         // Force rebuild overrides everything (except in-progress builds)
         const wants_rebuild = self.force_rebuild or rebuild_needed;
-        const can_spawn_new_build = self.tlas_rebuild_cooldown_frames == 0 and !self.bvh_build_in_progress;
-
-        // DEBUG: Log why we're rebuilding
-        if (wants_rebuild and can_spawn_new_build) {
-            log(.INFO, "raytracing", "🔨 TLAS rebuild - force:{} mesh_xform:{} (xform_flag:{} renderable_flag:{}) geo:{} cooldown:{}", .{
-                self.force_rebuild,
-                mesh_transforms_changed,
-                render_system.transform_only_change,
-                render_system.renderables_dirty,
-                geo_changed,
-                self.tlas_rebuild_cooldown_frames,
-            });
-        }
+        const can_spawn_new_build = self.tlas_rebuild_cooldown_frames == 0 and !self.bvh_build_in_progress and !completed_tlas_this_call;
 
         if (wants_rebuild and can_spawn_new_build) {
             // Clear force flag when we actually start the build

@@ -1,7 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -26,9 +25,8 @@ const MaterialBindings = @import("../../ecs/systems/material_system.zig").Materi
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const Mesh = @import("../mesh.zig").Mesh;
-
-// ECS imports
 const ecs = @import("../../ecs.zig");
+
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
 
@@ -145,7 +143,7 @@ pub const PathTracingPass = struct {
         render_system: *RenderSystem,
         texture_manager: *TextureManager,
         material_bindings: MaterialBindings,
-        swapchain: *const @import("../../core/swapchain.zig").Swapchain,
+        swapchain: *const Swapchain,
         width: u32,
         height: u32,
     ) !*PathTracingPass {

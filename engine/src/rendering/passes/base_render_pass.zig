@@ -1,11 +1,12 @@
 const std = @import("std");
 const zephyr = @import("../../zephyr.zig");
 const vk = @import("vulkan");
-
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
+const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const UnifiedPipelineSystem = @import("../unified_pipeline_system.zig").UnifiedPipelineSystem;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
+const UnifiedPipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const RenderSystem = @import("../../ecs/systems/render_system.zig").RenderSystem;
 const FrameInfo = @import("../frameinfo.zig").FrameInfo;
@@ -130,11 +131,11 @@ pub const BaseRenderPass = struct {
 
     pub const PipelineConfig = struct {
         // Render target config
-        color_formats: []const @import("vulkan").Format,
-        depth_format: ?@import("vulkan").Format = null,
+        color_formats: []const vk.Format,
+        depth_format: ?vk.Format = null,
 
         // Pipeline state
-        cull_mode: @import("vulkan").CullModeFlags = .{ .back_bit = true },
+        cull_mode: vk.CullModeFlags = .{ .back_bit = true },
         depth_test: bool = true,
         depth_write: bool = true,
         blend_enable: bool = false,
@@ -287,10 +288,9 @@ pub const BaseRenderPass = struct {
             };
             self.push_constant_range_storage = range_slice;
         }
-        
         const push_constant_ranges: ?[]const vk.PushConstantRange = self.push_constant_range_storage;
 
-        const pipeline_create_info = @import("../unified_pipeline_system.zig").PipelineConfig{
+        const pipeline_create_info = UnifiedPipelineConfig{
             .name = self.name,
             .vertex_shader = if (self.shader_paths.items.len > 0) self.shader_paths.items[0] else null,
             .fragment_shader = if (self.shader_paths.items.len > 1) self.shader_paths.items[1] else null,
@@ -421,7 +421,7 @@ pub const BaseRenderPass = struct {
         .checkValidity = checkValidityImpl,
     };
 
-    fn setupImpl(base: *RenderPass, graph: *@import("../render_graph.zig").RenderGraph) !void {
+    fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
         const self: *BaseRenderPass = @fieldParentPtr("base", base);
         _ = graph; // We don't use render graph in BaseRenderPass
 

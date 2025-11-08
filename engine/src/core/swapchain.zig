@@ -4,10 +4,11 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Texture = @import("texture.zig").Texture;
 const TextureManager = @import("../rendering/texture_manager.zig").TextureManager;
 const ManagedTexture = @import("../rendering/texture_manager.zig").ManagedTexture;
-const Allocator = std.mem.Allocator;
 const glfw = @import("glfw");
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const log = @import("../utils/log.zig").log;
+
+const Allocator = std.mem.Allocator;
 
 pub const MAX_FRAMES_IN_FLIGHT = 3;
 
@@ -183,7 +184,7 @@ pub const Swapchain = struct {
     pub fn deinit(self: *Swapchain) void {
         // Clean up HDR textures before other resources
         self.cleanupHdrTextures();
-        
+
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
         var i: usize = 0;
@@ -780,7 +781,7 @@ const SwapImage = struct {
         // NOTE: Do NOT destroy HDR texture here! It's reused during swapchain recreation via getOrCreateTexture
         // The texture manager will handle updating it with new extent
         _ = texture_manager; // Suppress unused parameter warning
-        
+
         gc.vkd.destroyImageView(gc.dev, self.depth_image_view, null);
         gc.vkd.freeMemory(gc.dev, self.depth_image_memory, null);
         gc.vkd.destroyImage(gc.dev, self.depth_image, null);

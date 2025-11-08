@@ -144,7 +144,7 @@ pub const CameraController = struct {
 
         // Apply FOV with existing aspect ratio set by UI/resize logic
         camera.fov = self.fov;
-        camera.setPerspectiveProjection(@import("../utils/math.zig").radians(camera.fov), camera.aspectRatio, camera.nearPlane, camera.farPlane);
+        camera.setPerspectiveProjection(Math.radians(camera.fov), camera.aspectRatio, camera.nearPlane, camera.farPlane);
 
         // Update view matrix
         camera.setViewYXZ(self.position, self.rotation);

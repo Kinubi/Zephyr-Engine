@@ -2,7 +2,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -16,17 +15,13 @@ const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
-
 const Buffer = @import("../../core/buffer.zig").Buffer;
-
-// ECS imports for lights
 const ecs = @import("../../ecs.zig");
-const World = ecs.World;
-const LightSystem = ecs.LightSystem;
-
-// Global UBO
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
+
+const World = ecs.World;
+const LightSystem = ecs.LightSystem;
 
 // TODO: SIMPLIFY RENDER PASS - Remove resource update checks
 // TODO: Use named resource binding: bindStorageBuffer("LightVolumes", light_volume_buffer)
@@ -220,7 +215,7 @@ pub const LightVolumePass = struct {
                 .buffer = .{
                     .buffer = ubo_managed_buffer.buffer.buffer,
                     .offset = 0,
-                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
+                    .range = @sizeOf(GlobalUbo),
                 },
             };
 

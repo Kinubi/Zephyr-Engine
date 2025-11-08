@@ -11,9 +11,9 @@ const createBvhBuildingWork = @import("../../threading/thread_pool.zig").createB
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
 const Mesh = @import("../../rendering/mesh.zig").Mesh;
-
 const RaytracingData = @import("../../rendering/render_data_types.zig").RaytracingData;
 const tlas_worker = @import("tlas_worker.zig");
+const TlasJob = @import("tlas_worker.zig").TlasJob;
 
 /// BVH acceleration structure types
 pub const AccelerationStructureType = enum {
@@ -70,7 +70,7 @@ pub const BvhWorkData = struct {
 
     // Optional TlasJob for per-job BLAS tracking
     // If set, BLAS completion will fill the slot at geometry_index
-    tlas_job: ?*@import("tlas_worker.zig").TlasJob = null,
+    tlas_job: ?*TlasJob = null,
     geometry_index: u32 = 0, // Which slot in the job's blas_buffer to fill
 };
 

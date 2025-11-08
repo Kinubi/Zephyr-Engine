@@ -6,11 +6,6 @@
 
 const std = @import("std");
 
-// ===== Constants =====
-/// Maximum number of frames that can be in-flight simultaneously
-/// This affects command buffer allocation and synchronization
-pub const MAX_FRAMES_IN_FLIGHT: u32 = 3;
-
 // ===== Core Engine =====
 pub const Engine = @import("core/engine.zig").Engine;
 pub const EngineConfig = Engine.Config;
@@ -117,3 +112,8 @@ pub const ActionQueue = @import("scripting/action_queue.zig").ActionQueue;
 pub const lua = @import("scripting/lua_bindings.zig");
 // Expose CVars API to consumers
 pub const cvar = @import("core/cvar.zig");
+
+// ===== Constants =====
+/// Maximum number of frames that can be in-flight simultaneously
+/// This affects command buffer allocation and synchronization
+pub const MAX_FRAMES_IN_FLIGHT: u32 = 3;

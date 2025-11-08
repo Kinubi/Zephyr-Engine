@@ -1,12 +1,12 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Math = @import("../utils/math.zig");
-
 const ecs = @import("../ecs.zig");
 const Camera = @import("../rendering/camera.zig").Camera;
 const Transform = @import("../ecs/components/transform.zig").Transform;
 const MeshRenderer = @import("../ecs/components/mesh_renderer.zig").MeshRenderer;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
+
+const Allocator = std.mem.Allocator;
 
 /// Flat, cache-friendly snapshot of game state for rendering.
 /// Passed from main thread to render thread via double-buffering.
@@ -33,7 +33,7 @@ pub const GameStateSnapshot = struct {
 
     // ImGui draw data (cloned from main thread for render thread)
     imgui_draw_data: ?*anyopaque, // Pointer to cloned ImDrawData
-    
+
     // Particle system data (if needed)
     // particles: []ParticleData,
 

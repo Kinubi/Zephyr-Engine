@@ -1,16 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-
 const GameStateSnapshot = @import("game_state_snapshot.zig").GameStateSnapshot;
 const captureSnapshot = @import("game_state_snapshot.zig").captureSnapshot;
 const freeSnapshot = @import("game_state_snapshot.zig").freeSnapshot;
-
 const ecs = @import("../ecs.zig");
 const Camera = @import("../rendering/camera.zig").Camera;
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Swapchain = @import("../core/swapchain.zig").Swapchain;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const log = @import("../utils/log.zig").log;
+const Engine = @import("../core/engine.zig").Engine;
 
 /// Context for managing the render thread and double-buffered game state.
 pub const RenderThreadContext = struct {
@@ -167,9 +166,6 @@ fn renderThreadLoop(ctx: *RenderThreadContext) void {
 }
 
 fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
-    // Import Engine type for frame rendering
-    const Engine = @import("../core/engine.zig").Engine;
-
     // Get engine pointer (null check for tests)
     const engine_ptr = if (ctx.engine) |eng| @as(*Engine, @ptrCast(@alignCast(eng))) else null;
 

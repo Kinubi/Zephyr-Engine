@@ -622,7 +622,7 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        managed_textures: *const @import("../ecs/systems/material_system.zig").ManagedTextureArray,
+        managed_textures: *const ManagedTextureArray,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -759,7 +759,7 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         binding_name: []const u8,
         pipeline_id: PipelineId,
-        managed_buffer: *const @import("buffer_manager.zig").ManagedBuffer,
+        managed_buffer: *const ManagedBuffer,
     ) !void {
         // Look up the binding location
         const location = self.lookupBinding(binding_name) orelse {

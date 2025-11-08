@@ -2,7 +2,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -19,14 +18,12 @@ const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_F
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
 const Buffer = @import("../../core/buffer.zig").Buffer;
 const vertex_formats = @import("../vertex_formats.zig");
-
-// ECS imports for particles
+const ParticleComputePass = @import("particle_compute_pass.zig").ParticleComputePass;
 const ecs = @import("../../ecs.zig");
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+
 const World = ecs.World;
 const ParticleComponent = ecs.ParticleComponent;
-
-// Global UBO
-const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
 // TODO: SIMPLIFY RENDER PASS - Remove resource update checks
 // TODO: Use named resource binding: bindStorageBuffer("ParticleData", particle_buffer)
@@ -41,7 +38,7 @@ pub const ParticlePass = struct {
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
-    compute_pass: ?*@import("particle_compute_pass.zig").ParticleComputePass,
+    compute_pass: ?*ParticleComputePass,
     global_ubo_set: *GlobalUboSet,
 
     // Swapchain formats
@@ -173,7 +170,7 @@ pub const ParticlePass = struct {
     }
     fn updateDescriptors(self: *ParticlePass) !void {
         // Bind global UBO for all frames
-        for (0..@import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
 
             // Skip if buffer not created yet (generation 0)
@@ -183,7 +180,7 @@ pub const ParticlePass = struct {
                 .buffer = .{
                     .buffer = ubo_managed_buffer.buffer.buffer,
                     .offset = 0,
-                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
+                    .range = @sizeOf(GlobalUbo),
                 },
             };
 
@@ -281,7 +278,7 @@ pub const ParticlePass = struct {
     }
 
     /// Set the compute pass that produces particles
-    pub fn setComputePass(self: *ParticlePass, compute_pass: *@import("particle_compute_pass.zig").ParticleComputePass) void {
+    pub fn setComputePass(self: *ParticlePass, compute_pass: *ParticleComputePass) void {
         self.compute_pass = compute_pass;
     }
 };
