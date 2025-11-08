@@ -1,12 +1,12 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Math = @import("../utils/math.zig");
-
 const ecs = @import("../ecs.zig");
 const Camera = @import("../rendering/camera.zig").Camera;
 const Transform = @import("../ecs/components/transform.zig").Transform;
 const MeshRenderer = @import("../ecs/components/mesh_renderer.zig").MeshRenderer;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
+
+const Allocator = std.mem.Allocator;
 
 /// Flat, cache-friendly snapshot of game state for rendering.
 /// Passed from main thread to render thread via double-buffering.
@@ -30,6 +30,9 @@ pub const GameStateSnapshot = struct {
     // Light data
     point_lights: []PointLightData,
     point_light_count: usize,
+
+    // ImGui draw data (cloned from main thread for render thread)
+    imgui_draw_data: ?*anyopaque, // Pointer to cloned ImDrawData
 
     // Particle system data (if needed)
     // particles: []ParticleData,
@@ -65,6 +68,7 @@ pub const GameStateSnapshot = struct {
             .entity_count = 0,
             .point_lights = &.{},
             .point_light_count = 0,
+            .imgui_draw_data = null,
         };
     }
 
@@ -75,23 +79,36 @@ pub const GameStateSnapshot = struct {
         if (self.point_lights.len > 0) {
             self.allocator.free(self.point_lights);
         }
+        // Note: imgui_draw_data cleanup handled by ImGuiContext
         self.* = undefined;
     }
 };
 
 /// Captures current game state from ECS World into a flat snapshot.
 /// This function is called by the main thread before signaling the render thread.
+/// Capture a snapshot of the current game state for rendering
 pub fn captureSnapshot(
     allocator: Allocator,
     world: *ecs.World,
     camera: anytype,
     frame_index: u64,
     delta_time: f32,
+    imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
 ) !GameStateSnapshot {
-    var snapshot = GameStateSnapshot.init(allocator);
-
-    snapshot.frame_index = frame_index;
-    snapshot.delta_time = delta_time;
+    var snapshot = GameStateSnapshot{
+        .allocator = allocator,
+        .frame_index = frame_index,
+        .delta_time = delta_time,
+        .imgui_draw_data = imgui_draw_data,
+        .camera_position = undefined,
+        .camera_view_matrix = undefined,
+        .camera_projection_matrix = undefined,
+        .camera_view_projection_matrix = undefined,
+        .entities = undefined,
+        .entity_count = 0,
+        .point_lights = undefined,
+        .point_light_count = 0,
+    };
 
     // Copy camera state
     // Camera position is stored in the translation column of inverseViewMatrix

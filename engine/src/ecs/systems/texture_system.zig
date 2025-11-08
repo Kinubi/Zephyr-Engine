@@ -104,8 +104,6 @@ pub const ManagedTexture = struct {
             stats.extent = new_extent;
             stats.last_updated = texture_manager.frame_counter;
         }
-
-        log(.INFO, "texture_manager", "Texture '{s}' resized, new generation: {}", .{ self.name, self.generation });
     }
 };
 

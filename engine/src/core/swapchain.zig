@@ -4,10 +4,11 @@ const GraphicsContext = @import("graphics_context.zig").GraphicsContext;
 const Texture = @import("texture.zig").Texture;
 const TextureManager = @import("../rendering/texture_manager.zig").TextureManager;
 const ManagedTexture = @import("../rendering/texture_manager.zig").ManagedTexture;
-const Allocator = std.mem.Allocator;
 const glfw = @import("glfw");
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const log = @import("../utils/log.zig").log;
+
+const Allocator = std.mem.Allocator;
 
 pub const MAX_FRAMES_IN_FLIGHT = 3;
 
@@ -23,7 +24,7 @@ pub const Swapchain = struct {
 
     surface_format: vk.SurfaceFormatKHR,
     // HDR rendering format used for intermediate backbuffers
-    hdr_format: vk.Format = .r16g16b16a16_sfloat,
+    hdr_format: vk.Format = .r32g32b32a32_sfloat,
     present_mode: vk.PresentModeKHR,
     extent: vk.Extent2D,
     handle: vk.SwapchainKHR,
@@ -36,13 +37,54 @@ pub const Swapchain = struct {
     compute_fence: []vk.Fence = undefined,
 
     swap_images: []SwapImage,
+    // HDR textures per frame-in-flight (decoupled from swapchain images)
+    hdr_textures: [MAX_FRAMES_IN_FLIGHT]*ManagedTexture = undefined,
     image_index: u32 = 0,
     use_viewport_texture: bool = false,
     compute: bool = false, // Whether to use compute shaders in the swapchain
 
     pub fn init(gc: *GraphicsContext, allocator: Allocator, texture_manager: *TextureManager, extent: vk.Extent2D) !Swapchain {
-        var swapchain = try initRecycle(gc, allocator, texture_manager, extent, .null_handle, .null_handle);
+        var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
         swapchain.texture_manager = texture_manager;
+
+        // Create HDR textures per frame-in-flight (independent of swapchain image count)
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            var hdr_name_buf: [64]u8 = undefined;
+            const hdr_name = try std.fmt.bufPrint(&hdr_name_buf, "swapchain_hdr_{}", .{i});
+
+            swapchain.hdr_textures[i] = try texture_manager.getOrCreateTexture(.{
+                .name = hdr_name,
+                .format = swapchain.hdr_format,
+                .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
+                .usage = .{
+                    .color_attachment_bit = true,
+                    .sampled_bit = true,
+                    .transfer_dst_bit = true,
+                },
+                .samples = .{ .@"1_bit" = true },
+            });
+
+            // Track estimated swapchain image memory (not directly allocated by us, but still uses GPU memory)
+            // Calculate bytes per pixel outside of runtime control flow
+            const bytes_per_pixel: u32 = switch (swapchain.hdr_format) {
+                .b8g8r8a8_srgb, .b8g8r8a8_unorm, .r8g8b8a8_srgb, .r8g8b8a8_unorm => 4,
+                .a2b10g10r10_unorm_pack32 => 4,
+                .r16g16b16a16_sfloat => 8,
+                .r32g32b32a32_sfloat => 16,
+                else => 4, // Conservative estimate for unknown formats
+            };
+
+            if (gc.memory_tracker) |tracker| {
+                const estimated_size: u64 = @as(u64, extent.width) * @as(u64, extent.height) * bytes_per_pixel;
+
+                var buf: [32]u8 = undefined;
+                const key = std.fmt.bufPrint(&buf, "HDR_image_{x}", .{i}) catch "HDR Image Unknown";
+                tracker.trackAllocation(key, estimated_size, .texture) catch |err| {
+                    std.log.warn("Failed to track HDR image allocation: {}", .{err});
+                };
+            }
+        }
+
         var image_acquired = try allocator.alloc(vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
         var render_finished = try allocator.alloc(vk.Semaphore, swapchain.swap_images.len);
         var frame_fence = try allocator.alloc(vk.Fence, MAX_FRAMES_IN_FLIGHT);
@@ -80,7 +122,7 @@ pub const Swapchain = struct {
         return swapchain;
     }
 
-    pub fn initRecycle(gc: *GraphicsContext, allocator: Allocator, texture_manager: *TextureManager, extent: vk.Extent2D, old_handle: vk.SwapchainKHR, old_render_pass: vk.RenderPass) !Swapchain {
+    pub fn initRecycle(gc: *GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR, old_render_pass: vk.RenderPass) !Swapchain {
         const caps = try gc.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(gc.pdev, gc.surface);
         const actual_extent = findActualExtent(caps, extent);
         if (actual_extent.width == 0 or actual_extent.height == 0) {
@@ -126,8 +168,8 @@ pub const Swapchain = struct {
             gc.vkd.destroySwapchainKHR(gc.dev, old_handle, null);
         }
 
-        const swap_images = try initSwapchainImages(gc, texture_manager, handle, surface_format.format, allocator, actual_extent, .r16g16b16a16_sfloat);
-        errdefer for (swap_images) |*si| si.deinit(gc, texture_manager);
+        const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator, actual_extent);
+        errdefer for (swap_images) |*si| si.deinit(gc);
 
         // var next_image_acquired = try gc.vkd.createSemaphore(gc.dev, &.{ .flags = .{} }, null);
         // errdefer gc.vkd.destroySemaphore(gc.dev, next_image_acquired, null);
@@ -152,14 +194,18 @@ pub const Swapchain = struct {
     }
 
     fn deinitExceptSwapchain(self: *Swapchain) void {
-        if (self.texture_manager) |tm| {
-            for (self.swap_images) |*si| si.deinit(self.gc, tm);
-        } else {
-            // Should not happen in normal operation
-            log(.WARN, "swapchain", "deinitExceptSwapchain called without texture_manager", .{});
-        }
+        for (self.swap_images) |*si| si.deinit(self.gc);
         self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
         self.destroyFramebuffers();
+    }
+
+    /// Clean up HDR textures (only called during full shutdown, not recreation)
+    fn cleanupHdrTextures(self: *Swapchain) void {
+        if (self.texture_manager) |tm| {
+            for (self.hdr_textures) |hdr_texture| {
+                tm.destroyTexture(hdr_texture);
+            }
+        }
     }
 
     pub fn waitForAllFences(self: *Swapchain) !void {
@@ -171,6 +217,9 @@ pub const Swapchain = struct {
     }
 
     pub fn deinit(self: *Swapchain) void {
+        // Clean up HDR textures before other resources
+        self.cleanupHdrTextures();
+
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
         var i: usize = 0;
@@ -201,14 +250,35 @@ pub const Swapchain = struct {
         const texture_manager = self.texture_manager orelse return error.TextureManagerNotSet;
         const old_handle = self.handle;
         const old_compute = self.compute;
+        const old_hdr_textures = self.hdr_textures;
         self.deinitExceptSwapchain();
         const old_acquire = self.image_acquired;
         const old_finished = self.render_finished;
         const old_fence = self.frame_fence;
         const old_compute_finished = self.compute_finished;
         const old_compute_fence = self.compute_fence;
-        self.* = try initRecycle(gc, allocator, texture_manager, new_extent, old_handle, .null_handle);
+        self.* = try initRecycle(gc, allocator, new_extent, old_handle, .null_handle);
         self.*.texture_manager = texture_manager;
+        self.*.hdr_textures = old_hdr_textures;
+
+        // Update HDR textures with new extent
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            var hdr_name_buf: [64]u8 = undefined;
+            const hdr_name = try std.fmt.bufPrint(&hdr_name_buf, "swapchain_hdr_{}", .{i});
+
+            self.*.hdr_textures[i] = try texture_manager.getOrCreateTexture(.{
+                .name = hdr_name,
+                .format = self.hdr_format,
+                .extent = .{ .width = new_extent.width, .height = new_extent.height, .depth = 1 },
+                .usage = .{
+                    .color_attachment_bit = true,
+                    .sampled_bit = true,
+                    .transfer_dst_bit = true,
+                },
+                .samples = .{ .@"1_bit" = true },
+            });
+        }
+
         self.*.frame_fence = old_fence;
         self.*.image_acquired = old_acquire;
         self.*.render_finished = old_finished;
@@ -230,8 +300,10 @@ pub const Swapchain = struct {
         return &self.swap_images[self.image_index];
     }
 
-    pub fn currentHdrTexture(self: *Swapchain) *ManagedTexture {
-        return self.swap_images[self.image_index].hdr_texture;
+    /// Get array of HDR textures for all frames in flight
+    /// Used by passes that need to bind all HDR textures at setup time
+    pub fn getHdrTextures(self: *Swapchain) [MAX_FRAMES_IN_FLIGHT]*ManagedTexture {
+        return self.hdr_textures;
     }
 
     pub fn depthFormat(self: Swapchain) !vk.Format {
@@ -638,13 +710,11 @@ pub const Swapchain = struct {
 const SwapImage = struct {
     image: vk.Image,
     view: vk.ImageView,
-    // Per-swap image HDR render target as ManagedTexture (includes generation tracking)
-    hdr_texture: *ManagedTexture,
     depth_image: vk.Image,
     depth_image_view: vk.ImageView,
     depth_image_memory: vk.DeviceMemory,
 
-    fn init(gc: *const GraphicsContext, texture_manager: *TextureManager, image: vk.Image, format: vk.Format, extent: vk.Extent2D, hdr_format: vk.Format, frame_index: u32) !SwapImage {
+    fn init(gc: *const GraphicsContext, image: vk.Image, format: vk.Format, extent: vk.Extent2D) !SwapImage {
         const view = try gc.vkd.createImageView(gc.dev, &.{
             .flags = .{},
             .image = image,
@@ -660,22 +730,6 @@ const SwapImage = struct {
             },
         }, null);
         errdefer gc.vkd.destroyImageView(gc.dev, view, null);
-
-        // Create per-frame HDR color attachment as ManagedTexture (color attachment + sampled + transfer_src)
-        var hdr_name_buf: [64]u8 = undefined;
-        const hdr_name = try std.fmt.bufPrint(&hdr_name_buf, "swapchain_hdr_{}", .{frame_index});
-
-        const hdr_texture = try texture_manager.createTexture(.{
-            .name = hdr_name,
-            .format = hdr_format,
-            .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
-            .usage = .{
-                .color_attachment_bit = true,
-                .sampled_bit = true,
-                .transfer_dst_bit = true,
-            },
-            .samples = .{ .@"1_bit" = true },
-        });
 
         const depth_image = try gc.vkd.createImage(gc.dev, &.{
             .image_type = .@"2d",
@@ -743,14 +797,13 @@ const SwapImage = struct {
         return SwapImage{
             .image = image,
             .view = view,
-            .hdr_texture = hdr_texture,
             .depth_image = depth_image,
             .depth_image_view = depth_image_view,
             .depth_image_memory = depth_image_memory,
         };
     }
 
-    fn deinit(self: *SwapImage, gc: *const GraphicsContext, texture_manager: *TextureManager) void {
+    fn deinit(self: *SwapImage, gc: *const GraphicsContext) void {
         // Untrack memory before freeing
         if (gc.memory_tracker) |tracker| {
             var buf: [32]u8 = undefined;
@@ -764,7 +817,6 @@ const SwapImage = struct {
             tracker.untrackAllocation(image_key);
         }
 
-        texture_manager.destroyTexture(self.hdr_texture);
         gc.vkd.destroyImageView(gc.dev, self.depth_image_view, null);
         gc.vkd.freeMemory(gc.dev, self.depth_image_memory, null);
         gc.vkd.destroyImage(gc.dev, self.depth_image, null);
@@ -772,7 +824,7 @@ const SwapImage = struct {
     }
 };
 
-fn initSwapchainImages(gc: *const GraphicsContext, texture_manager: *TextureManager, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator, extent: vk.Extent2D, hdr_format: vk.Format) ![]SwapImage {
+fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator, extent: vk.Extent2D) ![]SwapImage {
     var count: u32 = undefined;
     _ = try gc.vkd.getSwapchainImagesKHR(gc.dev, swapchain, &count, null);
     const images = try allocator.alloc(vk.Image, count);
@@ -783,10 +835,10 @@ fn initSwapchainImages(gc: *const GraphicsContext, texture_manager: *TextureMana
     errdefer allocator.free(swap_images);
 
     var i: usize = 0;
-    errdefer for (swap_images[0..i]) |*si| si.deinit(gc, texture_manager);
+    errdefer for (swap_images[0..i]) |*si| si.deinit(gc);
 
-    for (images, 0..) |image, idx| {
-        swap_images[i] = try SwapImage.init(gc, texture_manager, image, format, extent, hdr_format, @intCast(idx));
+    for (images) |image| {
+        swap_images[i] = try SwapImage.init(gc, image, format, extent);
         i += 1;
     }
 

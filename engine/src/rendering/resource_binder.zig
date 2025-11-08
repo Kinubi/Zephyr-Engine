@@ -222,7 +222,15 @@ pub const ResourceBinder = struct {
         }
     }
 
-    /// Bind a uniform buffer to a pipeline
+    // ============================================================================
+    // LOW-LEVEL BINDING API (INTERNAL USE)
+    // ============================================================================
+    // These functions are used internally by the high-level Named API.
+    // Most users should use the Named API instead (bindUniformBufferNamed, etc.)
+    // ============================================================================
+
+    /// Bind a uniform buffer to a pipeline (low-level)
+    /// Most code should use bindUniformBufferNamed() instead
     pub fn bindUniformBuffer(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
@@ -260,7 +268,8 @@ pub const ResourceBinder = struct {
         try self.bound_uniform_buffers.put(key, bound_buffer);
     }
 
-    /// Bind a texture (image + sampler) to a pipeline
+    /// Bind a texture (image + sampler) to a pipeline (low-level)
+    /// Most code should use bindManagedTextureNamed() instead
     pub fn bindTexture(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
@@ -298,7 +307,8 @@ pub const ResourceBinder = struct {
         try self.bound_textures.put(key, bound_texture);
     }
 
-    /// Bind a storage buffer to a pipeline
+    /// Bind a storage buffer to a pipeline (low-level)
+    /// Most code should use bindStorageBufferNamed() or bindStorageBufferArrayNamed() instead
     pub fn bindStorageBuffer(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
@@ -336,45 +346,8 @@ pub const ResourceBinder = struct {
         try self.bound_storage_buffers.put(key, bound_storage);
     }
 
-    /// Convenience function to bind a full uniform buffer
-    pub fn bindFullUniformBuffer(
-        self: *ResourceBinder,
-        pipeline_id: PipelineId,
-        set: u32,
-        binding: u32,
-        buffer: *Buffer,
-        frame_index: u32,
-    ) !void {
-        try self.bindUniformBuffer(pipeline_id, set, binding, buffer, 0, vk.WHOLE_SIZE, frame_index);
-    }
-
-    /// Convenience function to bind a full storage buffer
-    pub fn bindFullStorageBuffer(
-        self: *ResourceBinder,
-        pipeline_id: PipelineId,
-        set: u32,
-        binding: u32,
-        buffer: *Buffer,
-        frame_index: u32,
-    ) !void {
-        try self.bindStorageBuffer(pipeline_id, set, binding, buffer, 0, vk.WHOLE_SIZE, frame_index);
-    }
-
-    /// Bind a texture with default shader-read-only layout
-    pub fn bindTextureDefault(
-        self: *ResourceBinder,
-        pipeline_id: PipelineId,
-        set: u32,
-        binding: u32,
-        image_view: vk.ImageView,
-        sampler: vk.Sampler,
-        frame_index: u32,
-    ) !void {
-        try self.bindTexture(pipeline_id, set, binding, image_view, sampler, .general, frame_index);
-    }
-
     // ============================================================================
-    // PHASE 2: NAMED BINDING API
+    // PHASE 2: NAMED BINDING API - HIGH LEVEL
     // ============================================================================
     //
     // AUTOMATIC SHADER REFLECTION:
@@ -397,10 +370,20 @@ pub const ResourceBinder = struct {
     // - Names are case-sensitive and must match shader declarations exactly
     // - Check spirv_reflection_debug.json for available binding names
     //
+    // API PATTERNS:
+    // - Uniform Buffers: ALWAYS per-frame arrays -> bindUniformBufferNamed(name, [3]buffers)
+    // - Storage Buffers: Single shared OR per-frame arrays
+    //   * Shared: bindStorageBufferNamed(name, buffer)
+    //   * Per-frame: bindStorageBufferArrayNamed(name, [3]buffers)
+    // - Textures: Managed with automatic generation tracking
+    //   * Single: bindTextureNamed(name, texture)
+    //   * Shader Array: bindTextureArrayNamed(name, texture_array)
+    //
     // ============================================================================
 
-    /// Bind a uniform buffer by name
-    /// Takes a ManagedBuffer, binds for all frames, and tracks generation changes
+    /// Bind a per-frame uniform buffer array by name
+    /// Uniform buffers are ALWAYS per-frame arrays (one buffer per frame-in-flight)
+    /// Takes an array of ManagedBuffers, binds for all frames, and tracks generation changes
     pub fn bindUniformBufferNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
@@ -417,9 +400,8 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        // Register the first frame's buffer for generation tracking (all frames share same generation)
-        // We only track one buffer since they all have the same generation tracking behavior
-        try self.registerBufferByName(binding_name, pipeline_id, frame_buffers[0]);
+        // Register ALL frames' buffers for per-frame generation tracking
+        try self.registerUniformBufferArrayByName(binding_name, pipeline_id, frame_buffers);
 
         // Bind each frame buffer to its corresponding frame
         for (frame_buffers, 0..) |managed_buffer, frame_idx| {
@@ -442,7 +424,8 @@ pub const ResourceBinder = struct {
         }
     }
 
-    /// Bind a managed storage buffer by name for all frames
+    /// Bind a managed storage buffer by name (shared across all frames)
+    /// For per-frame storage buffers, use bindStorageBufferArrayNamed() instead
     /// Automatically registers the buffer for generation-based tracking
     pub fn bindStorageBufferNamed(
         self: *ResourceBinder,
@@ -483,32 +466,52 @@ pub const ResourceBinder = struct {
         }
     }
 
-    /// Bind a texture by name
-    pub fn bindTextureNamed(
+    /// Bind a storage buffer array by name (one buffer per frame)
+    /// Takes an array of ManagedBuffers, binds for all frames, and tracks generation changes
+    pub fn bindStorageBufferArrayNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        image_view: vk.ImageView,
-        sampler: vk.Sampler,
-        layout: vk.ImageLayout,
-        frame_index: u32,
+        frame_buffers: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
             return error.UnknownBinding;
         };
 
-        if (location.binding_type != .combined_image_sampler and location.binding_type != .sampled_image) {
-            log(.ERROR, "resource_binder", "Binding '{s}' is not a texture (type: {})", .{ binding_name, location.binding_type });
+        if (location.binding_type != .storage_buffer) {
+            log(.ERROR, "resource_binder", "Binding '{s}' is not a storage buffer (type: {})", .{ binding_name, location.binding_type });
             return error.BindingTypeMismatch;
         }
 
-        try self.bindTexture(pipeline_id, location.set, location.binding, image_view, sampler, layout, frame_index);
+        // Register ALL frames' buffers for per-frame generation tracking
+        try self.registerStorageBufferArrayByName(binding_name, pipeline_id, frame_buffers);
+
+        // Bind each frame buffer to its corresponding frame
+        for (frame_buffers, 0..) |managed_buffer, frame_idx| {
+            if (managed_buffer.generation == 0) {
+                // Buffer not created yet - skip initial bind, updateFrame will bind it later
+                continue;
+            }
+
+            // Bind the Vulkan buffer handle for this specific frame
+            const frame_index = @as(u32, @intCast(frame_idx));
+            try self.bindStorageBuffer(
+                pipeline_id,
+                location.set,
+                location.binding,
+                @constCast(&managed_buffer.buffer),
+                0, // offset
+                managed_buffer.size, // use buffer's actual size
+                frame_index,
+            );
+        }
     }
 
-    /// Bind a managed texture by name for all frames
+    /// Bind a managed texture by name (shared across all frames)
     /// Automatically registers the texture for generation-based tracking
-    pub fn bindManagedTextureNamed(
+    /// Most common use case for textures
+    pub fn bindTextureNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
@@ -570,8 +573,16 @@ pub const ResourceBinder = struct {
         // Register for generation tracking
         try self.registerAccelerationStructureByName(binding_name, pipeline_id, managed_tlas);
 
-        if (managed_tlas.generation == 0) {
+        if (managed_tlas.generation.load(.acquire) == 0) {
             // TLAS not created yet - skip initial bind, updateFrame will bind it later
+            return;
+        }
+
+        // Read the AS handle once (atomic operation) to avoid race conditions
+        const as_handle = managed_tlas.acceleration_structure();
+
+        if (as_handle == vk.AccelerationStructureKHR.null_handle) {
+            // TLAS pointer is null - skip initial bind, updateFrame will bind it later
             return;
         }
 
@@ -580,7 +591,7 @@ pub const ResourceBinder = struct {
             const frame_index = @as(u32, @intCast(frame_idx));
 
             const resource = Resource{
-                .acceleration_structure = managed_tlas.acceleration_structure,
+                .acceleration_structure = as_handle,
             };
 
             try self.pipeline_system.bindResource(
@@ -593,36 +604,59 @@ pub const ResourceBinder = struct {
         }
     }
 
-    /// Convenience function to bind a full uniform buffer by name
-    pub fn bindFullUniformBufferNamed(
+    /// Bind a per-frame managed texture array - one texture per frame-in-flight
+    /// Each frame uses a different managed texture from the array
+    /// Example: HDR output textures [frame0_hdr, frame1_hdr, frame2_hdr]
+    pub fn bindManagedTexturePerFrameNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        buffer: *Buffer,
-        frame_index: u32,
+        textures: [MAX_FRAMES_IN_FLIGHT]*ManagedTexture,
     ) !void {
-        try self.bindUniformBufferNamed(pipeline_id, binding_name, buffer, 0, vk.WHOLE_SIZE, frame_index);
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        if (location.binding_type != .combined_image_sampler and location.binding_type != .sampled_image) {
+            log(.ERROR, "resource_binder", "Binding '{s}' is not a texture (type: {})", .{ binding_name, location.binding_type });
+            return error.BindingTypeMismatch;
+        }
+
+        // Register ALL frames' textures for per-frame generation tracking
+        try self.registerTexturePerFrameArrayByName(binding_name, pipeline_id, textures);
+
+        // Bind each frame's texture individually
+        for (textures, 0..) |texture, frame_idx| {
+            if (texture.generation == 0) {
+                // Texture not created yet - skip initial bind
+                continue;
+            }
+
+            const frame_index = @as(u32, @intCast(frame_idx));
+            const descriptor_info = @constCast(&texture.texture).getDescriptorInfo();
+
+            const resource = Resource{
+                .image = .{
+                    .image_view = descriptor_info.image_view,
+                    .sampler = descriptor_info.sampler,
+                    .layout = descriptor_info.image_layout,
+                },
+            };
+
+            try self.pipeline_system.bindResource(pipeline_id, location.set, location.binding, resource, frame_index);
+        }
     }
 
-    /// Convenience function to bind a full storage buffer by name
-    pub fn bindFullStorageBufferNamed(
-        self: *ResourceBinder,
-        pipeline_id: PipelineId,
-        binding_name: []const u8,
-        buffer: *Buffer,
-        frame_index: u32,
-    ) !void {
-        try self.bindStorageBufferNamed(pipeline_id, binding_name, buffer, 0, vk.WHOLE_SIZE, frame_index);
-    }
-
-    /// Bind a texture array by name (for descriptor arrays like uniform sampler2D textures[N])
-    /// Bind a managed texture array with automatic generation tracking
-    /// Registers the ManagedTextureArray for tracking and binds for all frames
+    /// Bind a descriptor array of textures by name (shader: uniform sampler2D textures[N])
+    /// Takes a ManagedTextureArray that contains multiple textures in a SHADER descriptor array
+    /// This binds an array IN THE SHADER, not a per-frame array
+    /// Example: Material texture array with albedo, normal, roughness, etc.
     pub fn bindTextureArrayNamed(
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        managed_textures: *const @import("../ecs/systems/material_system.zig").ManagedTextureArray,
+        managed_textures: *const ManagedTextureArray,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -637,12 +671,12 @@ pub const ResourceBinder = struct {
         // Always register for generation tracking
         try self.updateTextureArrayByName(binding_name, pipeline_id, managed_textures);
 
-        // Don't bind if generation is 0 (not created yet) or if descriptor array is empty - updateFrame will bind it later
+        // Don't bind if generation is 0 (not created yet) or if descriptor array is empty
         if (managed_textures.generation == 0 or managed_textures.descriptor_infos.len == 0) {
             return;
         }
 
-        // Bind for all frames
+        // Bind descriptor array for all frames
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
             const frame_index = @as(u32, @intCast(frame_idx));
 
@@ -759,7 +793,7 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         binding_name: []const u8,
         pipeline_id: PipelineId,
-        managed_buffer: *const @import("buffer_manager.zig").ManagedBuffer,
+        managed_buffer: *const ManagedBuffer,
     ) !void {
         // Look up the binding location
         const location = self.lookupBinding(binding_name) orelse {
@@ -789,6 +823,86 @@ pub const ResourceBinder = struct {
             .binding = location.binding,
             .pipeline_id = pipeline_id,
             .resource = .{ .managed_buffer = managed_buffer },
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+    }
+
+    /// Register a per-frame storage buffer array for automatic generation tracking
+    /// Each frame's buffer is tracked individually, and ALL frames are rebound when ANY generation changes
+    pub fn registerStorageBufferArrayByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        frame_buffers: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track storage buffer array '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource - copy the buffer array
+                res.resource = .{ .managed_buffer_array = frame_buffers };
+                res.set = location.set;
+                res.binding = location.binding;
+                // Don't update last_generation - that happens in updateFrame
+                return;
+            }
+        }
+
+        // Register new tracked resource with per-frame buffer array
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .managed_buffer_array = frame_buffers },
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+    }
+
+    /// Register a per-frame uniform buffer array for automatic generation tracking
+    /// Each frame's buffer is tracked individually, and ALL frames are rebound when ANY generation changes
+    pub fn registerUniformBufferArrayByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        frame_buffers: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track uniform buffer array '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource - copy the buffer array
+                res.resource = .{ .managed_buffer_array = frame_buffers };
+                res.set = location.set;
+                res.binding = location.binding;
+                // Don't update last_generation - that happens in updateFrame
+                return;
+            }
+        }
+
+        // Register new tracked resource with per-frame buffer array
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .managed_buffer_array = frame_buffers },
             .last_generation = 0, // Will bind on first updateFrame
         });
     }
@@ -935,51 +1049,51 @@ pub const ResourceBinder = struct {
         });
     }
 
+    /// Register a per-frame texture array for automatic generation tracking
+    /// Each frame's texture is tracked individually, and ALL frames are rebound when ANY generation changes
+    fn registerTexturePerFrameArrayByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        frame_textures: [MAX_FRAMES_IN_FLIGHT]*const ManagedTexture,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track texture per-frame array '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource - copy the texture array
+                res.resource = .{ .managed_texture_array = frame_textures };
+                res.set = location.set;
+                res.binding = location.binding;
+                // Don't update last_generation - that happens in updateFrame
+                return;
+            }
+        }
+
+        // Register new tracked resource with per-frame texture array
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .managed_texture_array = frame_textures },
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+    }
+
     /// Update descriptor bindings for a specific pipeline and frame
     /// Automatically rebinds any buffers whose VkBuffer handle has changed
     /// AND checks tracked managed buffers for generation changes
     pub fn updateFrame(self: *ResourceBinder, pipeline_id: PipelineId, frame_index: u32) !void {
         // Check all bound storage buffers for this pipeline/frame to see if their handles changed
-        var storage_iter = self.bound_storage_buffers.iterator();
-        while (storage_iter.next()) |entry| {
-            const key = entry.key_ptr.*;
-            if (key.pipeline_id.hash != pipeline_id.hash or key.frame_index != frame_index) continue;
-
-            const bound = entry.value_ptr.*;
-            const current_handle = bound.buffer.buffer;
-
-            // Check if buffer handle changed (buffer was recreated)
-            // If so, rebind it automatically
-            const resource = Resource{
-                .buffer = .{
-                    .buffer = current_handle,
-                    .offset = bound.offset,
-                    .range = bound.range,
-                },
-            };
-
-            try self.pipeline_system.bindResource(pipeline_id, key.set, key.binding, resource, frame_index);
-        }
-
-        // Check uniform buffers too
-        var uniform_iter = self.bound_uniform_buffers.iterator();
-        while (uniform_iter.next()) |entry| {
-            const key = entry.key_ptr.*;
-            if (key.pipeline_id.hash != pipeline_id.hash or key.frame_index != frame_index) continue;
-
-            const bound = entry.value_ptr.*;
-            const current_handle = bound.buffer.buffer;
-
-            const resource = Resource{
-                .buffer = .{
-                    .buffer = current_handle,
-                    .offset = bound.offset,
-                    .range = bound.range,
-                },
-            };
-
-            try self.pipeline_system.bindResource(pipeline_id, key.set, key.binding, resource, frame_index);
-        }
 
         // Check tracked resources for generation changes
         for (self.tracked_resources.items) |*res| {
@@ -995,16 +1109,27 @@ pub const ResourceBinder = struct {
             // Check if generation changed
             if (current_gen == res.last_generation) continue;
 
+            // Update last generation BEFORE attempting rebind
+            // This prevents infinite rebind attempts if resources aren't ready yet
+            res.last_generation = current_gen;
+
             // Rebind based on resource type
             switch (res.resource) {
                 .managed_buffer => |managed_buffer| {
+                    // Single shared buffer (storage buffers only - uniforms are ALWAYS per-frame arrays)
                     // Look up binding type
                     const location = self.lookupBinding(res.name) orelse {
                         log(.ERROR, "resource_binder", "Tracked resource '{s}' has no registered binding location", .{res.name});
                         continue;
                     };
 
-                    // Rebind for ALL frames
+                    // Uniform buffers should NEVER use this path - they're always per-frame arrays
+                    if (location.binding_type == .uniform_buffer) {
+                        log(.ERROR, "resource_binder", "Uniform buffer '{s}' incorrectly registered as single buffer - must use per-frame array", .{res.name});
+                        continue;
+                    }
+
+                    // Rebind storage buffer for ALL frames (shared across frames)
                     for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
                         const bind_frame = @as(u32, @intCast(frame_idx));
 
@@ -1016,7 +1141,38 @@ pub const ResourceBinder = struct {
                                     res.binding,
                                     @constCast(&managed_buffer.buffer),
                                     0,
-                                    vk.WHOLE_SIZE,
+                                    managed_buffer.size,
+                                    bind_frame,
+                                );
+                            },
+                            else => {
+                                log(.WARN, "resource_binder", "Tracked resource '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
+                            },
+                        }
+                    }
+                },
+                .managed_buffer_array => |frame_buffers| {
+                    // Per-frame buffer arrays (uniform or storage) - bind each frame's buffer individually
+                    const location = self.lookupBinding(res.name) orelse {
+                        log(.ERROR, "resource_binder", "Tracked resource '{s}' has no registered binding location", .{res.name});
+                        continue;
+                    };
+
+                    for (frame_buffers, 0..) |managed_buffer, frame_idx| {
+                        // Skip if this frame's buffer isn't created yet
+                        if (managed_buffer.generation == 0) continue;
+
+                        const bind_frame = @as(u32, @intCast(frame_idx));
+
+                        switch (location.binding_type) {
+                            .storage_buffer => {
+                                try self.bindStorageBuffer(
+                                    res.pipeline_id,
+                                    res.set,
+                                    res.binding,
+                                    @constCast(&managed_buffer.buffer),
+                                    0,
+                                    managed_buffer.size,
                                     bind_frame,
                                 );
                             },
@@ -1027,12 +1183,12 @@ pub const ResourceBinder = struct {
                                     res.binding,
                                     @constCast(&managed_buffer.buffer),
                                     0,
-                                    vk.WHOLE_SIZE,
+                                    managed_buffer.size,
                                     bind_frame,
                                 );
                             },
                             else => {
-                                log(.WARN, "resource_binder", "Tracked resource '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
+                                log(.WARN, "resource_binder", "Per-frame buffer array '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
                             },
                         }
                     }
@@ -1055,12 +1211,6 @@ pub const ResourceBinder = struct {
                             bind_frame,
                         );
                     }
-
-                    log(.INFO, "resource_binder", "Rebound managed texture '{s}' for all frames (generation {} -> {})", .{
-                        res.name,
-                        res.last_generation,
-                        current_gen,
-                    });
                 },
                 .texture_array => |arr| {
                     // Cast back to ManagedTextureArray to access descriptor_infos
@@ -1088,39 +1238,82 @@ pub const ResourceBinder = struct {
                             bind_frame,
                         );
                     }
-
-                    log(.INFO, "resource_binder", "Rebound texture array '{s}' for all frames (generation {} -> {}, {} textures)", .{
-                        res.name,
-                        res.last_generation,
-                        current_gen,
-                        managed_textures.descriptor_infos.len,
-                    });
                 },
-                .acceleration_structure => |as| {
-                    // Cast back to ManagedTLAS to access acceleration_structure handle
-                    const managed_tlas: *const ManagedTLAS = @ptrCast(@alignCast(as.ptr));
+                .managed_texture_array => |frame_textures| {
+                    // Per-frame texture arrays - bind each frame's texture individually
 
-                    // Don't rebind if TLAS not created yet
-                    if (managed_tlas.acceleration_structure == vk.AccelerationStructureKHR.null_handle) {
-                        continue;
-                    }
+                    for (frame_textures, 0..) |managed_texture, frame_idx| {
+                        // Skip if this frame's texture isn't created yet
+                        if (managed_texture.generation == 0) continue;
 
-                    // Rebind the acceleration structure for ALL frames
-                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
                         const bind_frame = @as(u32, @intCast(frame_idx));
+                        const descriptor_info = @constCast(&managed_texture.texture).getDescriptorInfo();
 
-                        const resource = Resource{
-                            .acceleration_structure = managed_tlas.acceleration_structure,
-                        };
-
-                        try self.pipeline_system.bindResource(
+                        try self.bindTexture(
                             res.pipeline_id,
                             res.set,
                             res.binding,
-                            resource,
+                            descriptor_info.image_view,
+                            descriptor_info.sampler,
+                            descriptor_info.image_layout,
                             bind_frame,
                         );
                     }
+                },
+                .acceleration_structure => |as| {
+                    // Cast back to ManagedTLAS to access acceleration_structure handle (mutable for atomic ops)
+                    const managed_tlas: *ManagedTLAS = @ptrCast(@alignCast(as.ptr));
+
+                    // Read the AS handle once (atomic operation) to avoid race conditions
+                    const as_handle = managed_tlas.acceleration_structure();
+
+                    // Don't rebind if TLAS not created yet
+                    if (as_handle == vk.AccelerationStructureKHR.null_handle) {
+                        continue;
+                    }
+
+                    // ALWAYS bind only the current frame, even on first bind (generation==1)
+                    // This allows gradual transition across frames without destroying old TLAS
+                    // while some frames still reference it.
+                    const resource = Resource{
+                        .acceleration_structure = as_handle,
+                    };
+                    try self.pipeline_system.bindResource(
+                        res.pipeline_id,
+                        res.set,
+                        res.binding,
+                        resource,
+                        (frame_index + 1) % MAX_FRAMES_IN_FLIGHT,
+                    );
+
+                    // Check if this is the FIRST frame to see this generation change
+                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    const prev_gen = current_gen - 1;
+                    if (res.last_generation == prev_gen) {
+                        // This is the first frame to process this generation
+                        // Reset mask to 0b111 atomically (only if it was 0)
+                        const expected: u8 = 0;
+                        _ = managed_tlas.pending_bind_mask.cmpxchgStrong(
+                            expected,
+                            0b111,
+                            .acq_rel,
+                            .acquire,
+                        );
+                    }
+
+                    // Clear this frame's bit in the pending bind mask
+                    const frame_bit: u8 = @as(u8, 1) << @intCast(frame_index);
+                    const old_mask = managed_tlas.pending_bind_mask.fetchAnd(~frame_bit, .acq_rel);
+
+                    // Check if mask is complete (all frames have bound)
+                    // If mask is NOT complete, revert last_generation so other frames can still bind
+                    const new_mask = old_mask & ~frame_bit;
+                    if (new_mask != 0) {
+                        // Other frames still need to bind - keep last_generation one behind
+                        res.last_generation = current_gen - 1;
+                    }
+
+                    // else: mask is complete (0), last_generation stays at current_gen
                 },
                 .buffer_array => |arr| {
                     // Get buffer infos directly from the ArrayList pointer
@@ -1130,8 +1323,6 @@ pub const ResourceBinder = struct {
                     if (buffer_infos.len == 0) {
                         continue;
                     }
-
-                    log(.INFO, "resource_binder", "Rebinding buffer array '{s}' with {} buffers (generation changed)", .{ res.name, buffer_infos.len });
 
                     // Rebind the buffer array for ALL frames
                     for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
@@ -1155,9 +1346,6 @@ pub const ResourceBinder = struct {
                     log(.WARN, "resource_binder", "Single texture rebinding not yet implemented for '{s}'", .{res.name});
                 },
             }
-
-            // Update the last bound generation
-            res.last_generation = current_gen;
         }
 
         try self.pipeline_system.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
@@ -1294,7 +1482,9 @@ const BoundResource = struct {
 
     const ResourceVariant = union(enum) {
         managed_buffer: *const ManagedBuffer,
+        managed_buffer_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer, // Per-frame buffers
         managed_texture: *const ManagedTexture,
+        managed_texture_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedTexture, // Per-frame textures
         texture: TextureResource,
         texture_array: TextureArrayResource,
         acceleration_structure: AccelerationStructureResource,
@@ -1325,7 +1515,29 @@ const BoundResource = struct {
     fn getCurrentGeneration(self: *const BoundResource) u32 {
         return switch (self.resource) {
             .managed_buffer => |buf| buf.generation,
+            .managed_buffer_array => |buf_array| blk: {
+                // For per-frame buffer arrays, return the MAX generation across all frames
+                // This ensures we rebind ALL frames when ANY buffer changes
+                var max_gen: u32 = 0;
+                for (buf_array) |buf| {
+                    if (buf.generation > max_gen) {
+                        max_gen = buf.generation;
+                    }
+                }
+                break :blk max_gen;
+            },
             .managed_texture => |tex| tex.generation,
+            .managed_texture_array => |tex_array| blk: {
+                // For per-frame texture arrays, return the MAX generation across all frames
+                // This ensures we rebind ALL frames when ANY texture changes
+                var max_gen: u32 = 0;
+                for (tex_array) |tex| {
+                    if (tex.generation > max_gen) {
+                        max_gen = tex.generation;
+                    }
+                }
+                break :blk max_gen;
+            },
             .texture => |tex| blk: {
                 const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(tex.ptr) + tex.generation_offset);
                 break :blk gen_ptr.*;

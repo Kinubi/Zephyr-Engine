@@ -1007,7 +1007,7 @@ const material = Material{
 
 **Goal**: Create builder pattern for simple render passes with automatic resource management
 
-See [RENDER_PASS_VISION.md](RENDER_PASS_VISION.md) for full design.
+See [BASE_RENDER_PASS_GUIDE.md](BASE_RENDER_PASS_GUIDE.md) for comprehensive documentation.
 
 **Prerequisites** (Already Implemented ✅):
 - ✅ **ResourceBinder Automatic Rebinding**: Already detects buffer handle changes in `updateFrame()`
@@ -1018,13 +1018,14 @@ See [RENDER_PASS_VISION.md](RENDER_PASS_VISION.md) for full design.
   - Works for MaterialSystem, future InstanceBuffer, etc.
 
 **Implementation Tasks**:
-1. ⏳ Create `base_render_pass.zig`
-2. ⏳ Implement `registerShader()` queuing
-3. ⏳ Implement `bind()` queuing (use existing named binding API)
-4. ⏳ Implement `bake()` - creates pipeline + binds resources once
-5. ⏳ Add default `updateImpl()` that calls `updateFrame()` (auto-rebinding happens here)
-6. ⏳ Leverage existing automatic rebinding - no manual dirty tracking needed
-7. ⏳ Document usage patterns
+1. ✅ Create `base_render_pass.zig`
+2. ✅ Implement `registerShader()` queuing
+3. ✅ Implement `bind()` queuing (use existing named binding API)
+4. ✅ Implement `bake()` - creates pipeline + binds resources once
+5. ✅ Add default `updateImpl()` that calls `updateFrame()` (auto-rebinding happens here)
+6. ✅ Leverage existing automatic rebinding - no manual dirty tracking needed
+7. ✅ Implement flexible `RenderDataFn` callback system for per-pass data extraction
+8. ✅ Document usage patterns with comprehensive examples
 
 **Example Usage**:
 ```zig

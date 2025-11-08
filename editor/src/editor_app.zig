@@ -457,7 +457,9 @@ pub const App = struct {
 
             // MAIN THREAD: Capture game state snapshot and signal render thread (non-blocking)
             // This copies data from World into snapshot for render thread to use
-            try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera);
+            // Pass ImGui draw data captured during prepare() to avoid data race
+            const imgui_data = ui_layer.getImGuiDrawData();
+            try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera, imgui_data);
 
             // Main thread continues immediately without blocking on GPU
             // The render thread will:

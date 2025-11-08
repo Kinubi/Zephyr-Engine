@@ -7,6 +7,7 @@ const BlasResult = @import("multithreaded_bvh_builder.zig").BlasResult;
 const InstanceData = @import("multithreaded_bvh_builder.zig").InstanceData;
 const GeometryData = @import("multithreaded_bvh_builder.zig").GeometryData;
 const BvhWorkData = @import("multithreaded_bvh_builder.zig").BvhWorkData;
+const TlasResult = @import("multithreaded_bvh_builder.zig").TlasResult;
 const buildTlasSynchronous = @import("multithreaded_bvh_builder.zig").buildTlasSynchronous;
 const blasWorkerFn = @import("multithreaded_bvh_builder.zig").blasWorkerFn;
 const createBvhBuildingWork = @import("../../threading/thread_pool.zig").createBvhBuildingWork;
@@ -208,7 +209,7 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
 
     // Step 6: Store TLAS result in builder (lock-free atomic store)
     // The raytracing_system will pick this up on next frame and swap to render_tlas
-    const tlas_ptr = try job.allocator.create(@import("multithreaded_bvh_builder.zig").TlasResult);
+    const tlas_ptr = try job.allocator.create(TlasResult);
     tlas_ptr.* = tlas_result;
 
     // Atomically store the pointer - if there's an old one, free it (shouldn't happen but be safe)

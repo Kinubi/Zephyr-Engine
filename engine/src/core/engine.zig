@@ -28,6 +28,8 @@ const World = ecs.World;
 const log = @import("../utils/log.zig").log;
 const startRenderThread = @import("../threading/render_thread.zig").startRenderThread;
 const stopRenderThread = @import("../threading/render_thread.zig").stopRenderThread;
+const mainThreadUpdate = @import("../threading/render_thread.zig").mainThreadUpdate;
+const rtGetEffectiveFrameCount = @import("../threading/render_thread.zig").getEffectiveFrameCount;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -537,18 +539,19 @@ pub const Engine = struct {
         self: *Engine,
         world: anytype, // *ecs.World or compatible
         camera: anytype, // *Camera or compatible
+        imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
     ) !void {
         if (!self.use_render_thread) {
             return error.RenderThreadNotEnabled;
         }
 
         if (self.render_thread_context) |*ctx| {
-            const mainThreadUpdate = @import("../threading/render_thread.zig").mainThreadUpdate;
             try mainThreadUpdate(
                 ctx,
                 world,
                 camera,
                 self.frame_info.dt,
+                imgui_draw_data,
             );
         } else {
             return error.RenderThreadNotInitialized;
@@ -560,7 +563,6 @@ pub const Engine = struct {
     /// Use this for scheduling assets/events based on actual displayed frames
     pub fn getEffectiveFrameCount(self: *Engine) u64 {
         if (self.render_thread_context) |*ctx| {
-            const rtGetEffectiveFrameCount = @import("../threading/render_thread.zig").getEffectiveFrameCount;
             return rtGetEffectiveFrameCount(ctx);
         }
         return 0;

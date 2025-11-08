@@ -39,6 +39,9 @@ pub const UILayer = struct {
     show_ui_panels: bool = true, // Hide all panels except viewport when false
     current_fps: f32 = 0.0,
 
+    // Temporary ImGui draw data storage (set by prepare, passed to snapshot, cleared after)
+    pending_imgui_draw_data: ?*anyopaque = null,
+
     // LDR tonemapped viewport texture for UI display (per-frame, managed with generation tracking)
     viewport_ldr: [MAX_FRAMES_IN_FLIGHT]?*ManagedTexture = [_]?*ManagedTexture{null} ** MAX_FRAMES_IN_FLIGHT,
     viewport_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
@@ -70,10 +73,15 @@ pub const UILayer = struct {
         };
     }
 
+    /// Get ImGui draw data captured during prepare() for passing to render thread
+    pub fn getImGuiDrawData(self: *UILayer) ?*anyopaque {
+        return self.pending_imgui_draw_data;
+    }
+
     const vtable = Layer.VTable{
         .attach = attach,
         .detach = detach,
-        .prepare = null, // UILayer has no main thread preparation work
+        .prepare = prepare, // MAIN THREAD: ImGui CPU recording
         .begin = begin,
         .update = update,
         .render = render,
@@ -115,9 +123,10 @@ pub const UILayer = struct {
         // Ensure HDR and LDR viewport textures exist and match current viewport size
         _ = try ensureViewportTargets(self, frame_info);
 
-        // Update frame_info with current HDR texture (may have been recreated during resize)
+        // Update frame_info with current HDR texture for this frame-in-flight
+        // IMPORTANT: Use frame_info.current_frame (frame-in-flight index), NOT swapchain image_index
         const mutable_frame_info: *FrameInfo = @constCast(frame_info);
-        mutable_frame_info.hdr_texture = &self.swapchain.currentHdrTexture().texture;
+        mutable_frame_info.hdr_texture = &self.swapchain.hdr_textures[frame_info.current_frame].texture;
 
         // Configure frame_info to render to viewport-sized LDR texture (not swapchain)
         if (self.viewport_ldr[frame_info.current_frame]) |managed_ldr| {
@@ -141,14 +150,13 @@ pub const UILayer = struct {
         self.current_fps = if (frame_info.dt > 0.0) 1.0 / frame_info.dt else 0.0;
     }
 
-    fn render(base: *Layer, frame_info: *const FrameInfo) !void {
+    /// MAIN THREAD: Record all ImGui CPU commands (build draw lists)
+    fn prepare(base: *Layer, dt: f32) !void {
         const self: *UILayer = @fieldParentPtr("base", base);
 
         if (!self.show_ui) return;
 
-        // Swapchain image transitions are handled centrally in swapchain.beginFrame/endFrame.
-
-        // Begin new ImGui frame
+        // Begin new ImGui frame (CPU work only - builds draw lists)
         self.imgui_context.newFrame();
 
         // Prepare render stats
@@ -161,7 +169,7 @@ pub const UILayer = struct {
 
         const stats = RenderStats{
             .fps = self.current_fps,
-            .frame_time_ms = frame_info.dt * 1000.0,
+            .frame_time_ms = dt * 1000.0,
             .entity_count = self.scene.ecs_world.entityCount(),
             .draw_calls = 0, // TODO: Get from render stats
             .path_tracing_enabled = pt_enabled,
@@ -171,7 +179,7 @@ pub const UILayer = struct {
             .scene = self.scene,
         };
 
-        // Render UI viewport (always visible)
+        // Render UI viewport (always visible) - CPU recording only
         self.ui_renderer.render();
 
         // Publish UI capture state for engine layers (base→overlays dispatch means
@@ -185,7 +193,7 @@ pub const UILayer = struct {
             want_mouse_after = i.*.WantCaptureMouse;
         }
 
-        // Render UI panels (conditionally hidden with F1)
+        // Render UI panels (conditionally hidden with F1) - CPU recording only
         if (self.show_ui_panels) {
             self.ui_renderer.renderPanels(stats);
         }
@@ -239,28 +247,28 @@ pub const UILayer = struct {
             self.ui_renderer.renderHierarchy(self.scene);
         }
 
-        // Note: Camera aspect ratio is updated in begin() via ensureViewportTargets().
-        // ImGui computes the new viewport_size during this render() call, which will be
-        // used in the next frame's begin() to create correctly-sized textures and update
-        // the camera projection. This one-frame delay is unavoidable since we can't know
-        // the viewport size until ImGui has laid out the UI.
+        // Finalize ImGui frame and store draw data for passing to render thread via snapshot
+        self.pending_imgui_draw_data = self.imgui_context.endFrame();
+    }
+
+    /// RENDER THREAD: Convert ImGui draw data to Vulkan commands
+    fn render(base: *Layer, frame_info: *const FrameInfo) !void {
+        const self: *UILayer = @fieldParentPtr("base", base);
+
+        if (!self.show_ui) return;
 
         // Begin GPU timing for ImGui rendering
         if (self.performance_monitor) |pm| {
             try pm.beginPass("imgui", frame_info.current_frame, frame_info.command_buffer);
         }
 
-        // Render ImGui to command buffer
-        try self.imgui_context.render(frame_info.command_buffer, self.swapchain, frame_info.current_frame);
-
-        // No transition needed - attachment_optimal supports both rendering and sampling
+        // Render using draw data from snapshot (thread-safe - passed from main thread)
+        try self.imgui_context.renderFromSnapshot(frame_info.imgui_draw_data, frame_info.command_buffer, self.swapchain, frame_info.current_frame);
 
         // End GPU timing
         if (self.performance_monitor) |pm| {
             try pm.endPass("imgui", frame_info.current_frame, frame_info.command_buffer);
         }
-
-        // Present transition is handled in swapchain.endFrame.
     }
 
     fn end(base: *Layer, frame_info: *FrameInfo) !void {
@@ -471,8 +479,8 @@ fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
     const texture_manager = self.swapchain.texture_manager orelse return error.TextureManagerNotSet;
 
     // Resize all HDR textures to new extent
-    for (self.swapchain.swap_images) |*swap_img| {
-        try swap_img.hdr_texture.resize(texture_manager, extent3d, self.swapchain.hdr_format);
+    for (self.swapchain.hdr_textures) |hdr_texture| {
+        try hdr_texture.resize(texture_manager, extent3d, self.swapchain.hdr_format);
     }
 }
 

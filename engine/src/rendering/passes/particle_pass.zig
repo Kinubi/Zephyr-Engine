@@ -2,7 +2,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -19,14 +18,12 @@ const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_F
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
 const Buffer = @import("../../core/buffer.zig").Buffer;
 const vertex_formats = @import("../vertex_formats.zig");
-
-// ECS imports for particles
+const ParticleComputePass = @import("particle_compute_pass.zig").ParticleComputePass;
 const ecs = @import("../../ecs.zig");
+const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+
 const World = ecs.World;
 const ParticleComponent = ecs.ParticleComponent;
-
-// Global UBO
-const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 
 // TODO: SIMPLIFY RENDER PASS - Remove resource update checks
 // TODO: Use named resource binding: bindStorageBuffer("ParticleData", particle_buffer)
@@ -41,7 +38,7 @@ pub const ParticlePass = struct {
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
-    compute_pass: ?*@import("particle_compute_pass.zig").ParticleComputePass,
+    compute_pass: ?*ParticleComputePass,
     global_ubo_set: *GlobalUboSet,
 
     // Swapchain formats
@@ -108,20 +105,22 @@ pub const ParticlePass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return false;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
-        // Bind global UBO to all frames
-        self.updateDescriptors() catch |err| {
-            log(.WARN, "particle_pass", "Failed to update descriptors during recovery: {}", .{err});
+        // Bind resources after recovery
+        self.bindResources() catch |err| {
+            log(.WARN, "particle_pass", "Failed to bind resources during recovery: {}", .{err});
             return false;
         };
+
+        self.pipeline_system.markPipelineResourcesDirty(self.particle_pipeline);
 
         log(.INFO, "particle_pass", "Recovery setup complete", .{});
         return true;
     }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
-        _ = base;
-        _ = frame_info;
-        // No per-frame updates needed for particle rendering pass
+        const self: *ParticlePass = @fieldParentPtr("base", base);
+
+        try self.resource_binder.updateFrame(self.particle_pipeline, frame_info.current_frame);
     }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
@@ -166,36 +165,28 @@ pub const ParticlePass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
-        // Bind global UBO to all frames
-        try self.updateDescriptors();
+        // Populate ResourceBinder with shader reflection data
+        if (try self.pipeline_system.getPipelineReflection(self.particle_pipeline)) |reflection| {
+            var mut_reflection = reflection;
+            try self.resource_binder.populateFromReflection(mut_reflection);
+            mut_reflection.deinit(self.allocator);
+        }
+
+        // Bind resources once - ResourceBinder tracks generation changes automatically
+        try self.bindResources();
+
+        self.pipeline_system.markPipelineResourcesDirty(self.particle_pipeline);
 
         log(.INFO, "particle_pass", "Setup complete", .{});
     }
-    fn updateDescriptors(self: *ParticlePass) !void {
-        // Bind global UBO for all frames
-        for (0..@import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
 
-            // Skip if buffer not created yet (generation 0)
-            if (ubo_managed_buffer.generation == 0) continue;
-
-            const ubo_resource = Resource{
-                .buffer = .{
-                    .buffer = ubo_managed_buffer.buffer.buffer,
-                    .offset = 0,
-                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
-                },
-            };
-
-            try self.pipeline_system.bindResource(
-                self.particle_pipeline,
-                0, // Set 0
-                0, // Binding 0
-                ubo_resource,
-                @intCast(frame_idx),
-            );
-            try self.resource_binder.updateFrame(self.particle_pipeline, @as(u32, @intCast(frame_idx)));
-        }
+    fn bindResources(self: *ParticlePass) !void {
+        // Bind global UBO for all frames (generation tracked automatically)
+        try self.resource_binder.bindUniformBufferNamed(
+            self.particle_pipeline,
+            "GlobalUbo",
+            self.global_ubo_set.frame_buffers,
+        );
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -214,12 +205,13 @@ pub const ParticlePass = struct {
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
 
         if (pipeline_rebuilt) {
-            log(.INFO, "particle_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
-            self.pipeline_system.markPipelineResourcesDirty(self.particle_pipeline);
+            log(.INFO, "particle_pass", "Pipeline hot-reloaded, rebinding resources", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.resource_binder.clearPipeline(self.particle_pipeline);
 
             // Rebind resources after hot reload
-            try self.updateDescriptors();
+            try self.bindResources();
+            self.pipeline_system.markPipelineResourcesDirty(self.particle_pipeline);
 
             pipeline_entry = self.pipeline_system.pipelines.get(self.particle_pipeline) orelse return error.PipelineNotFound;
         }
@@ -281,7 +273,7 @@ pub const ParticlePass = struct {
     }
 
     /// Set the compute pass that produces particles
-    pub fn setComputePass(self: *ParticlePass, compute_pass: *@import("particle_compute_pass.zig").ParticleComputePass) void {
+    pub fn setComputePass(self: *ParticlePass, compute_pass: *ParticleComputePass) void {
         self.compute_pass = compute_pass;
     }
 };

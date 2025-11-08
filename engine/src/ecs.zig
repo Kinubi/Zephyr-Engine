@@ -34,6 +34,8 @@ pub const TransformSystem = @import("ecs/systems/transform_system.zig").Transfor
 pub const RenderSystem = @import("ecs/systems/render_system.zig").RenderSystem;
 pub const LightSystem = @import("ecs/systems/light_system.zig").LightSystem;
 pub const ParticleSystem = @import("ecs/systems/particle_system.zig").ParticleSystem;
+pub const ParticleBuffers = @import("ecs/systems/particle_system.zig").ParticleBuffers;
+pub const ParticleGPUResources = @import("ecs/systems/particle_system.zig").ParticleGPUResources;
 pub const ScriptingSystem = @import("ecs/systems/scripting_system.zig").ScriptingSystem;
 
 // System functions for parallel execution

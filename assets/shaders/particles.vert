@@ -17,7 +17,7 @@ void main() {
     
     // Scale point size based on distance from camera
     float distance = length(viewPos.xyz);
-    gl_PointSize = 14.0 / distance;
+    gl_PointSize = 80.0 / distance;
     
     // Transform to clip space
     gl_Position = ubo.projection * viewPos;

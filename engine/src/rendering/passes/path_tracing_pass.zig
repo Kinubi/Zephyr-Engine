@@ -1,7 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -26,9 +25,8 @@ const MaterialBindings = @import("../../ecs/systems/material_system.zig").Materi
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const Mesh = @import("../mesh.zig").Mesh;
-
-// ECS imports
 const ecs = @import("../../ecs.zig");
+
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
 
@@ -145,7 +143,7 @@ pub const PathTracingPass = struct {
         render_system: *RenderSystem,
         texture_manager: *TextureManager,
         material_bindings: MaterialBindings,
-        swapchain: *const @import("../../core/swapchain.zig").Swapchain,
+        swapchain: *const Swapchain,
         width: u32,
         height: u32,
     ) !*PathTracingPass {
@@ -156,7 +154,8 @@ pub const PathTracingPass = struct {
         rt_system.* = try RaytracingSystem.init(graphics_context, allocator, thread_pool);
 
         var output_texture = try allocator.create(ManagedTexture);
-        const hdr_texture = @constCast(swapchain).currentHdrTexture();
+        // Get any HDR texture (all frames have same format/size) for resize linking
+        const hdr_texture = @constCast(swapchain).getHdrTextures()[0];
 
         output_texture = try texture_manager.createTexture(.{
             .name = "pt_output",
@@ -288,7 +287,7 @@ pub const PathTracingPass = struct {
     /// Bind resources once during setup - ResourceBinder tracks changes automatically
     fn bindResources(self: *PathTracingPass) !void {
         // Bind output texture (generation tracked automatically)
-        try self.resource_binder.bindManagedTextureNamed(
+        try self.resource_binder.bindTextureNamed(
             self.path_tracing_pipeline,
             "image", // Output texture binding name from shader
             self.output_texture,

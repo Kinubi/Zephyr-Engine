@@ -855,6 +855,21 @@ pub const GraphicsContext = struct {
         const count1 = pending_buffers[1].items.len;
         const total = count0 + count1;
 
+        // IMPORTANT: Clean up pending resources (scratch buffers) before clearing
+        for (&pending_buffers) |*buffer| {
+            for (buffer.items) |*secondary_buf| {
+                // Only clean up pending resources (buffers/memory), don't free command buffers
+                // Command buffers will be freed by resetCommandPool below
+                if (secondary_buf.pending_resources) |*resources| {
+                    for (resources.items) |resource| {
+                        resource.cleanup(self);
+                    }
+                    resources.deinit(secondary_buf.allocator);
+                    secondary_buf.pending_resources = null;
+                }
+            }
+        }
+
         // Clear both buffers
         pending_buffers[0].clearRetainingCapacity();
         pending_buffers[1].clearRetainingCapacity();

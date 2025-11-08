@@ -4,6 +4,9 @@ const EntityRegistry = @import("entity_registry.zig").EntityRegistry;
 const DenseSet = @import("dense_set.zig").DenseSet;
 const View = @import("view.zig").View;
 const ThreadPool = @import("view.zig").ThreadPool;
+const SubsystemConfig = @import("view.zig").SubsystemConfig;
+const WorkItemType = @import("view.zig").WorkItemType;
+const WorkPriority = @import("view.zig").WorkPriority;
 const log = @import("../utils/log.zig").log;
 
 /// Metadata for type-erased component storages
@@ -464,10 +467,6 @@ test "World parallel dispatch with ThreadPool" {
     defer thread_pool.deinit();
 
     //Register ECS subsystem
-    const SubsystemConfig = @import("view.zig").SubsystemConfig;
-    const WorkItemType = @import("view.zig").WorkItemType;
-    const WorkPriority = @import("view.zig").WorkPriority;
-
     const ecs_subsystem = SubsystemConfig{
         .name = "ecs_update",
         .min_workers = 1,
@@ -532,10 +531,6 @@ test "World parallel vs serial correctness" {
         defer thread_pool.deinit();
 
         // Register ECS subsystem
-        const SubsystemConfig = @import("view.zig").SubsystemConfig;
-        const WorkItemType = @import("view.zig").WorkItemType;
-        const WorkPriority = @import("view.zig").WorkPriority;
-
         const ecs_subsystem = SubsystemConfig{
             .name = "ecs_update",
             .min_workers = 1,

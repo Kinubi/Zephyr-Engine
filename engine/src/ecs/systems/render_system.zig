@@ -19,6 +19,7 @@ const log = @import("../../utils/log.zig").log;
 const Scene = @import("../../scene/scene.zig").Scene;
 const ecs = @import("../world.zig");
 const components = @import("../../ecs.zig"); // Import to access MaterialSet component
+const GameStateSnapshot = @import("../../threading/game_state_snapshot.zig").GameStateSnapshot;
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
@@ -393,7 +394,7 @@ pub const RenderSystem = struct {
     /// Writes to INACTIVE buffer, then atomically flips to make it active
     pub fn rebuildCachesFromSnapshot(
         self: *RenderSystem,
-        snapshot: *const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot,
+        snapshot: *const GameStateSnapshot,
         asset_manager: *AssetManager,
     ) !void {
         const start_time = std.time.nanoTimestamp();
@@ -465,7 +466,7 @@ pub const RenderSystem = struct {
     /// Branch recommended: features/instanced-rendering (coordinate with geometry_pass.zig changes)
     fn buildCachesFromSnapshotSingleThreaded(
         self: *RenderSystem,
-        entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
+        entities: []const GameStateSnapshot.EntityRenderData,
         asset_manager: *AssetManager,
         write_idx: u8,
     ) !void {
@@ -538,7 +539,7 @@ pub const RenderSystem = struct {
     /// Build caches from snapshot entities (parallel)
     fn buildCachesFromSnapshotParallel(
         self: *RenderSystem,
-        entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
+        entities: []const GameStateSnapshot.EntityRenderData,
         asset_manager: *AssetManager,
         write_idx: u8,
     ) !void {
@@ -642,7 +643,7 @@ pub const RenderSystem = struct {
 
     /// Context for snapshot-based parallel cache building
     const SnapshotCacheBuildContext = struct {
-        entities: []const @import("../../threading/game_state_snapshot.zig").GameStateSnapshot.EntityRenderData,
+        entities: []const GameStateSnapshot.EntityRenderData,
         start_idx: usize,
         end_idx: usize,
         raster_objects: []RasterizationData.RenderableObject,

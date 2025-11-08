@@ -10,6 +10,7 @@ const log = @import("../../utils/log.zig").log;
 const lua = @import("../../scripting/lua_bindings.zig");
 const cvar = @import("../../core/cvar.zig");
 const ActionKind = @import("../../scripting/action_queue.zig").ActionKind;
+const EntityId = @import("../entity_registry.zig").EntityId;
 
 pub const NativeCallbackDescriptor = struct {
     cb: ?*const fn ([]const u8, []const u8, []const u8) void,
@@ -53,7 +54,7 @@ pub const ScriptingSystem = struct {
 
     /// Enqueue a script to be executed on the thread pool. ctx is an opaque pointer
     /// that will be delivered with the Action; use null if not needed.
-    pub fn runScript(self: *ScriptingSystem, script: []const u8, ctx: *anyopaque, owner: @import("../entity_registry.zig").EntityId, scene_ptr: *anyopaque) !u64 {
+    pub fn runScript(self: *ScriptingSystem, script: []const u8, ctx: *anyopaque, owner: EntityId, scene_ptr: *anyopaque) !u64 {
         return self.runner.enqueueScript(script, ctx, null, owner, scene_ptr);
     }
 

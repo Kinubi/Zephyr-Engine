@@ -2,7 +2,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
-
 const RenderGraph = @import("../render_graph.zig").RenderGraph;
 const RenderPass = @import("../render_graph.zig").RenderPass;
 const RenderPassVTable = @import("../render_graph.zig").RenderPassVTable;
@@ -16,17 +15,15 @@ const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
-
 const Buffer = @import("../../core/buffer.zig").Buffer;
-
-// ECS imports for lights
+const BufferManager = @import("../buffer_manager.zig").BufferManager;
+const ManagedBuffer = @import("../buffer_manager.zig").ManagedBuffer;
 const ecs = @import("../../ecs.zig");
-const World = ecs.World;
-const LightSystem = ecs.LightSystem;
-
-// Global UBO
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
+
+const World = ecs.World;
+const LightSystem = ecs.LightSystem;
 
 // TODO: SIMPLIFY RENDER PASS - Remove resource update checks
 // TODO: Use named resource binding: bindStorageBuffer("LightVolumes", light_volume_buffer)
@@ -49,6 +46,7 @@ pub const LightVolumePass = struct {
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
+    buffer_manager: *BufferManager,
     ecs_world: *World,
     global_ubo_set: *GlobalUboSet,
 
@@ -64,13 +62,14 @@ pub const LightVolumePass = struct {
     light_system: LightSystem,
 
     // SSBO for instanced light data (per frame to avoid synchronization issues)
-    light_volume_buffers: [MAX_FRAMES_IN_FLIGHT]Buffer,
+    light_volume_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer,
     max_lights: u32,
 
     pub fn create(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
+        buffer_manager: *BufferManager,
         ecs_world: *World,
         global_ubo_set: *GlobalUboSet,
         swapchain_color_format: vk.Format,
@@ -78,20 +77,26 @@ pub const LightVolumePass = struct {
     ) !*LightVolumePass {
         const pass = try allocator.create(LightVolumePass);
 
-        // Create SSBO for light data (per frame in flight)
+        // Create SSBO for light data (per frame in flight) using BufferManager
         const max_lights: u32 = 128; // Support up to 128 lights
-        var light_volume_buffers: [MAX_FRAMES_IN_FLIGHT]Buffer = undefined;
+        var light_volume_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = undefined;
 
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            light_volume_buffers[i] = try Buffer.init(
-                graphics_context,
-                @sizeOf(LightVolumeData) * max_lights,
-                1,
-                .{ .storage_buffer_bit = true },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
+            const buffer_name = try std.fmt.allocPrint(allocator, "light_volumes_{d}", .{i});
+            defer allocator.free(buffer_name);
+
+            light_volume_buffers[i] = try buffer_manager.createBuffer(
+                .{
+                    .name = buffer_name,
+                    .size = @sizeOf(LightVolumeData) * max_lights,
+                    .strategy = .host_visible,
+                    .usage = .{ .storage_buffer_bit = true },
+                },
+                0, // frame_index
             );
-            // Keep buffer mapped for writes (host_coherent means no need to flush)
-            try light_volume_buffers[i].map(@sizeOf(LightVolumeData) * max_lights, 0);
+
+            // Map the buffer for host writes
+            try light_volume_buffers[i].buffer.map(vk.WHOLE_SIZE, 0);
         }
 
         pass.* = LightVolumePass{
@@ -105,6 +110,7 @@ pub const LightVolumePass = struct {
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
+            .buffer_manager = buffer_manager,
             .ecs_world = ecs_world,
             .global_ubo_set = global_ubo_set,
             .swapchain_color_format = swapchain_color_format,
@@ -138,20 +144,22 @@ pub const LightVolumePass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.light_volume_pipeline) orelse return false;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
-        // Bind global UBO to all frames
-        self.updateDescriptors() catch |err| {
-            log(.WARN, "light_volume_pass", "Failed to update descriptors during recovery: {}", .{err});
+        // Bind resources after recovery
+        self.bindResources() catch |err| {
+            log(.WARN, "light_volume_pass", "Failed to bind resources during recovery: {}", .{err});
             return false;
         };
+
+        self.pipeline_system.markPipelineResourcesDirty(self.light_volume_pipeline);
 
         log(.INFO, "light_volume_pass", "Recovery setup complete", .{});
         return true;
     }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
-        _ = base;
-        _ = frame_info;
-        // No per-frame updates needed for light volume pass
+        const self: *LightVolumePass = @fieldParentPtr("base", base);
+
+        try self.resource_binder.updateFrame(self.light_volume_pipeline, frame_info.current_frame);
     }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
@@ -202,55 +210,36 @@ pub const LightVolumePass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.light_volume_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
-        // Bind global UBO to all frames
-        try self.updateDescriptors();
+        // Populate ResourceBinder with shader reflection data
+        if (try self.pipeline_system.getPipelineReflection(self.light_volume_pipeline)) |reflection| {
+            var mut_reflection = reflection;
+            try self.resource_binder.populateFromReflection(mut_reflection);
+            mut_reflection.deinit(self.allocator);
+        }
+
+        // Bind resources once - ResourceBinder tracks generation changes automatically
+        try self.bindResources();
+
+        self.pipeline_system.markPipelineResourcesDirty(self.light_volume_pipeline);
 
         log(.INFO, "light_volume_pass", "Setup complete", .{});
     }
 
-    fn updateDescriptors(self: *LightVolumePass) !void {
-        // Bind global UBO and light SSBO for all frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            const ubo_managed_buffer = self.global_ubo_set.getBuffer(frame_idx);
+    fn bindResources(self: *LightVolumePass) !void {
+        // Bind global UBO for all frames (generation tracked automatically)
+        try self.resource_binder.bindUniformBufferNamed(
+            self.light_volume_pipeline,
+            "GlobalUbo",
+            self.global_ubo_set.frame_buffers,
+        );
 
-            // Skip if buffer not created yet (generation 0)
-            if (ubo_managed_buffer.generation == 0) continue;
-
-            const ubo_resource = Resource{
-                .buffer = .{
-                    .buffer = ubo_managed_buffer.buffer.buffer,
-                    .offset = 0,
-                    .range = @sizeOf(@import("../frameinfo.zig").GlobalUbo),
-                },
-            };
-
-            try self.pipeline_system.bindResource(
-                self.light_volume_pipeline,
-                0, // Set 0
-                0, // Binding 0 - Global UBO
-                ubo_resource,
-                @intCast(frame_idx),
-            );
-
-            // Bind light volume SSBO
-            const ssbo_resource = Resource{
-                .buffer = .{
-                    .buffer = self.light_volume_buffers[frame_idx].buffer,
-                    .offset = 0,
-                    .range = @sizeOf(LightVolumeData) * self.max_lights,
-                },
-            };
-
-            try self.pipeline_system.bindResource(
-                self.light_volume_pipeline,
-                0, // Set 0
-                1, // Binding 1 - Light SSBO
-                ssbo_resource,
-                @intCast(frame_idx),
-            );
-
-            try self.resource_binder.updateFrame(self.light_volume_pipeline, @as(u32, @intCast(frame_idx)));
-        }
+        // Bind light volume SSBO for all frames (generation tracked automatically)
+        // Shader variable name is "lightVolumes" (lowercase 'l')
+        try self.resource_binder.bindStorageBufferArrayNamed(
+            self.light_volume_pipeline,
+            "LightVolumeBuffer",
+            self.light_volume_buffers,
+        );
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -283,10 +272,10 @@ pub const LightVolumePass = struct {
             };
         }
 
-        // Write to SSBO
+        // Write to SSBO (ManagedBuffer)
         const buffer_size = @sizeOf(LightVolumeData) * light_count;
         const light_bytes = std.mem.sliceAsBytes(light_volumes);
-        self.light_volume_buffers[frame_index].writeToBuffer(light_bytes, buffer_size, 0);
+        self.light_volume_buffers[frame_index].buffer.writeToBuffer(light_bytes, buffer_size, 0);
 
         // Setup dynamic rendering with load operations (don't clear, render on top of geometry)
         const helper = DynamicRenderingHelper.initLoad(
@@ -303,10 +292,13 @@ pub const LightVolumePass = struct {
         const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
 
         if (pipeline_rebuilt) {
-            log(.INFO, "light_volume_pass", "Pipeline hot-reloaded", .{});
+            log(.INFO, "light_volume_pass", "Pipeline hot-reloaded, rebinding resources", .{});
             self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+            self.resource_binder.clearPipeline(self.light_volume_pipeline);
+
+            // Rebind resources after hot reload
+            try self.bindResources();
             self.pipeline_system.markPipelineResourcesDirty(self.light_volume_pipeline);
-            try self.updateDescriptors();
         }
 
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.light_volume_pipeline, frame_info.current_frame);
@@ -320,9 +312,11 @@ pub const LightVolumePass = struct {
         const self: *LightVolumePass = @fieldParentPtr("base", base);
         log(.INFO, "light_volume_pass", "Tearing down", .{});
 
-        // Clean up SSBO buffers
-        for (&self.light_volume_buffers) |*buffer| {
-            buffer.deinit();
+        // Clean up SSBO buffers (ManagedBuffers destroyed by BufferManager)
+        for (self.light_volume_buffers) |buffer| {
+            self.buffer_manager.destroyBuffer(buffer) catch |err| {
+                log(.ERROR, "light_volume_pass", "Failed to destroy buffer: {}", .{err});
+            };
         }
 
         self.light_system.deinit();

@@ -42,4 +42,7 @@ pub const FrameInfo = struct {
 
     // Performance monitoring (optional)
     performance_monitor: ?*PerformanceMonitor = null,
+
+    // ImGui draw data from snapshot (for thread-safe UI rendering)
+    imgui_draw_data: ?*anyopaque = null,
 };

@@ -24,6 +24,8 @@ const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
 const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
+const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
+const render_data_types = @import("../rendering/render_data_types.zig");
 
 const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
 const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
@@ -31,6 +33,7 @@ const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").Lig
 const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
 const TonemapPass = @import("../rendering/passes/tonemap_pass.zig").TonemapPass;
+const BaseRenderPass = @import("../rendering/passes/base_render_pass.zig").BaseRenderPass;
 const vertex_formats = @import("../rendering/vertex_formats.zig");
 
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
@@ -87,6 +90,7 @@ pub const Scene = struct {
 
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
+    particle_system: ?*ecs.ParticleSystem = null,
     // NOTE: TextureSystem moved to Engine - it manages infrastructure textures (HDR/LDR)
 
     // Performance monitoring
@@ -442,55 +446,51 @@ pub const Scene = struct {
 
         try self.ecs_world.emplace(ecs.ParticleEmitter, entity, emitter);
 
-        // Register emitter with GPU if particle compute pass is initialized
-        if (self.render_graph) |*graph| {
-            if (graph.getPass("particle_compute_pass")) |pass| {
-                const compute_pass: *ParticleComputePass = @fieldParentPtr("base", pass);
+        // Register emitter with GPU via ParticleSystem
+        if (self.particle_system) |ps| {
+            // Create GPU emitter struct
+            const gpu_emitter = vertex_formats.GPUEmitter{
+                .position = .{ transform.position.x, transform.position.y, transform.position.z },
+                .is_active = 1,
+                .velocity_min = .{ emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z },
+                .velocity_max = .{ emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z },
+                .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
+                .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 }, // Fade to darker
+                .lifetime_min = particle_lifetime * 0.8,
+                .lifetime_max = particle_lifetime * 1.2,
+                .spawn_rate = emission_rate,
+                .accumulated_spawn_time = 0.0,
+                .particles_per_spawn = 1,
+            };
 
-                // Create GPU emitter struct
-                const gpu_emitter = vertex_formats.GPUEmitter{
-                    .position = .{ transform.position.x, transform.position.y, transform.position.z },
-                    .is_active = 1,
-                    .velocity_min = .{ emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z },
-                    .velocity_max = .{ emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z },
-                    .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
-                    .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 }, // Fade to darker
-                    .lifetime_min = particle_lifetime * 0.8,
-                    .lifetime_max = particle_lifetime * 1.2,
-                    .spawn_rate = emission_rate,
-                    .accumulated_spawn_time = 0.0,
-                    .particles_per_spawn = 1,
+            // Spawn some initial particles (more for better visual effect)
+            const initial_particle_count = 200;
+            const initial_particles = try self.allocator.alloc(vertex_formats.Particle, initial_particle_count);
+            defer self.allocator.free(initial_particles);
+
+            // Generate random initial particles (alive for immediate visibility)
+            for (initial_particles) |*particle| {
+                const rand_x = gpu_emitter.velocity_min[0] + (gpu_emitter.velocity_max[0] - gpu_emitter.velocity_min[0]) * self.random.random().float(f32);
+                const rand_y = gpu_emitter.velocity_min[1] + (gpu_emitter.velocity_max[1] - gpu_emitter.velocity_min[1]) * self.random.random().float(f32);
+                const rand_z = gpu_emitter.velocity_min[2] + (gpu_emitter.velocity_max[2] - gpu_emitter.velocity_min[2]) * self.random.random().float(f32);
+                const lifetime = gpu_emitter.lifetime_min + (gpu_emitter.lifetime_max - gpu_emitter.lifetime_min) * self.random.random().float(f32);
+
+                particle.* = vertex_formats.Particle{
+                    .position = gpu_emitter.position,
+                    .velocity = .{ rand_x, rand_y, rand_z },
+                    .color = gpu_emitter.color_start,
+                    .lifetime = lifetime * 0.5, // Start particles mid-life for immediate visibility
+                    .max_lifetime = lifetime,
+                    .emitter_id = 0, // Will be set by spawnParticlesForEmitter
+
                 };
-
-                // Spawn some initial particles (more for better visual effect)
-                const initial_particle_count = 200;
-                const initial_particles = try self.allocator.alloc(vertex_formats.Particle, initial_particle_count);
-                defer self.allocator.free(initial_particles);
-
-                // Generate random initial particles (dead, to be spawned by compute shader)
-                for (initial_particles) |*particle| {
-                    const rand_x = gpu_emitter.velocity_min[0] + (gpu_emitter.velocity_max[0] - gpu_emitter.velocity_min[0]) * self.random.random().float(f32);
-                    const rand_y = gpu_emitter.velocity_min[1] + (gpu_emitter.velocity_max[1] - gpu_emitter.velocity_min[1]) * self.random.random().float(f32);
-                    const rand_z = gpu_emitter.velocity_min[2] + (gpu_emitter.velocity_max[2] - gpu_emitter.velocity_min[2]) * self.random.random().float(f32);
-                    const lifetime = gpu_emitter.lifetime_min + (gpu_emitter.lifetime_max - gpu_emitter.lifetime_min) * self.random.random().float(f32);
-
-                    particle.* = vertex_formats.Particle{
-                        .position = gpu_emitter.position,
-                        .velocity = .{ rand_x, rand_y, rand_z },
-                        .color = gpu_emitter.color_start,
-                        .lifetime = 0.0, // Dead particles - will be assigned emitter_id by spawnParticlesForEmitter
-                        .max_lifetime = lifetime,
-                        .emitter_id = 0, // Will be set by spawnParticlesForEmitter
-
-                    };
-                }
-
-                // Add emitter to GPU and track the GPU ID
-                const gpu_emitter_id = try compute_pass.addEmitter(gpu_emitter, initial_particles);
-                try self.emitter_to_gpu_id.put(entity, gpu_emitter_id);
-
-                log(.INFO, "scene", "Added particle emitter {} (gpu_id={})", .{ @intFromEnum(entity), gpu_emitter_id });
             }
+
+            // Add emitter to ParticleSystem and track the GPU ID
+            const gpu_emitter_id = try ps.addEmitter(gpu_emitter, initial_particles);
+            try self.emitter_to_gpu_id.put(entity, gpu_emitter_id);
+
+            log(.INFO, "scene", "Added particle emitter {} (gpu_id={})", .{ @intFromEnum(entity), gpu_emitter_id });
         }
     }
 
@@ -573,6 +573,9 @@ pub const Scene = struct {
         // NOTE: TextureSystem now owned by Engine
         if (self.material_system) |ms| {
             ms.deinit();
+        }
+        if (self.particle_system) |ps| {
+            ps.deinit();
         }
 
         self.light_system.deinit();
@@ -672,19 +675,29 @@ pub const Scene = struct {
 
         log(.INFO, "scene", "Initialized material system (ECS-driven)", .{});
 
+        // Create particle system (owns particle GPU buffers)
+        const max_emitters = 16;
+        const particles_per_emitter = 200;
+        self.particle_system = try ecs.ParticleSystem.init(
+            self.allocator,
+            graphics_context,
+            buffer_manager,
+            particles_per_emitter * max_emitters, // 200 particles per emitter * 16 emitters = 3200 total
+            max_emitters,
+        );
+
+        log(.INFO, "scene", "Initialized particle system (ECS-driven)", .{});
+
         // Create render graph
         self.render_graph = RenderGraph.init(self.allocator, graphics_context);
 
         // Create and add ParticleComputePass FIRST (runs on compute queue)
-        const max_emitters = 16;
-        const particles_per_emitter = 200;
         const particle_compute_pass = ParticleComputePass.create(
             self.allocator,
             graphics_context,
             pipeline_system,
+            self.particle_system.?,
             self.ecs_world,
-            particles_per_emitter * max_emitters, // 200 particles per emitter * 16 emitters = 3200 total
-            max_emitters,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create ParticleComputePass: {}. Particles disabled.", .{err});
             break :blk null;
@@ -697,6 +710,8 @@ pub const Scene = struct {
         // Create and add GeometryPass
         // Pass material bindings (opaque handle - GeometryPass doesn't need MaterialSystem awareness)
         const opaque_bindings = try self.material_system.?.getBindings("opaque");
+
+        // OLD: Custom GeometryPass implementation (200+ lines of boilerplate)
         const geometry_pass = GeometryPass.create(
             self.allocator,
             graphics_context,
@@ -712,6 +727,123 @@ pub const Scene = struct {
             log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
             break :blk null;
         };
+
+        // NEW: BaseRenderPass - zero boilerplate!
+
+        // const RenderSystemType = ecs.RenderSystem;
+
+        // const geometry_pass = blk: {
+        //     // Push constant structure matching geometry shaders
+        //     const GeometryPushConstants = extern struct {
+        //         transform: [16]f32,
+        //         normal_matrix: [16]f32,
+        //         material_index: u32,
+        //     };
+
+        //     // Render data extractor: get opaque objects from RenderSystem
+        //     const getOpaqueGeometry = struct {
+        //         fn extract(render_system: *RenderSystemType, ctx: ?*anyopaque) BaseRenderPass.RenderData {
+        //             _ = ctx;
+        //             const raster_data = render_system.getRasterData() catch {
+        //                 return .{};
+        //             };
+        //             // Pass pointer and length since anyopaque can't be sliced
+        //             return .{
+        //                 .objects = raster_data.objects.ptr,
+        //                 .objects_len = raster_data.objects.len,
+        //             };
+        //         }
+        //     }.extract;
+
+        //     // Push constant generator: convert RenderableObject to push constants
+        //     const generatePushConstants = struct {
+        //         fn generate(object_ptr: *const anyopaque, out_buffer: []u8) void {
+        //             const object: *const render_data_types.RasterizationData.RenderableObject = @ptrCast(@alignCast(object_ptr));
+        //             const push: *GeometryPushConstants = @ptrCast(@alignCast(out_buffer.ptr));
+        //             push.* = .{
+        //                 .transform = object.transform,
+        //                 .normal_matrix = object.transform, // TODO: Compute proper normal matrix
+        //                 .material_index = object.material_index,
+        //             };
+        //         }
+        //     }.generate;
+
+        //     // Create pass with push constant configuration
+        //     const pass = BaseRenderPass.create(
+        //         self.allocator,
+        //         "geometry_pass",
+        //         graphics_context,
+        //         pipeline_system,
+        //         &self.render_system,
+        //         .{
+        //             .color_formats = &[_]vk.Format{swapchain.hdr_format},
+        //             .depth_format = try swapchain.depthFormat(),
+        //             .cull_mode = .{ .back_bit = true },
+        //             .depth_test = true,
+        //             .depth_write = true,
+        //             .blend_enable = false,
+        //             .vertex_input_bindings = vertex_formats.mesh_bindings[0..],
+        //             .vertex_input_attributes = vertex_formats.mesh_attributes[0..],
+        //             .push_constant_size = @sizeOf(GeometryPushConstants),
+        //             .push_constant_stages = .{ .vertex_bit = true, .fragment_bit = true },
+        //         },
+        //     ) catch |err| {
+        //         log(.WARN, "scene", "Failed to create BaseRenderPass GeometryPass: {}. Geometry rendering disabled.", .{err});
+        //         break :blk null;
+        //     };
+
+        //     // Register shaders
+        //     pass.registerShader("assets/shaders/textured.vert") catch |err| {
+        //         log(.WARN, "scene", "Failed to register vertex shader: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+        //     pass.registerShader("assets/shaders/textured.frag") catch |err| {
+        //         log(.WARN, "scene", "Failed to register fragment shader: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+
+        //     // Bind resources (uses named binding from shader reflection)
+        //     pass.bind("GlobalUbo", global_ubo_set.frame_buffers) catch |err| {
+        //         log(.WARN, "scene", "Failed to bind GlobalUbo: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+        //     pass.bind("MaterialBuffer", opaque_bindings.material_buffer) catch |err| {
+        //         log(.WARN, "scene", "Failed to bind MaterialBuffer: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+        //     pass.bind("textures", opaque_bindings.texture_array) catch |err| {
+        //         log(.WARN, "scene", "Failed to bind textures: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+
+        //     // Register render data extractor
+        //     pass.setRenderDataFn(getOpaqueGeometry, null) catch |err| {
+        //         log(.WARN, "scene", "Failed to set render data function: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+
+        //     // Register push constant generator
+        //     pass.setPushConstantFn(generatePushConstants) catch |err| {
+        //         log(.WARN, "scene", "Failed to set push constant function: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+
+        //     // Bake pipeline and bind resources
+        //     pass.bake() catch |err| {
+        //         log(.WARN, "scene", "Failed to bake GeometryPass: {}", .{err});
+        //         pass.destroy();
+        //         break :blk null;
+        //     };
+
+        //     break :blk pass;
+        // };
 
         if (geometry_pass) |pass| {
             try self.render_graph.?.addPass(&pass.base);
@@ -749,6 +881,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
+            buffer_manager,
             self.ecs_world,
             global_ubo_set,
             swapchain.hdr_format,
@@ -789,6 +922,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
+            swapchain.getHdrTextures(),
             swapchain.surface_format.format,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create TonemapPass: {}. Final tonemapping disabled.", .{err});

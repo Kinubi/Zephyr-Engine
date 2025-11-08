@@ -93,8 +93,6 @@ pub const ManagedTexture = struct {
             stats.extent = new_extent;
             stats.last_updated = texture_manager.frame_counter;
         }
-
-        log(.INFO, "texture_manager", "Texture '{s}' resized, new generation: {}", .{ self.name, self.generation });
     }
 };
 
@@ -204,6 +202,78 @@ pub const TextureManager = struct {
         });
 
         return managed;
+    }
+
+    /// Find an existing texture by name
+    pub fn findTexture(self: *TextureManager, name: []const u8) ?*ManagedTexture {
+        for (self.managed_textures.items) |managed| {
+            if (std.mem.eql(u8, managed.name, name)) {
+                return managed;
+            }
+        }
+        return null;
+    }
+
+    /// Get existing texture by name or create if it doesn't exist
+    /// If the texture exists but has different parameters, it will be recreated in-place
+    /// This ensures stable pointers for textures that are referenced elsewhere (e.g., swapchain HDR buffers)
+    pub fn getOrCreateTexture(
+        self: *TextureManager,
+        config: TextureConfig,
+    ) !*ManagedTexture {
+        // Check if texture already exists
+        if (self.findTexture(config.name)) |existing| {
+            // Check if parameters changed
+            const size_changed = existing.extent.width != config.extent.width or
+                existing.extent.height != config.extent.height or
+                existing.extent.depth != config.extent.depth;
+            const format_changed = existing.format != config.format;
+            const usage_changed = @as(u32, @bitCast(existing.usage)) != @as(u32, @bitCast(config.usage));
+            const samples_changed = @as(u32, @bitCast(existing.samples)) != @as(u32, @bitCast(config.samples));
+
+            if (size_changed or format_changed or usage_changed or samples_changed) {
+                log(.INFO, "texture_manager", "Recreating texture '{s}' with new parameters", .{config.name});
+
+                // Defer old texture cleanup
+                try self.deferTextureCleanup(existing.texture);
+
+                // Recreate texture with new parameters
+                existing.texture = try Texture.initSingleTime(
+                    self.graphics_context,
+                    config.format,
+                    config.extent,
+                    config.usage,
+                    config.samples,
+                );
+
+                // Update metadata
+                existing.format = config.format;
+                existing.extent = config.extent;
+                existing.usage = config.usage;
+                existing.samples = config.samples;
+                existing.generation += 1; // Trigger rebinding
+                existing.resize_source = config.resize_source;
+                existing.match_format = config.match_format;
+
+                // Update statistics
+                if (self.all_textures.getPtr(existing.name)) |stats| {
+                    stats.format = config.format;
+                    stats.extent = config.extent;
+                    stats.last_updated = self.frame_counter;
+                }
+
+                log(.INFO, "texture_manager", "Recreated texture '{s}', new generation: {}", .{ config.name, existing.generation });
+            } else {
+                // Update resize_source link even if texture params didn't change
+                existing.resize_source = config.resize_source;
+                existing.match_format = config.match_format;
+            }
+
+            return existing;
+        }
+
+        // Texture doesn't exist, create new one
+        return self.createTexture(config);
     }
 
     /// Register a managed texture for automatic updates
