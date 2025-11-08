@@ -153,6 +153,7 @@ pub const Swapchain = struct {
 
     fn deinitExceptSwapchain(self: *Swapchain) void {
         if (self.texture_manager) |tm| {
+            // During recreation, don't destroy HDR textures - they'll be reused via getOrCreateTexture
             for (self.swap_images) |*si| si.deinit(self.gc, tm);
         } else {
             // Should not happen in normal operation
@@ -160,6 +161,15 @@ pub const Swapchain = struct {
         }
         self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
         self.destroyFramebuffers();
+    }
+
+    /// Clean up HDR textures (only called during full shutdown, not recreation)
+    fn cleanupHdrTextures(self: *Swapchain) void {
+        if (self.texture_manager) |tm| {
+            for (self.swap_images) |si| {
+                tm.destroyTexture(si.hdr_texture);
+            }
+        }
     }
 
     pub fn waitForAllFences(self: *Swapchain) !void {
@@ -171,6 +181,9 @@ pub const Swapchain = struct {
     }
 
     pub fn deinit(self: *Swapchain) void {
+        // Clean up HDR textures before other resources
+        self.cleanupHdrTextures();
+        
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
         var i: usize = 0;
@@ -665,7 +678,7 @@ const SwapImage = struct {
         var hdr_name_buf: [64]u8 = undefined;
         const hdr_name = try std.fmt.bufPrint(&hdr_name_buf, "swapchain_hdr_{}", .{frame_index});
 
-        const hdr_texture = try texture_manager.createTexture(.{
+        const hdr_texture = try texture_manager.getOrCreateTexture(.{
             .name = hdr_name,
             .format = hdr_format,
             .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
@@ -764,7 +777,10 @@ const SwapImage = struct {
             tracker.untrackAllocation(image_key);
         }
 
-        texture_manager.destroyTexture(self.hdr_texture);
+        // NOTE: Do NOT destroy HDR texture here! It's reused during swapchain recreation via getOrCreateTexture
+        // The texture manager will handle updating it with new extent
+        _ = texture_manager; // Suppress unused parameter warning
+        
         gc.vkd.destroyImageView(gc.dev, self.depth_image_view, null);
         gc.vkd.freeMemory(gc.dev, self.depth_image_memory, null);
         gc.vkd.destroyImage(gc.dev, self.depth_image, null);
