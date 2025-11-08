@@ -31,6 +31,9 @@ pub const GameStateSnapshot = struct {
     point_lights: []PointLightData,
     point_light_count: usize,
 
+    // ImGui draw data (cloned from main thread for render thread)
+    imgui_draw_data: ?*anyopaque, // Pointer to cloned ImDrawData
+    
     // Particle system data (if needed)
     // particles: []ParticleData,
 
@@ -65,6 +68,7 @@ pub const GameStateSnapshot = struct {
             .entity_count = 0,
             .point_lights = &.{},
             .point_light_count = 0,
+            .imgui_draw_data = null,
         };
     }
 
@@ -75,6 +79,7 @@ pub const GameStateSnapshot = struct {
         if (self.point_lights.len > 0) {
             self.allocator.free(self.point_lights);
         }
+        // Note: imgui_draw_data cleanup handled by ImGuiContext
         self.* = undefined;
     }
 };
