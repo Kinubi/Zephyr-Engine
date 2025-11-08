@@ -573,8 +573,16 @@ pub const ResourceBinder = struct {
         // Register for generation tracking
         try self.registerAccelerationStructureByName(binding_name, pipeline_id, managed_tlas);
 
-        if (managed_tlas.generation == 0) {
+        if (managed_tlas.generation.load(.acquire) == 0) {
             // TLAS not created yet - skip initial bind, updateFrame will bind it later
+            return;
+        }
+
+        // Read the AS handle once (atomic operation) to avoid race conditions
+        const as_handle = managed_tlas.acceleration_structure();
+
+        if (as_handle == vk.AccelerationStructureKHR.null_handle) {
+            // TLAS pointer is null - skip initial bind, updateFrame will bind it later
             return;
         }
 
@@ -583,7 +591,7 @@ pub const ResourceBinder = struct {
             const frame_index = @as(u32, @intCast(frame_idx));
 
             const resource = Resource{
-                .acceleration_structure = managed_tlas.acceleration_structure,
+                .acceleration_structure = as_handle,
             };
 
             try self.pipeline_system.bindResource(
@@ -1101,6 +1109,10 @@ pub const ResourceBinder = struct {
             // Check if generation changed
             if (current_gen == res.last_generation) continue;
 
+            // Update last generation BEFORE attempting rebind
+            // This prevents infinite rebind attempts if resources aren't ready yet
+            res.last_generation = current_gen;
+
             // Rebind based on resource type
             switch (res.resource) {
                 .managed_buffer => |managed_buffer| {
@@ -1249,30 +1261,59 @@ pub const ResourceBinder = struct {
                     }
                 },
                 .acceleration_structure => |as| {
-                    // Cast back to ManagedTLAS to access acceleration_structure handle
-                    const managed_tlas: *const ManagedTLAS = @ptrCast(@alignCast(as.ptr));
+                    // Cast back to ManagedTLAS to access acceleration_structure handle (mutable for atomic ops)
+                    const managed_tlas: *ManagedTLAS = @ptrCast(@alignCast(as.ptr));
+
+                    // Read the AS handle once (atomic operation) to avoid race conditions
+                    const as_handle = managed_tlas.acceleration_structure();
 
                     // Don't rebind if TLAS not created yet
-                    if (managed_tlas.acceleration_structure == vk.AccelerationStructureKHR.null_handle) {
+                    if (as_handle == vk.AccelerationStructureKHR.null_handle) {
                         continue;
                     }
 
-                    // Rebind the acceleration structure for ALL frames
-                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                        const bind_frame = @as(u32, @intCast(frame_idx));
+                    // ALWAYS bind only the current frame, even on first bind (generation==1)
+                    // This allows gradual transition across frames without destroying old TLAS
+                    // while some frames still reference it.
+                    const resource = Resource{
+                        .acceleration_structure = as_handle,
+                    };
+                    try self.pipeline_system.bindResource(
+                        res.pipeline_id,
+                        res.set,
+                        res.binding,
+                        resource,
+                        (frame_index + 1) % MAX_FRAMES_IN_FLIGHT,
+                    );
 
-                        const resource = Resource{
-                            .acceleration_structure = managed_tlas.acceleration_structure,
-                        };
-
-                        try self.pipeline_system.bindResource(
-                            res.pipeline_id,
-                            res.set,
-                            res.binding,
-                            resource,
-                            bind_frame,
+                    // Check if this is the FIRST frame to see this generation change
+                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    const prev_gen = current_gen - 1;
+                    if (res.last_generation == prev_gen) {
+                        // This is the first frame to process this generation
+                        // Reset mask to 0b111 atomically (only if it was 0)
+                        const expected: u8 = 0;
+                        _ = managed_tlas.pending_bind_mask.cmpxchgStrong(
+                            expected,
+                            0b111,
+                            .acq_rel,
+                            .acquire,
                         );
                     }
+
+                    // Clear this frame's bit in the pending bind mask
+                    const frame_bit: u8 = @as(u8, 1) << @intCast(frame_index);
+                    const old_mask = managed_tlas.pending_bind_mask.fetchAnd(~frame_bit, .acq_rel);
+
+                    // Check if mask is complete (all frames have bound)
+                    // If mask is NOT complete, revert last_generation so other frames can still bind
+                    const new_mask = old_mask & ~frame_bit;
+                    if (new_mask != 0) {
+                        // Other frames still need to bind - keep last_generation one behind
+                        res.last_generation = current_gen - 1;
+                    }
+
+                    // else: mask is complete (0), last_generation stays at current_gen
                 },
                 .buffer_array => |arr| {
                     // Get buffer infos directly from the ArrayList pointer
@@ -1305,9 +1346,6 @@ pub const ResourceBinder = struct {
                     log(.WARN, "resource_binder", "Single texture rebinding not yet implemented for '{s}'", .{res.name});
                 },
             }
-
-            // Update the last bound generation
-            res.last_generation = current_gen;
         }
 
         try self.pipeline_system.updateDescriptorSetsForPipeline(pipeline_id, frame_index);
