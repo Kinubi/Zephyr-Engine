@@ -86,17 +86,29 @@ pub const GameStateSnapshot = struct {
 
 /// Captures current game state from ECS World into a flat snapshot.
 /// This function is called by the main thread before signaling the render thread.
+/// Capture a snapshot of the current game state for rendering
 pub fn captureSnapshot(
     allocator: Allocator,
     world: *ecs.World,
     camera: anytype,
     frame_index: u64,
     delta_time: f32,
+    imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
 ) !GameStateSnapshot {
-    var snapshot = GameStateSnapshot.init(allocator);
-
-    snapshot.frame_index = frame_index;
-    snapshot.delta_time = delta_time;
+    var snapshot = GameStateSnapshot{
+        .allocator = allocator,
+        .frame_index = frame_index,
+        .delta_time = delta_time,
+        .imgui_draw_data = imgui_draw_data,
+        .camera_position = undefined,
+        .camera_view_matrix = undefined,
+        .camera_projection_matrix = undefined,
+        .camera_view_projection_matrix = undefined,
+        .entities = undefined,
+        .entity_count = 0,
+        .point_lights = undefined,
+        .point_light_count = 0,
+    };
 
     // Copy camera state
     // Camera position is stored in the translation column of inverseViewMatrix

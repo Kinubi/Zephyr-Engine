@@ -619,9 +619,9 @@ pub const RaytracingSystem = struct {
                 // This is the SINGLE source of truth for TLAS lifecycle management
                 const default_set = try self.createSet("default");
 
-                // If TLAS already exists (generation > 1 means we've built at least twice),
+                // If TLAS already exists (generation >= 1 means we've built at least once),
                 // save the OLD handles BEFORE updating to the new ones
-                if (default_set.tlas.generation > 1) {
+                if (default_set.tlas.generation >= 1) {
                     // Save old handles before overwriting
                     const old_as = default_set.tlas.acceleration_structure;
                     const old_buffer = default_set.tlas.buffer;

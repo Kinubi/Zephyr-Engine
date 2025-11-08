@@ -59,7 +59,7 @@ pub const RenderLayer = struct {
         }
         try self.swapchain.beginFrame(frame_info.*);
         const mutable_frame_info: *FrameInfo = @constCast(frame_info);
-        const current_hdr = self.swapchain.currentHdrTexture();
+        const current_hdr = self.swapchain.hdr_textures[frame_info.current_frame];
         mutable_frame_info.hdr_texture = &current_hdr.texture;
 
         if (self.swapchain.use_viewport_texture) {

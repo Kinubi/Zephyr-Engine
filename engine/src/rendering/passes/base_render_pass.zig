@@ -357,9 +357,9 @@ pub const BaseRenderPass = struct {
                 // Array of ManagedBuffer (frame-in-flight) - use uniform buffer binding
                 // The array_ptr points to [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer
                 // Cast to the array type and pass it by value
-                const buffers_ptr: *const [3]*ManagedBuffer = @ptrCast(@alignCast(array_ptr));
-                // Convert to [3]*const ManagedBuffer for the function signature
-                const const_buffers: [3]*const ManagedBuffer = buffers_ptr.*;
+                const buffers_ptr: *const [zephyr.MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = @ptrCast(@alignCast(array_ptr));
+                // Convert to [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer for the function signature
+                const const_buffers: [zephyr.MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer = buffers_ptr.*;
                 try self.resource_binder.bindUniformBufferNamed(
                     self.pipeline.?,
                     name,
@@ -368,7 +368,7 @@ pub const BaseRenderPass = struct {
             },
             .texture => |tex_ptr| {
                 // ManagedTexture - cast and bind (tracked automatically)
-                try self.resource_binder.bindManagedTextureNamed(
+                try self.resource_binder.bindTextureNamed(
                     self.pipeline.?,
                     name,
                     @ptrCast(@alignCast(tex_ptr)),
@@ -393,6 +393,13 @@ pub const BaseRenderPass = struct {
     }
 
     pub fn destroy(self: *BaseRenderPass) void {
+        self.cleanupResources();
+        self.allocator.destroy(self);
+    }
+
+    /// Consolidated cleanup logic for both destroy() and teardownImpl()
+    /// This ensures all allocated resources are properly freed
+    fn cleanupResources(self: *BaseRenderPass) void {
         // Deinit resource binder
         self.resource_binder.deinit();
 
@@ -408,8 +415,18 @@ pub const BaseRenderPass = struct {
         }
         self.resource_bindings.deinit(self.allocator);
 
+        // Free allocated buffer arrays
+        for (self.allocated_buffer_arrays.items) |array| {
+            self.allocator.free(array);
+        }
+        self.allocated_buffer_arrays.deinit(self.allocator);
+
+        // Free push constant range storage
+        if (self.push_constant_range_storage) |range_slice| {
+            self.allocator.free(range_slice);
+        }
+
         self.allocator.free(self.name);
-        self.allocator.destroy(self);
     }
 
     // RenderPass vtable implementation
@@ -532,33 +549,8 @@ pub const BaseRenderPass = struct {
         const self: *BaseRenderPass = @fieldParentPtr("base", base);
         log(.INFO, "base_render_pass", "Tearing down: {s}", .{self.name});
 
-        // Clean up resource binder
-        self.resource_binder.deinit();
-
-        // Free shader paths
-        for (self.shader_paths.items) |path| {
-            self.allocator.free(path);
-        }
-        self.shader_paths.deinit(self.allocator);
-
-        // Free resource binding names
-        for (self.resource_bindings.items) |binding| {
-            self.allocator.free(binding.name);
-        }
-        self.resource_bindings.deinit(self.allocator);
-
-        // Free allocated buffer arrays
-        for (self.allocated_buffer_arrays.items) |array| {
-            self.allocator.free(array);
-        }
-        self.allocated_buffer_arrays.deinit(self.allocator);
-
-        // Free push constant range storage
-        if (self.push_constant_range_storage) |range_slice| {
-            self.allocator.free(range_slice);
-        }
-
-        self.allocator.free(self.name);
+        // Use consolidated cleanup logic
+        self.cleanupResources();
 
         // Pipeline cleanup handled by UnifiedPipelineSystem
         self.allocator.destroy(self);

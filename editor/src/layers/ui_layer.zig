@@ -38,9 +38,9 @@ pub const UILayer = struct {
     show_ui: bool = true,
     show_ui_panels: bool = true, // Hide all panels except viewport when false
     current_fps: f32 = 0.0,
-    
-    // ImGui draw data pointer (set by prepare, used by render)
-    current_imgui_draw_data: ?*anyopaque = null,
+
+    // Temporary ImGui draw data storage (set by prepare, passed to snapshot, cleared after)
+    pending_imgui_draw_data: ?*anyopaque = null,
 
     // LDR tonemapped viewport texture for UI display (per-frame, managed with generation tracking)
     viewport_ldr: [MAX_FRAMES_IN_FLIGHT]?*ManagedTexture = [_]?*ManagedTexture{null} ** MAX_FRAMES_IN_FLIGHT,
@@ -71,6 +71,11 @@ pub const UILayer = struct {
             .camera = camera,
             .camera_controller = camera_controller,
         };
+    }
+
+    /// Get ImGui draw data captured during prepare() for passing to render thread
+    pub fn getImGuiDrawData(self: *UILayer) ?*anyopaque {
+        return self.pending_imgui_draw_data;
     }
 
     const vtable = Layer.VTable{
@@ -118,9 +123,10 @@ pub const UILayer = struct {
         // Ensure HDR and LDR viewport textures exist and match current viewport size
         _ = try ensureViewportTargets(self, frame_info);
 
-        // Update frame_info with current HDR texture (may have been recreated during resize)
+        // Update frame_info with current HDR texture for this frame-in-flight
+        // IMPORTANT: Use frame_info.current_frame (frame-in-flight index), NOT swapchain image_index
         const mutable_frame_info: *FrameInfo = @constCast(frame_info);
-        mutable_frame_info.hdr_texture = &self.swapchain.currentHdrTexture().texture;
+        mutable_frame_info.hdr_texture = &self.swapchain.hdr_textures[frame_info.current_frame].texture;
 
         // Configure frame_info to render to viewport-sized LDR texture (not swapchain)
         if (self.viewport_ldr[frame_info.current_frame]) |managed_ldr| {
@@ -241,8 +247,8 @@ pub const UILayer = struct {
             self.ui_renderer.renderHierarchy(self.scene);
         }
 
-        // Finalize ImGui frame and clone draw data for render thread
-        self.current_imgui_draw_data = self.imgui_context.endFrame();
+        // Finalize ImGui frame and store draw data for passing to render thread via snapshot
+        self.pending_imgui_draw_data = self.imgui_context.endFrame();
     }
 
     /// RENDER THREAD: Convert ImGui draw data to Vulkan commands
@@ -256,8 +262,8 @@ pub const UILayer = struct {
             try pm.beginPass("imgui", frame_info.current_frame, frame_info.command_buffer);
         }
 
-        // Render using cloned draw data from main thread
-        try self.imgui_context.renderFromSnapshot(self.current_imgui_draw_data, frame_info.command_buffer, self.swapchain, frame_info.current_frame);
+        // Render using draw data from snapshot (thread-safe - passed from main thread)
+        try self.imgui_context.renderFromSnapshot(frame_info.imgui_draw_data, frame_info.command_buffer, self.swapchain, frame_info.current_frame);
 
         // End GPU timing
         if (self.performance_monitor) |pm| {
@@ -473,8 +479,8 @@ fn recreateHDRTextures(self: *UILayer, frame_info: *const FrameInfo, extent: vk.
     const texture_manager = self.swapchain.texture_manager orelse return error.TextureManagerNotSet;
 
     // Resize all HDR textures to new extent
-    for (self.swapchain.swap_images) |*swap_img| {
-        try swap_img.hdr_texture.resize(texture_manager, extent3d, self.swapchain.hdr_format);
+    for (self.swapchain.hdr_textures) |hdr_texture| {
+        try hdr_texture.resize(texture_manager, extent3d, self.swapchain.hdr_format);
     }
 }
 

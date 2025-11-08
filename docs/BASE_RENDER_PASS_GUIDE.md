@@ -22,11 +22,19 @@ Each pass can register a custom function to extract exactly what it needs from R
 pub const RenderDataFn = fn (render_system: *RenderSystem, context: ?*anyopaque) RenderData;
 
 pub const RenderData = struct {
-    batches: ?[]const anyopaque = null,    // Instanced batches
-    objects: ?[]const anyopaque = null,    // Individual objects  
-    particles: ?[]const anyopaque = null,  // Particle systems
-    lights: ?[]const anyopaque = null,     // Light data
-    custom: ?*anyopaque = null,            // Pass-specific data
+    // Different passes need different data
+    // Store as opaque pointers with separate length fields
+    // Note: We use pointer + length instead of []const anyopaque because
+    // Zig doesn't support slices of anyopaque (anyopaque has no defined size)
+    batches: ?*const anyopaque = null,      // Instanced batches (pointer to array)
+    batches_len: usize = 0,                 // Number of batches
+    objects: ?*const anyopaque = null,      // Individual objects (pointer to array)
+    objects_len: usize = 0,                 // Number of objects
+    particles: ?*const anyopaque = null,    // Particle systems (pointer to array)
+    particles_len: usize = 0,               // Number of particle systems
+    lights: ?*const anyopaque = null,       // Light data (pointer to array)
+    lights_len: usize = 0,                  // Number of lights
+    custom: ?*anyopaque = null,             // Pass-specific data
 };
 ```
 
@@ -52,7 +60,10 @@ try pass.bind("Textures", texture_array);
 fn getOpaqueGeometry(render_system: *RenderSystem, ctx: ?*anyopaque) BaseRenderPass.RenderData {
     _ = ctx;
     const batches = render_system.getOpaqueBatches();
-    return .{ .batches = batches };
+    return .{ 
+        .batches = batches.ptr,
+        .batches_len = batches.len,
+    };
 }
 
 // Create and configure pass
@@ -114,7 +125,11 @@ fn getTransparentGeometry(
         std.sort.block(anyopaque, batches, {}, compareDepth);
     }
     
-    return .{ .batches = batches[0..@min(batches.len, context.max_layers)] };
+    const limited_batches = batches[0..@min(batches.len, context.max_layers)];
+    return .{ 
+        .batches = limited_batches.ptr,
+        .batches_len = limited_batches.len,
+    };
 }
 
 var ctx = TransparentContext{ .sort_by_depth = true };
@@ -133,7 +148,10 @@ try transparent_pass.bake();
 fn getParticleData(render_system: *RenderSystem, ctx: ?*anyopaque) BaseRenderPass.RenderData {
     _ = ctx;
     const particles = render_system.getActiveParticleSystems();
-    return .{ .particles = particles };
+    return .{ 
+        .particles = particles.ptr,
+        .particles_len = particles.len,
+    };
 }
 
 const particle_pass = try BaseRenderPass.create(
@@ -176,7 +194,10 @@ fn getShadowCasters(render_system: *RenderSystem, ctx: ?*anyopaque) BaseRenderPa
     // Get objects visible from this light's perspective
     const batches = render_system.getBatchesVisibleFromLight(context.light_index);
     
-    return .{ .batches = batches };
+    return .{ 
+        .batches = batches.ptr,
+        .batches_len = batches.len,
+    };
 }
 
 var shadow_ctx = ShadowContext{ .light_index = 0 };
@@ -338,11 +359,19 @@ fn getOpaqueGeometry(rs: *RenderSystem, ctx: ?*anyopaque) RenderData {
 }
 
 fn getTransparentGeometry(rs: *RenderSystem, ctx: ?*anyopaque) RenderData {
-    return .{ .batches = rs.getTransparentBatches() };
+    const batches = rs.getTransparentBatches();
+    return .{ 
+        .batches = batches.ptr,
+        .batches_len = batches.len,
+    };
 }
 
 fn getParticles(rs: *RenderSystem, ctx: ?*anyopaque) RenderData {
-    return .{ .particles = rs.getActiveParticleSystems() };
+    const particles = rs.getActiveParticleSystems();
+    return .{ 
+        .particles = particles.ptr,
+        .particles_len = particles.len,
+    };
 }
 ```
 

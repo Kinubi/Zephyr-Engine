@@ -109,13 +109,14 @@ pub fn stopRenderThread(ctx: *RenderThreadContext) void {
     }
 }
 
-/// Main thread function: Captures game state and signals render thread.
-/// Call this from your main loop after updating game logic.
+/// MAIN THREAD: Submit new game state to render thread
+/// This is non-blocking - main thread continues immediately
 pub fn mainThreadUpdate(
     ctx: *RenderThreadContext,
     world: *ecs.World,
     camera: anytype,
     delta_time: f32,
+    imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
 ) !void {
     // BACKPRESSURE: Wait for render thread to consume previous frame
     // This prevents main thread from getting more than 1 frame ahead
@@ -139,6 +140,7 @@ pub fn mainThreadUpdate(
         camera,
         frame_idx,
         delta_time,
+        imgui_draw_data,
     );
 
     // Atomically flip buffers
@@ -228,6 +230,9 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 ctx.frame_consumed.post();
                 continue;
             };
+
+            // Pass ImGui draw data from snapshot to frame_info (thread-safe transfer)
+            frame_info.imgui_draw_data = snapshot.imgui_draw_data;
 
             // PHASE 2.1: Update phase does Vulkan descriptor updates (render thread)
             // This calls render_graph.update() which updates descriptor sets

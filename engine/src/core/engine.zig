@@ -539,6 +539,7 @@ pub const Engine = struct {
         self: *Engine,
         world: anytype, // *ecs.World or compatible
         camera: anytype, // *Camera or compatible
+        imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
     ) !void {
         if (!self.use_render_thread) {
             return error.RenderThreadNotEnabled;
@@ -550,6 +551,7 @@ pub const Engine = struct {
                 world,
                 camera,
                 self.frame_info.dt,
+                imgui_draw_data,
             );
         } else {
             return error.RenderThreadNotInitialized;

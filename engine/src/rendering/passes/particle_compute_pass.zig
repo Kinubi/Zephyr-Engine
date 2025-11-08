@@ -15,15 +15,17 @@ const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const Buffer = @import("../../core/buffer.zig").Buffer;
+const BufferManager = @import("../buffer_manager.zig").BufferManager;
+const ManagedBuffer = @import("../buffer_manager.zig").ManagedBuffer;
 const vertex_formats = @import("../vertex_formats.zig");
 
 // ECS imports
 const ecs = @import("../../ecs.zig");
 const World = ecs.World;
 const ParticleComponent = ecs.ParticleComponent;
-
-// TODO: SIMPLIFY RENDER PASS - Remove resource update checks
-// TODO: Use named resource binding: bindStorageBuffer("ParticleBufferIn", particle_in)
+const ParticleSystem = ecs.ParticleSystem;
+const ParticleBuffers = ecs.ParticleBuffers;
+const ParticleGPUResources = ecs.ParticleGPUResources;
 
 /// Compute shader uniform buffer
 const ComputeUniformBuffer = extern struct {
@@ -36,45 +38,6 @@ const ComputeUniformBuffer = extern struct {
     _padding: [2]u32 = .{ 0, 0 },
 };
 
-/// Particle buffers for ping-pong compute shader
-const ParticleBuffers = struct {
-    particle_buffer_in: Buffer,
-    particle_buffer_out: Buffer,
-
-    fn create(
-        graphics_context: *GraphicsContext,
-        max_particles: u32,
-    ) !ParticleBuffers {
-        const buffer_size = @sizeOf(vertex_formats.Particle) * max_particles;
-
-        const particle_buffer_in = try Buffer.init(
-            graphics_context,
-            buffer_size,
-            1,
-            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_dst_bit = true, .transfer_src_bit = true },
-            .{ .device_local_bit = true },
-        );
-
-        const particle_buffer_out = try Buffer.init(
-            graphics_context,
-            buffer_size,
-            1,
-            .{ .storage_buffer_bit = true, .vertex_buffer_bit = true, .transfer_src_bit = true, .transfer_dst_bit = true },
-            .{ .device_local_bit = true },
-        );
-
-        return ParticleBuffers{
-            .particle_buffer_in = particle_buffer_in,
-            .particle_buffer_out = particle_buffer_out,
-        };
-    }
-
-    fn destroy(self: *ParticleBuffers) void {
-        self.particle_buffer_in.deinit();
-        self.particle_buffer_out.deinit();
-    }
-};
-
 /// Particle compute pass - runs GPU-based particle simulation
 pub const ParticleComputePass = struct {
     base: RenderPass,
@@ -85,121 +48,35 @@ pub const ParticleComputePass = struct {
     pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
     ecs_world: *World,
+    particle_system: *ParticleSystem,
 
     // Compute pipeline
     compute_pipeline: PipelineId = undefined,
     cached_pipeline_handle: vk.Pipeline = .null_handle,
 
-    // Particle storage (per frame in flight with ping-pong buffers)
-    particle_buffers: [MAX_FRAMES_IN_FLIGHT]ParticleBuffers,
+    // GPU resource references (owned by ParticleSystem)
+    particle_buffers: *const ParticleBuffers,
+    compute_uniform_buffers: *const [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer,
+    emitter_buffer: *const *ManagedBuffer,
 
-    // Uniform buffers (per frame in flight)
-    compute_uniform_buffers: [MAX_FRAMES_IN_FLIGHT]Buffer,
-
-    // Emitter SSBO (shared across all frames, host-visible for direct updates)
-    emitter_buffer: Buffer,
+    // Configuration (from ParticleSystem)
     max_emitters: u32,
-    emitter_count: u32 = 0,
-
-    // Particle count
     max_particles: u32,
-    last_particle_count: u32 = 0,
 
-    /// Initialize particle buffer with invisible particles (alpha = 0)
-    fn initializeParticleBuffer(
-        allocator: std.mem.Allocator,
-        graphics_context: *GraphicsContext,
-        buffers: *ParticleBuffers,
-        max_particles: u32,
-    ) !void {
-        // Create array of invisible particles
-        const particles = try allocator.alloc(vertex_formats.Particle, max_particles);
-        defer allocator.free(particles);
-
-        // Initialize all particles as dead (lifetime = 0)
-        for (particles) |*particle| {
-            particle.* = vertex_formats.Particle{
-                .position = .{ 0.0, 0.0, 0.0 },
-                .velocity = .{ 0.0, 0.0, 0.0 },
-                .color = .{ 0.0, 0.0, 0.0, 0.0 }, // Alpha = 0 makes it invisible
-                .lifetime = 0.0,
-                .max_lifetime = 1.0,
-                .emitter_id = 0,
-            };
-        }
-
-        const buffer_size = max_particles * @sizeOf(vertex_formats.Particle);
-        const particle_bytes = std.mem.sliceAsBytes(particles);
-
-        // Create staging buffer
-        var staging_buffer = try Buffer.init(
-            graphics_context,
-            buffer_size,
-            1,
-            .{ .transfer_src_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        defer staging_buffer.deinit();
-
-        try staging_buffer.map(buffer_size, 0);
-        defer staging_buffer.unmap();
-
-        staging_buffer.writeToBuffer(particle_bytes, buffer_size, 0);
-
-        // Upload to both input and output buffers
-        try graphics_context.copyBuffer(
-            buffers.particle_buffer_in.buffer,
-            staging_buffer.buffer,
-            buffer_size,
-        );
-        try graphics_context.copyBuffer(
-            buffers.particle_buffer_out.buffer,
-            staging_buffer.buffer,
-            buffer_size,
-        );
-    }
+    // Debug counter
+    debug_frame_counter: u32 = 0,
 
     pub fn create(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
+        particle_system: *ParticleSystem,
         ecs_world: *World,
-        max_particles: u32,
-        max_emitters: u32,
     ) !*ParticleComputePass {
         const pass = try allocator.create(ParticleComputePass);
 
-        // Create particle buffers for each frame
-        var particle_buffers: [MAX_FRAMES_IN_FLIGHT]ParticleBuffers = undefined;
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            particle_buffers[i] = try ParticleBuffers.create(
-                graphics_context,
-                max_particles,
-            );
-        }
-
-        // Create uniform buffers (per frame in flight)
-        var compute_uniform_buffers: [MAX_FRAMES_IN_FLIGHT]Buffer = undefined;
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            compute_uniform_buffers[i] = try Buffer.init(
-                graphics_context,
-                @sizeOf(ComputeUniformBuffer),
-                1,
-                .{ .uniform_buffer_bit = true },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
-            );
-            try compute_uniform_buffers[i].map(vk.WHOLE_SIZE, 0);
-        }
-
-        // Create emitter SSBO (shared across all frames, stays mapped)
-        var emitter_buffer = try Buffer.init(
-            graphics_context,
-            @sizeOf(vertex_formats.GPUEmitter) * max_emitters,
-            1,
-            .{ .storage_buffer_bit = true, .transfer_dst_bit = true, .transfer_src_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        try emitter_buffer.map(vk.WHOLE_SIZE, 0);
+        // Get GPU resources from ParticleSystem
+        const gpu_resources = particle_system.getGPUResources();
 
         pass.* = ParticleComputePass{
             .base = RenderPass{
@@ -213,14 +90,15 @@ pub const ParticleComputePass = struct {
             .pipeline_system = pipeline_system,
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
             .ecs_world = ecs_world,
-            .particle_buffers = particle_buffers,
-            .compute_uniform_buffers = compute_uniform_buffers,
-            .emitter_buffer = emitter_buffer,
-            .max_emitters = max_emitters,
-            .max_particles = max_particles,
+            .particle_system = particle_system,
+            .particle_buffers = gpu_resources.particle_buffers,
+            .compute_uniform_buffers = gpu_resources.compute_uniform_buffers,
+            .emitter_buffer = gpu_resources.emitter_buffer,
+            .max_emitters = gpu_resources.max_emitters,
+            .max_particles = gpu_resources.max_particles,
         };
 
-        log(.INFO, "particle_compute_pass", "Created ParticleComputePass (max={} particles, {} emitters)", .{ max_particles, max_emitters });
+        log(.INFO, "particle_compute_pass", "Created ParticleComputePass (max={} particles, {} emitters)", .{ gpu_resources.max_particles, gpu_resources.max_emitters });
         return pass;
     }
 
@@ -245,7 +123,7 @@ pub const ParticleComputePass = struct {
         self.cached_pipeline_handle = entry.vulkan_pipeline;
 
         // Bind all resources and update descriptor sets
-        self.updateDescriptors() catch |err| {
+        self.bindResources() catch |err| {
             log(.WARN, "particle_compute_pass", "Failed to update descriptors during recovery: {}", .{err});
             return false;
         };
@@ -255,9 +133,22 @@ pub const ParticleComputePass = struct {
     }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
-        _ = base;
-        _ = frame_info;
-        // No per-frame updates needed for particle compute pass
+        const self: *ParticleComputePass = @fieldParentPtr("base", base);
+        // Check for pipeline reload
+        var pipeline_entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
+        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
+
+        if (pipeline_rebuilt) {
+            log(.INFO, "particle_compute_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
+            self.pipeline_system.markPipelineResourcesDirty(self.compute_pipeline);
+            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
+
+            // Rebind descriptors for ALL frames
+            try self.bindResources();
+            pipeline_entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
+        }
+
+        try self.resource_binder.updateFrame(self.compute_pipeline, frame_info.current_frame);
     }
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
@@ -281,9 +172,34 @@ pub const ParticleComputePass = struct {
 
         const entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = entry.vulkan_pipeline;
+        // Populate ResourceBinder with shader reflection data
+        if (try self.pipeline_system.getPipelineReflection(self.compute_pipeline)) |reflection| {
+            var mut_reflection = reflection;
 
-        // Bind all resources and update descriptor sets
-        try self.updateDescriptors();
+            // DEBUG: Print all storage buffers found by reflection
+            log(.INFO, "particle_compute_pass", "Shader reflection found {} storage buffers:", .{mut_reflection.storage_buffers.items.len});
+            for (mut_reflection.storage_buffers.items) |sb| {
+                log(.INFO, "particle_compute_pass", "  Storage buffer: set={}, binding={}, name='{s}'", .{
+                    sb.set,
+                    sb.binding,
+                    sb.name,
+                });
+            }
+
+            log(.INFO, "particle_compute_pass", "Shader reflection found {} uniform buffers:", .{mut_reflection.uniform_buffers.items.len});
+            for (mut_reflection.uniform_buffers.items) |ub| {
+                log(.INFO, "particle_compute_pass", "  Uniform buffer: set={}, binding={}, name='{s}'", .{
+                    ub.set,
+                    ub.binding,
+                    ub.name,
+                });
+            }
+
+            try self.resource_binder.populateFromReflection(mut_reflection);
+            mut_reflection.deinit(self.allocator);
+        } // Bind all resources and update descriptor sets
+        try self.bindResources();
+        self.pipeline_system.markPipelineResourcesDirty(self.compute_pipeline);
 
         log(.INFO, "particle_compute_pass", "Setup complete", .{});
     }
@@ -293,43 +209,28 @@ pub const ParticleComputePass = struct {
 
         const command_buffer = frame_info.compute_buffer;
         if (command_buffer == .null_handle) {
+            log(.WARN, "particle_compute_pass", "No compute command buffer available - skipping compute dispatch", .{});
             return; // No compute command buffer available
         }
 
         const frame_index = frame_info.current_frame;
 
-        // Check for pipeline reload
-        var pipeline_entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
-        const pipeline_rebuilt = pipeline_entry.vulkan_pipeline != self.cached_pipeline_handle;
-
-        if (pipeline_rebuilt) {
-            log(.INFO, "particle_compute_pass", "Pipeline hot-reloaded, rebinding all descriptors", .{});
-            self.pipeline_system.markPipelineResourcesDirty(self.compute_pipeline);
-            self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
-
-            // Rebind descriptors for ALL frames
-            try self.updateDescriptors();
-            pipeline_entry = self.pipeline_system.pipelines.get(self.compute_pipeline) orelse return error.PipelineNotFound;
-        }
-
         // Update compute uniform buffer
         // Only process particles for active emitters (200 particles per emitter)
         const particles_per_emitter = self.max_particles / self.max_emitters;
-        const active_particle_slots = particles_per_emitter * self.emitter_count;
+        const active_particle_slots = particles_per_emitter * self.particle_system.emitter_count;
 
         const compute_ubo = ComputeUniformBuffer{
             .delta_time = frame_info.dt,
             .particle_count = active_particle_slots, // Only process slots for active emitters
-            .emitter_count = self.emitter_count,
+            .emitter_count = self.particle_system.emitter_count,
             .max_particles = self.max_particles,
             .gravity = .{ 0.0, 9.81, 0.0, 0.0 }, // Standard gravity
             .frame_index = frame_info.current_frame,
         };
 
         const compute_ubo_bytes = std.mem.asBytes(&compute_ubo);
-        self.compute_uniform_buffers[frame_index].writeToBuffer(compute_ubo_bytes, @sizeOf(ComputeUniformBuffer), 0);
-
-        try self.resource_binder.updateFrame(self.compute_pipeline, frame_index);
+        self.compute_uniform_buffers[frame_index].*.buffer.writeToBuffer(compute_ubo_bytes, @sizeOf(ComputeUniformBuffer), 0);
 
         try self.pipeline_system.bindPipelineWithDescriptorSets(command_buffer, self.compute_pipeline, frame_index);
 
@@ -380,8 +281,8 @@ pub const ParticleComputePass = struct {
         };
         self.graphics_context.vkd.cmdCopyBuffer(
             command_buffer,
-            self.particle_buffers[frame_index].particle_buffer_out.buffer,
-            self.particle_buffers[(frame_index + 1) % MAX_FRAMES_IN_FLIGHT].particle_buffer_in.buffer,
+            self.particle_buffers.particle_buffers_out[frame_index].buffer.buffer,
+            self.particle_buffers.particle_buffers_in[(frame_index + 1) % MAX_FRAMES_IN_FLIGHT].buffer.buffer,
             1,
             @ptrCast(&copy_region),
         );
@@ -409,306 +310,71 @@ pub const ParticleComputePass = struct {
     fn teardownImpl(base: *RenderPass) void {
         const self: *ParticleComputePass = @fieldParentPtr("base", base);
 
-        // Clean up particle buffers
-        for (&self.particle_buffers) |*buffers| {
-            buffers.destroy();
-        }
-
-        // Clean up uniform buffers
-        for (&self.compute_uniform_buffers) |*buffer| {
-            buffer.deinit();
-        }
-
-        // Clean up emitter buffer
-        self.emitter_buffer.deinit();
-
+        // ParticleSystem owns buffers - no cleanup needed here
         log(.INFO, "particle_compute_pass", "Cleaned up ParticleComputePass", .{});
         self.allocator.destroy(self);
     }
 
     /// Update descriptor sets for all frames (called on pipeline reload)
-    fn updateDescriptors(self: *ParticleComputePass) !void {
-        // Rebind all resources for ALL frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_index| {
-            // Bind uniform buffer
-            try self.pipeline_system.bindResource(
-                self.compute_pipeline,
-                0, // set
-                0, // binding - uniform buffer
-                Resource{ .buffer = .{
-                    .buffer = self.compute_uniform_buffers[frame_index].buffer,
-                    .offset = 0,
-                    .range = @sizeOf(ComputeUniformBuffer),
-                } },
-                @intCast(frame_index),
-            );
+    fn bindResources(self: *ParticleComputePass) !void {
 
-            // Bind particle buffer in (storage buffer)
-            try self.pipeline_system.bindResource(
-                self.compute_pipeline,
-                0, // set
-                1, // binding - particle buffer in
-                Resource{ .buffer = .{
-                    .buffer = self.particle_buffers[frame_index].particle_buffer_in.buffer,
-                    .offset = 0,
-                    .range = vk.WHOLE_SIZE,
-                } },
-                @intCast(frame_index),
-            );
+        // Bind uniform buffers (per frame) - matches shader "ComputeUniformBuffer ubo"
+        try self.resource_binder.bindUniformBufferNamed(
+            self.compute_pipeline,
+            "ComputeUniformBuffer",
+            self.compute_uniform_buffers.*,
+        );
 
-            // Bind particle buffer out (storage buffer)
-            try self.pipeline_system.bindResource(
-                self.compute_pipeline,
-                0, // set
-                2, // binding - particle buffer out
-                Resource{ .buffer = .{
-                    .buffer = self.particle_buffers[frame_index].particle_buffer_out.buffer,
-                    .offset = 0,
-                    .range = vk.WHOLE_SIZE,
-                } },
-                @intCast(frame_index),
-            );
+        // Bind particle buffers (storage buffers, per frame with ping-pong)
+        // Match shader "ParticleBufferIn { particlesIn[] }"
 
-            // Bind emitter buffer (storage buffer, shared across all frames)
-            try self.pipeline_system.bindResource(
-                self.compute_pipeline,
-                0, // set
-                3, // binding - emitter buffer
-                Resource{ .buffer = .{
-                    .buffer = self.emitter_buffer.buffer,
-                    .offset = 0,
-                    .range = vk.WHOLE_SIZE,
-                } },
-                @intCast(frame_index),
-            );
+        log(.INFO, "particle_compute_pass", "Binding ParticleBufferIn[0]={} to binding 1", .{self.particle_buffers.particle_buffers_in[0].buffer.buffer});
+        try self.resource_binder.bindStorageBufferArrayNamed(
+            self.compute_pipeline,
+            "ParticleBufferIn",
+            self.particle_buffers.particle_buffers_in,
+        );
 
-            // Update descriptor sets for this frame
-            try self.pipeline_system.updateDescriptorSetsForPipeline(
-                self.compute_pipeline,
-                @intCast(frame_index),
-            );
-        }
+        // Match shader "ParticleBufferOut { particlesOut[] }"
+
+        log(.INFO, "particle_compute_pass", "Binding ParticleBufferOut[0]={} to binding 2", .{self.particle_buffers.particle_buffers_out[0].buffer.buffer});
+        try self.resource_binder.bindStorageBufferArrayNamed(
+            self.compute_pipeline,
+            "ParticleBufferOut",
+            self.particle_buffers.particle_buffers_out,
+        );
+
+        // Bind emitter buffer (shared across all frames)
+        // Match shader "EmitterBuffer { emitters[] }"
+        try self.resource_binder.bindStorageBufferNamed(
+            self.compute_pipeline,
+            "EmitterBuffer",
+            self.emitter_buffer.*,
+        );
     }
 
-    /// Add a new emitter and spawn initial particles for it
+    /// Delegate: Add a new emitter (managed by ParticleSystem)
     pub fn addEmitter(self: *ParticleComputePass, emitter: vertex_formats.GPUEmitter, initial_particles: []const vertex_formats.Particle) !u32 {
-        if (self.emitter_count >= self.max_emitters) {
-            return error.TooManyEmitters;
-        }
-
-        const emitter_id = self.emitter_count;
-
-        // Write emitter to mapped buffer
-        const emitter_bytes = std.mem.asBytes(&emitter);
-        const emitter_size = self.emitter_buffer.instance_size;
-        const offset = emitter_id * emitter_size;
-
-        self.emitter_buffer.writeToBuffer(emitter_bytes, emitter_size, offset);
-        // No flush needed - using host_coherent memory
-
-        self.emitter_count += 1;
-
-        // NOTE: No need to call updateDescriptors() here!
-        // The descriptor set already points to the emitter buffer.
-        // We're just updating the data in mapped memory, not changing the binding.
-        // Descriptors only need updating on pipeline reload (handled in executeImpl).
-
-        // Spawn initial particles: Read last simulated buffer, add new particles, write to all buffers
-        if (initial_particles.len > 0) {
-            try self.spawnParticlesForEmitter(emitter_id, initial_particles);
-        }
-
-        return emitter_id;
+        return self.particle_system.addEmitter(emitter, initial_particles);
     }
 
-    /// Update an existing emitter (position, colors, spawn rate, etc.)
-    /// This just updates the mapped memory - no particle buffer sync needed
+    /// Delegate: Update an existing emitter (managed by ParticleSystem)
     pub fn updateEmitter(self: *ParticleComputePass, emitter_id: u32, emitter: vertex_formats.GPUEmitter) !void {
-        if (emitter_id >= self.emitter_count) {
-            return error.InvalidEmitterId;
-        }
-
-        const emitter_bytes = std.mem.asBytes(&emitter);
-        const emitter_size = @sizeOf(vertex_formats.GPUEmitter);
-        const offset = emitter_id * emitter_size;
-
-        self.emitter_buffer.writeToBuffer(emitter_bytes, emitter_size, offset);
-        // No flush needed - using host_coherent memory
+        return self.particle_system.updateEmitter(emitter_id, emitter);
     }
 
-    /// Remove an emitter and kill all its particles
+    /// Delegate: Remove an emitter (managed by ParticleSystem)
     pub fn removeEmitter(self: *ParticleComputePass, emitter_id: u32) !void {
-        if (emitter_id >= self.emitter_count) {
-            return error.InvalidEmitterId;
-        }
-
-        // Mark emitter as inactive
-        var emitter: vertex_formats.GPUEmitter = undefined;
-        const emitter_size = @sizeOf(vertex_formats.GPUEmitter);
-        const offset = emitter_id * emitter_size;
-
-        // Read current emitter data
-        const emitter_ptr = @as([*]u8, @ptrCast(self.emitter_buffer.mapped.?))[offset .. offset + emitter_size];
-        @memcpy(std.mem.asBytes(&emitter), emitter_ptr);
-
-        // Mark as inactive
-        emitter.is_active = 0;
-
-        self.emitter_buffer.writeToBuffer(std.mem.asBytes(&emitter), emitter_size, offset);
-        try self.emitter_buffer.flush(emitter_size, offset);
-
-        // Kill all particles belonging to this emitter by reading last simulated buffer,
-        // filtering out particles with this emitter_id, and writing back
-        try self.killParticlesForEmitter(emitter_id);
-
-        log(.INFO, "particle_compute_pass", "Removed emitter {d}", .{emitter_id});
+        return self.particle_system.removeEmitter(emitter_id);
     }
 
-    /// Spawn initial particles for a new emitter
-    /// OPTIMIZATION: Only reads/writes the emitter's particle range, not the entire buffer
-    fn spawnParticlesForEmitter(self: *ParticleComputePass, emitter_id: u32, new_particles: []const vertex_formats.Particle) !void {
-        // Calculate particle range for this emitter
-        const particles_per_emitter = self.max_particles / self.max_emitters;
-        const range_size = particles_per_emitter * @sizeOf(vertex_formats.Particle);
-        const range_offset = @as(vk.DeviceSize, emitter_id) * @as(vk.DeviceSize, particles_per_emitter) * @as(vk.DeviceSize, @sizeOf(vertex_formats.Particle));
-
-        // Prepare particles for this emitter's range only
-        const particles_to_write = try self.allocator.alloc(vertex_formats.Particle, particles_per_emitter);
-        defer self.allocator.free(particles_to_write);
-
-        // Initialize all particles in this emitter's range
-        var spawn_index: usize = 0;
-        for (0..particles_per_emitter) |slot_idx| {
-            if (spawn_index < new_particles.len) {
-                // Use initial particle data
-                particles_to_write[slot_idx] = new_particles[spawn_index];
-                particles_to_write[slot_idx].emitter_id = emitter_id;
-                spawn_index += 1;
-            } else {
-                // Fill remaining slots with dead particles owned by this emitter
-                particles_to_write[slot_idx] = vertex_formats.Particle{
-                    .position = .{ 0.0, 0.0, 0.0 },
-                    .velocity = .{ 0.0, 0.0, 0.0 },
-                    .color = .{ 0.0, 0.0, 0.0, 0.0 },
-                    .lifetime = 0.0,
-                    .max_lifetime = 1.0,
-                    .emitter_id = emitter_id,
-                };
-            }
-        }
-
-        // Create staging buffer for just this emitter's range
-        var staging_write = try Buffer.init(
-            self.graphics_context,
-            range_size,
-            1,
-            .{ .transfer_src_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        defer staging_write.deinit();
-
-        try staging_write.map(range_size, 0);
-        defer staging_write.unmap();
-
-        const particle_bytes = std.mem.sliceAsBytes(particles_to_write);
-        staging_write.writeToBuffer(particle_bytes, range_size, 0);
-
-        // Copy only this emitter's range to all frame buffers (IN and OUT)
-        // Use the helper copyBuffer which chooses a worker-safe path when called from
-        // a worker thread. This avoids allocating primary command buffers from the
-        // main thread's command pool (which caused concurrent access validation errors).
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            // copy to IN buffer at the correct offset
-            try self.graphics_context.copyBufferWithOffset(
-                self.particle_buffers[frame_idx].particle_buffer_in.buffer,
-                staging_write.buffer,
-                @as(vk.DeviceSize, range_size),
-                range_offset,
-                0,
-            );
-
-            // copy to OUT buffer at the correct offset
-            try self.graphics_context.copyBufferWithOffset(
-                self.particle_buffers[frame_idx].particle_buffer_out.buffer,
-                staging_write.buffer,
-                @as(vk.DeviceSize, range_size),
-                range_offset,
-                0,
-            );
-        }
-
-        self.last_particle_count = @max(self.last_particle_count, @as(u32, @intCast(spawn_index)));
-    }
-
-    /// Kill all particles belonging to an emitter
-    /// OPTIMIZATION: Only reads/writes the emitter's particle range, not the entire buffer
-    fn killParticlesForEmitter(self: *ParticleComputePass, emitter_id: u32) !void {
-        const last_frame: usize = if (self.last_particle_count == 0) 0 else (MAX_FRAMES_IN_FLIGHT - 1);
-
-        // Calculate particle range for this emitter
-        const particles_per_emitter = self.max_particles / self.max_emitters;
-        const range_size = particles_per_emitter * @sizeOf(vertex_formats.Particle);
-        const range_offset = @as(vk.DeviceSize, emitter_id) * @as(vk.DeviceSize, particles_per_emitter) * @as(vk.DeviceSize, @sizeOf(vertex_formats.Particle));
-
-        // Read only this emitter's particle range
-        var staging_buffer = try Buffer.init(
-            self.graphics_context,
-            range_size,
-            1,
-            .{ .transfer_dst_bit = true, .transfer_src_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-        );
-        defer staging_buffer.deinit();
-
-        // Read the emitter range into the staging buffer. Use copyBuffer helper so
-        // it chooses a worker-safe path when called from a worker thread.
-        try self.graphics_context.copyBufferWithOffset(
-            staging_buffer.buffer,
-            self.particle_buffers[last_frame].particle_buffer_out.buffer,
-            @as(vk.DeviceSize, range_size),
-            0,
-            range_offset,
-        );
-
-        try staging_buffer.map(range_size, 0);
-        defer staging_buffer.unmap();
-
-        const particles = @as([*]vertex_formats.Particle, @ptrCast(@alignCast(staging_buffer.mapped.?)))[0..particles_per_emitter];
-
-        // Kill all particles in this emitter's range
-        for (particles) |*particle| {
-            particle.lifetime = 0.0;
-            particle.color[3] = 0.0; // Set alpha to 0
-        }
-
-        // Write back only this emitter's range to all frame buffers. Use helper so
-        // the copy is done via a worker-safe path when appropriate.
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-            try self.graphics_context.copyBufferWithOffset(
-                self.particle_buffers[frame_idx].particle_buffer_in.buffer,
-                staging_buffer.buffer,
-                @as(vk.DeviceSize, range_size),
-                range_offset,
-                0,
-            );
-            try self.graphics_context.copyBufferWithOffset(
-                self.particle_buffers[frame_idx].particle_buffer_out.buffer,
-                staging_buffer.buffer,
-                @as(vk.DeviceSize, range_size),
-                range_offset,
-                0,
-            );
-        }
-    }
-
-    /// Get the output particle buffer for rendering
+    /// Delegate: Get the output particle buffer for rendering
     pub fn getParticleBuffer(self: *ParticleComputePass, frame_index: usize) vk.Buffer {
-        return self.particle_buffers[frame_index].particle_buffer_out.buffer;
+        return self.particle_system.getParticleBuffer(frame_index);
     }
 
-    /// Get the current active particle count (based on number of active emitters)
+    /// Delegate: Get the current active particle count
     pub fn getParticleCount(self: *ParticleComputePass) u32 {
-        const particles_per_emitter = self.max_particles / self.max_emitters;
-        return particles_per_emitter * self.emitter_count; // Only active emitter slots
+        return self.particle_system.getParticleCount();
     }
 };

@@ -154,7 +154,8 @@ pub const PathTracingPass = struct {
         rt_system.* = try RaytracingSystem.init(graphics_context, allocator, thread_pool);
 
         var output_texture = try allocator.create(ManagedTexture);
-        const hdr_texture = @constCast(swapchain).currentHdrTexture();
+        // Get any HDR texture (all frames have same format/size) for resize linking
+        const hdr_texture = @constCast(swapchain).getHdrTextures()[0];
 
         output_texture = try texture_manager.createTexture(.{
             .name = "pt_output",
@@ -286,7 +287,7 @@ pub const PathTracingPass = struct {
     /// Bind resources once during setup - ResourceBinder tracks changes automatically
     fn bindResources(self: *PathTracingPass) !void {
         // Bind output texture (generation tracked automatically)
-        try self.resource_binder.bindManagedTextureNamed(
+        try self.resource_binder.bindTextureNamed(
             self.path_tracing_pipeline,
             "image", // Output texture binding name from shader
             self.output_texture,

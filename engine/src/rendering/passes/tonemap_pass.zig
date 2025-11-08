@@ -11,6 +11,7 @@ const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
+const ManagedTexture = @import("../texture_manager.zig").ManagedTexture;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
 
@@ -27,6 +28,9 @@ pub const TonemapPass = struct {
     pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
 
+    // HDR input textures (per-frame swapchain textures)
+    hdr_textures: [MAX_FRAMES_IN_FLIGHT]*ManagedTexture,
+
     // Formats
     swapchain_color_format: vk.Format,
 
@@ -41,6 +45,7 @@ pub const TonemapPass = struct {
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
+        hdr_textures: [MAX_FRAMES_IN_FLIGHT]*ManagedTexture,
         swapchain_color_format: vk.Format,
     ) !*TonemapPass {
         const pass = try allocator.create(TonemapPass);
@@ -56,6 +61,7 @@ pub const TonemapPass = struct {
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
+            .hdr_textures = hdr_textures,
             .swapchain_color_format = swapchain_color_format,
         };
 
@@ -108,21 +114,36 @@ pub const TonemapPass = struct {
         const pipeline_entry = self.pipeline_system.pipelines.get(self.pipeline) orelse return error.PipelineNotFound;
         self.cached_pipeline_handle = pipeline_entry.vulkan_pipeline;
 
+        // Populate ResourceBinder with shader reflection data
+        if (try self.pipeline_system.getPipelineReflection(self.pipeline)) |reflection| {
+            var mut_reflection = reflection;
+            try self.resource_binder.populateFromReflection(mut_reflection);
+            mut_reflection.deinit(self.allocator);
+        }
+
+        // Bind resources once during setup - ResourceBinder will track updates automatically
+        try self.bindResources();
+
+        self.pipeline_system.markPipelineResourcesDirty(self.pipeline);
+
         log(.INFO, "tonemap_pass", "Setup complete", .{});
     }
 
     fn updateImpl(base: *RenderPass, frame_info: *const FrameInfo) !void {
         const self: *TonemapPass = @fieldParentPtr("base", base);
-        _ = frame_info;
 
-        // Handle pipeline hot-reload
-        if (self.pipeline_system.pipelines.get(self.pipeline)) |entry| {
-            if (entry.vulkan_pipeline != self.cached_pipeline_handle) {
-                log(.INFO, "tonemap_pass", "Pipeline hot-reloaded, rebinding descriptors", .{});
-                self.cached_pipeline_handle = entry.vulkan_pipeline;
-                self.pipeline_system.markPipelineResourcesDirty(self.pipeline);
-            }
-        }
+        // Update descriptors for this frame
+        try self.resource_binder.updateFrame(self.pipeline, frame_info.current_frame);
+    }
+
+    /// Bind resources - called during setup and after hot-reload
+    fn bindResources(self: *TonemapPass) !void {
+        // Bind HDR texture array (one per frame-in-flight)
+        try self.resource_binder.bindManagedTexturePerFrameNamed(
+            self.pipeline,
+            "uHdr",
+            self.hdr_textures,
+        );
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -130,20 +151,6 @@ pub const TonemapPass = struct {
 
         const cmd = frame_info.command_buffer;
         const frame_index = frame_info.current_frame;
-
-        // Bind HDR view+sampler from FrameInfo.hdr_texture for current frame
-        const hdr_tex = frame_info.hdr_texture orelse return error.InvalidState;
-        const hdr_resource = Resource{
-            .image = .{
-                .image_view = hdr_tex.image_view,
-                .sampler = hdr_tex.sampler,
-                .layout = .general, // Unified layout - always GENERAL
-            },
-        };
-        try self.pipeline_system.bindResource(self.pipeline, 0, 0, hdr_resource, frame_index);
-        try self.resource_binder.updateFrame(self.pipeline, frame_index);
-
-        // No transitions needed with unified image layouts!
 
         // Setup dynamic rendering targeting the LDR swapchain image (no depth)
         const rendering = DynamicRenderingHelper.init(
