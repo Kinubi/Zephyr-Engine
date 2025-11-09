@@ -1048,7 +1048,11 @@ quad_pass.bake();
 
 **Validation**: Can create simple passes without new files, GeometryPass still works as custom pass, automatic rebinding works
 
-> **Status**: 🚧 **TODO** - Phase 4 not yet implemented, but auto-rebinding foundation is complete
+> **Status**: ✅ **COMPLETE** - Phase 4 implemented (November 9, 2025)
+> 
+> **Enhancement**: `.bind()` now accepts explicit `Resource` union types with tags (`.buffer`, `.texture`, `.texture_array`, `.buffer_descriptor_array`, etc.) for clean delegation to ResourceBinder methods.
+> 
+> **Additional**: Created `BaseComputePass` with same builder pattern and resource binding system for compute shader passes.
 
 ---
 

@@ -778,9 +778,6 @@ pub const UIRenderer = struct {
                 self.appendHistory(cmd);
                 self.scripting_history_nav_pos = null;
 
-                // Also log the command into the engine logs so it appears in the logs area
-                log(.INFO, "console", "{s}", .{cmd});
-
                 // Execute via Lua if available. Special-case a small runtime
                 // test command `test_input_capture` which verifies whether
                 // the console currently has focus and whether ImGui wants
