@@ -26,6 +26,7 @@ const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const render_data_types = @import("../rendering/render_data_types.zig");
+const GameStateSnapshot = @import("../threading/game_state_snapshot.zig").GameStateSnapshot;
 
 const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
 const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
@@ -984,16 +985,6 @@ pub const Scene = struct {
     /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
         _ = global_ubo;
-
-        // RENDER THREAD: Rebuild render system caches from snapshot if dirty
-        // This is the proper snapshot-based architecture where:
-        // - Main thread detects changes via ECS and captures snapshot
-        // - Render thread rebuilds caches from snapshot (no ECS access)
-        if (frame_info.snapshot) |snapshot| {
-            if (self.render_system.renderables_dirty) {
-                try self.render_system.rebuildCachesFromSnapshot(snapshot, self.asset_manager);
-            }
-        }
 
         // Update all render passes through the render graph (descriptor sets)
         if (self.render_graph) |*graph| {

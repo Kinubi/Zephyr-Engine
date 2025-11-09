@@ -21,6 +21,8 @@ pub const Name = @import("ecs/components/name.zig").Name;
 
 // Material Components
 pub const MaterialSet = @import("ecs/components/material_set.zig").MaterialSet;
+pub const RenderablesSet = @import("ecs/components/renderables_set.zig").RenderablesSet;
+pub const ExtractedRenderable = @import("ecs/components/renderables_set.zig").ExtractedRenderable;
 const material_props = @import("ecs/components/material_properties.zig");
 pub const AlbedoMaterial = material_props.AlbedoMaterial;
 pub const RoughnessMaterial = material_props.RoughnessMaterial;
@@ -43,7 +45,9 @@ pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").up
 pub const updateLightSystem = @import("ecs/systems/light_system.zig").update;
 pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").update;
 pub const updateScriptingSystem = @import("ecs/systems/scripting_system.zig").update;
+pub const prepareRenderSystem = @import("ecs/systems/render_system.zig").prepare;
 pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
+pub const prepareMaterialSystem = @import("ecs/systems/material_system.zig").prepare;
 pub const updateMaterialSystem = @import("ecs/systems/material_system.zig").update;
 
 // Parallel System Execution

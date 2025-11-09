@@ -23,6 +23,7 @@ const BufferConfig = @import("../../rendering/buffer_manager.zig").BufferConfig;
 const ManagedBuffer = @import("../../rendering/buffer_manager.zig").ManagedBuffer;
 const components = @import("../../ecs.zig"); // Import to access MaterialSet component
 const GameStateSnapshot = @import("../../threading/game_state_snapshot.zig").GameStateSnapshot;
+const FrameInfo = @import("../../rendering/frameinfo.zig").FrameInfo;
 
 /// RenderSystem extracts rendering data from ECS entities
 /// Queries entities with Transform + MeshRenderer and prepares data for rendering
@@ -928,220 +929,6 @@ pub const RenderSystem = struct {
         return a.layer < b.layer;
     }
 
-    /// Check for any changes that require cache/descriptor updates
-    /// This runs every frame (very lightweight) and sets dirty flags
-    pub fn checkForChanges(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
-        // OPTIMIZATION: Fast-path count check first (no allocations)
-        var current_renderable_count: usize = 0;
-        var current_geometry_count: usize = 0;
-
-        // Quick query to count entities and geometry
-        var mesh_view = try world.view(MeshRenderer);
-        var iter = mesh_view.iterator();
-        while (iter.next()) |entry| {
-            const renderer = entry.component;
-            if (!renderer.hasValidAssets()) continue;
-
-            current_renderable_count += 1;
-
-            if (renderer.model_asset) |model_asset_id| {
-                // Count geometry from loaded model
-                if (asset_manager.getModel(model_asset_id)) |model| {
-                    current_geometry_count += model.meshes.items.len;
-                }
-            }
-        }
-
-        // Progressive change detection - each check only runs if previous checks didn't detect changes
-        var changes_detected = false;
-        var reason: []const u8 = "";
-
-        // Check 1: Count changes (cheap - no allocations!)
-        if (current_renderable_count != self.last_renderable_count or
-            current_geometry_count != self.last_geometry_count)
-        {
-            changes_detected = true;
-            reason = "count_changed";
-        }
-
-        // Check 2: Cache missing (cheap)
-        if (!changes_detected) {
-            const active_idx = self.active_cache_index.load(.acquire);
-            if (self.cached_raster_data[active_idx] == null) {
-                changes_detected = true;
-                reason = "cache_missing";
-            }
-        }
-
-        // Check 3: Asset IDs and mesh pointers changed - async asset loading (medium cost)
-        // OPTIMIZATION: Only do this expensive check if counts haven't changed
-        if (!changes_detected) {
-            // Now allocate ArrayList only if needed for deep comparison
-            var current_mesh_asset_ids = std.ArrayList(AssetId){};
-            defer current_mesh_asset_ids.deinit(self.allocator);
-
-            // Re-iterate to collect asset IDs (only when needed)
-            var mesh_view2 = try world.view(MeshRenderer);
-            var iter2 = mesh_view2.iterator();
-            while (iter2.next()) |entry| {
-                const renderer = entry.component;
-                if (!renderer.hasValidAssets()) continue;
-                if (renderer.model_asset) |model_asset_id| {
-                    try current_mesh_asset_ids.append(self.allocator, model_asset_id);
-                }
-            }
-
-            const active_idx = self.active_cache_index.load(.acquire);
-            if (self.cached_raytracing_data[active_idx]) |rt_cache| {
-                if (current_mesh_asset_ids.items.len != rt_cache.geometries.len) {
-                    changes_detected = true;
-                    reason = "rt_geom_count_mismatch";
-                } else {
-                    var geom_idx: usize = 0;
-                    for (current_mesh_asset_ids.items) |current_asset_id| {
-                        const model = asset_manager.getModel(current_asset_id) orelse continue;
-
-                        for (model.meshes.items) |model_mesh| {
-                            if (geom_idx >= rt_cache.geometries.len) {
-                                changes_detected = true;
-                                reason = "rt_geom_overflow";
-                                break;
-                            }
-
-                            const rt_geom = rt_cache.geometries[geom_idx];
-
-                            // Compare asset ID AND mesh pointer (detects async asset loads)
-                            if (rt_geom.model_asset != current_asset_id or
-                                rt_geom.mesh_ptr != model_mesh.geometry.mesh)
-                            {
-                                changes_detected = true;
-                                reason = "mesh_ptr_changed";
-                                break;
-                            }
-
-                            geom_idx += 1;
-                        }
-
-                        if (changes_detected) break;
-                    }
-                }
-            }
-        }
-
-        // Check 4: Transform dirty flags (cheap - detects inspector edits)
-        // Check ALL transforms for dirty flags, not just renderables
-        // This ensures inspector edits to any object are detected
-        if (!changes_detected) {
-            var transform_view = try world.view(Transform);
-            var transform_iter = transform_view.iterator();
-            while (transform_iter.next()) |entry| {
-                if (entry.component.dirty) {
-                    const has_mesh = world.has(MeshRenderer, entry.entity);
-                    // Only trigger rebuild if this entity has a MeshRenderer
-                    if (has_mesh) {
-                        changes_detected = true;
-                        reason = "transform_dirty";
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Clear transform dirty flags ONLY for entities with MeshRenderer
-        // This allows cameras and lights to move freely without triggering TLAS rebuilds
-        // Only mesh transforms should cause geometry updates
-        {
-            var mesh_view_clear = try world.view(MeshRenderer);
-            var mesh_iter_clear = mesh_view_clear.iterator();
-            while (mesh_iter_clear.next()) |entry| {
-                if (world.get(Transform, entry.entity)) |transform| {
-                    transform.dirty = false;
-                }
-            }
-        }
-
-        // Update tracking state
-        self.last_renderable_count = current_renderable_count;
-        self.last_geometry_count = current_geometry_count;
-
-        // Rebuild if any changes detected
-        if (changes_detected) {
-            // Determine if this is ONLY a transform change (no geometry/asset changes)
-            const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
-
-            self.renderables_dirty = true;
-            self.transform_only_change = is_transform_only;
-            if (!is_transform_only) {
-                self.raster_descriptors_dirty = true;
-                self.raytracing_descriptors_dirty = true;
-            }
-
-            try self.rebuildCaches(world, asset_manager);
-        } else {
-            // No changes - clear the transform_only flag
-            self.transform_only_change = false;
-        }
-    }
-
-    /// Rebuild both raster and raytracing caches in one pass
-    /// Called by checkForChanges when geometry changes detected
-    /// Writes to INACTIVE buffer, then atomically flips to make it active
-    fn rebuildCaches(self: *RenderSystem, world: *World, asset_manager: *AssetManager) !void {
-        const start_time = std.time.nanoTimestamp();
-
-        // Determine which buffer to write to (inactive = opposite of active)
-        const active_idx = self.active_cache_index.load(.acquire);
-        const write_idx = 1 - active_idx;
-
-        // Clean up old cached data in the WRITE buffer (safe - render thread reads ACTIVE buffer)
-        if (self.cached_raster_data[write_idx]) |data| {
-            self.allocator.free(data.objects);
-        }
-        if (self.cached_raytracing_data[write_idx]) |*data| {
-            self.allocator.free(data.instances);
-            self.allocator.free(data.geometries);
-            self.allocator.free(data.materials);
-        }
-
-        const extraction_start = std.time.nanoTimestamp();
-
-        // Extract renderables from ECS (already parallel)
-        var temp_renderables = std.ArrayList(RenderableEntity){};
-        defer temp_renderables.deinit(self.allocator);
-        try self.extractRenderables(world, &temp_renderables);
-
-        const extraction_time_ns = std.time.nanoTimestamp() - extraction_start;
-        const extraction_time_ms = @as(f64, @floatFromInt(extraction_time_ns)) / 1_000_000.0;
-
-        const cache_build_start = std.time.nanoTimestamp();
-
-        // Use parallel cache building if thread_pool available and enough work
-        if (self.thread_pool != null and temp_renderables.items.len >= 50) {
-            try self.buildCachesParallel(temp_renderables.items, asset_manager, write_idx);
-        } else {
-            try self.buildCachesSingleThreaded(temp_renderables.items, asset_manager, write_idx);
-        }
-
-        const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
-        const cache_build_time_ms = @as(f64, @floatFromInt(cache_build_time_ns)) / 1_000_000.0;
-
-        const total_time_ns = std.time.nanoTimestamp() - start_time;
-        const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
-
-        // Frame budget enforcement: warn if we exceed 2ms
-        const budget_ms: f64 = 2.0;
-
-        if (total_time_ms > budget_ms) {
-            log(.WARN, "render_system", "Frame budget exceeded! Total: {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms) Budget: {d:.2}ms", .{ total_time_ms, extraction_time_ms, cache_build_time_ms, budget_ms });
-        } else if (total_time_ms > budget_ms * 0.8) {
-            // Warn at 80% of budget
-            log(.INFO, "render_system", "Approaching frame budget: {d:.2}ms / {d:.2}ms (extraction: {d:.2}ms, cache: {d:.2}ms)", .{ total_time_ms, budget_ms, extraction_time_ms, cache_build_time_ms });
-        }
-
-        // Note: Transform dirty flags are cleared in checkForChanges() after checking them
-        // This ensures ALL transforms (including cameras, lights) get cleared
-    }
-
     /// Single-threaded cache building
     /// Builds caches in the WRITE buffer at write_idx
     fn buildCachesSingleThreaded(self: *RenderSystem, renderables: []const RenderableEntity, asset_manager: *AssetManager, write_idx: u8) !void {
@@ -1480,10 +1267,13 @@ pub const RenderSystem = struct {
     }
 };
 
-/// Free update function for SystemScheduler
+/// MAIN THREAD: Prepare phase - change detection and dirty flag management
 /// Runs RenderSystem change detection ONLY - does NOT build caches
-/// Cache building happens on render thread via rebuildCachesFromSnapshot()
-pub fn update(world: *World, dt: f32) !void {
+/// Cache building happens on render thread via rebuildCachesFromSnapshot() (update phase)
+/// MAIN THREAD: Prepare phase - query ECS and detect changes
+/// This function is called on the main thread before captureSnapshot()
+/// Extracts all renderable data and writes to RenderablesSet component (NO internal state)
+pub fn prepare(world: *World, dt: f32) !void {
     _ = dt;
 
     const scene_ptr = world.getUserData("scene") orelse return;
@@ -1492,98 +1282,42 @@ pub fn update(world: *World, dt: f32) !void {
     var self: *RenderSystem = &scene.render_system;
     const asset_manager = scene.asset_manager;
 
-    // Inline of checkForChanges: lightweight change detection + cache rebuild
-    var current_renderable_count: usize = 0;
-    var current_geometry_count: usize = 0;
+    // Get or create the RenderablesSet singleton component
+    const renderables_set_entity = try world.getOrCreateSingletonEntity();
+    var renderables_set = world.get(components.RenderablesSet, renderables_set_entity) orelse blk: {
+        const new_set = components.RenderablesSet.init();
+        try world.emplace(components.RenderablesSet, renderables_set_entity, new_set);
+        break :blk world.get(components.RenderablesSet, renderables_set_entity).?;
+    };
 
-    // Quick query to count entities and geometry
-    var mesh_view = try world.view(MeshRenderer);
-    var iter = mesh_view.iterator();
-    while (iter.next()) |entry| {
-        const renderer = entry.component;
-        if (!renderer.hasValidAssets()) continue;
-
-        current_renderable_count += 1;
-
-        if (renderer.model_asset) |model_asset_id| {
-            if (asset_manager.getModel(model_asset_id)) |model| {
-                current_geometry_count += model.meshes.items.len;
-            }
-        }
-    }
-
+    // FAST PATH: Check for changes BEFORE doing expensive extraction
     var changes_detected = false;
     var reason: []const u8 = "";
 
-    // 1) Count changes
-    if (current_renderable_count != self.last_renderable_count or
-        current_geometry_count != self.last_geometry_count)
-    {
+    // 1) Quick check: Cache missing (first frame)
+    const active_idx = self.active_cache_index.load(.acquire);
+    if (self.cached_raster_data[active_idx] == null) {
         changes_detected = true;
-        reason = "count_changed";
+        reason = "cache_missing";
     }
 
-    // 2) Cache missing
+    // 2) Quick check: Entity count changed (cheap)
     if (!changes_detected) {
-        const active_idx = self.active_cache_index.load(.acquire);
-        if (self.cached_raster_data[active_idx] == null) {
+        const mesh_view = try world.view(MeshRenderer);
+        const current_count = mesh_view.storage.entities.items.len;
+        if (current_count != self.last_renderable_count) {
             changes_detected = true;
-            reason = "cache_missing";
+            reason = "count_changed";
         }
     }
 
-    // 3) Asset IDs/mesh pointers changed (async loads)
+    // 3) Quick check: Transform dirty flags (medium cost, but early exit)
     if (!changes_detected) {
-        var current_mesh_asset_ids = std.ArrayList(AssetId){};
-        defer current_mesh_asset_ids.deinit(self.allocator);
-
-        var mesh_view2 = try world.view(MeshRenderer);
-        var iter2 = mesh_view2.iterator();
-        while (iter2.next()) |entry2| {
-            const renderer2 = entry2.component;
-            if (!renderer2.hasValidAssets()) continue;
-            if (renderer2.model_asset) |mid| {
-                try current_mesh_asset_ids.append(self.allocator, mid);
-            }
-        }
-
-        const active_idx2 = self.active_cache_index.load(.acquire);
-        if (self.cached_raytracing_data[active_idx2]) |rt_cache| {
-            if (current_mesh_asset_ids.items.len != rt_cache.geometries.len) {
-                changes_detected = true;
-                reason = "rt_geom_count_mismatch";
-            } else {
-                var geom_idx: usize = 0;
-                for (current_mesh_asset_ids.items) |current_asset_id| {
-                    const model = asset_manager.getModel(current_asset_id) orelse continue;
-                    for (model.meshes.items) |model_mesh| {
-                        if (geom_idx >= rt_cache.geometries.len) {
-                            changes_detected = true;
-                            reason = "rt_geom_overflow";
-                            break;
-                        }
-                        const rt_geom = rt_cache.geometries[geom_idx];
-                        if (rt_geom.model_asset != current_asset_id or rt_geom.mesh_ptr != model_mesh.geometry.mesh) {
-                            changes_detected = true;
-                            reason = "mesh_ptr_changed";
-                            break;
-                        }
-                        geom_idx += 1;
-                    }
-                    if (changes_detected) break;
-                }
-            }
-        }
-    }
-
-    // 4) Transform dirty flags
-    if (!changes_detected) {
-        var transform_view = try world.view(Transform);
-        var titer = transform_view.iterator();
-        while (titer.next()) |tentry| {
-            if (tentry.component.dirty) {
-                const has_mesh = world.has(MeshRenderer, tentry.entity);
-                if (has_mesh) {
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+        while (iter.next()) |entry| {
+            if (world.get(Transform, entry.entity)) |transform| {
+                if (transform.dirty) {
                     changes_detected = true;
                     reason = "transform_dirty";
                     break;
@@ -1592,9 +1326,10 @@ pub fn update(world: *World, dt: f32) !void {
         }
     }
 
-    // Clear transform dirty flags ONLY for entities with MeshRenderer
-    // This allows cameras and lights to move freely without triggering TLAS rebuilds
-    {
+    // ONLY extract if changes detected - this is the expensive part!
+    if (changes_detected) {
+        // Clear transform dirty flags ONLY when we're about to extract
+        // (No point clearing flags if we're not extracting)
         var mesh_view_clear = try world.view(MeshRenderer);
         var iter_clear = mesh_view_clear.iterator();
         while (iter_clear.next()) |entry_clear| {
@@ -1602,23 +1337,88 @@ pub fn update(world: *World, dt: f32) !void {
                 transform.dirty = false;
             }
         }
-    }
+        var extracted_renderables = std.ArrayList(components.ExtractedRenderable){};
+        defer extracted_renderables.deinit(self.allocator);
 
-    // Update tracking
-    self.last_renderable_count = current_renderable_count;
-    self.last_geometry_count = current_geometry_count;
+        var mesh_view = try world.view(MeshRenderer);
+        var iter = mesh_view.iterator();
+        while (iter.next()) |entry| {
+            const renderer = entry.component;
 
-    if (changes_detected) {
-        const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
-        self.renderables_dirty = true;
-        self.transform_only_change = is_transform_only;
-        if (!is_transform_only) {
-            self.raster_descriptors_dirty = true;
-            self.raytracing_descriptors_dirty = true;
+            if (!renderer.enabled) {
+                continue;
+            }
+            if (!renderer.hasValidAssets()) {
+                continue;
+            }
+
+            // Get transform (default to identity if missing)
+            const transform = world.get(Transform, entry.entity);
+            const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
+
+            // Get material buffer index from MaterialSet component
+            const material_set = world.get(components.MaterialSet, entry.entity);
+            const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+
+            try extracted_renderables.append(self.allocator, .{
+                .entity_id = entry.entity,
+                .transform = world_matrix,
+                .model_asset = renderer.model_asset.?,
+                .material_buffer_index = material_buffer_index,
+                .texture_asset = renderer.texture_asset,
+                .layer = renderer.layer,
+                .casts_shadows = renderer.casts_shadows,
+                .receives_shadows = renderer.receives_shadows,
+            });
         }
-    } else {
-        // No changes - clear the transform_only flag
-        self.transform_only_change = false;
+
+        // Count geometries for tracking
+        const current_renderable_count = extracted_renderables.items.len;
+        var current_geometry_count: usize = 0;
+        for (extracted_renderables.items) |renderable| {
+            if (asset_manager.getModel(renderable.model_asset)) |model| {
+                current_geometry_count += model.meshes.items.len;
+            }
+        }
+
+        // Update tracking state
+        self.last_renderable_count = current_renderable_count;
+        self.last_geometry_count = current_geometry_count;
+
+        // Store extracted renderables in RenderablesSet component
+        const renderables_copy = try self.allocator.dupe(components.ExtractedRenderable, extracted_renderables.items);
+        renderables_set.setRenderables(self.allocator, renderables_copy);
+
+        // Write change flags to RenderablesSet component for snapshot to capture
+        const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
+        renderables_set.markDirty(is_transform_only);
+
+        log(.INFO, "render_system", "Changes detected ({s}): {} renderables, {} geometries", .{ reason, current_renderable_count, current_geometry_count });
+    }
+}
+
+/// RENDER THREAD: Update phase - build GPU caches from snapshot
+/// This function is called by the render thread with a snapshot
+/// Reads change flags from snapshot and rebuilds GPU buffers if needed
+pub fn update(world: *World, frame_info: *FrameInfo) !void {
+    const scene_ptr = world.getUserData("scene") orelse return;
+    const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
+
+    var self: *RenderSystem = &scene.render_system;
+    const asset_manager = scene.asset_manager;
+
+    // Snapshot may be null if render thread is not enabled
+    const snapshot = frame_info.snapshot orelse return;
+
+    // Read change flags from snapshot (set by prepare phase)
+    if (snapshot.render_changes.renderables_dirty) {
+        try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
+
+        // Clear the dirty flag in RenderablesSet so prepare() doesn't re-extract next frame
+        const renderables_set_entity = try world.getOrCreateSingletonEntity();
+        if (world.get(components.RenderablesSet, renderables_set_entity)) |renderables_set| {
+            renderables_set.clearDirty();
+        }
     }
 }
 

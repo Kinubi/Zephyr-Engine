@@ -2,6 +2,7 @@ const std = @import("std");
 const World = @import("world.zig").World;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
+const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const log = @import("../utils/log.zig").log;
 
 /// Component types that systems can read/write
@@ -13,13 +14,21 @@ pub const ComponentAccess = struct {
     writes: []const []const u8,
 };
 
-/// System function signature
-pub const SystemFn = *const fn (*World, f32) anyerror!void;
+/// System function signature (main thread - ECS queries, CPU work)
+pub const SystemPrepareFn = *const fn (*World, f32) anyerror!void;
+
+/// System function signature (render thread - Vulkan operations, uses snapshot from FrameInfo)
+pub const SystemUpdateFn = *const fn (*World, *FrameInfo) anyerror!void;
 
 /// System definition with metadata
+/// Systems can have:
+///   - prepare_fn only: Pure ECS/CPU work on main thread (most systems)
+///   - update_fn only: Pure Vulkan work on render thread (rare)
+///   - Both: Two-phase system (e.g., MaterialSystem)
 pub const SystemDef = struct {
     name: []const u8,
-    update_fn: SystemFn,
+    prepare_fn: ?SystemPrepareFn = null, // Main thread: ECS queries, CPU work
+    update_fn: ?SystemUpdateFn = null, // Render thread: Vulkan operations
     access: ComponentAccess,
 };
 
@@ -56,15 +65,22 @@ pub const SystemStage = struct {
         try self.systems.append(self.allocator, system);
     }
 
-    /// Execute all systems in this stage in parallel
-    pub fn execute(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
-        const system_count = self.systems.items.len;
-        if (system_count == 0) return;
+    /// Execute all systems' prepare phase in this stage in parallel (main thread)
+    pub fn executePrepare(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
+        // Count systems that have prepare_fn
+        var prepare_count: usize = 0;
+        for (self.systems.items) |system| {
+            if (system.prepare_fn != null) prepare_count += 1;
+        }
+
+        if (prepare_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (system_count < 2 or thread_pool == null) {
+        if (prepare_count < 2 or thread_pool == null) {
             for (self.systems.items) |system| {
-                try system.update_fn(world, dt);
+                if (system.prepare_fn) |prepare_fn| {
+                    try prepare_fn(world, dt);
+                }
             }
             return;
         }
@@ -72,36 +88,103 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.completion.store(system_count, .release);
+        self.completion.store(prepare_count, .release);
 
         // Build a stage-scoped immutable context and dispatch one job per system
         var stage_ctx = StageContext{
             .world = world,
             .dt = dt,
+            .frame_info = null, // No frame info for prepare phase
             .systems = self.systems.items,
             .completion = &self.completion,
             .done_sem = &self.done_sem,
+            .phase = .prepare,
         };
 
-        // Prepare/reuse batch of work items to reduce submit overhead and allocations
-        try self.items_cache.ensureTotalCapacity(self.allocator, system_count);
+        // Prepare/reuse batch of work items
+        try self.items_cache.ensureTotalCapacity(self.allocator, prepare_count);
         self.items_cache.clearRetainingCapacity();
 
-        var i: usize = 0;
-        while (i < system_count) : (i += 1) {
-            self.items_cache.appendAssumeCapacity(.{
-                .id = work_id_counter.fetchAdd(1, .monotonic),
-                .item_type = .ecs_update,
-                .priority = .high, // System updates are frame-critical
-                .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(i) } },
-                .worker_fn = systemWorker,
-                .context = &stage_ctx,
-            });
+        for (self.systems.items, 0..) |system, i| {
+            if (system.prepare_fn != null) {
+                self.items_cache.appendAssumeCapacity(.{
+                    .id = work_id_counter.fetchAdd(1, .monotonic),
+                    .item_type = .ecs_update,
+                    .priority = .high,
+                    .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(i) } },
+                    .worker_fn = systemWorker,
+                    .context = &stage_ctx,
+                });
+            }
         }
         try pool.submitBatch(self.items_cache.items);
 
-        // Wait exactly once for stage completion: last worker posts
+        // Wait for completion
         self.done_sem.wait();
+    }
+
+    /// Execute all systems' update phase in this stage in parallel (render thread)
+    pub fn executeUpdate(self: *SystemStage, world: *World, frame_info: *FrameInfo, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
+        // Count systems that have update_fn
+        var update_count: usize = 0;
+        for (self.systems.items) |system| {
+            if (system.update_fn != null) update_count += 1;
+        }
+
+        if (update_count == 0) return;
+
+        // Small-stage fast path: sequential is cheaper than dispatch
+        if (update_count < 2 or thread_pool == null) {
+            for (self.systems.items) |system| {
+                if (system.update_fn) |update_fn| {
+                    try update_fn(world, frame_info);
+                }
+            }
+            return;
+        }
+
+        const pool = thread_pool.?;
+
+        // Initialize completion counter
+        self.completion.store(update_count, .release);
+
+        // Build a stage-scoped immutable context and dispatch one job per system
+        var stage_ctx = StageContext{
+            .world = world,
+            .dt = frame_info.dt,
+            .frame_info = frame_info,
+            .systems = self.systems.items,
+            .completion = &self.completion,
+            .done_sem = &self.done_sem,
+            .phase = .update,
+        };
+
+        // Prepare/reuse batch of work items
+        try self.items_cache.ensureTotalCapacity(self.allocator, update_count);
+        self.items_cache.clearRetainingCapacity();
+
+        for (self.systems.items, 0..) |system, i| {
+            if (system.update_fn != null) {
+                self.items_cache.appendAssumeCapacity(.{
+                    .id = work_id_counter.fetchAdd(1, .monotonic),
+                    .item_type = .ecs_update,
+                    .priority = .high,
+                    .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(i) } },
+                    .worker_fn = systemWorker,
+                    .context = &stage_ctx,
+                });
+            }
+        }
+        try pool.submitBatch(self.items_cache.items);
+
+        // Wait for completion
+        self.done_sem.wait();
+    }
+
+    /// Execute all systems in this stage in parallel (legacy - calls prepare_fn)
+    pub fn execute(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
+        // For backward compatibility, execute prepare phase
+        try self.executePrepare(world, dt, thread_pool, work_id_counter);
     }
 };
 
@@ -109,9 +192,11 @@ pub const SystemStage = struct {
 const StageContext = struct {
     world: *World,
     dt: f32,
+    frame_info: ?*FrameInfo, // Only set for update phase
     systems: []const SystemDef,
     completion: *std.atomic.Value(usize),
     done_sem: *std.Thread.Semaphore,
+    phase: enum { prepare, update },
 };
 
 /// Worker function for parallel system execution
@@ -124,9 +209,28 @@ fn systemWorker(context: *anyopaque, work_item: @import("../threading/thread_poo
     }
 
     const sys = ctx.systems[job_index];
-    sys.update_fn(ctx.world, ctx.dt) catch |err| {
-        log(.ERROR, "system_scheduler", "System '{s}' failed with error: {}", .{ sys.name, err });
-    };
+
+    // Execute the appropriate phase function
+    switch (ctx.phase) {
+        .prepare => {
+            if (sys.prepare_fn) |prepare_fn| {
+                prepare_fn(ctx.world, ctx.dt) catch |err| {
+                    log(.ERROR, "system_scheduler", "System '{s}' prepare failed with error: {}", .{ sys.name, err });
+                };
+            }
+        },
+        .update => {
+            if (sys.update_fn) |update_fn| {
+                if (ctx.frame_info) |frame_info| {
+                    update_fn(ctx.world, frame_info) catch |err| {
+                        log(.ERROR, "system_scheduler", "System '{s}' update failed with error: {}", .{ sys.name, err });
+                    };
+                } else {
+                    log(.ERROR, "system_scheduler", "System '{s}' update called but frame_info is null", .{sys.name});
+                }
+            }
+        },
+    }
 }
 
 /// System scheduler manages parallel execution of ECS systems
@@ -159,10 +263,19 @@ pub const SystemScheduler = struct {
         return &self.stages.items[self.stages.items.len - 1];
     }
 
-    /// Execute all stages sequentially (systems within each stage run in parallel)
-    pub fn execute(self: *SystemScheduler, world: *World, dt: f32) !void {
+    /// Execute all stages' prepare phase sequentially (main thread)
+    /// Systems within each stage run in parallel
+    pub fn executePrepare(self: *SystemScheduler, world: *World, dt: f32) !void {
         for (self.stages.items) |*stage| {
-            try stage.execute(world, dt, self.thread_pool, &self.work_id_counter);
+            try stage.executePrepare(world, dt, self.thread_pool, &self.work_id_counter);
+        }
+    }
+
+    /// Execute all stages' update phase sequentially (render thread)
+    /// Systems within each stage run in parallel
+    pub fn executeUpdate(self: *SystemScheduler, world: *World, frame_info: *FrameInfo) !void {
+        for (self.stages.items) |*stage| {
+            try stage.executeUpdate(world, frame_info, self.thread_pool, &self.work_id_counter);
         }
     }
 

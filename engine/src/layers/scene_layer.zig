@@ -60,7 +60,7 @@ pub const SceneLayer = struct {
 
                 stage1.addSystem(.{
                     .name = "LightAnimationSystem",
-                    .update_fn = ecs.updateLightSystem,
+                    .prepare_fn = ecs.updateLightSystem,
                     .access = .{
                         .reads = &[_][]const u8{"PointLight"},
                         .writes = &[_][]const u8{"Transform"},
@@ -71,7 +71,7 @@ pub const SceneLayer = struct {
 
                 stage1.addSystem(.{
                     .name = "ScriptingSystem",
-                    .update_fn = ecs.updateScriptingSystem,
+                    .prepare_fn = ecs.updateScriptingSystem,
                     .access = .{
                         .reads = &[_][]const u8{},
                         .writes = &[_][]const u8{"ScriptComponent"},
@@ -79,13 +79,14 @@ pub const SceneLayer = struct {
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add scripting system: {}", .{err});
                 };
-                // MaterialSystem - builds GPU material buffers
+
                 stage1.addSystem(.{
                     .name = "MaterialSystem",
+                    .prepare_fn = ecs.prepareMaterialSystem,
                     .update_fn = ecs.updateMaterialSystem,
                     .access = .{
-                        .reads = &[_][]const u8{}, // Reads asset textures, no ECS components
-                        .writes = &[_][]const u8{}, // Writes GPU buffers, no ECS components
+                        .reads = &[_][]const u8{ "MaterialSet", "MeshRenderer" },
+                        .writes = &[_][]const u8{},
                     },
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
@@ -95,7 +96,7 @@ pub const SceneLayer = struct {
                 if (sched.addStage("DependentSystems")) |stage2| {
                     stage2.addSystem(.{
                         .name = "TransformSystem",
-                        .update_fn = ecs.updateTransformSystem,
+                        .prepare_fn = ecs.updateTransformSystem,
                         .access = .{
                             .reads = &[_][]const u8{},
                             .writes = &[_][]const u8{"Transform"},
@@ -111,7 +112,7 @@ pub const SceneLayer = struct {
                 if (sched.addStage("ParticleEmitterUpdates")) |stage4| {
                     stage4.addSystem(.{
                         .name = "ParticleEmitterSystem",
-                        .update_fn = ecs.updateParticleEmittersSystem,
+                        .prepare_fn = ecs.updateParticleEmittersSystem,
                         .access = .{
                             .reads = &[_][]const u8{ "ParticleEmitter", "Transform" },
                             .writes = &[_][]const u8{},
@@ -129,6 +130,7 @@ pub const SceneLayer = struct {
                 if (sched.addStage("RenderSystemUpdates")) |stage4| {
                     stage4.addSystem(.{
                         .name = "RenderSystem",
+                        .prepare_fn = ecs.prepareRenderSystem,
                         .update_fn = ecs.updateRenderSystem,
                         .access = .{
                             .reads = &[_][]const u8{ "MeshRenderer", "Transform", "Camera" },
@@ -210,7 +212,7 @@ pub const SceneLayer = struct {
         if (self.system_scheduler) |*scheduler| {
             // Parallel execution of all registered systems
             // Systems can now extract data to GlobalUbo via userdata
-            try scheduler.execute(self.ecs_world, dt);
+            try scheduler.executePrepare(self.ecs_world, dt);
         } else {
             // Fallback: Sequential execution
             try ecs.updateTransformSystem(self.ecs_world, dt);
@@ -268,6 +270,12 @@ pub const SceneLayer = struct {
             for (light_count..max_lights) |i| {
                 self.prepared_ubo[frame_info.current_frame].point_lights[i] = .{};
             }
+        }
+        if (self.system_scheduler) |*scheduler| {
+            // Parallel execution of all registered systems update phase
+            // Systems use snapshot data from frame_info
+            // Cast away const - systems need mutable access to frame_info for internal state
+            try scheduler.executeUpdate(self.ecs_world, @constCast(frame_info));
         }
 
         // Update Vulkan resources (descriptor updates)
