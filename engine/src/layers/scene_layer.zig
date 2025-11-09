@@ -123,9 +123,11 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
                 }
 
-                // Stage 4: Render system updates (extract render data, build caches)
-                if (sched.addStage("RenderSystemUpdates")) |stage5| {
-                    stage5.addSystem(.{
+                // Stage 4: Render system updates (change detection only - no cache building)
+                // Sets dirty flags when scene changes are detected
+                // Actual cache building happens on render thread via rebuildCachesFromSnapshot()
+                if (sched.addStage("RenderSystemUpdates")) |stage4| {
+                    stage4.addSystem(.{
                         .name = "RenderSystem",
                         .update_fn = ecs.updateRenderSystem,
                         .access = .{

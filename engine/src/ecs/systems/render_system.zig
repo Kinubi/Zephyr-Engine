@@ -12,7 +12,7 @@ const RasterizationData = render_data_types.RasterizationData;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../../assets/asset_manager.zig").AssetId;
 const AssetTypeId = @import("../../assets/asset_types.zig").AssetId;
-const Mesh = @import("../../core/graphics_context.zig").Mesh;
+const Mesh = @import("../../rendering/mesh.zig").Mesh;
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
@@ -41,6 +41,15 @@ pub const RenderSystem = struct {
     // geometry_change: mesh count/assets changed (full rebuild + descriptors)
     transform_only_change: bool = false,
 
+    // Instanced rendering: cache generation tracking
+    // Incremented when batches/instances change, used for buffer invalidation
+    cache_generation: u32 = 0,
+
+    // Extracted renderables for snapshot capture (main thread only)
+    // Updated by update() when changes detected, read by captureSnapshot()
+    extracted_renderables: std.ArrayList(RenderableEntity),
+    extracted_renderables_valid: bool = false,
+
     // Double-buffered cached render data (lock-free main/render thread access)
     // Main thread writes to inactive buffer, render thread reads from active buffer
     cached_raster_data: [2]?RasterizationData = .{ null, null },
@@ -63,14 +72,23 @@ pub const RenderSystem = struct {
         return .{
             .allocator = allocator,
             .thread_pool = thread_pool,
+            .extracted_renderables = std.ArrayList(RenderableEntity){},
         };
     }
 
     pub fn deinit(self: *RenderSystem) void {
+        // Clean up extracted renderables
+        self.extracted_renderables.deinit(self.allocator);
+
         // Clean up both cache buffers
         for (&self.cached_raster_data) |*data| {
             if (data.*) |cache| {
                 self.allocator.free(cache.objects);
+                // Clean up instanced batches
+                for (cache.batches) |batch| {
+                    self.allocator.free(batch.instances);
+                }
+                self.allocator.free(cache.batches);
             }
         }
         for (&self.cached_raytracing_data) |*data| {
@@ -464,6 +482,75 @@ pub const RenderSystem = struct {
     ///
     /// Complexity: HIGH - requires cache structure refactor + shader changes
     /// Branch recommended: features/instanced-rendering (coordinate with geometry_pass.zig changes)
+    /// Helper struct for building instanced batches
+    const BatchBuilder = struct {
+        // Map mesh_ptr → list of instance indices
+        mesh_to_instances: std.AutoHashMap(usize, std.ArrayList(usize)),
+        allocator: std.mem.Allocator,
+
+        fn init(allocator: std.mem.Allocator) BatchBuilder {
+            return .{
+                .mesh_to_instances = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
+                .allocator = allocator,
+            };
+        }
+
+        fn deinit(self: *BatchBuilder) void {
+            var iter = self.mesh_to_instances.valueIterator();
+            while (iter.next()) |list| {
+                list.deinit(self.allocator);
+            }
+            self.mesh_to_instances.deinit();
+        }
+
+        /// Add an object to the batch builder
+        fn addObject(self: *BatchBuilder, mesh_ptr: *const Mesh, object_idx: usize) !void {
+            const mesh_key = @intFromPtr(mesh_ptr);
+            const result = try self.mesh_to_instances.getOrPut(mesh_key);
+            if (!result.found_existing) {
+                result.value_ptr.* = std.ArrayList(usize){};
+            }
+            try result.value_ptr.append(self.allocator, object_idx);
+        }
+
+        /// Build final InstancedBatch array from collected data
+        fn buildBatches(
+            self: *BatchBuilder,
+            objects: []const RasterizationData.RenderableObject,
+            allocator: std.mem.Allocator,
+        ) ![]RasterizationData.InstancedBatch {
+            const batch_count = self.mesh_to_instances.count();
+            const batches = try allocator.alloc(RasterizationData.InstancedBatch, batch_count);
+
+            var batch_idx: usize = 0;
+            var iter = self.mesh_to_instances.iterator();
+            while (iter.next()) |entry| {
+                const indices = entry.value_ptr;
+                const instances = try allocator.alloc(RasterizationData.InstanceData, indices.items.len);
+
+                // Copy instance data from objects
+                for (indices.items, 0..) |obj_idx, inst_idx| {
+                    const obj = objects[obj_idx];
+                    instances[inst_idx] = .{
+                        .transform = obj.transform,
+                        .material_index = obj.material_index,
+                    };
+                }
+
+                // Get mesh_ptr from first object in batch
+                const first_obj = objects[indices.items[0]];
+                batches[batch_idx] = .{
+                    .mesh_handle = .{ .mesh_ptr = first_obj.mesh_handle.mesh_ptr },
+                    .instances = instances,
+                    .visible = true,
+                };
+                batch_idx += 1;
+            }
+
+            return batches;
+        }
+    };
+
     fn buildCachesFromSnapshotSingleThreaded(
         self: *RenderSystem,
         entities: []const GameStateSnapshot.EntityRenderData,
@@ -471,19 +558,28 @@ pub const RenderSystem = struct {
         write_idx: u8,
     ) !void {
         // Count total meshes
-        // TODO(INSTANCING): This will count unique meshes after deduplication
         var total_meshes: usize = 0;
         for (entities) |entity_data| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
             total_meshes += model.meshes.items.len;
         }
 
-        // Allocate output arrays
-        // TODO(INSTANCING): Change RenderableObject to InstancedRenderBatch
+        // Allocate output arrays (still needed for legacy per-object data and RT)
         const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        errdefer self.allocator.free(raster_objects);
+
         const geometries = try self.allocator.alloc(RaytracingData.RTGeometry, total_meshes);
+        errdefer self.allocator.free(geometries);
+
         const instances = try self.allocator.alloc(RaytracingData.RTInstance, total_meshes);
+        errdefer self.allocator.free(instances);
+
         const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
+        errdefer self.allocator.free(materials);
+
+        // NEW: Build instanced batches
+        var batch_builder = BatchBuilder.init(self.allocator);
+        defer batch_builder.deinit();
 
         var mesh_idx: usize = 0;
         for (entities) |entity_data| {
@@ -503,6 +599,9 @@ pub const RenderSystem = struct {
                     .visible = true,
                 };
 
+                // Register this object with the batch builder
+                try batch_builder.addObject(model_mesh.geometry.mesh, mesh_idx);
+
                 geometries[mesh_idx] = .{
                     .mesh_ptr = model_mesh.geometry.mesh,
                     .blas = null,
@@ -521,9 +620,22 @@ pub const RenderSystem = struct {
             }
         }
 
+        // Build instanced batches from deduplicated data
+        const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
+
+        // Increment cache generation to invalidate GPU buffers
+        self.cache_generation +%= 1;
+
+        log(.INFO, "render_system", "Built {} instanced batches from {} objects (cache_gen={})", .{
+            batches.len,
+            raster_objects.len,
+            self.cache_generation,
+        });
+
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
+            .batches = batches, // NEW: Add instanced batches
         };
 
         self.cached_raytracing_data[write_idx] = .{
@@ -626,9 +738,29 @@ pub const RenderSystem = struct {
             std.Thread.yield() catch {};
         }
 
+        // Build instanced batches from deduplicated data
+        var batch_builder = BatchBuilder.init(self.allocator);
+        defer batch_builder.deinit();
+
+        for (raster_objects, 0..) |obj, idx| {
+            try batch_builder.addObject(obj.mesh_handle.mesh_ptr, idx);
+        }
+
+        const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
+
+        // Increment cache generation to invalidate GPU buffers
+        self.cache_generation +%= 1;
+
+        log(.INFO, "render_system", "Built {} instanced batches from {} objects (parallel, cache_gen={})", .{
+            batches.len,
+            raster_objects.len,
+            self.cache_generation,
+        });
+
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
+            .batches = batches, // NEW: Add instanced batches
         };
 
         self.cached_raytracing_data[write_idx] = .{
@@ -985,9 +1117,25 @@ pub const RenderSystem = struct {
             }
         }
 
+        // NEW: Build instanced batches from deduplicated data
+        var batch_builder = BatchBuilder.init(self.allocator);
+        defer batch_builder.deinit();
+
+        const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
+
+        // Increment cache generation to invalidate GPU buffers
+        self.cache_generation +%= 1;
+
+        log(.INFO, "render_system", "Built {} instanced batches from {} objects (cache_gen={})", .{
+            batches.len,
+            raster_objects.len,
+            self.cache_generation,
+        });
+
         // Store caches in WRITE buffer
         self.cached_raster_data[write_idx] = RasterizationData{
             .objects = raster_objects,
+            .batches = batches, // NEW: Add instanced batches
         };
         self.cached_raytracing_data[write_idx] = RaytracingData{
             .instances = instances,
@@ -1153,9 +1301,25 @@ pub const RenderSystem = struct {
             std.Thread.yield() catch {};
         }
 
+        // NEW: Build instanced batches from deduplicated data
+        var batch_builder = BatchBuilder.init(self.allocator);
+        defer batch_builder.deinit();
+
+        const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
+
+        // Increment cache generation to invalidate GPU buffers
+        self.cache_generation +%= 1;
+
+        log(.INFO, "render_system", "Built {} instanced batches from {} objects (cache_gen={}, parallel)", .{
+            batches.len,
+            raster_objects.len,
+            self.cache_generation,
+        });
+
         // Store caches in WRITE buffer
         self.cached_raster_data[write_idx] = RasterizationData{
             .objects = raster_objects,
+            .batches = batches, // NEW: Add instanced batches
         };
         self.cached_raytracing_data[write_idx] = RaytracingData{
             .instances = instances,
@@ -1187,15 +1351,23 @@ pub const RenderSystem = struct {
                 objects_copy[i] = obj;
             }
 
+            const batches_copy = try self.allocator.alloc(RasterizationData.InstancedBatch, cached.batches.len);
+            for (cached.batches, 0..) |batch, i| {
+                batches_copy[i] = batch;
+            }
+
             return RasterizationData{
                 .objects = objects_copy,
+                .batches = batches_copy,
             };
         }
 
         // If no cache exists, return empty data
         const empty_objects = try self.allocator.alloc(RasterizationData.RenderableObject, 0);
+        const empty_batches = try self.allocator.alloc(RasterizationData.InstancedBatch, 0);
         return RasterizationData{
             .objects = empty_objects,
+            .batches = empty_batches,
         };
     }
 
@@ -1236,9 +1408,11 @@ pub const RenderSystem = struct {
 };
 
 /// Free update function for SystemScheduler
-/// Runs RenderSystem change detection and cache rebuilds via the Scene-owned instance.
+/// Runs RenderSystem change detection ONLY - does NOT build caches
+/// Cache building happens on render thread via rebuildCachesFromSnapshot()
 pub fn update(world: *World, dt: f32) !void {
     _ = dt;
+
     const scene_ptr = world.getUserData("scene") orelse return;
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
@@ -1369,7 +1543,13 @@ pub fn update(world: *World, dt: f32) !void {
             self.raster_descriptors_dirty = true;
             self.raytracing_descriptors_dirty = true;
         }
-        try self.rebuildCaches(world, asset_manager);
+        // NOTE: Cache building happens on render thread via rebuildCachesFromSnapshot()
+        // We just set dirty flags here to signal that snapshot data has changed
+        log(.DEBUG, "render_system", "Changes detected ({s}): renderables={}, geometries={}", .{
+            reason,
+            current_renderable_count,
+            current_geometry_count,
+        });
     } else {
         // No changes - clear the transform_only flag
         self.transform_only_change = false;

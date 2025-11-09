@@ -1060,17 +1060,26 @@ quad_pass.bake();
 
 **Goal**: Build instanced batches in RenderSystem
 
-1. ⏳ Add `InstanceData` struct to render_data_types.zig
-2. ⏳ Add `InstancedBatch` struct to render_data_types.zig
-3. ⏳ Add `cache_generation` counter to RenderSystem
-4. ⏳ Implement deduplication by mesh_ptr in `buildCachesFromSnapshot()`
-5. ⏳ Build `InstanceData[]` arrays for each unique mesh
-6. ⏳ Update `cached_raster_data` to use `InstancedBatch[]`
-7. ⏳ Implement proper cleanup of old `InstanceData[]` arrays
+1. ✅ Add `InstanceData` struct to render_data_types.zig
+2. ✅ Add `InstancedBatch` struct to render_data_types.zig
+3. ✅ Add `cache_generation` counter to RenderSystem
+4. ✅ Implement deduplication by mesh_ptr in `buildCachesFromSnapshot()`
+5. ✅ Build `InstanceData[]` arrays for each unique mesh
+6. ✅ Update `cached_raster_data` to use `InstancedBatch[]`
+7. ✅ Implement proper cleanup of old `InstanceData[]` arrays
 
 **Validation**: Cache builds correctly, no per-object entries
 
-> **Status**: 🚧 **TODO** - Phase 5 not yet implemented
+> **Status**: ✅ **COMPLETE** - Phase 5 implemented (November 9, 2025)
+> 
+> **Implementation Details**:
+> - Added `InstanceData` struct with transform, material_index, and padding for SSBO alignment
+> - Added `InstancedBatch` struct grouping instances by mesh
+> - Added `BatchBuilder` helper for mesh deduplication using HashMap
+> - `cache_generation` counter increments on batch rebuild for GPU buffer invalidation
+> - Both single-threaded and parallel paths build instanced batches
+> - Legacy `objects` array kept for backwards compatibility during migration
+> - Ray tracing system unaffected: RTInstance already represents instances, one BLAS per unique mesh
 
 ---
 

@@ -13,6 +13,8 @@ const PipelineConfig = @import("../unified_pipeline_system.zig").PipelineConfig;
 const PipelineId = @import("../unified_pipeline_system.zig").PipelineId;
 const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
+const BufferManager = @import("../buffer_manager.zig").BufferManager;
+const ManagedBuffer = @import("../buffer_manager.zig").ManagedBuffer;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
 const MaterialBindings = @import("../../ecs/systems/material_system.zig").MaterialBindings;
@@ -21,6 +23,8 @@ const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_F
 const DynamicRenderingHelper = @import("../../utils/dynamic_rendering.zig").DynamicRenderingHelper;
 const ecs = @import("../../ecs.zig");
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
+const render_data_types = @import("../render_data_types.zig");
+const Mesh = @import("../mesh.zig").Mesh;
 
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
@@ -37,6 +41,7 @@ pub const GeometryPass = struct {
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
     resource_binder: ResourceBinder,
+    buffer_manager: *BufferManager,
     asset_manager: *AssetManager,
     ecs_world: *World,
     global_ubo_set: *GlobalUboSet,
@@ -64,6 +69,7 @@ pub const GeometryPass = struct {
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
+        buffer_manager: *BufferManager,
         asset_manager: *AssetManager,
         ecs_world: *World,
         global_ubo_set: *GlobalUboSet,
@@ -84,6 +90,7 @@ pub const GeometryPass = struct {
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
             .resource_binder = ResourceBinder.init(allocator, pipeline_system),
+            .buffer_manager = buffer_manager,
             .asset_manager = asset_manager,
             .ecs_world = ecs_world,
             .global_ubo_set = global_ubo_set,
@@ -247,7 +254,10 @@ pub const GeometryPass = struct {
         // Get rasterization data from render system (cached, no asset manager queries needed)
         const raster_data = try self.render_system.getRasterData();
 
-        if (raster_data.objects.len == 0) {
+        // Check for instanced batches (preferred path)
+        const use_instancing = raster_data.batches.len > 0;
+
+        if (!use_instancing and raster_data.objects.len == 0) {
             log(.TRACE, "geometry_pass", "No entities to render", .{});
             return;
         }
@@ -263,66 +273,80 @@ pub const GeometryPass = struct {
 
         // Begin rendering (also sets viewport and scissor)
         rendering.begin(self.graphics_context, cmd);
-        // Update descriptor sets for this frame using ResourceBinder (handles Set 1: materials/textures)
 
         // Bind pipeline with all descriptor sets (Set 0: global UBO, Set 1: materials/textures)
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.geometry_pipeline, frame_index);
 
         // Get pipeline layout from pipeline system (ensures we use the correct layout even during hot-reload)
-        // Don't use cached_pipeline_layout here - it might be stale during hot-reload
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
-        // Render each object (mesh pointers and material indices already resolved in cache)
-        // NOTE: All objects in cache are currently visible (visibility culling not yet implemented)
-        // When adding visibility culling, filter at cache build time in RenderSystem, not here
+        if (use_instancing) {
+            // NEW PATH: Instanced rendering - one draw call per unique mesh
+            // NOTE: Currently using legacy per-instance push constants
+            // TODO Phase 7: Update shaders to use SSBO with gl_InstanceIndex
+            log(.DEBUG, "geometry_pass", "Rendering {} instanced batches", .{raster_data.batches.len});
 
-        // TODO(MAINTENANCE): IMPLEMENT INSTANCED RENDERING - HIGH PRIORITY
-        // Currently drawing each mesh individually with instance_count=1 (very inefficient!)
-        //
-        // Problem: For a scene with 1000 identical trees, we make 1000 draw calls.
-        // Solution: Group objects by (mesh, material), draw once with instance_count=N.
-        //
-        // Required changes:
-        // 1. RenderSystem: Sort cached objects by mesh_id during extraction
-        // 2. RenderSystem: Build instance data buffer (transforms + material indices)
-        // 3. GeometryPass: Loop over unique meshes, not individual objects
-        // 4. GeometryPass: Use instanced drawing API
-        // 5. Mesh: Add drawInstanced(instance_count, instance_buffer_offset) method
-        // 6. Shaders: Use gl_InstanceIndex to fetch per-instance data
-        //
-        // Expected benefit: 10-100x reduction in draw calls for scenes with repeated assets
-        // (e.g., 1000 trees → 1 draw call, 500 rocks → 1 draw call)
-        //
-        // Complexity: MEDIUM - requires render system refactor + shader changes
-        // Branch recommended: features/instanced-rendering (not a simple maintenance fix)
-        for (raster_data.objects) |object| {
-            // Push constants (data already resolved in cache)
-            const push_constants = GeometryPushConstants{
-                .transform = object.transform,
-                .normal_matrix = object.transform, // TODO: Compute proper normal matrix
-                .material_index = object.material_index,
-            };
+            for (raster_data.batches) |batch| {
+                if (!batch.visible) continue;
 
-            self.graphics_context.vkd.cmdPushConstants(
-                cmd,
-                pipeline_layout,
-                .{ .vertex_bit = true, .fragment_bit = true },
-                0,
-                @sizeOf(GeometryPushConstants),
-                &push_constants,
-            );
+                const mesh = batch.mesh_handle.getMesh();
 
-            // Draw mesh (pointer already resolved in cache)
-            // NOTE: instance_count=1 here - no instancing yet!
-            object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
+                // TEMPORARY: Still using per-instance push constants until shaders are updated
+                // This works but defeats the purpose of instancing (still N command buffer writes)
+                // Phase 7 will add SSBO binding for instance data
+                for (batch.instances, 0..) |instance, idx| {
+                    const push_constants = GeometryPushConstants{
+                        .transform = instance.transform,
+                        .normal_matrix = instance.transform, // TODO: Compute proper normal matrix
+                        .material_index = instance.material_index,
+                    };
+
+                    self.graphics_context.vkd.cmdPushConstants(
+                        cmd,
+                        pipeline_layout,
+                        .{ .vertex_bit = true, .fragment_bit = true },
+                        0,
+                        @sizeOf(GeometryPushConstants),
+                        &push_constants,
+                    );
+
+                    // Draw single instance
+                    mesh.drawInstanced(
+                        self.graphics_context.*,
+                        cmd,
+                        1, // instance_count
+                        @intCast(idx), // first_instance (for gl_InstanceIndex)
+                    );
+                }
+            }
+        } else {
+            // LEGACY PATH: Per-object drawing with push constants
+            log(.DEBUG, "geometry_pass", "Rendering {} objects (non-instanced)", .{raster_data.objects.len});
+
+            for (raster_data.objects) |object| {
+                // Push constants (data already resolved in cache)
+                const push_constants = GeometryPushConstants{
+                    .transform = object.transform,
+                    .normal_matrix = object.transform, // TODO: Compute proper normal matrix
+                    .material_index = object.material_index,
+                };
+
+                self.graphics_context.vkd.cmdPushConstants(
+                    cmd,
+                    pipeline_layout,
+                    .{ .vertex_bit = true, .fragment_bit = true },
+                    0,
+                    @sizeOf(GeometryPushConstants),
+                    &push_constants,
+                );
+
+                // Draw mesh (pointer already resolved in cache)
+                object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
+            }
         }
 
         // End rendering
         rendering.end(self.graphics_context, cmd);
-
-        // Leave color image in COLOR_ATTACHMENT_OPTIMAL; swapchain.endFrame will transition
-        // the swapchain image to PRESENT, and offscreen viewport images should remain in
-        // a layout suitable for their next consumer.
     }
 
     fn teardownImpl(base: *RenderPass) void {

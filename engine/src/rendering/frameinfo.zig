@@ -4,6 +4,7 @@ const Camera = @import("camera.zig").Camera;
 const Math = @import("../utils/math.zig");
 const PerformanceMonitor = @import("performance_monitor.zig").PerformanceMonitor;
 const Texture = @import("../core/texture.zig").Texture;
+const GameStateSnapshot = @import("../threading/game_state_snapshot.zig").GameStateSnapshot;
 
 const MAX_LIGHTS: usize = 16;
 
@@ -43,6 +44,8 @@ pub const FrameInfo = struct {
     // Performance monitoring (optional)
     performance_monitor: ?*PerformanceMonitor = null,
 
-    // ImGui draw data from snapshot (for thread-safe UI rendering)
-    imgui_draw_data: ?*anyopaque = null,
+    // Game state snapshot for thread-safe access to entities, camera, lights, imgui
+    // Read from the double-buffered snapshot captured on the main thread
+    // Optional during engine initialization, set before rendering begins
+    snapshot: ?*const GameStateSnapshot = null,
 };

@@ -168,9 +168,6 @@ pub const Mesh = struct {
     }
 
     /// Draw this mesh (non-instanced, single draw call)
-    /// TODO(MAINTENANCE): ADD drawInstanced() method for instanced rendering
-    /// New signature: pub fn drawInstanced(self: *const Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer, instance_count: u32, first_instance: u32) void
-    /// This will be used by the instanced rendering system (see geometry_pass.zig TODO)
     pub fn draw(self: *const Mesh, gc: GraphicsContext, cmdbuf: vk.CommandBuffer) void {
         const offset = [_]vk.DeviceSize{0};
         if (self.vertex_buffer) |buf| {
@@ -182,6 +179,41 @@ pub const Mesh = struct {
             gc.vkd.cmdDrawIndexed(cmdbuf, @intCast(self.indices.items.len), 1, 0, 0, 0);
         } else {
             gc.vkd.cmdDraw(cmdbuf, @intCast(self.vertices.items.len), 1, 0, 0);
+        }
+    }
+
+    /// Draw this mesh with instancing (multiple instances in one draw call)
+    /// instance_count: Number of instances to draw
+    /// first_instance: Starting instance index (for gl_InstanceIndex offset)
+    pub fn drawInstanced(
+        self: *const Mesh,
+        gc: GraphicsContext,
+        cmdbuf: vk.CommandBuffer,
+        instance_count: u32,
+        first_instance: u32,
+    ) void {
+        const offset = [_]vk.DeviceSize{0};
+        if (self.vertex_buffer) |buf| {
+            gc.vkd.cmdBindVertexBuffers(cmdbuf, 0, 1, @as([*]const vk.Buffer, @ptrCast(&buf.buffer)), &offset);
+        }
+        if (self.index_buffer) |buf| {
+            gc.vkd.cmdBindIndexBuffer(cmdbuf, buf.buffer, 0, vk.IndexType.uint32);
+            gc.vkd.cmdDrawIndexed(
+                cmdbuf,
+                @intCast(self.indices.items.len),
+                instance_count,
+                0, // firstIndex
+                0, // vertexOffset
+                first_instance, // firstInstance
+            );
+        } else {
+            gc.vkd.cmdDraw(
+                cmdbuf,
+                @intCast(self.vertices.items.len),
+                instance_count,
+                0, // firstVertex
+                first_instance, // firstInstance
+            );
         }
     }
 
