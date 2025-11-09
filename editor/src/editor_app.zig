@@ -205,7 +205,7 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
+        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, self.engine.getBufferManager().?, "cornell_box");
 
         // Register scene pointer in World so systems can access it
         try new_ecs_world.setUserData("scene", @ptrCast(&scene));

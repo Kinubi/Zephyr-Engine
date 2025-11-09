@@ -244,6 +244,15 @@ pub const GeometryPass = struct {
             "GlobalUbo",
             self.global_ubo_set.frame_buffers,
         );
+
+        // Bind instance data SSBO from render system (generation tracked automatically)
+        // RenderSystem owns and manages this buffer (starts as dummy, gets replaced when instances exist)
+        // Buffer is guaranteed to exist after Scene.initRenderGraph()
+        try self.resource_binder.bindStorageBufferNamed(
+            self.geometry_pipeline,
+            "InstanceDataBuffer",
+            self.render_system.instance_buffer,
+        );
     }
 
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
@@ -281,43 +290,39 @@ pub const GeometryPass = struct {
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
         if (use_instancing) {
-            // NEW PATH: Instanced rendering - one draw call per unique mesh
-            // NOTE: Currently using legacy per-instance push constants
-            // TODO Phase 7: Update shaders to use SSBO with gl_InstanceIndex
-            log(.DEBUG, "geometry_pass", "Rendering {} instanced batches", .{raster_data.batches.len});
+            // TRUE INSTANCED RENDERING: Single draw call per unique mesh
+            // Instance data read from SSBO using gl_InstanceIndex + push constant offset
 
+            var instance_offset: u32 = 0;
             for (raster_data.batches) |batch| {
                 if (!batch.visible) continue;
 
                 const mesh = batch.mesh_handle.getMesh();
+                const instance_count: u32 = @intCast(batch.instances.len);
 
-                // TEMPORARY: Still using per-instance push constants until shaders are updated
-                // This works but defeats the purpose of instancing (still N command buffer writes)
-                // Phase 7 will add SSBO binding for instance data
-                for (batch.instances, 0..) |instance, idx| {
-                    const push_constants = GeometryPushConstants{
-                        .transform = instance.transform,
-                        .normal_matrix = instance.transform, // TODO: Compute proper normal matrix
-                        .material_index = instance.material_index,
-                    };
+                // Push instance offset so shader knows where to read in SSBO
+                const push_constants = GeometryPushConstants{
+                    .instance_offset = instance_offset,
+                };
+                self.graphics_context.vkd.cmdPushConstants(
+                    cmd,
+                    pipeline_layout,
+                    vk.ShaderStageFlags{ .vertex_bit = true, .fragment_bit = true },
+                    0,
+                    @sizeOf(GeometryPushConstants),
+                    @ptrCast(&push_constants),
+                );
 
-                    self.graphics_context.vkd.cmdPushConstants(
-                        cmd,
-                        pipeline_layout,
-                        .{ .vertex_bit = true, .fragment_bit = true },
-                        0,
-                        @sizeOf(GeometryPushConstants),
-                        &push_constants,
-                    );
+                // Draw all instances of this mesh in a single draw call
+                // Shader reads instance_data[gl_InstanceIndex + push_constants.instance_offset]
+                mesh.drawInstanced(
+                    self.graphics_context.*,
+                    cmd,
+                    instance_count, // Draw all instances at once
+                    0, // firstInstance = 0 (offset handled by push constant)
+                );
 
-                    // Draw single instance
-                    mesh.drawInstanced(
-                        self.graphics_context.*,
-                        cmd,
-                        1, // instance_count
-                        @intCast(idx), // first_instance (for gl_InstanceIndex)
-                    );
-                }
+                instance_offset += instance_count;
             }
         } else {
             // LEGACY PATH: Per-object drawing with push constants
@@ -354,6 +359,7 @@ pub const GeometryPass = struct {
         log(.INFO, "geometry_pass", "Tearing down", .{});
 
         // render_system is shared with scene, don't deinit here
+        // instance_buffer is owned by render_system, not freed here
 
         // Clean up resource binder
         self.resource_binder.deinit();
@@ -369,4 +375,5 @@ pub const GeometryPushConstants = extern struct {
     transform: [16]f32 = Math.Mat4x4.identity().data,
     normal_matrix: [16]f32 = Math.Mat4x4.identity().data,
     material_index: u32 = 0,
+    instance_offset: u32 = 0, // For instanced rendering: offset into instance buffer
 };

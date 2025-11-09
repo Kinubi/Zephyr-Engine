@@ -106,6 +106,7 @@ pub const Scene = struct {
         ecs_world: *World,
         asset_manager: *AssetManager,
         thread_pool: *ThreadPool,
+        buffer_manager: *BufferManager,
         name: []const u8,
     ) !Scene {
         log(.INFO, "scene", "Creating scene: {s}", .{name});
@@ -124,7 +125,7 @@ pub const Scene = struct {
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
-            .render_system = try ecs.RenderSystem.init(allocator, thread_pool),
+            .render_system = try ecs.RenderSystem.init(allocator, thread_pool, buffer_manager),
             .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
         };
         return scene;
@@ -1021,7 +1022,8 @@ test "Scene v2: init creates empty scene" {
         testing.allocator.destroy(tp_ptr);
     }
 
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, "test_scene");
+    var mock_buffer_manager: BufferManager = undefined;
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, &mock_buffer_manager, "test_scene");
     defer scene.deinit();
 
     try testing.expectEqual(@as(usize, 0), scene.entities.items.len);
@@ -1044,7 +1046,8 @@ test "Scene v2: spawnEmpty creates entity with Transform" {
         testing.allocator.destroy(tp_ptr);
     }
 
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, "test_scene");
+    var mock_buffer_manager: BufferManager = undefined;
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, &mock_buffer_manager, "test_scene");
     defer scene.deinit();
 
     const obj = try scene.spawnEmpty("empty_object");

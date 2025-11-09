@@ -159,13 +159,33 @@ pub fn captureSnapshot(
     }
     snapshot.entity_count = entity_index;
 
-    // TODO: Extract light data from PointLight components - MEDIUM PRIORITY
-    // PointLight component exists (engine/src/ecs/components/point_light.zig)
-    // Need to query entities with PointLight component and extract to snapshot
-    // Required: Iterate over entities with (Transform, PointLight), populate point_lights array
-    // Branch: features/light-snapshot-extraction
-    snapshot.point_lights = try allocator.alloc(GameStateSnapshot.PointLightData, 0);
-    snapshot.point_light_count = 0;
+    // Extract light data from PointLight components
+    const PointLight = ecs.PointLight;
+    const light_view = try world.view(PointLight);
+    const light_entities = light_view.storage.entities.items;
+
+    // Allocate array for light data (up to 16 lights)
+    const max_lights = 16;
+    const light_count = @min(light_entities.len, max_lights);
+    snapshot.point_lights = try allocator.alloc(GameStateSnapshot.PointLightData, light_count);
+
+    // Extract each light with Transform
+    var light_index: usize = 0;
+    for (light_entities) |entity| {
+        if (light_index >= max_lights) break;
+
+        const point_light = world.get(PointLight, entity) orelse continue;
+        const transform = world.get(Transform, entity) orelse continue;
+
+        snapshot.point_lights[light_index] = .{
+            .position = transform.position,
+            .color = point_light.color,
+            .intensity = point_light.intensity,
+            .radius = point_light.range,
+        };
+        light_index += 1;
+    }
+    snapshot.point_light_count = light_index;
 
     return snapshot;
 }

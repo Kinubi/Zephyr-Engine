@@ -234,14 +234,41 @@ pub const SceneLayer = struct {
         const self: *SceneLayer = @fieldParentPtr("base", base);
 
         // PHASE 2.1: RENDER THREAD - Vulkan descriptor updates (NO ECS queries!)
-        // Main thread already did:
-        // - transform_system.update() (in prepare)
-        // - scene.prepareFrame() (in prepare) - populated lights in prepared_ubo
-        //
-        // Here we do Vulkan descriptor updates
+        // Rebuild GlobalUbo from snapshot (thread-safe snapshot-based architecture)
 
-        // Use the UBO prepared on main thread (immutable snapshot for this frame).
-        // Avoid mutating prepared_ubo here to prevent data races with prepare() on main thread.
+        if (frame_info.snapshot) |snapshot| {
+            // Build GlobalUbo from snapshot data (camera, lights, dt)
+            self.prepared_ubo[frame_info.current_frame] = GlobalUbo{
+                .view = snapshot.camera_view_matrix,
+                .projection = snapshot.camera_projection_matrix,
+                .dt = snapshot.delta_time,
+                .ambient_color = Math.Vec4.init(1, 1, 1, 0.2),
+                .point_lights = undefined,
+                .num_point_lights = 0,
+            };
+
+            // Populate point lights from snapshot
+            const max_lights = 16;
+            const light_count = @min(snapshot.point_light_count, max_lights);
+            for (0..light_count) |i| {
+                const light = snapshot.point_lights[i];
+                self.prepared_ubo[frame_info.current_frame].point_lights[i] = .{
+                    .position = Math.Vec4.init(light.position.x, light.position.y, light.position.z, 1.0),
+                    .color = Math.Vec4.init(
+                        light.color.x * light.intensity,
+                        light.color.y * light.intensity,
+                        light.color.z * light.intensity,
+                        light.intensity,
+                    ),
+                };
+            }
+            self.prepared_ubo[frame_info.current_frame].num_point_lights = @intCast(light_count);
+
+            // Clear remaining light slots
+            for (light_count..max_lights) |i| {
+                self.prepared_ubo[frame_info.current_frame].point_lights[i] = .{};
+            }
+        }
 
         // Update Vulkan resources (descriptor updates)
         if (self.performance_monitor) |pm| {
@@ -252,7 +279,7 @@ pub const SceneLayer = struct {
             try pm.endPass("scene_update", frame_info.current_frame, null);
         }
 
-        // Update UBO set for this frame using prepared_ubo (with lights!)
+        // Update UBO set for this frame using prepared_ubo (with lights from snapshot!)
         if (self.performance_monitor) |pm| {
             try pm.beginPass("ubo_update", frame_info.current_frame, null);
         }

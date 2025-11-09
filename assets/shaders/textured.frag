@@ -55,6 +55,7 @@ layout(push_constant) uniform Push {
 
 void main() {
     // Get material for this object
+    // Use materialIndex from vertex shader (per-instance data from SSBO)
     Material mat = materials[materialIndex];
     
     // Sample albedo texture and apply tint

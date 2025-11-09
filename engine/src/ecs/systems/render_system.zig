@@ -18,6 +18,9 @@ const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
 const Scene = @import("../../scene/scene.zig").Scene;
 const ecs = @import("../world.zig");
+const BufferManager = @import("../../rendering/buffer_manager.zig").BufferManager;
+const BufferConfig = @import("../../rendering/buffer_manager.zig").BufferConfig;
+const ManagedBuffer = @import("../../rendering/buffer_manager.zig").ManagedBuffer;
 const components = @import("../../ecs.zig"); // Import to access MaterialSet component
 const GameStateSnapshot = @import("../../threading/game_state_snapshot.zig").GameStateSnapshot;
 
@@ -26,6 +29,7 @@ const GameStateSnapshot = @import("../../threading/game_state_snapshot.zig").Gam
 pub const RenderSystem = struct {
     allocator: std.mem.Allocator,
     thread_pool: ?*ThreadPool,
+    buffer_manager: ?*BufferManager, // For creating instance buffer
 
     // Change tracking (similar to SceneBridge)
     last_renderable_count: usize = 0,
@@ -56,7 +60,12 @@ pub const RenderSystem = struct {
     cached_raytracing_data: [2]?RaytracingData = .{ null, null },
     active_cache_index: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
-    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !RenderSystem {
+    // Instance data SSBO for instanced rendering
+    // RenderSystem owns and uploads this buffer (parallel to MaterialSystem owning material_buffer)
+    // Always valid - starts as dummy buffer, gets replaced with real data
+    instance_buffer: *ManagedBuffer,
+
+    pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool, buffer_manager: *BufferManager) !RenderSystem {
         // Register with thread pool if provided
         if (thread_pool) |tp| {
             try tp.registerSubsystem(.{
@@ -69,15 +78,45 @@ pub const RenderSystem = struct {
             log(.INFO, "render_system", "Registered render_extraction subsystem with thread pool", .{});
         }
 
+        // Create empty dummy instance buffer so descriptor binding is always valid
+        // BufferManager should always be provided
+        const bm = buffer_manager;
+
+        const dummy_instance = render_data_types.RasterizationData.InstanceData{
+            .transform = [_]f32{1} ** 16, // Identity matrix
+            .material_index = 0,
+        };
+
+        const dummy_buffer = try bm.createBuffer(
+            BufferConfig{
+                .name = "instance_data_buffer_dummy",
+                .size = @sizeOf(render_data_types.RasterizationData.InstanceData),
+                .strategy = .device_local,
+                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+            },
+            0, // frame_index
+        );
+
+        // Upload dummy data
+        const bytes: []const u8 = std.mem.asBytes(&dummy_instance);
+        try bm.updateBuffer(dummy_buffer, bytes, 0);
+
         return .{
             .allocator = allocator,
             .thread_pool = thread_pool,
+            .buffer_manager = buffer_manager,
             .extracted_renderables = std.ArrayList(RenderableEntity){},
+            .instance_buffer = dummy_buffer,
         };
     }
 
     pub fn deinit(self: *RenderSystem) void {
-        // Clean up extracted renderables
+        // Clean up instance buffer
+        if (self.buffer_manager) |bm| {
+            bm.destroyBuffer(self.instance_buffer) catch |err| {
+                log(.ERROR, "render_system", "Failed to destroy instance buffer: {}", .{err});
+            };
+        } // Clean up extracted renderables
         self.extracted_renderables.deinit(self.allocator);
 
         // Clean up both cache buffers
@@ -453,11 +492,69 @@ pub const RenderSystem = struct {
         const budget_ms: f64 = 2.0;
         if (total_time_ms > budget_ms) {
             log(.WARN, "render_system", "Frame budget exceeded in snapshot rebuild! Total: {d:.2}ms (cache: {d:.2}ms) Budget: {d:.2}ms", .{ total_time_ms, cache_build_time_ms, budget_ms });
-        } else {
-            log(.DEBUG, "render_system", "Snapshot rebuild complete: {d:.2}ms (cache: {d:.2}ms)", .{ total_time_ms, cache_build_time_ms });
         }
 
         self.renderables_dirty = false;
+
+        // Upload instance data to GPU if we have batches
+        try self.uploadInstanceDataToGPU();
+    }
+
+    /// Upload instance data from batches to GPU buffer
+    /// Called after cache rebuild when batches are updated
+    fn uploadInstanceDataToGPU(self: *RenderSystem) !void {
+        const buffer_manager = self.buffer_manager orelse return;
+
+        // Get active cache with batches
+        const active_idx = self.active_cache_index.load(.acquire);
+        const raster_data = self.cached_raster_data[active_idx] orelse return;
+
+        if (raster_data.batches.len == 0) return;
+
+        // Count total instances across all batches
+        var total_instances: usize = 0;
+        for (raster_data.batches) |batch| {
+            total_instances += batch.instances.len;
+        }
+
+        if (total_instances == 0) return;
+
+        // Calculate buffer size
+        const buffer_size = total_instances * @sizeOf(render_data_types.RasterizationData.InstanceData);
+
+        // Create or resize buffer if needed (dummy buffer has size of 1 instance)
+        const needs_realloc = self.instance_buffer.size < buffer_size;
+
+        if (needs_realloc) {
+            // Destroy old buffer
+            try buffer_manager.destroyBuffer(self.instance_buffer);
+
+            // Create new buffer
+            self.instance_buffer = try buffer_manager.createBuffer(
+                BufferConfig{
+                    .name = "instance_data_buffer",
+                    .size = buffer_size,
+                    .strategy = .device_local,
+                    .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                },
+                0, // frame_index
+            );
+
+            log(.INFO, "render_system", "Created instance buffer for {} instances ({} bytes)", .{ total_instances, buffer_size });
+        }
+
+        // Upload instance data from all batches
+        var upload_buffer = std.ArrayList(u8){};
+        defer upload_buffer.deinit(self.allocator);
+
+        try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+
+        for (raster_data.batches) |batch| {
+            const batch_bytes = std.mem.sliceAsBytes(batch.instances);
+            try upload_buffer.appendSlice(self.allocator, batch_bytes);
+        }
+
+        try buffer_manager.updateBuffer(self.instance_buffer, upload_buffer.items, 0);
     }
 
     /// Build caches from snapshot entities (single-threaded)
@@ -626,12 +723,6 @@ pub const RenderSystem = struct {
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
 
-        log(.INFO, "render_system", "Built {} instanced batches from {} objects (cache_gen={})", .{
-            batches.len,
-            raster_objects.len,
-            self.cache_generation,
-        });
-
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
@@ -750,12 +841,6 @@ pub const RenderSystem = struct {
 
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
-
-        log(.INFO, "render_system", "Built {} instanced batches from {} objects (parallel, cache_gen={})", .{
-            batches.len,
-            raster_objects.len,
-            self.cache_generation,
-        });
 
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
@@ -1126,12 +1211,6 @@ pub const RenderSystem = struct {
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
 
-        log(.INFO, "render_system", "Built {} instanced batches from {} objects (cache_gen={})", .{
-            batches.len,
-            raster_objects.len,
-            self.cache_generation,
-        });
-
         // Store caches in WRITE buffer
         self.cached_raster_data[write_idx] = RasterizationData{
             .objects = raster_objects,
@@ -1309,12 +1388,6 @@ pub const RenderSystem = struct {
 
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
-
-        log(.INFO, "render_system", "Built {} instanced batches from {} objects (cache_gen={}, parallel)", .{
-            batches.len,
-            raster_objects.len,
-            self.cache_generation,
-        });
 
         // Store caches in WRITE buffer
         self.cached_raster_data[write_idx] = RasterizationData{
@@ -1543,13 +1616,6 @@ pub fn update(world: *World, dt: f32) !void {
             self.raster_descriptors_dirty = true;
             self.raytracing_descriptors_dirty = true;
         }
-        // NOTE: Cache building happens on render thread via rebuildCachesFromSnapshot()
-        // We just set dirty flags here to signal that snapshot data has changed
-        log(.DEBUG, "render_system", "Changes detected ({s}): renderables={}, geometries={}", .{
-            reason,
-            current_renderable_count,
-            current_geometry_count,
-        });
     } else {
         // No changes - clear the transform_only flag
         self.transform_only_change = false;
@@ -1647,7 +1713,7 @@ test "RenderSystem: extract primary camera" {
     // Create camera entity
     const entity = try world.createEntity();
 
-    var camera = Camera.initPerspective(60.0, 16.0 / 9.0, 0.1, 100.0);
+    var camera = Camera.initPerspective(90.0, 16.0 / 9.0, 0.1, 100.0);
     camera.setPrimary(true);
     try world.emplace(Camera, entity, camera);
 

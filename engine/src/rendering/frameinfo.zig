@@ -25,7 +25,7 @@ pub const GlobalUbo = struct {
 pub const FrameInfo = struct {
     command_buffer: vk.CommandBuffer = undefined,
     compute_buffer: vk.CommandBuffer = undefined,
-    camera: *Camera = undefined,
+    // DEPRECATED: Use snapshot.delta_time instead (kept for backward compatibility during migration)
     dt: f32 = 0,
     current_frame: u32 = 0,
     extent: vk.Extent2D = .{ .width = 1280, .height = 720 },

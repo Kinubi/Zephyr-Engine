@@ -147,7 +147,8 @@ pub const UILayer = struct {
         if (!self.show_ui) return;
 
         // Update FPS estimate from dt (smoothed)
-        self.current_fps = if (frame_info.dt > 0.0) 1.0 / frame_info.dt else 0.0;
+        const dt = if (frame_info.snapshot) |s| s.delta_time else frame_info.dt;
+        self.current_fps = if (dt > 0.0) 1.0 / dt else 0.0;
     }
 
     /// MAIN THREAD: Record all ImGui CPU commands (build draw lists)

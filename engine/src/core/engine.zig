@@ -259,8 +259,7 @@ pub const Engine = struct {
             .current_frame = 0,
             .command_buffer = undefined, // Will be set in beginFrame
             .compute_buffer = undefined, // Will be set in beginFrame
-            .camera = undefined,
-            .dt = 0.0,
+            .dt = 0.0, // DEPRECATED: Will be set from snapshot
             .performance_monitor = engine.performance_monitor,
         };
         engine.last_frame_time = c.glfwGetTime();
