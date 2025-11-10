@@ -782,6 +782,16 @@ pub const RaytracingSystem = struct {
             return false;
         }
 
+        // Check if all frames have bound the current TLAS (mask == 0)
+        // If so, it's safe to flush deferred destruction queues
+        if (self.getSet("default")) |default_set| {
+            const mask = default_set.tlas.pending_bind_mask.load(.acquire);
+            if (mask == 0 and default_set.tlas.generation.load(.acquire) > 0) {
+                // All frames have bound the new TLAS, safe to destroy old resources
+                self.flushAllPendingDestruction();
+            }
+        }
+
         return false; // No rebuild needed or already in progress
     }
 

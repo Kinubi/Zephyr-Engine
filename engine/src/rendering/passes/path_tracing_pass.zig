@@ -505,8 +505,6 @@ pub const PathTracingPass = struct {
         const self: *PathTracingPass = @fieldParentPtr("base", base);
         const frame_index = frame_info.current_frame;
 
-        self.rt_system.flushDeferredFrame(frame_index);
-
         const geometry_changed = self.render_system.raytracing_descriptors_dirty;
 
         _ = try self.rt_system.update(self.render_system, frame_info, geometry_changed);
