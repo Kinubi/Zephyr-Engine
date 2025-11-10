@@ -2,6 +2,8 @@
 
 A modern, high-performance game engine built in Zig with Vulkan, featuring an Entity Component System (ECS), path tracing, and advanced asset management.
 
+> **Note**: This project is largely AI-coded with human guidance, architectural decisions, and code review. It serves as an exploration of AI-assisted game engine development.
+
 ## 🏗️ Architecture
 
 Zephyr-Engine is structured as a **modular engine library** with a separate editor application:

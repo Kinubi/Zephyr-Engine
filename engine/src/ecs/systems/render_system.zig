@@ -1436,7 +1436,7 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
         if (is_first_frame) {
             log(.INFO, "render_system", "First frame detected - forcing cache rebuild ({} entities)", .{snapshot.entity_count});
         }
-        
+
         try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
 
         // Update transform_only_change flag from snapshot for raytracing system to read
