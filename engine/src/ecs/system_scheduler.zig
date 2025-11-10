@@ -149,9 +149,10 @@ pub const SystemStage = struct {
         self.completion.store(update_count, .release);
 
         // Build a stage-scoped immutable context and dispatch one job per system
+        const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
         var stage_ctx = StageContext{
             .world = world,
-            .dt = frame_info.dt,
+            .dt = dt,
             .frame_info = frame_info,
             .systems = self.systems.items,
             .completion = &self.completion,
@@ -179,12 +180,6 @@ pub const SystemStage = struct {
 
         // Wait for completion
         self.done_sem.wait();
-    }
-
-    /// Execute all systems in this stage in parallel (legacy - calls prepare_fn)
-    pub fn execute(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
-        // For backward compatibility, execute prepare phase
-        try self.executePrepare(world, dt, thread_pool, work_id_counter);
     }
 };
 

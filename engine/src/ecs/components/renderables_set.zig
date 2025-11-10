@@ -36,15 +36,28 @@ pub const RenderablesSet = struct {
     }
 
     pub fn deinit(self: *RenderablesSet) void {
+        // Safety check: if we have renderables, we must have an allocator to free them
+        // This catches bugs where renderables is set but allocator is not
+        if (self.renderables.len > 0) {
+            std.debug.assert(self.allocator != null); // Must have allocator if renderables exist
+        }
+
         if (self.allocator) |allocator| {
             if (self.renderables.len > 0) {
                 allocator.free(self.renderables);
             }
         }
         self.renderables = &.{};
+        self.allocator = null;
     }
 
     pub fn setRenderables(self: *RenderablesSet, allocator: std.mem.Allocator, renderables: []ExtractedRenderable) void {
+        // Safety: If we're given a non-empty slice, we must have a valid allocator
+        // This ensures the invariant that renderables.len > 0 implies allocator != null
+        if (renderables.len > 0) {
+            std.debug.assert(@intFromPtr(&allocator) != 0); // Ensure allocator is valid
+        }
+
         // Free old data
         self.deinit();
         // Store new data

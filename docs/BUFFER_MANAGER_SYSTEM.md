@@ -1,11 +1,12 @@
 # Buffer Manager System — Unified Buffer Lifecycle Management
 
-**Status**: ✅ **IMPLEMENTED & INTEGRATED** (Phase 1 Complete)  
-**Branch**: `feature/buffer-manager`  
-**Priority**: HIGH  
-**Complexity**: HIGH (Multi-week refactor)
+**Status**: ✅ **COMPLETE & IN PRODUCTION**  
+**Last Updated**: November 10, 2025  
+**Branch**: feature/instanced-rendering (merged to master)  
+**Priority**: ~~HIGH~~ COMPLETE  
+**Complexity**: ~~HIGH~~ (Multi-week refactor) COMPLETE
 
-> **🎉 UPDATE (November 2025)**: BufferManager has been successfully implemented and integrated into the Engine core! All rendering systems (ShaderManager, UnifiedPipelineSystem, ResourceBinder, AssetManager) and ECS are now engine-managed, greatly simplifying application code and fixing architectural dependencies.
+> **🎉 UPDATE (November 2025)**: BufferManager has been successfully implemented, integrated, and is now in production use! All rendering systems (MaterialSystem, GeometryPass, LightVolumePass) use BufferManager for GPU buffer lifecycle. Instanced rendering is fully operational with device-local SSBO caching, generation tracking, and automatic ring-buffer cleanup.
 
 ---
 
@@ -24,20 +25,20 @@ This document describes a comprehensive refactor to create a unified **BufferMan
 
 ## Architecture
 
-### Current State (Problems)
+### Previous State (Before BufferManager)
 
 ```
-Problems:
-├─ Buffer creation scattered across passes and managers
-├─ Manual staging buffer management (error-prone)
-├─ AssetManager owns GPU buffers (wrong layer)
-├─ No unified cleanup strategy (potential leaks)
-├─ Numeric binding indices (fragile, hard to read)
-├─ Duplicate staging upload code in multiple places
-└─ No strategy for different buffer types (UBO vs SSBO)
+Problems (SOLVED):
+├─ Buffer creation scattered across passes and managers ✅ FIXED
+├─ Manual staging buffer management (error-prone) ✅ FIXED
+├─ AssetManager owns GPU buffers (wrong layer) ✅ FIXED
+├─ No unified cleanup strategy (potential leaks) ✅ FIXED
+├─ Numeric binding indices (fragile, hard to read) ✅ FIXED
+├─ Duplicate staging upload code in multiple places ✅ FIXED
+└─ No strategy for different buffer types (UBO vs SSBO) ✅ FIXED
 ```
 
-### Proposed Architecture
+### Current Architecture (Implemented & Production)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -51,6 +52,7 @@ Problems:
 │  RenderSystem (Cache Builder)                                │
 │  ├─ Build CPU cache: InstancedBatch[] with InstanceData[]   │
 │  ├─ NO GPU resources, NO Vulkan calls                       │
+│  ├─ Snapshot-based change detection (mesh ptr, count, etc)  │
 │  └─ Publish cache to render thread atomically               │
 └─────────────────────────────────────────────────────────────┘
                             │
@@ -58,33 +60,32 @@ Problems:
 ┌─────────────────────────────────────────────────────────────┐
 │                   Render Thread Layer                        │
 ├─────────────────────────────────────────────────────────────┤
-│  BufferManager (NEW - Core Infrastructure)                   │
+│  BufferManager ✅ IMPLEMENTED                                │
 │  ├─ Create buffers (UBO, SSBO, staging)                     │
 │  ├─ Upload strategies: device-local, host-visible           │
 │  ├─ Ring-buffer cleanup (frame safety)                      │
 │  ├─ Integrates with ResourceBinder                          │
 │  └─ Named buffer registration                               │
 │                                                              │
-│  ResourceBinder (ENHANCED)                                   │
+│  ResourceBinder ✅ ENHANCED                                  │
 │  ├─ Named binding API: bindBuffer("MaterialBuffer", ...)    │
 │  ├─ Binding registry from shader reflection                 │
-│  ├─ Descriptor set management                               │
+│  ├─ Descriptor set management with generation tracking      │
 │  └─ Validation and error reporting                          │
 │                                                              │
-│  MaterialSystem (NEW - Domain Manager)                       │
+│  MaterialSystem ✅ IMPLEMENTED                               │
 │  ├─ Use BufferManager to create material SSBO               │
 │  ├─ Listen to AssetManager changes                          │
 │  ├─ Rebuild buffer on hot-reload                            │
+│  ├─ Atomic generation tracking for descriptor updates       │
 │  └─ Bind via ResourceBinder: "MaterialBuffer"               │
 │                                                              │
-│  InstanceBufferCache (NEW - Domain Manager)                  │
-│  ├─ Use BufferManager for per-batch instance SSBOs          │
-│  ├─ Cache by (mesh_ptr, generation)                         │
-│  ├─ Ring cleanup via BufferManager                          │
-│  └─ Bind via ResourceBinder: "InstanceData"                 │
-│                                                              │
-│  GeometryPass (SIMPLIFIED - Pure Rendering)                  │
-│  └─> Just issues draw calls, no resource management         │
+│  GeometryPass ✅ INSTANCED RENDERING                         │
+│  ├─ Per-batch instance SSBO caching (mesh_ptr, generation)  │
+│  ├─ Device-local buffer creation via staging                │
+│  ├─ Ring cleanup via per_frame_buffers[MAX_FRAMES]          │
+│  ├─ Bind via ResourceBinder: "InstanceData"                 │
+│  └─ drawInstanced() for N instances per unique mesh         │
 └─────────────────────────────────────────────────────────────┘
 ```
 

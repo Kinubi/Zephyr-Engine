@@ -220,7 +220,7 @@ pub const ParticleComputePass = struct {
         const particles_per_emitter = self.max_particles / self.max_emitters;
         const active_particle_slots = particles_per_emitter * self.particle_system.emitter_count;
 
-        const delta_time = if (frame_info.snapshot) |s| s.delta_time else frame_info.dt;
+        const delta_time = if (frame_info.snapshot) |s| s.delta_time else 0.0;
 
         const compute_ubo = ComputeUniformBuffer{
             .delta_time = delta_time,

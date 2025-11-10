@@ -449,7 +449,7 @@ pub const App = struct {
         if (self.engine.isRenderThreadEnabled()) {
             // RENDER THREAD MODE (Phase 2.1): Main thread handles game logic, render thread handles GPU
 
-            const dt = self.engine.frame_info.dt;
+            const dt = if (self.engine.frame_info.snapshot) |s| s.delta_time else 0.0;
 
             // MAIN THREAD: Prepare all layers (game logic, ECS queries, NO Vulkan)
             // This calls layer.prepare() which calls scene.prepareFrame()

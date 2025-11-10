@@ -588,7 +588,13 @@ pub const RenderSystem = struct {
             if (!result.found_existing) {
                 result.value_ptr.* = std.ArrayList(usize){};
             }
-            try result.value_ptr.append(self.allocator, object_idx);
+            result.value_ptr.append(self.allocator, object_idx) catch |err| {
+                // If append fails on a newly created list, remove the HashMap entry to prevent leak
+                if (!result.found_existing) {
+                    _ = self.mesh_to_instances.remove(mesh_key);
+                }
+                return err;
+            };
         }
 
         /// Build final InstancedBatch array from collected data
@@ -1419,8 +1425,18 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
     // Snapshot may be null if render thread is not enabled
     const snapshot = frame_info.snapshot orelse return;
 
+    // First frame detection: If caches are empty and snapshot has entities, force rebuild
+    // This handles the case where the render thread runs before the first prepare() call
+    const active_idx = self.active_cache_index.load(.acquire);
+    const is_first_frame = self.cached_raster_data[active_idx] == null and snapshot.entity_count > 0;
+
     // Read change flags from snapshot (set by prepare phase)
-    if (snapshot.render_changes.renderables_dirty) {
+    // Force rebuild on first frame even if renderables_dirty is false
+    if (snapshot.render_changes.renderables_dirty or is_first_frame) {
+        if (is_first_frame) {
+            log(.INFO, "render_system", "First frame detected - forcing cache rebuild ({} entities)", .{snapshot.entity_count});
+        }
+        
         try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
 
         // Update transform_only_change flag from snapshot for raytracing system to read

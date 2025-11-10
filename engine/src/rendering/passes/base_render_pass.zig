@@ -406,6 +406,9 @@ pub const BaseRenderPass = struct {
         }
     }
 
+    /// Manual cleanup method - only call if NOT using RenderGraph
+    /// If this pass is registered with RenderGraph, teardownImpl will be called automatically
+    /// DO NOT call both destroy() and let RenderGraph call teardown - this will cause double-free
     pub fn destroy(self: *BaseRenderPass) void {
         self.cleanupResources();
         self.allocator.destroy(self);
@@ -559,6 +562,9 @@ pub const BaseRenderPass = struct {
         rendering.end(self.graphics_context, frame_info.command_buffer);
     }
 
+    /// Called by RenderGraph during pass lifecycle cleanup
+    /// WARNING: This destroys the pass struct - do not call destroy() if RenderGraph will call this
+    /// The RenderGraph owns the pass lifecycle when registered, so this is the only cleanup needed
     fn teardownImpl(base: *RenderPass) void {
         const self: *BaseRenderPass = @fieldParentPtr("base", base);
         log(.INFO, "base_render_pass", "Tearing down: {s}", .{self.name});

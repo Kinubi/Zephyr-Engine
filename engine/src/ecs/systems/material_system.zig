@@ -292,8 +292,6 @@ pub const MaterialSystem = struct {
 
         // Build materials for entities in this set
         for (entities) |entity| {
-            const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
-
             // Get optional material property components
             const albedo = world.get(ecs.AlbedoMaterial, entity);
             const roughness = world.get(ecs.RoughnessMaterial, entity);
@@ -362,6 +360,9 @@ pub const MaterialSystem = struct {
             }
 
             // CRITICAL: Write material_buffer_index to component (snapshot will capture this)
+            // Get fresh pointer right before writing to avoid stale pointer issues
+            // if ECS storage was reallocated during the loop
+            const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
             material_set.material_buffer_index = @intCast(gpu_materials.items.len);
 
             try gpu_materials.append(self.allocator, gpu_mat);

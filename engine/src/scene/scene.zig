@@ -958,7 +958,7 @@ pub const Scene = struct {
 
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
     /// Call this on the MAIN THREAD before capturing snapshot
-    pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+    pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo) !void {
         // Apply any pending path tracing toggles FIRST (CPU-side state change)
         // This prepares the render graph state for frame N+1 while render thread renders frame N
 
@@ -970,7 +970,6 @@ pub const Scene = struct {
             const prep_frame_info = FrameInfo{
                 .command_buffer = vk.CommandBuffer.null_handle,
                 .current_frame = 0,
-                .dt = dt,
                 .extent = undefined,
                 .color_image = undefined,
                 .color_image_view = undefined,

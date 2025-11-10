@@ -29,7 +29,6 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
 struct InstanceData {
     mat4 transform;          // 16 floats
     uint materialIndex;      // 1 uint
-    uint padding[3];         // 3 uints padding (total 20 elements = 80 bytes, aligned)
 };
 
 layout(set = 1, binding = 2) readonly buffer InstanceDataBuffer {
@@ -55,7 +54,7 @@ void main() {
 
     v_color = color;
     v_uv = uv;
-    v_normal = normalize(mat3(instance.transform) * normal);
+    v_normal = normalize(transpose(inverse(mat3(instance.transform))) * normal);
     v_pos = positionWorld.xyz;
     v_material_index = instance.materialIndex;
 }

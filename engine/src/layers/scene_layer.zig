@@ -201,7 +201,6 @@ pub const SceneLayer = struct {
         self.prepared_ubo[prep_idx] = GlobalUbo{
             .view = self.camera.viewMatrix,
             .projection = self.camera.projectionMatrix,
-            .dt = dt,
         };
 
         // Store GlobalUbo pointer in World so systems can access it
@@ -221,7 +220,7 @@ pub const SceneLayer = struct {
         // Prepare scene (ECS queries, particle spawning, light updates - no Vulkan)
         // NOTE: Light extraction now happens in animateLightsSystem
         // NOTE: Particle GPU updates now happen in updateParticleEmittersSystem
-        try self.scene.prepareFrame(&self.prepared_ubo[prep_idx], dt);
+        try self.scene.prepareFrame(&self.prepared_ubo[prep_idx]);
 
         // Advance prepare frame index for next main-thread prepare()
         self.prepare_frame_index = (prep_idx + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -243,7 +242,6 @@ pub const SceneLayer = struct {
             self.prepared_ubo[frame_info.current_frame] = GlobalUbo{
                 .view = snapshot.camera_view_matrix,
                 .projection = snapshot.camera_projection_matrix,
-                .dt = snapshot.delta_time,
                 .ambient_color = Math.Vec4.init(1, 1, 1, 0.2),
                 .point_lights = undefined,
                 .num_point_lights = 0,

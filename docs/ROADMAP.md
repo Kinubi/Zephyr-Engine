@@ -1,9 +1,9 @@
 # Zephyr-Engine Development Roadmap
 
-**Last Updated**: October 30, 2025  
-**Branch**: features/ui-stuff
+**Last Updated**: November 10, 2025  
+**Branch**: feature/instanced-rendering
 
-## Current Status: Phase 3 - Engine/Editor Architecture
+## Current Status: Phase 5 - Editor Features & Rendering Optimizations
 
 ### ✅ Phase 1: Core Foundation (COMPLETE)
 
@@ -56,11 +56,19 @@
 - ✅ Toggle with 'T' key
 
 #### Render Passes
-- ✅ GeometryPass (rasterization)
+- ✅ GeometryPass (rasterization with instanced rendering)
 - ✅ LightVolumePass (instanced rendering, 128 lights, 1 draw call)
 - ✅ PathTracingPass (ray tracing)
 - ✅ ParticlePass (rendering)
 - ✅ ParticleComputePass (GPU simulation)
+
+#### Instanced Rendering
+- ✅ Instance batching by mesh (N objects → M batches)
+- ✅ Per-instance SSBO with transform + material index
+- ✅ Device-local buffer caching with ring-buffer cleanup
+- ✅ Automatic cache invalidation on scene changes
+- ✅ Mesh.drawInstanced API
+- ✅ Integration with GeometryPass
 
 #### Camera System
 - ✅ Keyboard movement controller (WASD)
@@ -125,6 +133,12 @@
 **Status**: 🟢 **Complete** - October 29, 2025
 
 #### Render Pass Optimizations
+- ✅ **GeometryPass**: Instanced rendering (N draw calls → M batches, where M = unique meshes)
+  - SSBO-based instance data (transform + material index)
+  - Device-local buffer caching with generation tracking
+  - Automatic cache invalidation and rebuild
+  - Ring-buffer cleanup for in-flight resources
+  
 - ✅ **LightVolumePass**: Instanced rendering (N draw calls → 1 draw call)
   - SSBO-based light data (128 light capacity)
   - Billboard rendering with gl_InstanceIndex
@@ -266,6 +280,15 @@
 ---
 
 ## Recent Milestones
+
+### November 10, 2025
+- ✅ **Instanced Rendering Complete**
+  - Per-mesh instance batching in RenderSystem
+  - Device-local SSBO caching with generation tracking
+  - Ring-buffer cleanup for MAX_FRAMES_IN_FLIGHT safety
+  - GeometryPass using drawInstanced for all objects
+  - Achieved: N individual draws → M batches (M = unique mesh count)
+  - Documentation: INSTANCED_RENDERING.md
 
 ### October 30, 2025
 - ✅ **Viewport Picking Revamp**

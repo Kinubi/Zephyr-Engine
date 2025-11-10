@@ -293,12 +293,24 @@ pub const GeometryPass = struct {
             // TRUE INSTANCED RENDERING: Single draw call per unique mesh
             // Instance data read from SSBO using gl_InstanceIndex + push constant offset
 
+            // Calculate total instances for bounds validation
+            var total_instance_count: u32 = 0;
+            for (raster_data.batches) |batch| {
+                if (batch.visible) {
+                    total_instance_count += @as(u32, @intCast(batch.instances.len));
+                }
+            }
+
             var instance_offset: u32 = 0;
             for (raster_data.batches) |batch| {
                 if (!batch.visible) continue;
 
                 const mesh = batch.mesh_handle.getMesh();
                 const instance_count: u32 = @intCast(batch.instances.len);
+
+                // Bounds validation: Ensure we don't read past the end of the instance buffer
+                // This catches bugs where instance_offset or instance_count is incorrect
+                std.debug.assert(instance_offset + instance_count <= total_instance_count);
 
                 // Push instance offset so shader knows where to read in SSBO
                 const push_constants = GeometryPushConstants{
@@ -324,6 +336,9 @@ pub const GeometryPass = struct {
 
                 instance_offset += instance_count;
             }
+
+            // Final validation: instance_offset should equal total_instance_count
+            std.debug.assert(instance_offset == total_instance_count);
         } else {
             // LEGACY PATH: Per-object drawing with push constants
             log(.DEBUG, "geometry_pass", "Rendering {} objects (non-instanced)", .{raster_data.objects.len});

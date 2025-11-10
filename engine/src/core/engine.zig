@@ -259,7 +259,6 @@ pub const Engine = struct {
             .current_frame = 0,
             .command_buffer = undefined, // Will be set in beginFrame
             .compute_buffer = undefined, // Will be set in beginFrame
-            .dt = 0.0, // DEPRECATED: Will be set from snapshot
             .performance_monitor = engine.performance_monitor,
         };
         engine.last_frame_time = c.glfwGetTime();
@@ -410,10 +409,9 @@ pub const Engine = struct {
         // 2. Process queued events through layers
         self.event_bus.processEvents(&self.layer_stack);
 
-        // 3. Calculate delta time
+        // 3. Calculate delta time (used by mainThreadUpdate when capturing snapshot)
         const current_time = c.glfwGetTime();
-        const dt = current_time - self.last_frame_time;
-        self.frame_info.dt = @floatCast(dt);
+        _ = current_time - self.last_frame_time; // dt calculated but not stored in frame_info
         self.last_frame_time = current_time;
 
         // 4. Set up command buffers for this frame
@@ -545,11 +543,15 @@ pub const Engine = struct {
         }
 
         if (self.render_thread_context) |*ctx| {
+            // Calculate delta time for this frame
+            const current_time = c.glfwGetTime();
+            const dt: f32 = @floatCast(current_time - self.last_frame_time);
+
             try mainThreadUpdate(
                 ctx,
                 world,
                 camera,
-                self.frame_info.dt,
+                dt,
                 imgui_draw_data,
             );
         } else {

@@ -147,7 +147,7 @@ pub const UILayer = struct {
         if (!self.show_ui) return;
 
         // Update FPS estimate from dt (smoothed)
-        const dt = if (frame_info.snapshot) |s| s.delta_time else frame_info.dt;
+        const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
         self.current_fps = if (dt > 0.0) 1.0 / dt else 0.0;
     }
 

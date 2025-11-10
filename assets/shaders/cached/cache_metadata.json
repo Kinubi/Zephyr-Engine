@@ -63,9 +63,9 @@
     },
     "assets/shaders/textured.vert": {
       "cached_spirv_path": "assets/shaders/cached/textured.vert.spv",
-      "file_hash": "10806055325794807204",
+      "file_hash": "3680755129384432237",
       "options_hash": "13509613240315378116",
-      "compile_time": 1762666630
+      "compile_time": 1762753246
     },
     "assets/shaders/RayTracingTriangle.rmiss.hlsl": {
       "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rmiss.hlsl.spv",

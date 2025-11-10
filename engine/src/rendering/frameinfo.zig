@@ -19,14 +19,11 @@ pub const GlobalUbo = struct {
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
     point_lights: [MAX_LIGHTS]PointLight = [_]PointLight{.{}} ** MAX_LIGHTS,
     num_point_lights: u32 = 0,
-    dt: f32 = 0,
 };
 
 pub const FrameInfo = struct {
     command_buffer: vk.CommandBuffer = undefined,
     compute_buffer: vk.CommandBuffer = undefined,
-    // DEPRECATED: Use snapshot.delta_time instead (kept for backward compatibility during migration)
-    dt: f32 = 0,
     current_frame: u32 = 0,
     extent: vk.Extent2D = .{ .width = 1280, .height = 720 },
     global_descriptor_set: vk.DescriptorSet = undefined,
