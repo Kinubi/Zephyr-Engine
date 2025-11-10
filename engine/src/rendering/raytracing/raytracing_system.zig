@@ -347,14 +347,6 @@ pub const RaytracingSystem = struct {
         log(.DEBUG, "RaytracingSystem", "Added geometry to set '{s}' (vertices: {}, indices: {})", .{ set_name, vertex_count, index_count });
     }
 
-    /// Mark a set as dirty (needs rebuild)
-    pub fn markSetDirty(self: *RaytracingSystem, set_name: []const u8) void {
-        if (self.getSet(set_name)) |set| {
-            set.dirty = true;
-            log(.DEBUG, "RaytracingSystem", "Marked set '{s}' as dirty", .{set_name});
-        }
-    }
-
     /// Rebuild an acceleration structure set (builds TLAS from BLAS handles)
     pub fn rebuildSet(self: *RaytracingSystem, set_name: []const u8) !void {
         const set = self.getSet(set_name) orelse {
