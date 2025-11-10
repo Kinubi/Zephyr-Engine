@@ -8,6 +8,14 @@ const AssetId = @import("../assets/asset_types.zig").AssetId;
 
 const Allocator = std.mem.Allocator;
 
+/// Change detection metadata from prepare phase
+pub const RenderChangeFlags = struct {
+    renderables_dirty: bool = false, // If true, caches need rebuild
+    transform_only_change: bool = false, // If true, only TLAS needs update
+    raster_descriptors_dirty: bool = false, // If true, descriptor sets need update
+    raytracing_descriptors_dirty: bool = false, // If true, RT descriptor sets need update
+};
+
 /// Flat, cache-friendly snapshot of game state for rendering.
 /// Passed from main thread to render thread via double-buffering.
 pub const GameStateSnapshot = struct {
@@ -33,6 +41,9 @@ pub const GameStateSnapshot = struct {
 
     // ImGui draw data (cloned from main thread for render thread)
     imgui_draw_data: ?*anyopaque, // Pointer to cloned ImDrawData
+
+    // Change detection metadata (from RenderSystem.prepare)
+    render_changes: RenderChangeFlags,
 
     // Particle system data (if needed)
     // particles: []ParticleData,
@@ -69,6 +80,7 @@ pub const GameStateSnapshot = struct {
             .point_lights = &.{},
             .point_light_count = 0,
             .imgui_draw_data = null,
+            .render_changes = .{},
         };
     }
 
@@ -95,11 +107,22 @@ pub fn captureSnapshot(
     delta_time: f32,
     imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
 ) !GameStateSnapshot {
+    // Read render change flags from RenderablesSet component
+    const render_changes = blk: {
+        if (world.getSingletonEntity()) |singleton_entity| {
+            if (world.get(ecs.RenderablesSet, singleton_entity)) |renderables_set| {
+                break :blk renderables_set.changes;
+            }
+        }
+        break :blk RenderChangeFlags{};
+    };
+
     var snapshot = GameStateSnapshot{
         .allocator = allocator,
         .frame_index = frame_index,
         .delta_time = delta_time,
         .imgui_draw_data = imgui_draw_data,
+        .render_changes = render_changes,
         .camera_position = undefined,
         .camera_view_matrix = undefined,
         .camera_projection_matrix = undefined,
@@ -121,51 +144,55 @@ pub fn captureSnapshot(
     snapshot.camera_projection_matrix = camera.projectionMatrix;
     snapshot.camera_view_projection_matrix = snapshot.camera_projection_matrix.mul(snapshot.camera_view_matrix);
 
-    // Query for entities with MeshRenderer (they may or may not have Transform)
-    const mesh_view = try world.view(MeshRenderer);
-    const renderable_entities = mesh_view.storage.entities.items;
+    // Read extracted renderables from RenderablesSet component (NO ECS QUERIES!)
+    // RenderSystem.prepare() already did all the ECS extraction work
+    const singleton_entity = try world.getOrCreateSingletonEntity();
+    const renderables_set = world.get(ecs.RenderablesSet, singleton_entity);
+    const extracted_renderables = if (renderables_set) |rs| rs.renderables else &[_]ecs.ExtractedRenderable{};
 
-    // Allocate array for entity data
-    snapshot.entities = try allocator.alloc(GameStateSnapshot.EntityRenderData, renderable_entities.len);
-
-    // Extract entity data
-    var entity_index: usize = 0;
-    for (renderable_entities) |entity| {
-        const renderer = world.get(MeshRenderer, entity) orelse continue;
-
-        // Skip disabled renderers or those without a model
-        if (!renderer.enabled or renderer.model_asset == null) continue;
-
-        // Get transform (default to identity if missing)
-        const transform = world.get(Transform, entity);
-        const world_matrix = if (transform) |t| t.world_matrix else Math.Mat4x4.identity();
-
-        // Get material buffer index from MaterialSet component
-        const material_set = world.get(ecs.MaterialSet, entity);
-        const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
-
-        // Store entity render data
-        snapshot.entities[entity_index] = .{
-            .entity_id = entity,
-            .transform = world_matrix,
-            .model_asset = renderer.model_asset.?,
-            .material_buffer_index = material_buffer_index,
-            .texture_asset = renderer.texture_asset,
-            .layer = renderer.layer,
-            .casts_shadows = renderer.casts_shadows,
-            .receives_shadows = renderer.receives_shadows,
+    // Allocate and copy entity render data
+    snapshot.entities = try allocator.alloc(GameStateSnapshot.EntityRenderData, extracted_renderables.len);
+    for (extracted_renderables, 0..) |extracted, i| {
+        snapshot.entities[i] = .{
+            .entity_id = extracted.entity_id,
+            .transform = extracted.transform,
+            .model_asset = extracted.model_asset,
+            .material_buffer_index = extracted.material_buffer_index,
+            .texture_asset = extracted.texture_asset,
+            .layer = extracted.layer,
+            .casts_shadows = extracted.casts_shadows,
+            .receives_shadows = extracted.receives_shadows,
         };
-        entity_index += 1;
     }
-    snapshot.entity_count = entity_index;
+    snapshot.entity_count = extracted_renderables.len;
 
-    // TODO: Extract light data from PointLight components - MEDIUM PRIORITY
-    // PointLight component exists (engine/src/ecs/components/point_light.zig)
-    // Need to query entities with PointLight component and extract to snapshot
-    // Required: Iterate over entities with (Transform, PointLight), populate point_lights array
-    // Branch: features/light-snapshot-extraction
-    snapshot.point_lights = try allocator.alloc(GameStateSnapshot.PointLightData, 0);
-    snapshot.point_light_count = 0;
+    // Extract light data from PointLight components
+    const PointLight = ecs.PointLight;
+    const light_view = try world.view(PointLight);
+    const light_entities = light_view.storage.entities.items;
+
+    // Allocate array for light data (up to 16 lights)
+    const max_lights = 16;
+    const light_count = @min(light_entities.len, max_lights);
+    snapshot.point_lights = try allocator.alloc(GameStateSnapshot.PointLightData, light_count);
+
+    // Extract each light with Transform
+    var light_index: usize = 0;
+    for (light_entities) |entity| {
+        if (light_index >= max_lights) break;
+
+        const point_light = world.get(PointLight, entity) orelse continue;
+        const transform = world.get(Transform, entity) orelse continue;
+
+        snapshot.point_lights[light_index] = .{
+            .position = transform.position,
+            .color = point_light.color,
+            .intensity = point_light.intensity,
+            .radius = point_light.range,
+        };
+        light_index += 1;
+    }
+    snapshot.point_light_count = light_index;
 
     return snapshot;
 }

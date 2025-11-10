@@ -231,8 +231,8 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 continue;
             };
 
-            // Pass ImGui draw data from snapshot to frame_info (thread-safe transfer)
-            frame_info.imgui_draw_data = snapshot.imgui_draw_data;
+            // Set snapshot reference in frame_info for thread-safe access
+            frame_info.snapshot = snapshot;
 
             // PHASE 2.1: Update phase does Vulkan descriptor updates (render thread)
             // This calls render_graph.update() which updates descriptor sets

@@ -4,6 +4,7 @@ const Camera = @import("camera.zig").Camera;
 const Math = @import("../utils/math.zig");
 const PerformanceMonitor = @import("performance_monitor.zig").PerformanceMonitor;
 const Texture = @import("../core/texture.zig").Texture;
+const GameStateSnapshot = @import("../threading/game_state_snapshot.zig").GameStateSnapshot;
 
 const MAX_LIGHTS: usize = 16;
 
@@ -18,14 +19,11 @@ pub const GlobalUbo = struct {
     ambient_color: Math.Vec4 = Math.Vec4.init(1, 1, 1, 0.2),
     point_lights: [MAX_LIGHTS]PointLight = [_]PointLight{.{}} ** MAX_LIGHTS,
     num_point_lights: u32 = 0,
-    dt: f32 = 0,
 };
 
 pub const FrameInfo = struct {
     command_buffer: vk.CommandBuffer = undefined,
     compute_buffer: vk.CommandBuffer = undefined,
-    camera: *Camera = undefined,
-    dt: f32 = 0,
     current_frame: u32 = 0,
     extent: vk.Extent2D = .{ .width = 1280, .height = 720 },
     global_descriptor_set: vk.DescriptorSet = undefined,
@@ -43,6 +41,8 @@ pub const FrameInfo = struct {
     // Performance monitoring (optional)
     performance_monitor: ?*PerformanceMonitor = null,
 
-    // ImGui draw data from snapshot (for thread-safe UI rendering)
-    imgui_draw_data: ?*anyopaque = null,
+    // Game state snapshot for thread-safe access to entities, camera, lights, imgui
+    // Read from the double-buffered snapshot captured on the main thread
+    // Optional during engine initialization, set before rendering begins
+    snapshot: ?*const GameStateSnapshot = null,
 };

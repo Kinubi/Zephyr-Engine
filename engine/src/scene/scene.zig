@@ -26,6 +26,7 @@ const GlobalUboSet = @import("../rendering/ubo_set.zig").GlobalUboSet;
 const PerformanceMonitor = @import("../rendering/performance_monitor.zig").PerformanceMonitor;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const render_data_types = @import("../rendering/render_data_types.zig");
+const GameStateSnapshot = @import("../threading/game_state_snapshot.zig").GameStateSnapshot;
 
 const ParticleComputePass = @import("../rendering/passes/particle_compute_pass.zig").ParticleComputePass;
 const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPass;
@@ -106,6 +107,7 @@ pub const Scene = struct {
         ecs_world: *World,
         asset_manager: *AssetManager,
         thread_pool: *ThreadPool,
+        buffer_manager: *BufferManager,
         name: []const u8,
     ) !Scene {
         log(.INFO, "scene", "Creating scene: {s}", .{name});
@@ -124,7 +126,7 @@ pub const Scene = struct {
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
-            .render_system = try ecs.RenderSystem.init(allocator, thread_pool),
+            .render_system = try ecs.RenderSystem.init(allocator, thread_pool, buffer_manager),
             .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
         };
         return scene;
@@ -716,6 +718,7 @@ pub const Scene = struct {
             self.allocator,
             graphics_context,
             pipeline_system,
+            buffer_manager,
             self.asset_manager,
             self.ecs_world,
             global_ubo_set,
@@ -955,7 +958,7 @@ pub const Scene = struct {
 
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
     /// Call this on the MAIN THREAD before capturing snapshot
-    pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo, dt: f32) !void {
+    pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo) !void {
         // Apply any pending path tracing toggles FIRST (CPU-side state change)
         // This prepares the render graph state for frame N+1 while render thread renders frame N
 
@@ -967,7 +970,6 @@ pub const Scene = struct {
             const prep_frame_info = FrameInfo{
                 .command_buffer = vk.CommandBuffer.null_handle,
                 .current_frame = 0,
-                .dt = dt,
                 .extent = undefined,
                 .color_image = undefined,
                 .color_image_view = undefined,
@@ -1010,7 +1012,8 @@ test "Scene v2: init creates empty scene" {
         testing.allocator.destroy(tp_ptr);
     }
 
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, "test_scene");
+    var mock_buffer_manager: BufferManager = undefined;
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, &mock_buffer_manager, "test_scene");
     defer scene.deinit();
 
     try testing.expectEqual(@as(usize, 0), scene.entities.items.len);
@@ -1033,7 +1036,8 @@ test "Scene v2: spawnEmpty creates entity with Transform" {
         testing.allocator.destroy(tp_ptr);
     }
 
-    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, "test_scene");
+    var mock_buffer_manager: BufferManager = undefined;
+    var scene = Scene.init(testing.allocator, &world, &mock_asset_manager, tp_ptr, &mock_buffer_manager, "test_scene");
     defer scene.deinit();
 
     const obj = try scene.spawnEmpty("empty_object");

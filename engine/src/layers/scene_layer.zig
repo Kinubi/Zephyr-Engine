@@ -60,7 +60,7 @@ pub const SceneLayer = struct {
 
                 stage1.addSystem(.{
                     .name = "LightAnimationSystem",
-                    .update_fn = ecs.updateLightSystem,
+                    .prepare_fn = ecs.updateLightSystem,
                     .access = .{
                         .reads = &[_][]const u8{"PointLight"},
                         .writes = &[_][]const u8{"Transform"},
@@ -71,7 +71,7 @@ pub const SceneLayer = struct {
 
                 stage1.addSystem(.{
                     .name = "ScriptingSystem",
-                    .update_fn = ecs.updateScriptingSystem,
+                    .prepare_fn = ecs.updateScriptingSystem,
                     .access = .{
                         .reads = &[_][]const u8{},
                         .writes = &[_][]const u8{"ScriptComponent"},
@@ -79,13 +79,14 @@ pub const SceneLayer = struct {
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add scripting system: {}", .{err});
                 };
-                // MaterialSystem - builds GPU material buffers
+
                 stage1.addSystem(.{
                     .name = "MaterialSystem",
+                    .prepare_fn = ecs.prepareMaterialSystem,
                     .update_fn = ecs.updateMaterialSystem,
                     .access = .{
-                        .reads = &[_][]const u8{}, // Reads asset textures, no ECS components
-                        .writes = &[_][]const u8{}, // Writes GPU buffers, no ECS components
+                        .reads = &[_][]const u8{ "MaterialSet", "MeshRenderer" },
+                        .writes = &[_][]const u8{},
                     },
                 }) catch |err| {
                     log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
@@ -95,7 +96,7 @@ pub const SceneLayer = struct {
                 if (sched.addStage("DependentSystems")) |stage2| {
                     stage2.addSystem(.{
                         .name = "TransformSystem",
-                        .update_fn = ecs.updateTransformSystem,
+                        .prepare_fn = ecs.updateTransformSystem,
                         .access = .{
                             .reads = &[_][]const u8{},
                             .writes = &[_][]const u8{"Transform"},
@@ -111,7 +112,7 @@ pub const SceneLayer = struct {
                 if (sched.addStage("ParticleEmitterUpdates")) |stage4| {
                     stage4.addSystem(.{
                         .name = "ParticleEmitterSystem",
-                        .update_fn = ecs.updateParticleEmittersSystem,
+                        .prepare_fn = ecs.updateParticleEmittersSystem,
                         .access = .{
                             .reads = &[_][]const u8{ "ParticleEmitter", "Transform" },
                             .writes = &[_][]const u8{},
@@ -123,10 +124,13 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
                 }
 
-                // Stage 4: Render system updates (extract render data, build caches)
-                if (sched.addStage("RenderSystemUpdates")) |stage5| {
-                    stage5.addSystem(.{
+                // Stage 4: Render system updates (change detection only - no cache building)
+                // Sets dirty flags when scene changes are detected
+                // Actual cache building happens on render thread via rebuildCachesFromSnapshot()
+                if (sched.addStage("RenderSystemUpdates")) |stage4| {
+                    stage4.addSystem(.{
                         .name = "RenderSystem",
+                        .prepare_fn = ecs.prepareRenderSystem,
                         .update_fn = ecs.updateRenderSystem,
                         .access = .{
                             .reads = &[_][]const u8{ "MeshRenderer", "Transform", "Camera" },
@@ -197,7 +201,6 @@ pub const SceneLayer = struct {
         self.prepared_ubo[prep_idx] = GlobalUbo{
             .view = self.camera.viewMatrix,
             .projection = self.camera.projectionMatrix,
-            .dt = dt,
         };
 
         // Store GlobalUbo pointer in World so systems can access it
@@ -208,7 +211,7 @@ pub const SceneLayer = struct {
         if (self.system_scheduler) |*scheduler| {
             // Parallel execution of all registered systems
             // Systems can now extract data to GlobalUbo via userdata
-            try scheduler.execute(self.ecs_world, dt);
+            try scheduler.executePrepare(self.ecs_world, dt);
         } else {
             // Fallback: Sequential execution
             try ecs.updateTransformSystem(self.ecs_world, dt);
@@ -217,7 +220,7 @@ pub const SceneLayer = struct {
         // Prepare scene (ECS queries, particle spawning, light updates - no Vulkan)
         // NOTE: Light extraction now happens in animateLightsSystem
         // NOTE: Particle GPU updates now happen in updateParticleEmittersSystem
-        try self.scene.prepareFrame(&self.prepared_ubo[prep_idx], dt);
+        try self.scene.prepareFrame(&self.prepared_ubo[prep_idx]);
 
         // Advance prepare frame index for next main-thread prepare()
         self.prepare_frame_index = (prep_idx + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -232,14 +235,46 @@ pub const SceneLayer = struct {
         const self: *SceneLayer = @fieldParentPtr("base", base);
 
         // PHASE 2.1: RENDER THREAD - Vulkan descriptor updates (NO ECS queries!)
-        // Main thread already did:
-        // - transform_system.update() (in prepare)
-        // - scene.prepareFrame() (in prepare) - populated lights in prepared_ubo
-        //
-        // Here we do Vulkan descriptor updates
+        // Rebuild GlobalUbo from snapshot (thread-safe snapshot-based architecture)
 
-        // Use the UBO prepared on main thread (immutable snapshot for this frame).
-        // Avoid mutating prepared_ubo here to prevent data races with prepare() on main thread.
+        if (frame_info.snapshot) |snapshot| {
+            // Build GlobalUbo from snapshot data (camera, lights, dt)
+            self.prepared_ubo[frame_info.current_frame] = GlobalUbo{
+                .view = snapshot.camera_view_matrix,
+                .projection = snapshot.camera_projection_matrix,
+                .ambient_color = Math.Vec4.init(1, 1, 1, 0.2),
+                .point_lights = undefined,
+                .num_point_lights = 0,
+            };
+
+            // Populate point lights from snapshot
+            const max_lights = 16;
+            const light_count = @min(snapshot.point_light_count, max_lights);
+            for (0..light_count) |i| {
+                const light = snapshot.point_lights[i];
+                self.prepared_ubo[frame_info.current_frame].point_lights[i] = .{
+                    .position = Math.Vec4.init(light.position.x, light.position.y, light.position.z, 1.0),
+                    .color = Math.Vec4.init(
+                        light.color.x * light.intensity,
+                        light.color.y * light.intensity,
+                        light.color.z * light.intensity,
+                        light.intensity,
+                    ),
+                };
+            }
+            self.prepared_ubo[frame_info.current_frame].num_point_lights = @intCast(light_count);
+
+            // Clear remaining light slots
+            for (light_count..max_lights) |i| {
+                self.prepared_ubo[frame_info.current_frame].point_lights[i] = .{};
+            }
+        }
+        if (self.system_scheduler) |*scheduler| {
+            // Parallel execution of all registered systems update phase
+            // Systems use snapshot data from frame_info
+            // Cast away const - systems need mutable access to frame_info for internal state
+            try scheduler.executeUpdate(self.ecs_world, @constCast(frame_info));
+        }
 
         // Update Vulkan resources (descriptor updates)
         if (self.performance_monitor) |pm| {
@@ -250,7 +285,7 @@ pub const SceneLayer = struct {
             try pm.endPass("scene_update", frame_info.current_frame, null);
         }
 
-        // Update UBO set for this frame using prepared_ubo (with lights!)
+        // Update UBO set for this frame using prepared_ubo (with lights from snapshot!)
         if (self.performance_monitor) |pm| {
             try pm.beginPass("ubo_update", frame_info.current_frame, null);
         }

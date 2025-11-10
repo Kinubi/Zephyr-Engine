@@ -9,6 +9,8 @@ const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
 const World = @import("../../ecs.zig").World;
 const ecs = @import("../../ecs.zig");
 const Scene = @import("../../scene/scene.zig").Scene;
+const FrameInfo = @import("../../rendering/frameinfo.zig").FrameInfo;
+const GameStateSnapshot = @import("../../threading/game_state_snapshot.zig").GameStateSnapshot;
 const log = @import("../../utils/log.zig").log;
 
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
@@ -34,7 +36,7 @@ pub const GPUMaterial = extern struct {
 /// Managed texture descriptor array
 pub const ManagedTextureArray = struct {
     descriptor_infos: []vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
-    generation: u32 = 0,
+    generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     size: usize = 0,
 };
 
@@ -195,6 +197,235 @@ pub const MaterialSystem = struct {
             const entities = entry.value_ptr.items;
 
             try self.updateMaterialSet(world, set_name, entities);
+        }
+    }
+
+    /// MAIN THREAD: Query ECS and build material data (writes material_buffer_index to components)
+    /// Snapshot system will capture material_buffer_index later
+    pub fn prepareFromECS(self: *MaterialSystem, world: *World) !void {
+        const MaterialSet = ecs.MaterialSet;
+
+        // Group entities by material set name
+        var sets_map = std.StringHashMap(std.ArrayList(ecs.EntityId)).init(self.allocator);
+        defer {
+            var iter = sets_map.valueIterator();
+            while (iter.next()) |list| {
+                list.deinit(self.allocator);
+            }
+            sets_map.deinit();
+        }
+
+        // Query all entities with MaterialSet
+        var material_view = try world.view(MaterialSet);
+        var iter = material_view.iterator();
+
+        // Group entities by material set name
+        while (iter.next()) |entry| {
+            const entity = entry.entity;
+            const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
+
+            const gop = try sets_map.getOrPut(material_set.set_name);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(ecs.EntityId){};
+            }
+            try gop.value_ptr.append(self.allocator, entity);
+        }
+
+        // Process each material set (ECS queries, compute indices)
+        var sets_iter = sets_map.iterator();
+        while (sets_iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            const entities = entry.value_ptr.items;
+
+            try self.prepareMaterialSet(world, set_name, entities);
+        }
+    }
+
+    /// RENDER THREAD: Upload GPU buffers using material_buffer_index from snapshot
+    pub fn updateGPUResources(self: *MaterialSystem) !void {
+        // Process all material sets and upload changed data to GPU
+        var iter = self.material_sets.iterator();
+        while (iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            const set_data = entry.value_ptr;
+
+            // Upload texture array if changed
+            if (set_data.last_texture_ids.items.len > 0) {
+                // Texture array already built during prepare phase
+                // GPU descriptors will be bound by render passes
+            }
+
+            // Upload material buffer if changed
+            if (set_data.last_materials.items.len > 0) {
+                // Material buffer already uploaded during prepare phase
+                // This is a no-op for now, but will be proper GPU work when we split it
+            }
+
+            _ = set_name; // Suppress unused warning
+        }
+    }
+
+    /// MAIN THREAD: Prepare a specific material set (ECS queries + write component indices)
+    fn prepareMaterialSet(
+        self: *MaterialSystem,
+        world: *World,
+        set_name: []const u8,
+        entities: []const ecs.EntityId,
+    ) !void {
+        // Get or create set data
+        const gop = try self.material_sets.getOrPut(set_name);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = try MaterialSetData.init(self.allocator, self.buffer_manager);
+        }
+        var set_data = gop.value_ptr;
+
+        // Track textures and materials for this set
+        var texture_map = std.AutoHashMap(u64, u32).init(self.allocator);
+        defer texture_map.deinit();
+
+        var gpu_materials = std.ArrayList(GPUMaterial){};
+        defer gpu_materials.deinit(self.allocator);
+
+        // Reserve index 0 for white dummy texture
+        try texture_map.put(0, 0);
+        var next_texture_idx: u32 = 1;
+
+        // Build materials for entities in this set
+        for (entities) |entity| {
+            // Get optional material property components
+            const albedo = world.get(ecs.AlbedoMaterial, entity);
+            const roughness = world.get(ecs.RoughnessMaterial, entity);
+            const metallic = world.get(ecs.MetallicMaterial, entity);
+            const normal = world.get(ecs.NormalMaterial, entity);
+            const emissive = world.get(ecs.EmissiveMaterial, entity);
+            const occlusion = world.get(ecs.OcclusionMaterial, entity);
+
+            // Build GPU material
+            var gpu_mat: GPUMaterial = std.mem.zeroes(GPUMaterial);
+
+            // Albedo
+            if (albedo) |alb| {
+                gpu_mat.albedo_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, alb.texture_id);
+                gpu_mat.albedo_tint = alb.color_tint;
+            } else {
+                gpu_mat.albedo_idx = 0;
+                gpu_mat.albedo_tint = [_]f32{ 1, 1, 1, 1 };
+            }
+
+            // Roughness
+            if (roughness) |rough| {
+                gpu_mat.roughness_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, rough.texture_id);
+                gpu_mat.roughness_factor = rough.factor;
+            } else {
+                gpu_mat.roughness_idx = 0;
+                gpu_mat.roughness_factor = 0.5;
+            }
+
+            // Metallic
+            if (metallic) |metal| {
+                gpu_mat.metallic_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, metal.texture_id);
+                gpu_mat.metallic_factor = metal.factor;
+            } else {
+                gpu_mat.metallic_idx = 0;
+                gpu_mat.metallic_factor = 0.0;
+            }
+
+            // Normal
+            if (normal) |norm| {
+                gpu_mat.normal_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, norm.texture_id);
+                gpu_mat.normal_strength = norm.strength;
+            } else {
+                gpu_mat.normal_idx = 0;
+                gpu_mat.normal_strength = 1.0;
+            }
+
+            // Emissive
+            if (emissive) |emiss| {
+                gpu_mat.emissive_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, emiss.texture_id);
+                gpu_mat.emissive_color = emiss.color;
+                gpu_mat.emissive_intensity = emiss.intensity;
+            } else {
+                gpu_mat.emissive_idx = 0;
+                gpu_mat.emissive_color = [_]f32{ 0, 0, 0 };
+                gpu_mat.emissive_intensity = 0.0;
+            }
+
+            // Occlusion
+            if (occlusion) |occ| {
+                gpu_mat.occlusion_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, occ.texture_id);
+                gpu_mat.occlusion_strength = occ.strength;
+            } else {
+                gpu_mat.occlusion_idx = 0;
+                gpu_mat.occlusion_strength = 1.0;
+            }
+
+            // CRITICAL: Write material_buffer_index to component (snapshot will capture this)
+            // Get fresh pointer right before writing to avoid stale pointer issues
+            // if ECS storage was reallocated during the loop
+            const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
+            material_set.material_buffer_index = @intCast(gpu_materials.items.len);
+
+            try gpu_materials.append(self.allocator, gpu_mat);
+        }
+
+        // Check if texture set changed
+        var current_texture_ids = std.ArrayList(u64){};
+        defer current_texture_ids.deinit(self.allocator);
+
+        var tex_iter = texture_map.keyIterator();
+        while (tex_iter.next()) |key_ptr| {
+            try current_texture_ids.append(self.allocator, key_ptr.*);
+        }
+        std.sort.pdq(u64, current_texture_ids.items, {}, std.sort.asc(u64));
+
+        const textures_changed = blk: {
+            if (current_texture_ids.items.len != set_data.last_texture_ids.items.len) break :blk true;
+            for (current_texture_ids.items, set_data.last_texture_ids.items) |curr, last| {
+                if (curr != last) break :blk true;
+            }
+
+            // Check if any texture descriptors changed
+            var tex_check_iter = texture_map.iterator();
+            while (tex_check_iter.next()) |entry| {
+                const asset_id_u64 = entry.key_ptr.*;
+                const idx = entry.value_ptr.*;
+
+                if (asset_id_u64 == 0 or idx == 0) continue;
+
+                const asset_id = AssetId.fromU64(asset_id_u64);
+                const current_descriptor = self.asset_manager.getTextureDescriptor(asset_id);
+
+                if (current_descriptor != null and idx < set_data.texture_array.descriptor_infos.len) {
+                    const last_descriptor = set_data.texture_array.descriptor_infos[idx];
+                    if (current_descriptor.?.image_view != last_descriptor.image_view) {
+                        break :blk true;
+                    }
+                }
+            }
+
+            break :blk false;
+        };
+
+        // Check if materials changed
+        const materials_changed = blk: {
+            if (gpu_materials.items.len != set_data.last_materials.items.len) break :blk true;
+            for (gpu_materials.items, set_data.last_materials.items) |curr, last| {
+                if (!std.meta.eql(curr, last)) break :blk true;
+            }
+            break :blk false;
+        };
+
+        // Upload to GPU if changed (still on main thread for now, will move to render thread)
+        if (textures_changed) {
+            try self.buildTextureArray(set_data, &texture_map, next_texture_idx);
+            set_data.last_texture_ids.clearRetainingCapacity();
+            try set_data.last_texture_ids.appendSlice(self.allocator, current_texture_ids.items);
+        }
+
+        if (materials_changed and gpu_materials.items.len > 0) {
+            try self.uploadMaterialBuffer(set_data, set_name, gpu_materials.items);
+            set_data.last_materials.clearRetainingCapacity();
+            try set_data.last_materials.appendSlice(self.allocator, gpu_materials.items);
         }
     }
 
@@ -438,7 +669,9 @@ pub const MaterialSystem = struct {
 
         set_data.texture_array.descriptor_infos = descriptors;
         set_data.texture_array.size = texture_count;
-        set_data.texture_array.generation += 1;
+        // Increment generation AFTER writing data, with release ordering
+        // This ensures all writes above are visible before generation change is seen
+        _ = set_data.texture_array.generation.fetchAdd(1, .release);
     }
 
     /// Upload material buffer to GPU
@@ -487,8 +720,9 @@ pub const MaterialSystem = struct {
     }
 };
 
-/// Free update function for SystemScheduler compatibility
-pub fn update(world: *World, dt: f32) !void {
+/// MAIN THREAD: Prepare phase - ECS queries, compute indices, write to components
+/// SystemScheduler compatibility wrapper
+pub fn prepare(world: *World, dt: f32) !void {
     _ = dt;
 
     // Get the scene from world userdata
@@ -497,6 +731,26 @@ pub fn update(world: *World, dt: f32) !void {
 
     // Get material system from scene
     if (scene.material_system) |material_system| {
-        try material_system.updateFromECS(world, 0);
+        // Query ECS, build material data, write material_buffer_index to components
+        // Snapshot system will capture material_buffer_index later
+        try material_system.prepareFromECS(world);
     }
+}
+
+/// RENDER THREAD: Update phase - GPU buffer uploads (uses snapshot data)
+/// SystemScheduler compatibility wrapper
+pub fn update(world: *World, frame_info: *FrameInfo) !void {
+    _ = world;
+
+    // Get the snapshot from frame_info
+    const snapshot = frame_info.snapshot;
+
+    // TODO: Implement GPU buffer uploads using snapshot.entities[].material_buffer_index
+    // For now, GPU work still happens in prepare phase (will split in next iteration)
+    // The snapshot already has material_buffer_index, just need to:
+    // 1. Group entities by material_buffer_index
+    // 2. Upload material buffers to GPU
+    // 3. Build texture descriptor arrays
+
+    _ = snapshot;
 }

@@ -347,14 +347,6 @@ pub const RaytracingSystem = struct {
         log(.DEBUG, "RaytracingSystem", "Added geometry to set '{s}' (vertices: {}, indices: {})", .{ set_name, vertex_count, index_count });
     }
 
-    /// Mark a set as dirty (needs rebuild)
-    pub fn markSetDirty(self: *RaytracingSystem, set_name: []const u8) void {
-        if (self.getSet(set_name)) |set| {
-            set.dirty = true;
-            log(.DEBUG, "RaytracingSystem", "Marked set '{s}' as dirty", .{set_name});
-        }
-    }
-
     /// Rebuild an acceleration structure set (builds TLAS from BLAS handles)
     pub fn rebuildSet(self: *RaytracingSystem, set_name: []const u8) !void {
         const set = self.getSet(set_name) orelse {
@@ -742,7 +734,7 @@ pub const RaytracingSystem = struct {
         // 1. Geometry actually changed (geo_changed = true from descriptors dirty)
         // 2. OR mesh transforms changed (transform_only AND renderables_dirty)
         // Don't rebuild just because renderables_dirty is true - that could be raster-only changes
-        const mesh_transforms_changed = render_system.transform_only_change and render_system.renderables_dirty;
+        const mesh_transforms_changed = render_system.transform_only_change;
         const rebuild_needed = geo_changed or mesh_transforms_changed;
 
         // Decrement cooldown if active (but only once per frame!)
@@ -764,7 +756,7 @@ pub const RaytracingSystem = struct {
             // Clear renderables_dirty flag so we don't rebuild again next frame
             // This flag gets set by RenderSystem.checkForChanges() and needs to be cleared
             // immediately when we consume it (spawn TLAS build)
-            render_system.renderables_dirty = false;
+
             render_system.transform_only_change = false;
 
             // Get current raytracing data
@@ -780,6 +772,16 @@ pub const RaytracingSystem = struct {
             try self.spawnTlasWorker(rt_data);
 
             return false;
+        }
+
+        // Check if all frames have bound the current TLAS (mask == 0)
+        // If so, it's safe to flush deferred destruction queues
+        if (self.getSet("default")) |default_set| {
+            const mask = default_set.tlas.pending_bind_mask.load(.acquire);
+            if (mask == 0 and default_set.tlas.generation.load(.acquire) > 0) {
+                // All frames have bound the new TLAS, safe to destroy old resources
+                self.flushAllPendingDestruction();
+            }
         }
 
         return false; // No rebuild needed or already in progress

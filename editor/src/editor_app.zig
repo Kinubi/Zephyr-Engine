@@ -205,7 +205,7 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, "cornell_box");
+        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, self.engine.getBufferManager().?, "cornell_box");
 
         // Register scene pointer in World so systems can access it
         try new_ecs_world.setUserData("scene", @ptrCast(&scene));
@@ -449,7 +449,7 @@ pub const App = struct {
         if (self.engine.isRenderThreadEnabled()) {
             // RENDER THREAD MODE (Phase 2.1): Main thread handles game logic, render thread handles GPU
 
-            const dt = self.engine.frame_info.dt;
+            const dt = if (self.engine.frame_info.snapshot) |s| s.delta_time else 0.0;
 
             // MAIN THREAD: Prepare all layers (game logic, ECS queries, NO Vulkan)
             // This calls layer.prepare() which calls scene.prepareFrame()

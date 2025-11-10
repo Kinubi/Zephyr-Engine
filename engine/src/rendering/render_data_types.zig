@@ -7,6 +7,32 @@ const AssetId = @import("../assets/asset_types.zig").AssetId;
 /// These types are used by render_system, raytracing_system, and rendering passes
 /// Rasterization-specific scene data
 pub const RasterizationData = struct {
+    /// Per-instance data for instanced rendering
+    /// Each instance represents one object with a unique transform and material
+    pub const InstanceData = struct {
+        transform: [16]f32, // Model matrix
+        material_index: u32, // Index into material buffer
+        padding: [3]u32 = .{ 0, 0, 0 }, // Align to 16 bytes for SSBO
+    };
+
+    /// A batch of instances sharing the same mesh
+    /// Used for instanced draw calls
+    pub const InstancedBatch = struct {
+        pub const MeshHandle = struct {
+            mesh_ptr: *const Mesh,
+
+            pub fn getMesh(self: MeshHandle) *const Mesh {
+                return self.mesh_ptr;
+            }
+        };
+
+        mesh_handle: MeshHandle,
+        instances: []const InstanceData, // Per-instance data
+        visible: bool = true,
+    };
+
+    /// Legacy per-object structure (for backwards compatibility)
+    /// TODO: Remove once all passes use instanced batches
     /// TODO(FEATURE): ADD SORTING KEY FOR STATE-CHANGE MINIMIZATION - MEDIUM PRIORITY
     /// Currently: RenderableObject has no sorting key, objects drawn in ECS iteration order
     /// Required: Add sort_key: u64 = (pipeline_id << 48 | material_id << 32 | mesh_id)
@@ -36,10 +62,18 @@ pub const RasterizationData = struct {
         texture_index: u32 = 0,
     };
 
+    // Legacy: per-object array (deprecated, use batches instead)
     objects: []const RenderableObject,
+
+    // Instanced rendering data (preferred)
+    batches: []const InstancedBatch = &[_]InstancedBatch{},
 
     pub fn getVisibleObjects(self: *const RasterizationData) []const RenderableObject {
         return self.objects;
+    }
+
+    pub fn getInstancedBatches(self: *const RasterizationData) []const InstancedBatch {
+        return self.batches;
     }
 };
 

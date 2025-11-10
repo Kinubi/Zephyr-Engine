@@ -121,12 +121,35 @@ pub const BaseRenderPass = struct {
         resource: Resource,
     };
 
-    const Resource = union(enum) {
-        buffer: *const anyopaque, // Points to ManagedBuffer
-        buffer_array: *const anyopaque, // Points to array of ManagedBuffer (for frame-in-flight)
-        texture: *const anyopaque, // Points to ManagedTexture
-        texture_array: *const anyopaque, // Points to ManagedTextureArray
-        system: *const anyopaque, // Points to a system that provides resources
+    /// Resource types that can be bound to the pipeline
+    /// The tag indicates which ResourceBinder method to use
+    pub const Resource = union(enum) {
+        /// Single managed buffer (uses bindStorageBufferNamed)
+        buffer: *const ManagedBuffer,
+
+        /// Array of managed buffers for frame-in-flight (uses bindUniformBufferNamed)
+        buffer_array: [zephyr.MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer,
+
+        /// Single managed texture (uses bindTextureNamed)
+        texture: *const ManagedTexture,
+
+        /// Texture array for shader descriptor array (uses bindTextureArrayNamed)
+        texture_array: *const ManagedTextureArray,
+
+        /// Per-frame texture array (uses bindManagedTexturePerFrameNamed)
+        texture_per_frame: [zephyr.MAX_FRAMES_IN_FLIGHT]*const ManagedTexture,
+
+        /// Acceleration structure for ray tracing (uses bindAccelerationStructureNamed)
+        acceleration_structure: *const anyopaque, // Points to ManagedTLAS
+
+        /// Dynamic buffer array (e.g., vertex/index buffers) (uses bindBufferArrayNamed)
+        /// Stores: { buffer_infos slice, ArrayList pointer, generation pointer }
+        buffer_descriptor_array: BufferDescriptorArray,
+    };
+
+    pub const BufferDescriptorArray = struct {
+        infos_ptr: *const std.ArrayList(vk.DescriptorBufferInfo),
+        generation_ptr: *const u32,
     };
 
     pub const PipelineConfig = struct {
@@ -200,47 +223,22 @@ pub const BaseRenderPass = struct {
 
     /// Bind a resource by name (uses ResourceBinder's named binding)
     /// Resources are queued and bound during bake()
-    pub fn bind(self: *BaseRenderPass, name: []const u8, resource: anytype) !void {
+    ///
+    /// Example:
+    /// ```zig
+    /// try pass.bind("GlobalUBO", .{ .buffer_array = ubo_frames });
+    /// try pass.bind("MaterialBuffer", .{ .buffer = &material_buffer });
+    /// try pass.bind("Textures", .{ .texture_array = &texture_array });
+    /// try pass.bind("HDROutput", .{ .texture_per_frame = hdr_textures });
+    /// ```
+    pub fn bind(self: *BaseRenderPass, name: []const u8, resource: Resource) !void {
         if (self.is_baked) return error.AlreadyBaked;
 
         const name_copy = try self.allocator.dupe(u8, name);
 
-        // Detect the resource type at comptime
-        const T = @TypeOf(resource);
-        const type_info = @typeInfo(T);
-
-        const res: Resource = switch (type_info) {
-            .pointer => |ptr_info| blk: {
-                // Direct pointer types
-                if (ptr_info.child == ManagedBuffer) {
-                    break :blk .{ .buffer = @ptrCast(resource) };
-                } else if (ptr_info.child == ManagedTexture) {
-                    break :blk .{ .texture = @ptrCast(resource) };
-                } else if (ptr_info.child == ManagedTextureArray) {
-                    break :blk .{ .texture_array = @ptrCast(resource) };
-                }
-                break :blk .{ .system = @ptrCast(&resource) };
-            },
-            .array => |arr_info| blk: {
-                // Array of pointers to ManagedBuffer (frame-in-flight buffers)
-                if (arr_info.child == *ManagedBuffer or arr_info.child == *const ManagedBuffer) {
-                    // Allocate and copy the array to stable storage
-                    const array_copy = try self.allocator.alloc(*ManagedBuffer, arr_info.len);
-                    for (resource, 0..) |buf, i| {
-                        array_copy[i] = buf;
-                    }
-                    // Track for cleanup
-                    try self.allocated_buffer_arrays.append(self.allocator, array_copy);
-                    break :blk .{ .buffer_array = @ptrCast(array_copy.ptr) };
-                }
-                break :blk .{ .system = @ptrCast(&resource) };
-            },
-            else => .{ .system = @ptrCast(&resource) },
-        };
-
         try self.resource_bindings.append(self.allocator, .{
             .name = name_copy,
-            .resource = res,
+            .resource = resource,
         });
     }
 
@@ -350,48 +348,67 @@ pub const BaseRenderPass = struct {
                 try self.resource_binder.bindStorageBufferNamed(
                     self.pipeline.?,
                     name,
-                    @ptrCast(@alignCast(buf_ptr)),
+                    buf_ptr,
                 );
             },
-            .buffer_array => |array_ptr| {
+            .buffer_array => |buffers| {
                 // Array of ManagedBuffer (frame-in-flight) - use uniform buffer binding
-                // The array_ptr points to [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer
-                // Cast to the array type and pass it by value
-                const buffers_ptr: *const [zephyr.MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = @ptrCast(@alignCast(array_ptr));
-                // Convert to [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer for the function signature
-                const const_buffers: [zephyr.MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer = buffers_ptr.*;
                 try self.resource_binder.bindUniformBufferNamed(
                     self.pipeline.?,
                     name,
-                    const_buffers,
+                    buffers,
                 );
             },
             .texture => |tex_ptr| {
-                // ManagedTexture - cast and bind (tracked automatically)
+                // ManagedTexture - bind single texture (tracked automatically)
                 try self.resource_binder.bindTextureNamed(
                     self.pipeline.?,
                     name,
-                    @ptrCast(@alignCast(tex_ptr)),
+                    tex_ptr,
                 );
             },
             .texture_array => |array_ptr| {
-                // ManagedTextureArray - cast and bind (tracked automatically)
+                // ManagedTextureArray - bind shader descriptor array (tracked automatically)
                 try self.resource_binder.bindTextureArrayNamed(
                     self.pipeline.?,
                     name,
-                    @ptrCast(@alignCast(array_ptr)),
+                    array_ptr,
                 );
             },
-            .system => |sys_ptr| {
-                // System provides resources - query it
-                // This requires systems to have a standard interface
-                // For now, just log - we'll need to enhance this
-                _ = sys_ptr;
-                log(.WARN, "base_render_pass", "System binding not yet implemented for: {s}", .{name});
+            .texture_per_frame => |textures| {
+                // Per-frame textures - bind with frame-specific tracking
+                try self.resource_binder.bindManagedTexturePerFrameNamed(
+                    self.pipeline.?,
+                    name,
+                    textures,
+                );
+            },
+            .acceleration_structure => |as_ptr| {
+                // Acceleration structure for ray tracing
+                const ManagedTLAS = @import("../raytracing/raytracing_system.zig").ManagedTLAS;
+                const tlas_ptr: *const ManagedTLAS = @ptrCast(@alignCast(as_ptr));
+                try self.resource_binder.bindAccelerationStructureNamed(
+                    self.pipeline.?,
+                    name,
+                    tlas_ptr,
+                );
+            },
+            .buffer_descriptor_array => |buf_array| {
+                // Dynamic buffer descriptor array (e.g., vertex/index buffers for ray tracing)
+                try self.resource_binder.bindBufferArrayNamed(
+                    self.pipeline.?,
+                    name,
+                    buf_array.infos_ptr.items,
+                    buf_array.infos_ptr,
+                    buf_array.generation_ptr,
+                );
             },
         }
     }
 
+    /// Manual cleanup method - only call if NOT using RenderGraph
+    /// If this pass is registered with RenderGraph, teardownImpl will be called automatically
+    /// DO NOT call both destroy() and let RenderGraph call teardown - this will cause double-free
     pub fn destroy(self: *BaseRenderPass) void {
         self.cleanupResources();
         self.allocator.destroy(self);
@@ -545,6 +562,9 @@ pub const BaseRenderPass = struct {
         rendering.end(self.graphics_context, frame_info.command_buffer);
     }
 
+    /// Called by RenderGraph during pass lifecycle cleanup
+    /// WARNING: This destroys the pass struct - do not call destroy() if RenderGraph will call this
+    /// The RenderGraph owns the pass lifecycle when registered, so this is the only cleanup needed
     fn teardownImpl(base: *RenderPass) void {
         const self: *BaseRenderPass = @fieldParentPtr("base", base);
         log(.INFO, "base_render_pass", "Tearing down: {s}", .{self.name});

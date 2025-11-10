@@ -672,7 +672,8 @@ pub const ResourceBinder = struct {
         try self.updateTextureArrayByName(binding_name, pipeline_id, managed_textures);
 
         // Don't bind if generation is 0 (not created yet) or if descriptor array is empty
-        if (managed_textures.generation == 0 or managed_textures.descriptor_infos.len == 0) {
+        // Use acquire ordering to ensure we see all writes that happened before generation increment
+        if (managed_textures.generation.load(.acquire) == 0 or managed_textures.descriptor_infos.len == 0) {
             return;
         }
 
@@ -996,7 +997,7 @@ pub const ResourceBinder = struct {
 
         log(.INFO, "resource_binder", "Registered tracked texture array '{s}': gen={}", .{
             binding_name,
-            managed_textures.generation,
+            managed_textures.generation.load(.acquire),
         });
     }
 
@@ -1543,8 +1544,10 @@ const BoundResource = struct {
                 break :blk gen_ptr.*;
             },
             .texture_array => |arr| blk: {
-                const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(arr.ptr) + arr.generation_offset);
-                break :blk gen_ptr.*;
+                // SAFETY: For ManagedTextureArray, generation is std.atomic.Value(u32)
+                // Use atomic load with acquire ordering to ensure we see all writes
+                const gen_ptr: *std.atomic.Value(u32) = @ptrFromInt(@intFromPtr(arr.ptr) + arr.generation_offset);
+                break :blk gen_ptr.load(.acquire);
             },
             .acceleration_structure => |as| blk: {
                 const gen_ptr: *u32 = @ptrFromInt(@intFromPtr(as.ptr) + as.generation_offset);

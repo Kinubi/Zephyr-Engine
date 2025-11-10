@@ -60,6 +60,9 @@ pub const World = struct {
     // Change detection: track last checked version per component type
     last_checked_versions: std.StringHashMap(u32),
 
+    // Singleton entity for global/scene-wide components (like RenderablesSet, MaterialSet)
+    singleton_entity: ?EntityId = null,
+
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool) !World {
         // Register ecs_update subsystem with thread pool if provided
         if (thread_pool) |tp| {
@@ -101,6 +104,21 @@ pub const World = struct {
 
     pub fn createEntity(self: *World) !EntityId {
         return try self.entity_registry.create();
+    }
+
+    /// Get the singleton entity if it exists
+    pub fn getSingletonEntity(self: *const World) ?EntityId {
+        return self.singleton_entity;
+    }
+
+    /// Get or create the singleton entity for global components
+    pub fn getOrCreateSingletonEntity(self: *World) !EntityId {
+        if (self.singleton_entity) |entity| {
+            return entity;
+        }
+        const entity = try self.createEntity();
+        self.singleton_entity = entity;
+        return entity;
     }
 
     pub fn destroyEntity(self: *World, entity: EntityId) void {

@@ -147,7 +147,8 @@ pub const UILayer = struct {
         if (!self.show_ui) return;
 
         // Update FPS estimate from dt (smoothed)
-        self.current_fps = if (frame_info.dt > 0.0) 1.0 / frame_info.dt else 0.0;
+        const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
+        self.current_fps = if (dt > 0.0) 1.0 / dt else 0.0;
     }
 
     /// MAIN THREAD: Record all ImGui CPU commands (build draw lists)
@@ -263,7 +264,9 @@ pub const UILayer = struct {
         }
 
         // Render using draw data from snapshot (thread-safe - passed from main thread)
-        try self.imgui_context.renderFromSnapshot(frame_info.imgui_draw_data, frame_info.command_buffer, self.swapchain, frame_info.current_frame);
+        if (frame_info.snapshot) |snapshot| {
+            try self.imgui_context.renderFromSnapshot(snapshot.imgui_draw_data, frame_info.command_buffer, self.swapchain, frame_info.current_frame);
+        }
 
         // End GPU timing
         if (self.performance_monitor) |pm| {
