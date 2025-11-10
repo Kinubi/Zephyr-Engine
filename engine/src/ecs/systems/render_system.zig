@@ -32,28 +32,19 @@ pub const RenderSystem = struct {
     thread_pool: ?*ThreadPool,
     buffer_manager: ?*BufferManager, // For creating instance buffer
 
-    // Change tracking (similar to SceneBridge)
+    // Change tracking
     last_renderable_count: usize = 0,
-    last_geometry_count: usize = 0, // Track mesh count separately
-    renderables_dirty: bool = true,
+    last_geometry_count: usize = 0,
 
-    // Separate flags for raster and ray tracing descriptor updates
+    // Descriptor update flags
     raster_descriptors_dirty: bool = true,
     raytracing_descriptors_dirty: bool = true,
 
-    // NEW: Track what KIND of change occurred
-    // transform_only_change: only transforms changed (TLAS update needed, no BLAS rebuild, no descriptor rebind)
-    // geometry_change: mesh count/assets changed (full rebuild + descriptors)
+    // Transform-only change flag (set by update(), read by raytracing system)
     transform_only_change: bool = false,
 
-    // Instanced rendering: cache generation tracking
-    // Incremented when batches/instances change, used for buffer invalidation
+    // Cache generation tracking for instanced rendering
     cache_generation: u32 = 0,
-
-    // Extracted renderables for snapshot capture (main thread only)
-    // Updated by update() when changes detected, read by captureSnapshot()
-    extracted_renderables: std.ArrayList(RenderableEntity),
-    extracted_renderables_valid: bool = false,
 
     // Double-buffered cached render data (lock-free main/render thread access)
     // Main thread writes to inactive buffer, render thread reads from active buffer
@@ -106,7 +97,6 @@ pub const RenderSystem = struct {
             .allocator = allocator,
             .thread_pool = thread_pool,
             .buffer_manager = buffer_manager,
-            .extracted_renderables = std.ArrayList(RenderableEntity){},
             .instance_buffer = dummy_buffer,
         };
     }
@@ -117,8 +107,7 @@ pub const RenderSystem = struct {
             bm.destroyBuffer(self.instance_buffer) catch |err| {
                 log(.ERROR, "render_system", "Failed to destroy instance buffer: {}", .{err});
             };
-        } // Clean up extracted renderables
-        self.extracted_renderables.deinit(self.allocator);
+        }
 
         // Clean up both cache buffers
         for (&self.cached_raster_data) |*data| {
@@ -197,21 +186,6 @@ pub const RenderSystem = struct {
         std.sort.insertion(RenderableEntity, render_data.renderables.items, {}, compareByLayer);
 
         return render_data;
-    }
-
-    /// Check if renderables have been updated (similar to SceneBridge.raytracingUpdated)
-    pub fn renderablesUpdated(self: *RenderSystem) bool {
-        return self.renderables_dirty;
-    }
-
-    /// Mark renderables as synced (similar to SceneBridge.markRaytracingSynced)
-    pub fn markRenderablesSynced(self: *RenderSystem) void {
-        self.renderables_dirty = false;
-    }
-
-    /// Force mark renderables as dirty (for when assets load asynchronously)
-    pub fn markRenderablesDirty(self: *RenderSystem) void {
-        self.renderables_dirty = true;
     }
 
     /// Extract primary camera data
@@ -1195,16 +1169,6 @@ pub const RenderSystem = struct {
 
         // Atomically flip to make the new cache active
         self.active_cache_index.store(write_idx, .release);
-    }
-
-    /// Check if BVH needs to be rebuilt (for ray tracing system)
-    /// Returns true if renderables_dirty flag is set OR if cache doesn't exist yet
-    pub fn checkBvhRebuildNeeded(self: *RenderSystem) !bool {
-
-        // The actual checking is done by checkForChanges() which runs every frame
-        // Also check if cache doesn't exist yet (first frame)
-        const active_idx = self.active_cache_index.load(.acquire);
-        return self.renderables_dirty or self.cached_raytracing_data[active_idx] == null;
     }
 
     /// Get cached raster data from ACTIVE buffer (already built by checkForChanges on main thread)
