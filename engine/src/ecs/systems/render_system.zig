@@ -464,6 +464,11 @@ pub const RenderSystem = struct {
         // Clean up old cached data in the WRITE buffer (safe - render thread reads ACTIVE buffer)
         if (self.cached_raster_data[write_idx]) |data| {
             self.allocator.free(data.objects);
+            // Clean up instanced batches
+            for (data.batches) |batch| {
+                self.allocator.free(batch.instances);
+            }
+            self.allocator.free(data.batches);
         }
         if (self.cached_raytracing_data[write_idx]) |*data| {
             self.allocator.free(data.instances);
@@ -495,8 +500,6 @@ pub const RenderSystem = struct {
             log(.WARN, "render_system", "Frame budget exceeded in snapshot rebuild! Total: {d:.2}ms (cache: {d:.2}ms) Budget: {d:.2}ms", .{ total_time_ms, cache_build_time_ms, budget_ms });
         }
 
-        self.renderables_dirty = false;
-
         // Upload instance data to GPU if we have batches
         try self.uploadInstanceDataToGPU();
     }
@@ -527,11 +530,8 @@ pub const RenderSystem = struct {
         const needs_realloc = self.instance_buffer.size < buffer_size;
 
         if (needs_realloc) {
-            // Destroy old buffer
-            try buffer_manager.destroyBuffer(self.instance_buffer);
-
-            // Create new buffer
-            self.instance_buffer = try buffer_manager.createBuffer(
+            // Create new buffer FIRST (before destroying old one)
+            const new_buffer = try buffer_manager.createBuffer(
                 BufferConfig{
                     .name = "instance_data_buffer",
                     .size = buffer_size,
@@ -540,6 +540,12 @@ pub const RenderSystem = struct {
                 },
                 0, // frame_index
             );
+
+            // Destroy old buffer AFTER new one is created
+            try buffer_manager.destroyBuffer(self.instance_buffer);
+
+            // Set the new buffer
+            self.instance_buffer = new_buffer;
 
             log(.INFO, "render_system", "Created instance buffer for {} instances ({} bytes)", .{ total_instances, buffer_size });
         }
@@ -1292,26 +1298,68 @@ pub fn prepare(world: *World, dt: f32) !void {
 
     // FAST PATH: Check for changes BEFORE doing expensive extraction
     var changes_detected = false;
+    var is_transform_only = false;
     var reason: []const u8 = "";
 
-    // 1) Quick check: Cache missing (first frame)
+    // 1) Quick check: Cache missing (first frame) - NOT transform-only
     const active_idx = self.active_cache_index.load(.acquire);
     if (self.cached_raster_data[active_idx] == null) {
         changes_detected = true;
+        is_transform_only = false;
         reason = "cache_missing";
     }
 
-    // 2) Quick check: Entity count changed (cheap)
+    // 2) Quick check: Entity count changed (cheap) - NOT transform-only
     if (!changes_detected) {
         const mesh_view = try world.view(MeshRenderer);
         const current_count = mesh_view.storage.entities.items.len;
         if (current_count != self.last_renderable_count) {
             changes_detected = true;
+            is_transform_only = false;
             reason = "count_changed";
         }
     }
 
-    // 3) Quick check: Transform dirty flags (medium cost, but early exit)
+    // 3) EXPENSIVE check: Mesh pointers changed (iterate entities + asset lookups) - NOT transform-only
+    // Check this BEFORE transforms so geometry changes take priority over transform-only changes
+    if (!changes_detected) {
+        const active_idx_check = self.active_cache_index.load(.acquire);
+        if (self.cached_raster_data[active_idx_check]) |cached| {
+            var mesh_view = try world.view(MeshRenderer);
+            var iter = mesh_view.iterator();
+            var mesh_idx: usize = 0;
+
+            outer: while (iter.next()) |entry| {
+                const renderer = entry.component;
+                if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+
+                if (asset_manager.getModel(renderer.model_asset.?)) |model| {
+                    for (model.meshes.items) |model_mesh| {
+                        // Check if we've exceeded cached mesh count or mesh ptr changed
+                        if (mesh_idx >= cached.objects.len or
+                            cached.objects[mesh_idx].mesh_handle.mesh_ptr != model_mesh.geometry.mesh)
+                        {
+                            changes_detected = true;
+                            is_transform_only = false;
+                            reason = "mesh_ptr_changed";
+                            break :outer;
+                        }
+                        mesh_idx += 1;
+                    }
+                }
+            }
+
+            // Also check if we have fewer meshes than before
+            if (!changes_detected and mesh_idx != cached.objects.len) {
+                changes_detected = true;
+                is_transform_only = false;
+                reason = "mesh_count_changed";
+            }
+        }
+    }
+
+    // 4) Medium check: Transform dirty flags (iterate entities, check flags) - IS transform-only
+    // This runs LAST so it only triggers if no geometry changes were detected
     if (!changes_detected) {
         var mesh_view = try world.view(MeshRenderer);
         var iter = mesh_view.iterator();
@@ -1319,6 +1367,7 @@ pub fn prepare(world: *World, dt: f32) !void {
             if (world.get(Transform, entry.entity)) |transform| {
                 if (transform.dirty) {
                     changes_detected = true;
+                    is_transform_only = true;
                     reason = "transform_dirty";
                     break;
                 }
@@ -1389,11 +1438,7 @@ pub fn prepare(world: *World, dt: f32) !void {
         const renderables_copy = try self.allocator.dupe(components.ExtractedRenderable, extracted_renderables.items);
         renderables_set.setRenderables(self.allocator, renderables_copy);
 
-        // Write change flags to RenderablesSet component for snapshot to capture
-        const is_transform_only = std.mem.eql(u8, reason, "transform_dirty");
         renderables_set.markDirty(is_transform_only);
-
-        log(.INFO, "render_system", "Changes detected ({s}): {} renderables, {} geometries", .{ reason, current_renderable_count, current_geometry_count });
     }
 }
 
@@ -1414,7 +1459,8 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
     if (snapshot.render_changes.renderables_dirty) {
         try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
 
-        // Clear the dirty flag in RenderablesSet so prepare() doesn't re-extract next frame
+        // Update transform_only_change flag from snapshot for raytracing system to read
+        self.transform_only_change = snapshot.render_changes.transform_only_change;
         const renderables_set_entity = try world.getOrCreateSingletonEntity();
         if (world.get(components.RenderablesSet, renderables_set_entity)) |renderables_set| {
             renderables_set.clearDirty();

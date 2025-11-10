@@ -36,7 +36,7 @@ pub const GPUMaterial = extern struct {
 /// Managed texture descriptor array
 pub const ManagedTextureArray = struct {
     descriptor_infos: []vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
-    generation: u32 = 0,
+    generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     size: usize = 0,
 };
 
@@ -668,7 +668,9 @@ pub const MaterialSystem = struct {
 
         set_data.texture_array.descriptor_infos = descriptors;
         set_data.texture_array.size = texture_count;
-        set_data.texture_array.generation += 1;
+        // Increment generation AFTER writing data, with release ordering
+        // This ensures all writes above are visible before generation change is seen
+        _ = set_data.texture_array.generation.fetchAdd(1, .release);
     }
 
     /// Upload material buffer to GPU

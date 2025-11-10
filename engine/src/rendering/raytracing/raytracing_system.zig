@@ -742,7 +742,7 @@ pub const RaytracingSystem = struct {
         // 1. Geometry actually changed (geo_changed = true from descriptors dirty)
         // 2. OR mesh transforms changed (transform_only AND renderables_dirty)
         // Don't rebuild just because renderables_dirty is true - that could be raster-only changes
-        const mesh_transforms_changed = render_system.transform_only_change and render_system.renderables_dirty;
+        const mesh_transforms_changed = render_system.transform_only_change;
         const rebuild_needed = geo_changed or mesh_transforms_changed;
 
         // Decrement cooldown if active (but only once per frame!)
@@ -764,7 +764,7 @@ pub const RaytracingSystem = struct {
             // Clear renderables_dirty flag so we don't rebuild again next frame
             // This flag gets set by RenderSystem.checkForChanges() and needs to be cleared
             // immediately when we consume it (spawn TLAS build)
-            render_system.renderables_dirty = false;
+
             render_system.transform_only_change = false;
 
             // Get current raytracing data
