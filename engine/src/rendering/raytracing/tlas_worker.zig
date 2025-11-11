@@ -136,7 +136,9 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             }
         }
     } else {
-        log(.INFO, "tlas_worker", "Building TLAS with {} new BLAS (job {})", .{ missing_count, job.job_id });
+        // Recalculate missing_count to track how many BLAS builds we'll actually spawn
+        // This is needed because some geometries might now have BLAS in registry
+        missing_count = 0;
 
         // Reset processed flags for second pass
         @memset(processed_geom_ids, false);
@@ -145,7 +147,7 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
         for (job.required_geometry_ids, 0..) |geom_id, geom_index| {
             const mesh_ptr = job.geometries[geom_index].mesh_ptr;
 
-            // Check if BLAS exists AND matches our mesh
+            // Check if BLAS exists AND matches our mesh - if so, use it and skip building
             if (job.builder.lookupBlasPtr(geom_id, mesh_ptr)) |blas_ptr| {
                 // BLAS exists in registry AND mesh matches - use it for ALL instances of this geometry
                 const blas_copy = try job.allocator.create(BlasResult);
@@ -163,6 +165,9 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
                 continue;
             }
             processed_geom_ids[geom_id] = true;
+
+            // Increment actual missing count for geometries that need building
+            missing_count += 1;
 
             // BLAS doesn't exist - spawn build (ONCE per unique geometry)
             // Create GeometryData for this BLAS build
@@ -206,6 +211,11 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             );
 
             try job.builder.thread_pool.submitWork(blas_work_item);
+        }
+
+        // Log actual count of BLAS builds spawned
+        if (missing_count > 0) {
+            log(.INFO, "tlas_worker", "Building TLAS with {} new BLAS (job {})", .{ missing_count, job.job_id });
         }
 
         // Step 3: Wait for all BLAS workers to signal completion of their slots.
