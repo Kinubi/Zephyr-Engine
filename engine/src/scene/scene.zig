@@ -710,8 +710,8 @@ pub const Scene = struct {
         }
 
         // Create and add GeometryPass
-        // Pass material bindings (opaque handle - GeometryPass doesn't need MaterialSystem awareness)
-        const opaque_bindings = try self.material_system.?.getBindings("opaque");
+        // Get direct access to material set data for the opaque set
+        const opaque_material_set = try self.material_system.?.getOrCreateSet("opaque");
 
         // OLD: Custom GeometryPass implementation (200+ lines of boilerplate)
         const geometry_pass = GeometryPass.create(
@@ -722,7 +722,7 @@ pub const Scene = struct {
             self.asset_manager,
             self.ecs_world,
             global_ubo_set,
-            opaque_bindings,
+            opaque_material_set,
             swapchain.hdr_format,
             try swapchain.depthFormat(),
             &self.render_system,
@@ -853,8 +853,8 @@ pub const Scene = struct {
         }
 
         // Create PathTracingPass (alternative to raster rendering)
-        // Pass material bindings (opaque handle)
-        const path_tracing_bindings = try self.material_system.?.getBindings("opaque");
+        // Get direct access to material set data for the opaque set
+        const path_tracing_material_set = try self.material_system.?.getOrCreateSet("opaque");
         const path_tracing_pass = PathTracingPass.create(
             self.allocator,
             graphics_context,
@@ -865,7 +865,7 @@ pub const Scene = struct {
             self.asset_manager,
             &self.render_system,
             texture_manager,
-            path_tracing_bindings,
+            path_tracing_material_set,
             swapchain,
             width,
             height,
@@ -878,6 +878,8 @@ pub const Scene = struct {
         if (path_tracing_pass) |pass| {
             try self.render_graph.?.addPass(&pass.base);
         }
+
+        //self.render_graph.?.disablePass("path_tracing_pass");
 
         // Create and add LightVolumePass (renders after geometry)
         const light_volume_pass = LightVolumePass.create(

@@ -885,7 +885,6 @@ fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.Surfa
     }
 
     // Absolute fallback: first supported format
-    log(.DEBUG, "swapchain", "Selected first supported surface format: format={} color_space={}", .{ surface_formats[0].format, surface_formats[0].color_space });
     return surface_formats[0];
 }
 

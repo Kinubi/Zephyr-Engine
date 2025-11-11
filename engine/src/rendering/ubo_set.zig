@@ -8,6 +8,7 @@ const buffer_manager_module = @import("buffer_manager.zig");
 const BufferManager = buffer_manager_module.BufferManager;
 const ManagedBuffer = buffer_manager_module.ManagedBuffer;
 const BufferConfig = buffer_manager_module.BufferConfig;
+const log = @import("../utils/log.zig").log;
 
 /// Manages the global UBO buffers (one per frame in flight)
 /// Now uses BufferManager with generation tracking for automatic rebinding
@@ -63,6 +64,7 @@ pub const GlobalUboSet = struct {
     }
 
     pub fn deinit(self: *GlobalUboSet) void {
+        log(.INFO, "ubo_set", "Deinitializing GlobalUboSet and destroying buffers", .{});
         // Destroy all frame buffers via BufferManager
         for (self.frame_buffers) |buffer| {
             if (buffer.generation > 0) {

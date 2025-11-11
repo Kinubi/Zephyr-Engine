@@ -521,6 +521,7 @@ pub fn ensureGlobal(allocator: std.mem.Allocator) !*CVarRegistry {
     // Memory tracking CVARs
     _ = boxed.registerCVar("r_trackMemory", .Bool, "false", "Enable GPU memory allocation tracking", CVarFlags{ .archived = true, .read_only = false }, null, null, null, null, null) catch {};
     _ = boxed.registerCVar("r_logMemoryAllocs", .Bool, "false", "Log individual memory allocations", CVarFlags{ .archived = false, .read_only = false }, null, null, null, null, null) catch {};
+    _ = boxed.registerCVar("r_frame_arena_size_mb", .Int, "64", "Frame arena size in megabytes", CVarFlags{ .archived = true, .read_only = false }, null, null, null, null, null) catch {};
 
     // attempt to load archived CVARs persisted on disk
     _ = loadArchivedFromFile(boxed, "cache/cvars.cfg") catch {};

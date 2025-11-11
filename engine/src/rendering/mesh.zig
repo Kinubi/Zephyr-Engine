@@ -70,6 +70,7 @@ pub const Mesh = struct {
             .{ .host_visible_bit = true, .host_coherent_bit = true },
             "mesh_vertex_staging",
         );
+        defer staging_buffer.deinit();
 
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.vertices.items), buffer_size, 0);
@@ -103,6 +104,7 @@ pub const Mesh = struct {
             .{ .host_visible_bit = true, .host_coherent_bit = true },
             "mesh_index_staging",
         );
+        defer staging_buffer.deinit();
 
         try staging_buffer.map(buffer_size, 0);
         staging_buffer.writeToBuffer(std.mem.sliceAsBytes(self.indices.items), buffer_size, 0);

@@ -231,6 +231,7 @@ pub const MultithreadedBvhBuilder = struct {
     }
 
     /// Take old BLAS that need deferred destruction (lock-free)
+    /// Only returns BLAS that are no longer referenced in the registry
     pub fn takeOldBlasForDestruction(self: *MultithreadedBvhBuilder, allocator: std.mem.Allocator) ![]BlasResult {
         // Atomically take the entire linked list
         const head = self.old_blas_head.swap(null, .acquire);
@@ -238,25 +239,76 @@ pub const MultithreadedBvhBuilder = struct {
             return &[_]BlasResult{};
         }
 
-        // Count nodes and collect into array
-        var count: usize = 0;
-        var current = head;
-        while (current) |node| : (current = node.next) {
-            count += 1;
+        // Log current registry state for debugging
+        log(.DEBUG, "bvh_builder", "=== Registry state before destruction check ===", .{});
+        for (self.blas_registry, 0..) |*slot, i| {
+            if (slot.load(.acquire)) |blas_ptr| {
+                log(.DEBUG, "bvh_builder", "  Slot {}: handle={d}, buffer={d}", .{
+                    i,
+                    @intFromEnum(blas_ptr.acceleration_structure),
+                    @intFromEnum(blas_ptr.buffer.buffer),
+                });
+            }
         }
 
-        const results = try allocator.alloc(BlasResult, count);
-        current = head;
-        var i: usize = 0;
+        // First pass: collect all BLAS, filtering out those still in use
+        var temp_results = std.ArrayList(BlasResult){};
+
+        var current = head;
         while (current) |node| {
-            results[i] = node.blas;
-            i += 1;
+            const old_blas = node.blas;
+
+            // Check if this BLAS handle is still referenced in the registry
+            var still_in_use = false;
+            for (self.blas_registry) |*slot| {
+                if (slot.load(.acquire)) |blas_ptr| {
+                    if (blas_ptr.acceleration_structure == old_blas.acceleration_structure) {
+                        still_in_use = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!still_in_use) {
+                // Safe to destroy - not referenced anywhere
+                log(.INFO, "bvh_builder", "Queuing BLAS for destruction: handle={d}, buffer={d} (no longer in use)", .{
+                    @intFromEnum(old_blas.acceleration_structure),
+                    @intFromEnum(old_blas.buffer.buffer),
+                });
+                try temp_results.append(allocator, old_blas);
+            } else {
+                // Still in use - acceleration structure is shared, but buffer might not be
+                // The old BlasResult has a buffer that was replaced, but the acceleration_structure is reused
+                // We can't destroy the acceleration structure (still in use), but we CAN free the old buffer
+                // if it's different from the one being used
+                log(.DEBUG, "bvh_builder", "BLAS handle {d} still in use by registry, not queuing acceleration structure for destruction", .{@intFromEnum(old_blas.acceleration_structure)});
+
+                // Check if this buffer is still being used (compare buffer handle)
+                var buffer_still_in_use = false;
+                for (self.blas_registry) |*slot| {
+                    if (slot.load(.acquire)) |blas_ptr| {
+                        if (blas_ptr.buffer.buffer == old_blas.buffer.buffer) {
+                            buffer_still_in_use = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!buffer_still_in_use) {
+                    // Buffer is no longer used, free it
+                    var buffer_to_free = old_blas.buffer;
+                    buffer_to_free.deinit();
+                    log(.DEBUG, "bvh_builder", "Freed unused buffer for shared BLAS", .{});
+                }
+            }
+
             const next = node.next;
             self.allocator.destroy(node);
             current = next;
         }
 
-        return results;
+        // Convert to owned slice
+        return temp_results.toOwnedSlice(allocator);
     }
 
     /// Try to pick up completed TLAS if available (lock-free) and take ownership
@@ -393,11 +445,20 @@ pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
     };
 
     if (old_blas_opt) |old_blas| {
+        log(.INFO, "bvh_builder", "Replaced BLAS for geometry {}: old_handle={d}, old_buffer={d} -> new_handle={d}, new_buffer={d}", .{
+            old_blas.geometry_id,
+            @intFromEnum(old_blas.acceleration_structure),
+            @intFromEnum(old_blas.buffer.buffer),
+            @intFromEnum(final_result.acceleration_structure),
+            @intFromEnum(final_result.buffer.buffer),
+        });
+
         // Old BLAS was replaced - queue for deferred destruction using lock-free list
         // Can't destroy immediately because:
         // 1. GPU commands may still be using it (secondary command buffers not yet executed)
         // 2. Old TLAS may still reference it
-        // The raytracing_system will pick these up and add to per-frame destruction queues
+        // 3. Other geometries may still be using the same BLAS handle (shared)
+        // The takeOldBlasForDestruction() will filter out BLAS still in use before returning them
         const node = builder.allocator.create(BlasDestructionNode) catch |err| {
             log(.ERROR, "bvh_builder", "Failed to allocate destruction node: {}", .{err});
             // Last resort: destroy immediately (may cause validation errors)

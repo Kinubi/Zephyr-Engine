@@ -209,6 +209,7 @@ pub const SceneLayer = struct {
         // Update ECS systems (CPU work, no Vulkan)
         // Use parallel scheduler if available, otherwise fallback to sequential
         if (self.system_scheduler) |*scheduler| {
+
             // Parallel execution of all registered systems
             // Systems can now extract data to GlobalUbo via userdata
             try scheduler.executePrepare(self.ecs_world, dt);

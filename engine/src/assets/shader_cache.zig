@@ -1,5 +1,6 @@
 const std = @import("std");
 const ShaderCompiler = @import("shader_compiler.zig");
+const log = @import("../utils/log.zig").log;
 
 // Shader caching system with file hashing for change detection
 // Compiles raw GLSL/HLSL to SPIR-V only when source files have changed
@@ -34,7 +35,7 @@ pub const ShaderCache = struct {
     pub fn deinit(self: *ShaderCache) void {
         // Save cache metadata before cleanup
         self.saveCacheMetadata() catch |err| {
-            std.log.warn("Failed to save shader cache metadata: {}", .{err});
+            log(.WARN, "shader_cache", "Failed to save shader cache metadata: {}", .{err});
         };
 
         // Clean up memory
@@ -103,7 +104,7 @@ pub const ShaderCache = struct {
 
         // Save updated metadata to disk
         self.saveCacheMetadata() catch |err| {
-            std.log.warn("Failed to save cache metadata: {}", .{err});
+            log(.WARN, "shader_cache", "Failed to save cache metadata: {}", .{err});
         };
 
         return compiled;
@@ -157,7 +158,7 @@ pub const ShaderCache = struct {
 
         // Save updated metadata to disk
         self.saveCacheMetadata() catch |err| {
-            std.log.warn("Failed to save cache metadata: {}", .{err});
+            log(.WARN, "shader_cache", "Failed to save cache metadata: {}", .{err});
         };
 
         return compiled;
@@ -171,7 +172,7 @@ pub const ShaderCache = struct {
         while (iterator.next()) |entry| {
             std.fs.cwd().deleteFile(entry.value_ptr.cached_spirv_path) catch |err| switch (err) {
                 error.FileNotFound => {}, // Already deleted, that's fine
-                else => std.log.warn("Failed to delete cached file {s}: {}", .{ entry.value_ptr.cached_spirv_path, err }),
+                else => log(.WARN, "shader_cache", "Failed to delete cached file {s}: {}", .{ entry.value_ptr.cached_spirv_path, err }),
             };
 
             self.allocator.free(entry.key_ptr.*);
@@ -190,7 +191,7 @@ pub const ShaderCache = struct {
             self.cache_mutex.unlock();
             std.fs.cwd().deleteFile(entry.value.cached_spirv_path) catch |err| switch (err) {
                 error.FileNotFound => {},
-                else => std.log.warn("Failed to delete cached file {s}: {}", .{ entry.value.cached_spirv_path, err }),
+                else => log(.WARN, "shader_cache", "Failed to delete cached file {s}: {}", .{ entry.value.cached_spirv_path, err }),
             };
 
             // Free memory used by stored strings
@@ -212,7 +213,7 @@ pub const ShaderCache = struct {
 
     fn calculateFileHash(self: *ShaderCache, file_path: []const u8) !u64 {
         const file_content = std.fs.cwd().readFileAlloc(self.allocator, file_path, 16 * 1024 * 1024) catch |err| {
-            std.log.err("Failed to read file for hashing: {s}", .{file_path});
+            log(.ERROR, "shader_cache", "Failed to read file for hashing: {s}", .{file_path});
             return err;
         };
         defer self.allocator.free(file_content);
@@ -291,7 +292,7 @@ pub const ShaderCache = struct {
 
     fn loadCachedSpirv(self: *ShaderCache, compiler: *ShaderCompiler.ShaderCompiler, cache_path: []const u8, expected_hash: u64) !ShaderCompiler.CompiledShader {
         const spirv_data = std.fs.cwd().readFileAlloc(self.allocator, cache_path, 16 * 1024 * 1024) catch |err| {
-            std.log.warn("Failed to load cached SPIR-V from {s}: {}", .{ cache_path, err });
+            log(.WARN, "shader_cache", "Failed to load cached SPIR-V from {s}: {}", .{ cache_path, err });
             return err;
         };
         // Use the compiler to parse words and generate reflection
@@ -324,24 +325,24 @@ pub const ShaderCache = struct {
 
         // Parse JSON metadata
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, metadata_content, .{}) catch |err| {
-            std.log.warn("Failed to parse cache metadata JSON: {}, starting fresh", .{err});
+            log(.WARN, "shader_cache", "Failed to parse cache metadata JSON: {}, starting fresh", .{err});
             return;
         };
         defer parsed.deinit();
 
         const root = parsed.value;
         if (root != .object) {
-            std.log.warn("Cache metadata root is not an object, starting fresh", .{});
+            log(.WARN, "shader_cache", "Cache metadata root is not an object, starting fresh", .{});
             return;
         }
 
         const entries = root.object.get("entries") orelse {
-            std.log.warn("Cache metadata missing 'entries' field, starting fresh", .{});
+            log(.WARN, "shader_cache", "Cache metadata missing 'entries' field, starting fresh", .{});
             return;
         };
 
         if (entries != .object) {
-            std.log.warn("Cache metadata 'entries' is not an object, starting fresh", .{});
+            log(.WARN, "shader_cache", "Cache metadata 'entries' is not an object, starting fresh", .{});
             return;
         }
 
@@ -364,11 +365,11 @@ pub const ShaderCache = struct {
                 compile_time != null and compile_time.? == .integer)
             {
                 const parsed_file_hash = std.fmt.parseInt(u64, file_hash.?.string, 10) catch {
-                    std.log.debug("Failed to parse file_hash for {s}", .{shader_id});
+                    log(.DEBUG, "shader_cache", "Failed to parse file_hash for {s}", .{shader_id});
                     continue;
                 };
                 const parsed_options_hash = std.fmt.parseInt(u64, options_hash.?.string, 10) catch {
-                    std.log.debug("Failed to parse options_hash for {s}", .{shader_id});
+                    log(.DEBUG, "shader_cache", "Failed to parse options_hash for {s}", .{shader_id});
                     continue;
                 };
 
@@ -381,7 +382,7 @@ pub const ShaderCache = struct {
 
                 // Verify the cached SPIR-V file still exists
                 std.fs.cwd().access(cache_entry.cached_spirv_path, .{}) catch {
-                    std.log.debug("Cached SPIR-V file no longer exists: {s}", .{cache_entry.cached_spirv_path});
+                    log(.DEBUG, "shader_cache", "Cached SPIR-V file no longer exists: {s}", .{cache_entry.cached_spirv_path});
                     self.allocator.free(cache_entry.cached_spirv_path);
                     continue;
                 };

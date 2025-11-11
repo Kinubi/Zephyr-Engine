@@ -403,8 +403,6 @@ pub const GraphicsContext = struct {
                 log(.ERROR, "graphics_context", "Failed to reset worker command pool: {}", .{err});
             };
         }
-
-        log(.DEBUG, "graphics_context", "Reset {} worker command pools", .{self.worker_command_pools.items.len});
     }
 
     pub fn getThreadQueue(self: *GraphicsContext) !Queue {
@@ -443,9 +441,14 @@ pub const GraphicsContext = struct {
 
     /// Copy from staging buffer using dedicated transfer queue
     pub fn copyFromStagingBuffer(self: *GraphicsContext, dst: vk.Buffer, staging_buffer: *Buffer, size: vk.DeviceSize) !void {
+        try self.copyFromStagingBufferWithOffset(dst, staging_buffer, size, 0);
+    }
+
+    /// Copy from staging buffer to dst at specific offset using dedicated transfer queue
+    pub fn copyFromStagingBufferWithOffset(self: *GraphicsContext, dst: vk.Buffer, staging_buffer: *Buffer, size: vk.DeviceSize, dst_offset: vk.DeviceSize) !void {
         const region = vk.BufferCopy{
             .src_offset = 0,
-            .dst_offset = 0,
+            .dst_offset = dst_offset,
             .size = size,
         };
 
@@ -454,8 +457,7 @@ pub const GraphicsContext = struct {
         // Submit and wait for transfer to complete
         try self.endTransferCommandBuffer(command_buffer);
 
-        // Now safe to deinit staging buffer since transfer queue has finished
-        staging_buffer.deinit();
+        // Note: staging buffer is NOT freed here - caller manages lifetime
     }
 
     pub fn createCommandBuffers(

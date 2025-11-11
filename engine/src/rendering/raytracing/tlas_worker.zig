@@ -28,14 +28,18 @@ pub const TlasJob = struct {
     // Job identification
     job_id: u64,
 
-    // Atomic BLAS result buffer: each slot corresponds to a geometry index
+    // Atomic BLAS result buffer: one slot per UNIQUE geometry (not per instance!)
     // BLAS workers atomically fill their slot when complete
     blas_buffer: []std.atomic.Value(?*BlasResult),
     filled_count: std.atomic.Value(u32), // How many slots are filled
-    expected_count: u32, // Total number of BLAS we need
+    expected_count: u32, // Total number of unique BLAS we need
 
-    // Geometry IDs required for this TLAS build (indexed same as blas_buffer)
+    // Geometry IDs required for this TLAS build (one per instance, may have duplicates)
     required_geometry_ids: []const u32,
+
+    // Mapping from geometry_id to blas_buffer index
+    // This allows us to find the buffer slot for a given geometry ID
+    geom_id_to_buffer_index: []u32,
 
     // Geometry data for spawning BLAS builds (includes mesh_ptr for each geometry)
     geometries: []const RenderData.RaytracingData.RTGeometry,
@@ -54,10 +58,16 @@ pub const TlasJob = struct {
 };
 
 /// Called by BLAS workers to fill a slot in the job's BLAS buffer
-/// Each BLAS worker knows its geometry index and fills that specific slot
+/// geometry_index is the instance index - we map it to buffer index via geometry ID
 pub fn fillBlasSlot(job: *TlasJob, geometry_index: u32, blas_result: *BlasResult) void {
+    // Get the geometry ID for this instance
+    const geom_id = job.required_geometry_ids[geometry_index];
+
+    // Map geometry ID to buffer index
+    const buffer_index = job.geom_id_to_buffer_index[geom_id];
+
     // Store the BLAS result pointer in the appropriate slot
-    const slot = &job.blas_buffer[geometry_index];
+    const slot = &job.blas_buffer[buffer_index];
     slot.store(blas_result, .release);
 
     // Increment filled count
@@ -77,12 +87,24 @@ pub fn tlasWorkerMain(context: *anyopaque, work_item: WorkItem) void {
 }
 
 fn tlasWorkerImpl(job: *TlasJob) !void {
+    // Step 0: Deduplicate required_geometry_ids to avoid spawning multiple builds for the same geometry
+    // Use a simple approach: only process the first occurrence of each geometry_id
+    const processed_geom_ids = try job.allocator.alloc(bool, job.builder.max_geometry_id);
+    defer job.allocator.free(processed_geom_ids);
+    @memset(processed_geom_ids, false);
+
     // Step 1: Check BLAS registry for all required geometry IDs
 
     var all_blas_ready = true;
     var missing_count: u32 = 0;
 
     for (job.required_geometry_ids, 0..) |geom_id, geom_index| {
+        // Skip if we've already processed this geometry ID
+        if (processed_geom_ids[geom_id]) {
+            continue;
+        }
+        processed_geom_ids[geom_id] = true;
+
         const mesh_ptr = job.geometries[geom_index].mesh_ptr;
         if (job.builder.lookupBlas(geom_id, mesh_ptr)) |_| {
             // BLAS exists in registry AND matches our mesh
@@ -102,7 +124,10 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
                 // BLAS exists in registry AND mesh matches - make a heap copy to avoid stale pointer issues
                 const blas_copy = try job.allocator.create(BlasResult);
                 blas_copy.* = blas_ptr.*;
-                job.blas_buffer[geom_index].store(blas_copy, .release);
+
+                // Map geometry ID to buffer index
+                const buffer_index = job.geom_id_to_buffer_index[geom_id];
+                job.blas_buffer[buffer_index].store(blas_copy, .release);
                 _ = job.filled_count.fetchAdd(1, .release);
             } else {
                 // This shouldn't happen if all_blas_ready was true
@@ -111,23 +136,40 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             }
         }
     } else {
-        log(.INFO, "tlas_worker", "Building TLAS with {} new BLAS (job {})", .{ missing_count, job.job_id });
+        // Recalculate missing_count to track how many BLAS builds we'll actually spawn
+        // This is needed because some geometries might now have BLAS in registry
+        missing_count = 0;
 
-        // Spawn BLAS workers for missing geometry IDs
+        // Reset processed flags for second pass
+        @memset(processed_geom_ids, false);
+
+        // Spawn BLAS workers for missing geometry IDs (deduplicated)
         for (job.required_geometry_ids, 0..) |geom_id, geom_index| {
             const mesh_ptr = job.geometries[geom_index].mesh_ptr;
 
-            // Check if BLAS exists AND matches our mesh
+            // Check if BLAS exists AND matches our mesh - if so, use it and skip building
             if (job.builder.lookupBlasPtr(geom_id, mesh_ptr)) |blas_ptr| {
-                // BLAS exists in registry AND mesh matches - use it
+                // BLAS exists in registry AND mesh matches - use it for ALL instances of this geometry
                 const blas_copy = try job.allocator.create(BlasResult);
                 blas_copy.* = blas_ptr.*;
-                job.blas_buffer[geom_index].store(blas_copy, .release);
+
+                // Map geometry ID to buffer index
+                const buffer_index = job.geom_id_to_buffer_index[geom_id];
+                job.blas_buffer[buffer_index].store(blas_copy, .release);
                 _ = job.filled_count.fetchAdd(1, .release);
                 continue;
             }
 
-            // BLAS doesn't exist - spawn build
+            // Skip if we've already spawned a build for this geometry ID
+            if (processed_geom_ids[geom_id]) {
+                continue;
+            }
+            processed_geom_ids[geom_id] = true;
+
+            // Increment actual missing count for geometries that need building
+            missing_count += 1;
+
+            // BLAS doesn't exist - spawn build (ONCE per unique geometry)
             // Create GeometryData for this BLAS build
             const geom_data = try job.allocator.create(GeometryData);
             geom_data.* = .{
@@ -171,6 +213,11 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
             try job.builder.thread_pool.submitWork(blas_work_item);
         }
 
+        // Log actual count of BLAS builds spawned
+        if (missing_count > 0) {
+            log(.INFO, "tlas_worker", "Building TLAS with {} new BLAS (job {})", .{ missing_count, job.job_id });
+        }
+
         // Step 3: Wait for all BLAS workers to signal completion of their slots.
         // We only wait for the number of missing slots we spawned.
         if (missing_count > 0) {
@@ -188,16 +235,24 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
     }
 
     // Step 4: Create instances with BLAS addresses from our atomic buffer
+    // Map each instance's geometry_id to its BLAS in the buffer
     const instances_with_blas = try job.allocator.alloc(InstanceData, job.instances.len);
-    defer job.allocator.free(instances_with_blas);
 
-    for (job.blas_buffer, 0..) |*slot, i| {
+    for (job.instances, 0..) |inst, i| {
+        // Get geometry ID for this instance
+        const geom_id = job.required_geometry_ids[i];
+
+        // Map to buffer index
+        const buffer_index = job.geom_id_to_buffer_index[geom_id];
+
+        // Get BLAS from buffer
+        const slot = &job.blas_buffer[buffer_index];
         if (slot.load(.acquire)) |blas_result| {
             // Copy the instance and set the actual BLAS device address
-            instances_with_blas[i] = job.instances[i];
+            instances_with_blas[i] = inst;
             instances_with_blas[i].blas_address = blas_result.device_address;
         } else {
-            log(.ERROR, "tlas_worker", "BLAS slot {} is unexpectedly null after filling", .{i});
+            log(.ERROR, "tlas_worker", "BLAS slot {} (geom_id {}) is unexpectedly null after filling", .{ buffer_index, geom_id });
             return error.IncompleteBlas;
         }
     }
@@ -227,4 +282,21 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
 // Error handler wrapping the main implementation
 fn handleError(err: anyerror, job: *TlasJob) void {
     log(.ERROR, "tlas_worker", "TLAS worker failed for job {}: {}", .{ job.job_id, err });
+
+    // Clean up job resources on error
+    job.allocator.free(job.required_geometry_ids);
+    job.allocator.free(job.geom_id_to_buffer_index);
+    job.allocator.free(job.geometries);
+    job.allocator.free(job.instances);
+
+    // Free BLAS buffer and its contents
+    for (job.blas_buffer) |*slot| {
+        if (slot.load(.acquire)) |blas_ptr| {
+            job.allocator.destroy(blas_ptr);
+        }
+    }
+    job.allocator.free(job.blas_buffer);
+
+    // Free the job itself
+    job.allocator.destroy(job);
 }
