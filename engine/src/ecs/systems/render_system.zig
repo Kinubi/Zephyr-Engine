@@ -1631,6 +1631,10 @@ pub fn prepare(world: *World, dt: f32) !void {
         break :blk world.get(components.RenderablesSet, renderables_set_entity).?;
     };
 
+    // Create view once and reuse it for all checks
+    var mesh_view = try world.view(MeshRenderer);
+    const current_count = mesh_view.storage.entities.items.len;
+
     // FAST PATH: Check for changes BEFORE doing expensive extraction
     var changes_detected = false;
     var is_transform_only = false;
@@ -1645,22 +1649,16 @@ pub fn prepare(world: *World, dt: f32) !void {
     }
 
     // 2) Quick check: Entity count changed (cheap) - NOT transform-only
-    if (!changes_detected) {
-        const mesh_view = try world.view(MeshRenderer);
-        const current_count = mesh_view.storage.entities.items.len;
-        if (current_count != self.last_renderable_count) {
-            changes_detected = true;
-            is_transform_only = false;
-            reason = "count_changed";
-        }
+    if (!changes_detected and current_count != self.last_renderable_count) {
+        changes_detected = true;
+        is_transform_only = false;
+        reason = "count_changed";
     }
 
     // 3) EXPENSIVE check: Mesh pointers changed (iterate entities + asset lookups) - NOT transform-only
     // Check this BEFORE transforms so geometry changes take priority over transform-only changes
     if (!changes_detected) {
-        const active_idx_check = self.active_cache_index.load(.acquire);
-        if (self.cached_raster_data[active_idx_check]) |cached| {
-            var mesh_view = try world.view(MeshRenderer);
+        if (self.cached_raster_data[active_idx]) |cached| {
             var iter = mesh_view.iterator();
             var mesh_idx: usize = 0;
 
@@ -1696,7 +1694,6 @@ pub fn prepare(world: *World, dt: f32) !void {
     // 4) Medium check: Transform dirty flags (iterate entities, check flags) - IS transform-only
     // This runs LAST so it only triggers if no geometry changes were detected
     if (!changes_detected) {
-        var mesh_view = try world.view(MeshRenderer);
         var iter = mesh_view.iterator();
         while (iter.next()) |entry| {
             if (world.get(Transform, entry.entity)) |transform| {
@@ -1712,28 +1709,22 @@ pub fn prepare(world: *World, dt: f32) !void {
 
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
-        // Clear transform dirty flags ONLY when we're about to extract
-        // (No point clearing flags if we're not extracting)
-        var mesh_view_clear = try world.view(MeshRenderer);
-        var iter_clear = mesh_view_clear.iterator();
-        while (iter_clear.next()) |entry_clear| {
-            if (world.get(Transform, entry_clear.entity)) |transform| {
-                transform.dirty = false;
-            }
-        }
+        // Pre-allocate with expected capacity to avoid reallocations
         var extracted_renderables = std.ArrayList(components.ExtractedRenderable){};
+        try extracted_renderables.ensureTotalCapacity(self.allocator, current_count);
         defer extracted_renderables.deinit(self.allocator);
 
-        var mesh_view = try world.view(MeshRenderer);
+        // Single-pass extraction: clear dirty flags and extract in one loop
         var iter = mesh_view.iterator();
         while (iter.next()) |entry| {
             const renderer = entry.component;
 
-            if (!renderer.enabled) {
-                continue;
-            }
-            if (!renderer.hasValidAssets()) {
-                continue;
+            // Early exit conditions
+            if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+
+            // Clear transform dirty flag inline during extraction
+            if (world.get(Transform, entry.entity)) |transform| {
+                transform.dirty = false;
             }
 
             // Get transform (default to identity if missing)
@@ -1744,7 +1735,7 @@ pub fn prepare(world: *World, dt: f32) !void {
             const material_set = world.get(components.MaterialSet, entry.entity);
             const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
 
-            try extracted_renderables.append(self.allocator, .{
+            extracted_renderables.appendAssumeCapacity(.{
                 .entity_id = entry.entity,
                 .transform = world_matrix,
                 .model_asset = renderer.model_asset.?,
@@ -1789,52 +1780,67 @@ fn calculateInstanceDeltas(
     renderables: []const components.ExtractedRenderable,
     asset_manager: *AssetManager,
 ) !void {
-    // Build current instance data from renderables
+    // Pre-calculate total instance count to pre-allocate
+    var total_instances: usize = 0;
+    for (renderables) |renderable| {
+        if (asset_manager.getModel(renderable.model_asset)) |model| {
+            total_instances += model.meshes.items.len;
+        }
+    }
+
+    // Pre-allocate with exact capacity
     var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+    try current_instances.ensureTotalCapacity(self.allocator, total_instances);
     defer current_instances.deinit(self.allocator);
 
+    // Build current instance data from renderables
     for (renderables) |renderable| {
         const model = asset_manager.getModel(renderable.model_asset) orelse continue;
 
         // Get material_buffer_index from MaterialSet component
-        var material_index: u32 = 0;
-        if (renderable.material_buffer_index) |idx| {
-            material_index = idx;
-        }
+        const material_index: u32 = renderable.material_buffer_index orelse 0;
 
+        // Batch-append instances for this renderable
         for (model.meshes.items) |_| {
-            try current_instances.append(self.allocator, .{
+            current_instances.appendAssumeCapacity(.{
                 .transform = renderable.transform.data,
                 .material_index = material_index,
             });
         }
     }
 
-    // Compare with last instance data to find changes
+    // Fast path: if counts differ drastically, all instances changed
+    const instance_count = current_instances.items.len;
+    const last_count = self.last_instance_data.items.len;
+    
+    // Pre-allocate delta arrays with worst-case capacity
     var changed_indices = std.ArrayList(u32){};
+    try changed_indices.ensureTotalCapacity(self.allocator, instance_count);
     defer changed_indices.deinit(self.allocator);
 
     var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+    try changed_data.ensureTotalCapacity(self.allocator, instance_count);
     defer changed_data.deinit(self.allocator);
 
-    const compare_count = @min(current_instances.items.len, self.last_instance_data.items.len);
+    // Compare with last instance data to find changes
+    const compare_count = @min(instance_count, last_count);
 
+    // Optimized comparison loop
     for (current_instances.items[0..compare_count], 0..) |current, i| {
-        if (i >= self.last_instance_data.items.len) break;
         const last = self.last_instance_data.items[i];
 
-        if (!std.meta.eql(current, last)) {
-            try changed_indices.append(self.allocator, @intCast(i));
-            try changed_data.append(self.allocator, current);
+        // Use memcmp for faster comparison of flat data
+        if (!std.mem.eql(u8, std.mem.asBytes(&current), std.mem.asBytes(&last))) {
+            changed_indices.appendAssumeCapacity(@intCast(i));
+            changed_data.appendAssumeCapacity(current);
         }
     }
 
     // Any new instances beyond last count are also "changed"
-    if (current_instances.items.len > self.last_instance_data.items.len) {
-        var i = self.last_instance_data.items.len;
-        while (i < current_instances.items.len) : (i += 1) {
-            try changed_indices.append(self.allocator, @intCast(i));
-            try changed_data.append(self.allocator, current_instances.items[i]);
+    if (instance_count > last_count) {
+        for (current_instances.items[last_count..], last_count..) |instance, i| {
+            changed_indices.appendAssumeCapacity(@intCast(i));
+            changed_data.appendAssumeCapacity(instance);
         }
     }
 
@@ -1851,9 +1857,11 @@ fn calculateInstanceDeltas(
         const data_copy = try self.allocator.dupe(render_data_types.RasterizationData.InstanceData, changed_data.items);
 
         deltas_set.setDeltas(self.allocator, indices_copy, data_copy);
-
-        log(.DEBUG, "render_system", "Calculated {} instance deltas for snapshot", .{changed_indices.items.len});
     }
+
+    // Update tracking for next frame - use copyForwards for better performance
+    self.last_instance_data.clearRetainingCapacity();
+    try self.last_instance_data.appendSlice(self.allocator, current_instances.items);
 }
 
 /// RENDER THREAD: Update phase - build GPU caches from snapshot

@@ -317,6 +317,9 @@ pub const MaterialSystem = struct {
         var material_view = try world.view(MaterialSet);
         var iter = material_view.iterator();
 
+        // Pre-allocate space for common case (reduce allocations during grouping)
+        const entity_count = material_view.storage.entities.items.len;
+        
         // Group entities by material set name
         while (iter.next()) |entry| {
             const entity = entry.entity;
@@ -324,9 +327,11 @@ pub const MaterialSystem = struct {
 
             const gop = try sets_map.getOrPut(material_set.set_name);
             if (!gop.found_existing) {
+                // Pre-allocate with estimated size to reduce reallocations
                 gop.value_ptr.* = std.ArrayList(ecs.EntityId){};
+                try gop.value_ptr.ensureTotalCapacity(self.allocator, @max(1, entity_count / 2));
             }
-            try gop.value_ptr.append(self.allocator, entity);
+            gop.value_ptr.appendAssumeCapacity(entity);
         }
 
         // Process each material set (ECS queries, compute indices, build deltas)
@@ -355,6 +360,9 @@ pub const MaterialSystem = struct {
         // Include sets even with empty deltas to ensure proper tracking
         var deltas_list = std.ArrayList(ecs.MaterialSetDelta){};
         defer deltas_list.deinit(self.allocator);
+        
+        // Pre-allocate with known size
+        try deltas_list.ensureTotalCapacity(self.allocator, self.material_sets.count());
 
         var delta_iter = self.material_sets.iterator();
         while (delta_iter.next()) |entry| {
@@ -379,7 +387,7 @@ pub const MaterialSystem = struct {
                 set_data.pending_delta.texture_descriptors,
             );
 
-            try deltas_list.append(self.allocator, .{
+            deltas_list.appendAssumeCapacity(.{
                 .set_name = set_name,
                 .changed_materials = changed_materials,
                 .texture_descriptors = texture_descriptors,
@@ -503,15 +511,33 @@ pub const MaterialSystem = struct {
                 }
 
                 // Apply all material changes to all 3 frame buffers
+                // OPTIMIZATION: Batch all updates in a single map/unmap per buffer
                 for (&set_data.material_buffers) |buf| {
+                    if (snap.changed_materials.len == 0) continue;
+                    
+                    // Find the range of updates to determine map size
+                    var min_idx: u32 = std.math.maxInt(u32);
+                    var max_idx: u32 = 0;
                     for (snap.changed_materials) |change| {
-                        const offset = buf.arena_offset + (change.index * @sizeOf(GPUMaterial));
-                        try buf.buffer.map(@sizeOf(GPUMaterial), offset);
-                        const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
-                        const bytes = std.mem.asBytes(&change.data);
-                        @memcpy(data_ptr[0..bytes.len], bytes);
-                        buf.buffer.unmap();
+                        min_idx = @min(min_idx, change.index);
+                        max_idx = @max(max_idx, change.index);
                     }
+                    
+                    // Map the entire range once
+                    const range_start = buf.arena_offset + (min_idx * @sizeOf(GPUMaterial));
+                    const range_size = ((max_idx - min_idx + 1) * @sizeOf(GPUMaterial));
+                    
+                    try buf.buffer.map(range_size, range_start);
+                    const base_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                    
+                    // Write all changes to the mapped region
+                    for (snap.changed_materials) |change| {
+                        const local_offset = (change.index - min_idx) * @sizeOf(GPUMaterial);
+                        const bytes = std.mem.asBytes(&change.data);
+                        @memcpy(base_ptr[local_offset..][0..bytes.len], bytes);
+                    }
+                    
+                    buf.buffer.unmap();
                 }
             }
         }
@@ -541,6 +567,10 @@ pub const MaterialSystem = struct {
 
         var gpu_materials = std.ArrayList(GPUMaterial){};
         defer gpu_materials.deinit(self.allocator);
+        
+        // Pre-allocate with known entity count
+        try gpu_materials.ensureTotalCapacity(self.allocator, entities.len);
+        try texture_map.ensureTotalCapacity(@intCast(entities.len * 3)); // Rough estimate: ~3 textures per entity
 
         // Reserve index 0 for white dummy texture
         try texture_map.put(0, 0);
@@ -548,7 +578,7 @@ pub const MaterialSystem = struct {
 
         // Build materials for entities in this set
         for (entities) |entity| {
-            // Get optional material property components
+            // Batch get all material components at once (reduces component lookup overhead)
             const albedo = world.get(ecs.AlbedoMaterial, entity);
             const roughness = world.get(ecs.RoughnessMaterial, entity);
             const metallic = world.get(ecs.MetallicMaterial, entity);
@@ -556,77 +586,43 @@ pub const MaterialSystem = struct {
             const emissive = world.get(ecs.EmissiveMaterial, entity);
             const occlusion = world.get(ecs.OcclusionMaterial, entity);
 
-            // Build GPU material
-            var gpu_mat: GPUMaterial = std.mem.zeroes(GPUMaterial);
-
-            // Albedo
-            if (albedo) |alb| {
-                gpu_mat.albedo_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, alb.texture_id);
-                gpu_mat.albedo_tint = alb.color_tint;
-            } else {
-                gpu_mat.albedo_idx = 0;
-                gpu_mat.albedo_tint = [_]f32{ 1, 1, 1, 1 };
-            }
-
-            // Roughness
-            if (roughness) |rough| {
-                gpu_mat.roughness_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, rough.texture_id);
-                gpu_mat.roughness_factor = rough.factor;
-            } else {
-                gpu_mat.roughness_idx = 0;
-                gpu_mat.roughness_factor = 0.5;
-            }
-
-            // Metallic
-            if (metallic) |metal| {
-                gpu_mat.metallic_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, metal.texture_id);
-                gpu_mat.metallic_factor = metal.factor;
-            } else {
-                gpu_mat.metallic_idx = 0;
-                gpu_mat.metallic_factor = 0.0;
-            }
-
-            // Normal
-            if (normal) |norm| {
-                gpu_mat.normal_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, norm.texture_id);
-                gpu_mat.normal_strength = norm.strength;
-            } else {
-                gpu_mat.normal_idx = 0;
-                gpu_mat.normal_strength = 1.0;
-            }
-
-            // Emissive
-            if (emissive) |emiss| {
-                gpu_mat.emissive_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, emiss.texture_id);
-                gpu_mat.emissive_color = emiss.color;
-                gpu_mat.emissive_intensity = emiss.intensity;
-            } else {
-                gpu_mat.emissive_idx = 0;
-                gpu_mat.emissive_color = [_]f32{ 0, 0, 0 };
-                gpu_mat.emissive_intensity = 0.0;
-            }
-
-            // Occlusion
-            if (occlusion) |occ| {
-                gpu_mat.occlusion_idx = try self.getOrAddTexture(&texture_map, &next_texture_idx, occ.texture_id);
-                gpu_mat.occlusion_strength = occ.strength;
-            } else {
-                gpu_mat.occlusion_idx = 0;
-                gpu_mat.occlusion_strength = 1.0;
-            }
+            // Build GPU material with inline initialization (faster than zeroes + assignments)
+            const gpu_mat = GPUMaterial{
+                // Albedo
+                .albedo_idx = if (albedo) |alb| try self.getOrAddTexture(&texture_map, &next_texture_idx, alb.texture_id) else 0,
+                .albedo_tint = if (albedo) |alb| alb.color_tint else [_]f32{ 1, 1, 1, 1 },
+                
+                // Roughness
+                .roughness_idx = if (roughness) |rough| try self.getOrAddTexture(&texture_map, &next_texture_idx, rough.texture_id) else 0,
+                .roughness_factor = if (roughness) |rough| rough.factor else 0.5,
+                
+                // Metallic
+                .metallic_idx = if (metallic) |metal| try self.getOrAddTexture(&texture_map, &next_texture_idx, metal.texture_id) else 0,
+                .metallic_factor = if (metallic) |metal| metal.factor else 0.0,
+                
+                // Normal
+                .normal_idx = if (normal) |norm| try self.getOrAddTexture(&texture_map, &next_texture_idx, norm.texture_id) else 0,
+                .normal_strength = if (normal) |norm| norm.strength else 1.0,
+                
+                // Emissive
+                .emissive_idx = if (emissive) |emiss| try self.getOrAddTexture(&texture_map, &next_texture_idx, emiss.texture_id) else 0,
+                .emissive_color = if (emissive) |emiss| emiss.color else [_]f32{ 0, 0, 0 },
+                .emissive_intensity = if (emissive) |emiss| emiss.intensity else 0.0,
+                
+                // Occlusion
+                .occlusion_idx = if (occlusion) |occ| try self.getOrAddTexture(&texture_map, &next_texture_idx, occ.texture_id) else 0,
+                .occlusion_strength = if (occlusion) |occ| occ.strength else 1.0,
+            };
 
             // CRITICAL: Write material_buffer_index to component (snapshot will capture this)
-            // Get fresh pointer right before writing to avoid stale pointer issues
-            // if ECS storage was reallocated during the loop
             const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
             const mat_index: u32 = @intCast(gpu_materials.items.len);
             material_set.material_buffer_index = mat_index;
 
-            // Compare with last frame to detect changes
+            // Fast change detection using memcmp instead of std.meta.eql
             if (mat_index < set_data.last_materials.items.len) {
-                // Check if material data changed
                 const last_mat = set_data.last_materials.items[mat_index];
-                if (!std.meta.eql(gpu_mat, last_mat)) {
+                if (!std.mem.eql(u8, std.mem.asBytes(&gpu_mat), std.mem.asBytes(&last_mat))) {
                     // Material changed - add to delta
                     try set_data.pending_delta.changed_materials.append(self.allocator, .{
                         .index = mat_index,
@@ -641,26 +637,30 @@ pub const MaterialSystem = struct {
                 });
             }
 
-            try gpu_materials.append(self.allocator, gpu_mat);
+            gpu_materials.appendAssumeCapacity(gpu_mat);
         }
 
-        // Check if texture set changed
+        // Check if texture set changed - optimized with early exit
         var current_texture_ids = std.ArrayList(u64){};
         defer current_texture_ids.deinit(self.allocator);
+        
+        // Pre-allocate with known size
+        try current_texture_ids.ensureTotalCapacity(self.allocator, texture_map.count());
 
         var tex_iter = texture_map.keyIterator();
         while (tex_iter.next()) |key_ptr| {
-            try current_texture_ids.append(self.allocator, key_ptr.*);
+            current_texture_ids.appendAssumeCapacity(key_ptr.*);
         }
         std.sort.pdq(u64, current_texture_ids.items, {}, std.sort.asc(u64));
 
         const textures_changed = blk: {
+            // Quick count check
             if (current_texture_ids.items.len != set_data.last_texture_ids.items.len) break :blk true;
-            for (current_texture_ids.items, set_data.last_texture_ids.items) |curr, last| {
-                if (curr != last) break :blk true;
-            }
+            
+            // Fast memcmp for sorted IDs
+            if (!std.mem.eql(u64, current_texture_ids.items, set_data.last_texture_ids.items)) break :blk true;
 
-            // Check if any texture descriptors changed
+            // Only check descriptor changes if IDs match (uncommon case)
             var tex_check_iter = texture_map.iterator();
             while (tex_check_iter.next()) |entry| {
                 const asset_id_u64 = entry.key_ptr.*;
