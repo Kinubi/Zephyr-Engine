@@ -143,13 +143,13 @@ pub const RenderSystem = struct {
     }
 
     pub fn deinit(self: *RenderSystem) void {
-        // Free per-frame instance buffers from arenas
+        // Free per-frame instance buffers
         if (self.buffer_manager) |bm| {
             for (&self.instance_buffers, 0..) |buf_ptr, frame_idx| {
                 const frame = @as(u32, @intCast(frame_idx));
                 const buf = buf_ptr;
 
-                // If arena-allocated (arena_offset != 0), free from arena
+                // If arena-allocated (arena_offset != 0), free from arena first
                 if (buf.arena_offset != 0) {
                     bm.freeFromFrameArena(frame, buf);
                     // Free the heap-allocated ManagedBuffer and its name
@@ -590,6 +590,7 @@ pub const RenderSystem = struct {
                         self.allocator.destroy(buf);
 
                         const dedicated_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
+                        defer self.allocator.free(dedicated_name); // createBuffer duplicates the name
                         const dedicated = try buffer_manager.createBuffer(
                             .{
                                 .name = dedicated_name,
@@ -748,6 +749,7 @@ pub const RenderSystem = struct {
                         self.allocator.destroy(buf);
 
                         const dedicated_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
+                        defer self.allocator.free(dedicated_name); // createBuffer duplicates the name
                         const dedicated = try buffer_manager.createBuffer(
                             .{
                                 .name = dedicated_name,

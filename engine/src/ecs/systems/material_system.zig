@@ -140,6 +140,7 @@ pub const MaterialSetData = struct {
                 allocator.destroy(buf);
 
                 const dedicated_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_dedicated_{d}", .{frame});
+                defer allocator.free(dedicated_name); // createBuffer duplicates the name
                 const BufferConfig = buffer_manager_module.BufferConfig;
                 const dedicated = try buffer_manager.createBuffer(
                     BufferConfig{
@@ -196,19 +197,19 @@ pub const MaterialSetData = struct {
             delta.deinit();
         }
 
-        // Free per-frame material buffers from arenas
+        // Free per-frame material buffers
         for (&self.material_buffers, 0..) |buf_ptr, frame_idx| {
             const frame = @as(u32, @intCast(frame_idx));
             const buf = buf_ptr;
 
-            // If arena-allocated (arena_offset != 0), free from arena
             if (buf.arena_offset != 0) {
+                // Arena-allocated: only free tracking and heap-allocated struct
+                // Don't call destroyBuffer - the arena owns the Vulkan buffer
                 buffer_manager.freeFromFrameArena(frame, buf);
-                // Free the heap-allocated ManagedBuffer and its name
                 self.allocator.free(buf.name);
                 self.allocator.destroy(buf);
             } else {
-                // Dedicated buffer - destroy normally (this also frees the ManagedBuffer via buffer_manager)
+                // Dedicated buffer: use destroyBuffer for full cleanup
                 buffer_manager.destroyBuffer(buf) catch |err| {
                     log(.WARN, "material_system", "Failed to destroy material buffer for frame {}: {}", .{ frame, err });
                 };
@@ -483,6 +484,7 @@ pub const MaterialSystem = struct {
                                 self.allocator.destroy(buf);
 
                                 const dedicated_name = try std.fmt.allocPrint(self.allocator, "material_buffer_{s}_frame{d}_dedicated", .{ snap.set_name, frame });
+                                defer self.allocator.free(dedicated_name); // createBuffer duplicates the name
                                 const dedicated = try self.buffer_manager.createBuffer(
                                     .{
                                         .name = dedicated_name,

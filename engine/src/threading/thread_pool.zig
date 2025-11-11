@@ -458,7 +458,6 @@ pub const ThreadPool = struct {
     }
 
     pub fn deinit(self: *ThreadPool) void {
-        log(.INFO, "enhanced_thread_pool", "DEINIT CALLED - About to shutdown thread pool", .{});
         self.shutdown();
 
         self.work_queue.deinit();
@@ -760,8 +759,6 @@ pub const ThreadPool = struct {
     pub fn shutdown(self: *ThreadPool) void {
         if (!self.running) return;
 
-        log(.INFO, "enhanced_thread_pool", "SHUTDOWN CALLED - Shutting down thread pool...", .{});
-
         self.shutting_down.store(true, .release);
         self.running = false;
 
@@ -780,8 +777,6 @@ pub const ThreadPool = struct {
         }
 
         self.current_worker_count.store(0, .release);
-
-        log(.INFO, "enhanced_thread_pool", "Thread pool shutdown complete", .{});
     }
 
     /// Get current pool statistics
