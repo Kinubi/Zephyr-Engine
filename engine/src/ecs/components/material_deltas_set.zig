@@ -48,7 +48,8 @@ pub const MaterialDeltasSet = struct {
         };
     }
 
-    pub fn deinit(self: *MaterialDeltasSet) void {
+    /// Internal helper to free all delta arrays and their contents
+    fn freeDeltas(self: *MaterialDeltasSet) void {
         for (self.deltas) |*delta| {
             if (delta.changed_materials.len > 0) {
                 self.allocator.free(delta.changed_materials);
@@ -61,22 +62,16 @@ pub const MaterialDeltasSet = struct {
         if (self.deltas.len > 0) {
             self.allocator.free(self.deltas);
         }
+    }
+
+    pub fn deinit(self: *MaterialDeltasSet) void {
+        self.freeDeltas();
         self.* = undefined;
     }
 
     /// Clear deltas but keep allocator (for reuse)
     pub fn clear(self: *MaterialDeltasSet) void {
-        for (self.deltas) |*delta| {
-            if (delta.changed_materials.len > 0) {
-                self.allocator.free(delta.changed_materials);
-            }
-            if (delta.texture_descriptors.len > 0) {
-                self.allocator.free(delta.texture_descriptors);
-            }
-        }
-        if (self.deltas.len > 0) {
-            self.allocator.free(self.deltas);
-        }
+        self.freeDeltas();
         self.deltas = &.{};
     }
 };

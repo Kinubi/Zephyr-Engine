@@ -458,7 +458,7 @@ pub const BufferManager = struct {
         // Replace arena buffer with new compacted one
         arena.buffer = new_managed_buffer;
         arena.current_offset = new_offset;
-        arena.smallest_used_offset = if (arena.active_allocations.items.len > 0) 0 else 0;
+        arena.smallest_used_offset = if (arena.active_allocations.items.len > 0) 0 else arena.capacity;
         arena.needs_compaction = false;
 
         log(.INFO, "buffer_manager", "Arena {} compacted: {d}KB -> {d}KB used", .{ frame_index, arena.capacity / 1024, new_offset / 1024 });

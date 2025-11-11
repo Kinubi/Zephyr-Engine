@@ -71,7 +71,7 @@ pub const MaterialSetData = struct {
 
     // Tracking for change detection
     last_texture_ids: std.ArrayList(u64),
-    last_materials: std.ArrayList(GPUMaterial),
+    last_materials: std.AutoHashMap(ecs.EntityId, GPUMaterial), // Track by entity ID, not array index
     next_materials: std.ArrayList(GPUMaterial), // Staging area for next frame's materials
 
     // Delta tracking for incremental GPU updates (main thread)
@@ -172,7 +172,7 @@ pub const MaterialSetData = struct {
             .current_capacity = 1, // Currently holds 1 dummy material
             .texture_array = .{},
             .last_texture_ids = std.ArrayList(u64){},
-            .last_materials = std.ArrayList(GPUMaterial){},
+            .last_materials = std.AutoHashMap(ecs.EntityId, GPUMaterial).init(allocator),
             .next_materials = std.ArrayList(GPUMaterial){}, // Staging area
             .pending_delta = MaterialSetDelta.init(allocator),
             .pending_deltas = [_]MaterialSetDelta{MaterialSetDelta.init(allocator)} ** MAX_FRAMES_IN_FLIGHT,
@@ -187,7 +187,7 @@ pub const MaterialSetData = struct {
 
         // Clean up tracking
         self.last_texture_ids.deinit(self.allocator);
-        self.last_materials.deinit(self.allocator);
+        self.last_materials.deinit();
         self.next_materials.deinit(self.allocator);
 
         // Clean up deltas
@@ -319,7 +319,7 @@ pub const MaterialSystem = struct {
 
         // Pre-allocate space for common case (reduce allocations during grouping)
         const entity_count = material_view.storage.entities.items.len;
-        
+
         // Group entities by material set name
         while (iter.next()) |entry| {
             const entity = entry.entity;
@@ -360,7 +360,7 @@ pub const MaterialSystem = struct {
         // Include sets even with empty deltas to ensure proper tracking
         var deltas_list = std.ArrayList(ecs.MaterialSetDelta){};
         defer deltas_list.deinit(self.allocator);
-        
+
         // Pre-allocate with known size
         try deltas_list.ensureTotalCapacity(self.allocator, self.material_sets.count());
 
@@ -403,10 +403,6 @@ pub const MaterialSystem = struct {
         var tracking_iter = self.material_sets.iterator();
         while (tracking_iter.next()) |entry| {
             const set_data = entry.value_ptr;
-
-            // Update last_materials from next_materials
-            set_data.last_materials.clearRetainingCapacity();
-            try set_data.last_materials.appendSlice(self.allocator, set_data.next_materials.items);
 
             // Clear pending_delta for next frame
             set_data.pending_delta.clear();
@@ -514,7 +510,7 @@ pub const MaterialSystem = struct {
                 // OPTIMIZATION: Batch all updates in a single map/unmap per buffer
                 for (&set_data.material_buffers) |buf| {
                     if (snap.changed_materials.len == 0) continue;
-                    
+
                     // Find the range of updates to determine map size
                     var min_idx: u32 = std.math.maxInt(u32);
                     var max_idx: u32 = 0;
@@ -522,21 +518,21 @@ pub const MaterialSystem = struct {
                         min_idx = @min(min_idx, change.index);
                         max_idx = @max(max_idx, change.index);
                     }
-                    
+
                     // Map the entire range once
                     const range_start = buf.arena_offset + (min_idx * @sizeOf(GPUMaterial));
                     const range_size = ((max_idx - min_idx + 1) * @sizeOf(GPUMaterial));
-                    
+
                     try buf.buffer.map(range_size, range_start);
                     const base_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
-                    
+
                     // Write all changes to the mapped region
                     for (snap.changed_materials) |change| {
                         const local_offset = (change.index - min_idx) * @sizeOf(GPUMaterial);
                         const bytes = std.mem.asBytes(&change.data);
                         @memcpy(base_ptr[local_offset..][0..bytes.len], bytes);
                     }
-                    
+
                     buf.buffer.unmap();
                 }
             }
@@ -567,7 +563,7 @@ pub const MaterialSystem = struct {
 
         var gpu_materials = std.ArrayList(GPUMaterial){};
         defer gpu_materials.deinit(self.allocator);
-        
+
         // Pre-allocate with known entity count
         try gpu_materials.ensureTotalCapacity(self.allocator, entities.len);
         try texture_map.ensureTotalCapacity(@intCast(entities.len * 3)); // Rough estimate: ~3 textures per entity
@@ -591,37 +587,36 @@ pub const MaterialSystem = struct {
                 // Albedo
                 .albedo_idx = if (albedo) |alb| try self.getOrAddTexture(&texture_map, &next_texture_idx, alb.texture_id) else 0,
                 .albedo_tint = if (albedo) |alb| alb.color_tint else [_]f32{ 1, 1, 1, 1 },
-                
+
                 // Roughness
                 .roughness_idx = if (roughness) |rough| try self.getOrAddTexture(&texture_map, &next_texture_idx, rough.texture_id) else 0,
                 .roughness_factor = if (roughness) |rough| rough.factor else 0.5,
-                
+
                 // Metallic
                 .metallic_idx = if (metallic) |metal| try self.getOrAddTexture(&texture_map, &next_texture_idx, metal.texture_id) else 0,
                 .metallic_factor = if (metallic) |metal| metal.factor else 0.0,
-                
+
                 // Normal
                 .normal_idx = if (normal) |norm| try self.getOrAddTexture(&texture_map, &next_texture_idx, norm.texture_id) else 0,
                 .normal_strength = if (normal) |norm| norm.strength else 1.0,
-                
+
                 // Emissive
                 .emissive_idx = if (emissive) |emiss| try self.getOrAddTexture(&texture_map, &next_texture_idx, emiss.texture_id) else 0,
                 .emissive_color = if (emissive) |emiss| emiss.color else [_]f32{ 0, 0, 0 },
                 .emissive_intensity = if (emissive) |emiss| emiss.intensity else 0.0,
-                
+
                 // Occlusion
                 .occlusion_idx = if (occlusion) |occ| try self.getOrAddTexture(&texture_map, &next_texture_idx, occ.texture_id) else 0,
                 .occlusion_strength = if (occlusion) |occ| occ.strength else 1.0,
             };
 
             // CRITICAL: Write material_buffer_index to component (snapshot will capture this)
-            const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
+            const material_set = world.getMut(ecs.MaterialSet, entity) orelse continue;
             const mat_index: u32 = @intCast(gpu_materials.items.len);
             material_set.material_buffer_index = mat_index;
 
-            // Fast change detection using memcmp instead of std.meta.eql
-            if (mat_index < set_data.last_materials.items.len) {
-                const last_mat = set_data.last_materials.items[mat_index];
+            // Fast change detection using entity ID as key (handles entity order changes)
+            if (set_data.last_materials.get(entity)) |last_mat| {
                 if (!std.mem.eql(u8, std.mem.asBytes(&gpu_mat), std.mem.asBytes(&last_mat))) {
                     // Material changed - add to delta
                     try set_data.pending_delta.changed_materials.append(self.allocator, .{
@@ -630,7 +625,7 @@ pub const MaterialSystem = struct {
                     });
                 }
             } else {
-                // New material - add to delta
+                // New entity or first frame - add to delta
                 try set_data.pending_delta.changed_materials.append(self.allocator, .{
                     .index = mat_index,
                     .data = gpu_mat,
@@ -643,7 +638,7 @@ pub const MaterialSystem = struct {
         // Check if texture set changed - optimized with early exit
         var current_texture_ids = std.ArrayList(u64){};
         defer current_texture_ids.deinit(self.allocator);
-        
+
         // Pre-allocate with known size
         try current_texture_ids.ensureTotalCapacity(self.allocator, texture_map.count());
 
@@ -656,7 +651,7 @@ pub const MaterialSystem = struct {
         const textures_changed = blk: {
             // Quick count check
             if (current_texture_ids.items.len != set_data.last_texture_ids.items.len) break :blk true;
-            
+
             // Fast memcmp for sorted IDs
             if (!std.mem.eql(u64, current_texture_ids.items, set_data.last_texture_ids.items)) break :blk true;
 
@@ -691,13 +686,10 @@ pub const MaterialSystem = struct {
             try set_data.last_texture_ids.appendSlice(self.allocator, current_texture_ids.items);
         }
 
-        // Generate delta for all materials (simpler approach - always send everything)
-        set_data.pending_delta.changed_materials.clearRetainingCapacity();
-        for (gpu_materials.items, 0..) |material, i| {
-            try set_data.pending_delta.changed_materials.append(self.allocator, .{
-                .index = @intCast(i),
-                .data = material,
-            });
+        // Update last_materials hash map with current frame's entity->material mappings
+        set_data.last_materials.clearRetainingCapacity();
+        for (entities, 0..) |entity, i| {
+            try set_data.last_materials.put(entity, gpu_materials.items[i]);
         }
 
         // Store the current materials for next frame

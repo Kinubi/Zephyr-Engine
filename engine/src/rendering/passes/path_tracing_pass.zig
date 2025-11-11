@@ -360,18 +360,6 @@ pub const PathTracingPass = struct {
 
         const cmd = frame_info.command_buffer;
 
-        // // Check if TLAS is valid before dispatching rays
-        // // If generation is 0, TLAS hasn't been built yet - skip this frame
-        // if (self.accel_set) |set| {
-        //     if (set.tlas.generation.load(.acquire) == 0) {
-        //         log(.WARN, "path_tracing_pass", "TLAS not ready (generation=0), skipping ray dispatch", .{});
-        //         return;
-        //     }
-        // } else {
-        //     log(.WARN, "path_tracing_pass", "No acceleration structure set, skipping ray dispatch", .{});
-        //     return;
-        // }
-
         // Dispatch rays and render
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.path_tracing_pipeline, frame_index);
         try self.dispatchRays(cmd, self.rt_system.shader_binding_table);

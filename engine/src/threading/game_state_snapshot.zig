@@ -171,7 +171,8 @@ pub fn captureSnapshot(
         .point_lights = undefined,
         .point_light_count = 0,
         .instance_delta = null,
-    }; // Copy camera state
+    };
+    // Copy camera state
     // Camera position is stored in the translation column of inverseViewMatrix
     snapshot.camera_position = .{
         .x = camera.inverseViewMatrix.get(3, 0).*,

@@ -12,14 +12,19 @@ pub const InstanceDeltasSet = struct {
         return .{};
     }
 
+    /// Internal helper to free allocated delta arrays
+    fn freeDeltas(self: *InstanceDeltasSet, allocator: std.mem.Allocator) void {
+        if (self.changed_indices.len > 0) {
+            allocator.free(self.changed_indices);
+        }
+        if (self.changed_data.len > 0) {
+            allocator.free(self.changed_data);
+        }
+    }
+
     pub fn deinit(self: *InstanceDeltasSet) void {
         if (self.allocator) |allocator| {
-            if (self.changed_indices.len > 0) {
-                allocator.free(self.changed_indices);
-            }
-            if (self.changed_data.len > 0) {
-                allocator.free(self.changed_data);
-            }
+            self.freeDeltas(allocator);
         }
         self.changed_indices = &.{};
         self.changed_data = &.{};
@@ -34,12 +39,7 @@ pub const InstanceDeltasSet = struct {
     ) void {
         // Free old data
         if (self.allocator) |old_allocator| {
-            if (self.changed_indices.len > 0) {
-                old_allocator.free(self.changed_indices);
-            }
-            if (self.changed_data.len > 0) {
-                old_allocator.free(self.changed_data);
-            }
+            self.freeDeltas(old_allocator);
         }
 
         self.changed_indices = indices;
@@ -49,12 +49,7 @@ pub const InstanceDeltasSet = struct {
 
     pub fn clear(self: *InstanceDeltasSet) void {
         if (self.allocator) |allocator| {
-            if (self.changed_indices.len > 0) {
-                allocator.free(self.changed_indices);
-            }
-            if (self.changed_data.len > 0) {
-                allocator.free(self.changed_data);
-            }
+            self.freeDeltas(allocator);
         }
         self.changed_indices = &.{};
         self.changed_data = &.{};

@@ -637,10 +637,6 @@ pub const RenderSystem = struct {
             }
 
             if (changed_indices.items.len > 0) {
-                log(.DEBUG, "render_system", "Granular update: {} of {} instances changed", .{
-                    changed_indices.items.len,
-                    total_instances,
-                });
 
                 // Apply granular updates to each frame's buffer
                 for (&self.instance_buffers) |*buf| {
@@ -962,14 +958,6 @@ pub const RenderSystem = struct {
                     }
                 }.lessThan);
                 const instances = try allocator.alloc(RasterizationData.InstanceData, instances_with_entities.items.len);
-
-                // Copy instance data from objects in sorted order
-                var global_idx: usize = 0;
-                // Calculate global index offset for this batch
-                for (mesh_keys.items[0..batch_idx]) |prev_mesh_key| {
-                    const prev_instances = self.mesh_to_instances.get(prev_mesh_key).?;
-                    global_idx += prev_instances.items.len;
-                }
 
                 for (instances_with_entities.items, 0..) |inst_info, inst_idx| {
                     const obj = objects[inst_info.obj_idx];
@@ -1770,97 +1758,6 @@ pub fn prepare(world: *World, dt: f32) !void {
             try self.calculateInstanceDeltas(world, extracted_renderables.items, asset_manager);
         }
     }
-}
-
-/// Calculate instance deltas and store in InstanceDeltasSet component
-fn calculateInstanceDeltas(
-    self: *RenderSystem,
-    world: *World,
-    renderables: []const components.ExtractedRenderable,
-    asset_manager: *AssetManager,
-) !void {
-    // Pre-calculate total instance count to pre-allocate
-    var total_instances: usize = 0;
-    for (renderables) |renderable| {
-        if (asset_manager.getModel(renderable.model_asset)) |model| {
-            total_instances += model.meshes.items.len;
-        }
-    }
-
-    // Pre-allocate with exact capacity
-    var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
-    try current_instances.ensureTotalCapacity(self.allocator, total_instances);
-    defer current_instances.deinit(self.allocator);
-
-    // Build current instance data from renderables
-    for (renderables) |renderable| {
-        const model = asset_manager.getModel(renderable.model_asset) orelse continue;
-
-        // Get material_buffer_index from MaterialSet component
-        const material_index: u32 = renderable.material_buffer_index orelse 0;
-
-        // Batch-append instances for this renderable
-        for (model.meshes.items) |_| {
-            current_instances.appendAssumeCapacity(.{
-                .transform = renderable.transform.data,
-                .material_index = material_index,
-            });
-        }
-    }
-
-    // Fast path: if counts differ drastically, all instances changed
-    const instance_count = current_instances.items.len;
-    const last_count = self.last_instance_data.items.len;
-
-    // Pre-allocate delta arrays with worst-case capacity
-    var changed_indices = std.ArrayList(u32){};
-    try changed_indices.ensureTotalCapacity(self.allocator, instance_count);
-    defer changed_indices.deinit(self.allocator);
-
-    var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
-    try changed_data.ensureTotalCapacity(self.allocator, instance_count);
-    defer changed_data.deinit(self.allocator);
-
-    // Compare with last instance data to find changes
-    const compare_count = @min(instance_count, last_count);
-
-    // Optimized comparison loop
-    for (current_instances.items[0..compare_count], 0..) |current, i| {
-        const last = self.last_instance_data.items[i];
-
-        // Use memcmp for faster comparison of flat data
-        if (!std.mem.eql(u8, std.mem.asBytes(&current), std.mem.asBytes(&last))) {
-            changed_indices.appendAssumeCapacity(@intCast(i));
-            changed_data.appendAssumeCapacity(current);
-        }
-    }
-
-    // Any new instances beyond last count are also "changed"
-    if (instance_count > last_count) {
-        for (current_instances.items[last_count..], last_count..) |instance, i| {
-            changed_indices.appendAssumeCapacity(@intCast(i));
-            changed_data.appendAssumeCapacity(instance);
-        }
-    }
-
-    // Store deltas in InstanceDeltasSet component if any changes found
-    if (changed_indices.items.len > 0) {
-        const singleton_entity = try world.getOrCreateSingletonEntity();
-        var deltas_set = world.get(components.InstanceDeltasSet, singleton_entity) orelse blk: {
-            const new_set = components.InstanceDeltasSet.init();
-            try world.emplace(components.InstanceDeltasSet, singleton_entity, new_set);
-            break :blk world.get(components.InstanceDeltasSet, singleton_entity).?;
-        };
-
-        const indices_copy = try self.allocator.dupe(u32, changed_indices.items);
-        const data_copy = try self.allocator.dupe(render_data_types.RasterizationData.InstanceData, changed_data.items);
-
-        deltas_set.setDeltas(self.allocator, indices_copy, data_copy);
-    }
-
-    // Update tracking for next frame - use copyForwards for better performance
-    self.last_instance_data.clearRetainingCapacity();
-    try self.last_instance_data.appendSlice(self.allocator, current_instances.items);
 }
 
 /// RENDER THREAD: Update phase - build GPU caches from snapshot

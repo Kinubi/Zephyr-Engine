@@ -403,8 +403,6 @@ pub const GraphicsContext = struct {
                 log(.ERROR, "graphics_context", "Failed to reset worker command pool: {}", .{err});
             };
         }
-
-        log(.DEBUG, "graphics_context", "Reset {} worker command pools", .{self.worker_command_pools.items.len});
     }
 
     pub fn getThreadQueue(self: *GraphicsContext) !Queue {

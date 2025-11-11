@@ -358,10 +358,6 @@ pub const TextureManager = struct {
 
     /// Debug: Print all managed textures
     pub fn debugPrint(self: *TextureManager) void {
-        log(.DEBUG, "texture_manager", "=== TextureManager State ===", .{});
-        log(.DEBUG, "texture_manager", "Frame: {}", .{self.frame_counter});
-        log(.DEBUG, "texture_manager", "Active textures: {}", .{self.all_textures.count()});
-
         var iter = self.all_textures.iterator();
         while (iter.next()) |entry| {
             const stats = entry.value_ptr.*;

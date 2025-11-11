@@ -800,11 +800,11 @@ pub const RaytracingSystem = struct {
         var seen_geom_ids = try self.allocator.alloc(bool, self.bvh_builder.max_geometry_id);
         defer self.allocator.free(seen_geom_ids);
         @memset(seen_geom_ids, false);
-        
+
         // Create mapping from geometry_id to buffer index
         var geom_id_to_buffer_index = try self.allocator.alloc(u32, self.bvh_builder.max_geometry_id);
         @memset(geom_id_to_buffer_index, 0);
-        
+
         for (required_geom_ids) |geom_id| {
             if (!seen_geom_ids[geom_id]) {
                 seen_geom_ids[geom_id] = true;
@@ -1033,12 +1033,7 @@ pub const RaytracingSystem = struct {
     /// Flush ALL pending destruction queues immediately
     /// Use this when disabling the RT pass to clean up before re-enabling
     pub fn flushAllPendingDestruction(self: *RaytracingSystem) void {
-        for (&self.per_frame_destroy, 0..) |*queue, i| {
-            const blas_count = queue.blas_handles.items.len;
-            const tlas_count = queue.tlas_handles.items.len;
-            if (blas_count > 0 or tlas_count > 0) {
-                log(.INFO, "raytracing", "  Frame {}: {} BLAS, {} TLAS", .{ i, blas_count, tlas_count });
-            }
+        for (&self.per_frame_destroy) |*queue| {
             self.flushDestroyQueue(queue);
         }
     }
