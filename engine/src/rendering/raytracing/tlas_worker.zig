@@ -36,7 +36,7 @@ pub const TlasJob = struct {
 
     // Geometry IDs required for this TLAS build (one per instance, may have duplicates)
     required_geometry_ids: []const u32,
-    
+
     // Mapping from geometry_id to blas_buffer index
     // This allows us to find the buffer slot for a given geometry ID
     geom_id_to_buffer_index: []u32,
@@ -62,10 +62,10 @@ pub const TlasJob = struct {
 pub fn fillBlasSlot(job: *TlasJob, geometry_index: u32, blas_result: *BlasResult) void {
     // Get the geometry ID for this instance
     const geom_id = job.required_geometry_ids[geometry_index];
-    
+
     // Map geometry ID to buffer index
     const buffer_index = job.geom_id_to_buffer_index[geom_id];
-    
+
     // Store the BLAS result pointer in the appropriate slot
     const slot = &job.blas_buffer[buffer_index];
     slot.store(blas_result, .release);
@@ -124,7 +124,7 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
                 // BLAS exists in registry AND mesh matches - make a heap copy to avoid stale pointer issues
                 const blas_copy = try job.allocator.create(BlasResult);
                 blas_copy.* = blas_ptr.*;
-                
+
                 // Map geometry ID to buffer index
                 const buffer_index = job.geom_id_to_buffer_index[geom_id];
                 job.blas_buffer[buffer_index].store(blas_copy, .release);
@@ -150,7 +150,7 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
                 // BLAS exists in registry AND mesh matches - use it for ALL instances of this geometry
                 const blas_copy = try job.allocator.create(BlasResult);
                 blas_copy.* = blas_ptr.*;
-                
+
                 // Map geometry ID to buffer index
                 const buffer_index = job.geom_id_to_buffer_index[geom_id];
                 job.blas_buffer[buffer_index].store(blas_copy, .release);
@@ -227,15 +227,14 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
     // Step 4: Create instances with BLAS addresses from our atomic buffer
     // Map each instance's geometry_id to its BLAS in the buffer
     const instances_with_blas = try job.allocator.alloc(InstanceData, job.instances.len);
-    defer job.allocator.free(instances_with_blas);
 
     for (job.instances, 0..) |inst, i| {
         // Get geometry ID for this instance
         const geom_id = job.required_geometry_ids[i];
-        
+
         // Map to buffer index
         const buffer_index = job.geom_id_to_buffer_index[geom_id];
-        
+
         // Get BLAS from buffer
         const slot = &job.blas_buffer[buffer_index];
         if (slot.load(.acquire)) |blas_result| {
@@ -273,4 +272,21 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
 // Error handler wrapping the main implementation
 fn handleError(err: anyerror, job: *TlasJob) void {
     log(.ERROR, "tlas_worker", "TLAS worker failed for job {}: {}", .{ job.job_id, err });
+
+    // Clean up job resources on error
+    job.allocator.free(job.required_geometry_ids);
+    job.allocator.free(job.geom_id_to_buffer_index);
+    job.allocator.free(job.geometries);
+    job.allocator.free(job.instances);
+
+    // Free BLAS buffer and its contents
+    for (job.blas_buffer) |*slot| {
+        if (slot.load(.acquire)) |blas_ptr| {
+            job.allocator.destroy(blas_ptr);
+        }
+    }
+    job.allocator.free(job.blas_buffer);
+
+    // Free the job itself
+    job.allocator.destroy(job);
 }

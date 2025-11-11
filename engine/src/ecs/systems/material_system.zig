@@ -65,7 +65,7 @@ const MaterialSetDelta = struct {
 /// Per-set GPU resources (public for GeometryPass access)
 pub const MaterialSetData = struct {
     allocator: std.mem.Allocator,
-    material_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer, // Per-frame arena-allocated buffers
+    material_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer, // Per-frame arena-allocated buffers (heap pointers)
     current_capacity: usize, // Number of materials current buffers can hold
     texture_array: ManagedTextureArray,
 
@@ -99,16 +99,25 @@ pub const MaterialSetData = struct {
             .occlusion_strength = 1.0,
         };
 
-        var material_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer = undefined;
+        var material_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = undefined;
 
         // Allocate from each frame's arena
-        for (&material_buffers, 0..) |*buf, frame_idx| {
+        for (&material_buffers, 0..) |*buf_ptr, frame_idx| {
             const frame = @as(u32, @intCast(frame_idx));
+
+            // Allocate heap storage for ManagedBuffer
+            const buf = try allocator.create(ManagedBuffer);
+            errdefer allocator.destroy(buf);
+            buf_ptr.* = buf;
+
+            // Create unique name for each frame's buffer
+            const buffer_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_frame_{d}", .{frame});
+            errdefer allocator.free(buffer_name);
 
             // Create a managed buffer placeholder (will point to arena)
             buf.* = ManagedBuffer{
                 .buffer = undefined, // Will be set by allocateFromFrameArena
-                .name = "MaterialBuffer_frame",
+                .name = buffer_name,
                 .size = @sizeOf(GPUMaterial),
                 .strategy = .host_visible,
                 .created_frame = 0,
@@ -127,21 +136,22 @@ pub const MaterialSetData = struct {
             ) catch |err| {
                 // If arena allocation fails, fall back to dedicated buffer
                 log(.WARN, "material_system", "Arena allocation failed for frame {}, using dedicated buffer: {}", .{ frame, err });
-                const buffer_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_frame{}", .{frame});
-                defer allocator.free(buffer_name);
+                allocator.free(buffer_name);
+                allocator.destroy(buf);
 
+                const dedicated_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_dedicated_{d}", .{frame});
                 const BufferConfig = buffer_manager_module.BufferConfig;
                 const dedicated = try buffer_manager.createBuffer(
                     BufferConfig{
-                        .name = buffer_name,
+                        .name = dedicated_name,
                         .size = @sizeOf(GPUMaterial),
                         .strategy = .device_local,
                         .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
                     },
                     frame,
                 );
-                buf.* = dedicated.*;
-                buf.markUpdated();
+                buf_ptr.* = dedicated;
+                dedicated.markUpdated();
                 continue;
             };
 
@@ -156,7 +166,6 @@ pub const MaterialSetData = struct {
             @memcpy(data_ptr[0..@sizeOf(GPUMaterial)], std.mem.asBytes(&empty_material));
             alloc_result.buffer.buffer.unmap();
         }
-
         return .{
             .allocator = allocator,
             .material_buffers = material_buffers,
@@ -188,23 +197,18 @@ pub const MaterialSetData = struct {
         }
 
         // Free per-frame material buffers from arenas
-        for (&self.material_buffers, 0..) |*buf, frame_idx| {
+        for (&self.material_buffers, 0..) |buf_ptr, frame_idx| {
             const frame = @as(u32, @intCast(frame_idx));
+            const buf = buf_ptr;
 
             // If arena-allocated (arena_offset != 0), free from arena
             if (buf.arena_offset != 0) {
                 buffer_manager.freeFromFrameArena(frame, buf);
+                // Free the heap-allocated ManagedBuffer and its name
+                self.allocator.free(buf.name);
+                self.allocator.destroy(buf);
             } else {
-                // Dedicated buffer - destroy normally
-                buffer_manager.destroyBuffer(buf) catch |err| {
-                    log(.WARN, "material_system", "Failed to destroy material buffer for frame {}: {}", .{ frame, err });
-                };
-            }
-        }
-
-        // Destroy per-frame material buffers
-        for (&self.material_buffers, 0..) |*buf, frame| {
-            if (buf.buffer.buffer != .null_handle) {
+                // Dedicated buffer - destroy normally (this also frees the ManagedBuffer via buffer_manager)
                 buffer_manager.destroyBuffer(buf) catch |err| {
                     log(.WARN, "material_system", "Failed to destroy material buffer for frame {}: {}", .{ frame, err });
                 };
@@ -458,7 +462,7 @@ pub const MaterialSystem = struct {
                     const new_size = required_capacity * @sizeOf(GPUMaterial);
 
                     // Reallocate each frame's buffer from arena
-                    for (&set_data.material_buffers, 0..) |*buf, frame_idx| {
+                    for (&set_data.material_buffers, 0..) |buf, frame_idx| {
                         const frame = @as(u32, @intCast(frame_idx));
 
                         const alloc_result = self.buffer_manager.allocateFromFrameArena(
@@ -499,7 +503,7 @@ pub const MaterialSystem = struct {
                 }
 
                 // Apply all material changes to all 3 frame buffers
-                for (&set_data.material_buffers) |*buf| {
+                for (&set_data.material_buffers) |buf| {
                     for (snap.changed_materials) |change| {
                         const offset = buf.arena_offset + (change.index * @sizeOf(GPUMaterial));
                         try buf.buffer.map(@sizeOf(GPUMaterial), offset);

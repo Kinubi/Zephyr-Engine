@@ -234,7 +234,7 @@ pub const HotReloadManager = struct {
 
         // Early safety check - avoid processing if we're not fully initialized
         if (!self.watcher_started) {
-            log(.DEBUG, "enhanced_hot_reload", "Ignoring file change before watcher fully started: {s}", .{file_path});
+            log(.WARN, "enhanced_hot_reload", "Ignoring file change before watcher fully started: {s}", .{file_path});
             return;
         }
 
@@ -253,7 +253,7 @@ pub const HotReloadManager = struct {
             self.asset_manager.registry.forceMarkUnloaded(id);
 
             const asset_type = if (self.asset_to_type.count() > 0) self.asset_to_type.get(id) orelse .texture else .texture;
-            log(.DEBUG, "enhanced_hot_reload", "Processing file change for registered asset: {s} (ID: {})", .{ file_path, id });
+            log(.INFO, "enhanced_hot_reload", "Processing file change for registered asset: {s} (ID: {})", .{ file_path, id });
 
             // We already received a file-changed event, no need to re-stat here.
             // Submit an immediate load request to the AssetLoader via the ThreadPool.

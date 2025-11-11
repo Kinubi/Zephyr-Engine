@@ -43,6 +43,10 @@ pub const ManagedBuffer = struct {
     arena_offset: usize = 0, // Offset within arena buffer (0 = not arena-allocated)
     pending_bind_mask: std.atomic.Value(u8) = std.atomic.Value(u8).init(0), // Frame binding mask (like AS)
 
+    // Debug tracking
+    freed_at_frame: ?u64 = null, // Track when buffer was queued for destruction
+    freed_from_slot: ?u32 = null, // Track which ring slot it was added to
+
     pub const BindingInfo = struct {
         set: u32,
         binding: u32,
@@ -65,7 +69,7 @@ pub const ManagedBuffer = struct {
 /// Frame arena for dynamic per-frame allocations (materials, instances, dynamic uniforms)
 /// One arena per frame - independent allocation management with compaction support
 pub const FrameArena = struct {
-    buffer: ManagedBuffer,
+    buffer: *ManagedBuffer,
     capacity: usize,
     current_offset: usize,
     smallest_used_offset: usize,
@@ -96,7 +100,10 @@ pub const FrameArena = struct {
     }
 
     pub fn deinit(self: *FrameArena) void {
+        self.buffer.buffer.deinit();
         self.active_allocations.deinit(self.allocator);
+        self.allocator.free(self.buffer.name);
+        self.allocator.destroy(self.buffer);
     }
 
     /// Allocate from arena, returns offset within this arena's buffer
@@ -267,7 +274,7 @@ pub const BufferManager = struct {
             };
 
             const managed_buffer = try self.createBuffer(buffer_config, frame_idx);
-            arena.buffer = managed_buffer.*;
+            arena.buffer = managed_buffer; // Store pointer, not copy
         }
 
         log(.INFO, "buffer_manager", "BufferManager initialized with {} frame arenas ({d}MB each)", .{ MAX_FRAMES_IN_FLIGHT, arena_size_bytes / (1024 * 1024) });
@@ -275,8 +282,10 @@ pub const BufferManager = struct {
     }
 
     pub fn deinit(self: *BufferManager) void {
-        // Clean up frame arenas
+        // Clean up frame arenas FIRST, before any deferred cleanup
         for (&self.frame_arenas) |*arena| {
+            // Unregister the arena buffer before manual cleanup to avoid double-free
+            self.unregisterBuffer(arena.buffer);
             arena.deinit();
         }
 
@@ -312,11 +321,15 @@ pub const BufferManager = struct {
         errdefer self.allocator.free(owned_name);
 
         // Create the buffer based on strategy
-        const buffer = switch (config.strategy) {
+        var buffer = switch (config.strategy) {
             .device_local => try self.createDeviceLocalBuffer(config),
             .host_visible => try self.createHostVisibleBuffer(config),
             .host_cached => try self.createHostCachedBuffer(config),
         };
+
+        // Update Buffer's tracking_name to point to our owned duplicate
+        // (it was pointing to config.name which might be temporary)
+        buffer.tracking_name = owned_name;
 
         // Allocate the managed buffer on the heap so we can track it
         const managed = try self.allocator.create(ManagedBuffer);
@@ -371,7 +384,7 @@ pub const BufferManager = struct {
         managed_buffer.markUpdated(); // Mark for descriptor rebinding
 
         return .{
-            .buffer = &arena.buffer,
+            .buffer = arena.buffer,
             .offset = offset,
         };
     }
@@ -440,10 +453,10 @@ pub const BufferManager = struct {
         new_buffer.unmap();
 
         // Queue old arena buffer for deferred destruction
-        try self.deferBufferDestruction(&arena.buffer);
+        try self.deferBufferDestruction(arena.buffer);
 
         // Replace arena buffer with new compacted one
-        arena.buffer = new_managed_buffer.*;
+        arena.buffer = new_managed_buffer;
         arena.current_offset = new_offset;
         arena.smallest_used_offset = if (arena.active_allocations.items.len > 0) 0 else 0;
         arena.needs_compaction = false;
@@ -621,13 +634,25 @@ pub const BufferManager = struct {
 
     /// Queue buffer for deferred destruction
     pub fn destroyBuffer(self: *BufferManager, managed_buffer: *ManagedBuffer) !void {
-        log(.INFO, "buffer_manager", "Destroying buffer '{s}'", .{managed_buffer.name});
+        // Check if already freed
 
         // Unregister from tracking list
         self.unregisterBuffer(managed_buffer);
 
         // Add to deferred cleanup slot
         const slot = &self.deferred_buffers[self.current_frame];
+
+        // Check if already in the deferred list (shouldn't happen but protect against it)
+        for (slot.items) |existing| {
+            if (existing == managed_buffer) {
+                log(.WARN, "buffer_manager", "Buffer '{s}' already in deferred list for slot {d}! Skipping duplicate add.", .{
+                    managed_buffer.name,
+                    self.current_frame,
+                });
+                return; // Already queued, don't add again
+            }
+        }
+
         try slot.append(self.allocator, managed_buffer);
 
         // Remove from statistics
@@ -703,6 +728,13 @@ pub const BufferManager = struct {
     /// Cleanup buffers in ring slot
     fn cleanupRingSlot(self: *BufferManager, slot: *std.ArrayList(*ManagedBuffer)) void {
         for (slot.items) |managed| {
+            // Validate pointer before accessing fields
+            const ptr_addr = @intFromPtr(managed);
+            if (ptr_addr == 0) {
+                log(.ERROR, "buffer_manager", "NULL ManagedBuffer pointer in slot!", .{});
+                continue;
+            }
+
             // Clear tracking name before deinit to prevent use-after-free
             // (the buffer's tracking_name points to managed.name which we'll free)
             managed.buffer.tracking_name = null;

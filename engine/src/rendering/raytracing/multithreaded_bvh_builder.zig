@@ -282,7 +282,7 @@ pub const MultithreadedBvhBuilder = struct {
                 // We can't destroy the acceleration structure (still in use), but we CAN free the old buffer
                 // if it's different from the one being used
                 log(.DEBUG, "bvh_builder", "BLAS handle {d} still in use by registry, not queuing acceleration structure for destruction", .{@intFromEnum(old_blas.acceleration_structure)});
-                
+
                 // Check if this buffer is still being used (compare buffer handle)
                 var buffer_still_in_use = false;
                 for (self.blas_registry) |*slot| {
@@ -293,7 +293,7 @@ pub const MultithreadedBvhBuilder = struct {
                         }
                     }
                 }
-                
+
                 if (!buffer_still_in_use) {
                     // Buffer is no longer used, free it
                     var buffer_to_free = old_blas.buffer;
@@ -443,12 +443,6 @@ pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
         log(.ERROR, "bvh_builder", "Failed to register BLAS in registry: {}", .{err});
         return;
     };
-
-    log(.INFO, "bvh_builder", "Built BLAS for geometry {}: handle={d}, buffer={d}", .{
-        final_result.geometry_id,
-        @intFromEnum(final_result.acceleration_structure),
-        @intFromEnum(final_result.buffer.buffer),
-    });
 
     if (old_blas_opt) |old_blas| {
         log(.INFO, "bvh_builder", "Replaced BLAS for geometry {}: old_handle={d}, old_buffer={d} -> new_handle={d}, new_buffer={d}", .{

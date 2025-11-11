@@ -227,7 +227,7 @@ pub const GeometryPass = struct {
         try self.resource_binder.bindStorageBufferArrayNamed(
             self.geometry_pipeline,
             "MaterialBuffer",
-            .{ &self.material_set.material_buffers[0], &self.material_set.material_buffers[1], &self.material_set.material_buffers[2] },
+            .{ self.material_set.material_buffers[0], self.material_set.material_buffers[1], self.material_set.material_buffers[2] },
         );
 
         // Bind texture array from material set (generation tracked automatically)

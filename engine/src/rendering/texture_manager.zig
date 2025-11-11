@@ -302,8 +302,6 @@ pub const TextureManager = struct {
 
     /// Destroy a managed texture (defers actual cleanup)
     pub fn destroyTexture(self: *TextureManager, managed: *ManagedTexture) void {
-        log(.INFO, "texture_manager", "Destroying texture '{s}'", .{managed.name});
-
         // Unregister from update list
         self.unregisterTexture(managed);
 
