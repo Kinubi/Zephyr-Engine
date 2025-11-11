@@ -4,14 +4,11 @@ const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const Buffer = @import("../core/buffer.zig").Buffer;
 const ResourceBinder = @import("resource_binder.zig").ResourceBinder;
 const log = @import("../utils/log.zig").log;
-const CVars = @import("../core/cvars.zig");
+const CVars = @import("../core/cvar.zig");
 
 pub const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 const DEFAULT_FRAME_ARENA_SIZE_MB: i32 = 64; // 64MB default per frame
-
-// CVars
-var r_frame_arena_size_mb: CVars.CVar = undefined;
 
 pub const BufferStrategy = enum {
     device_local, // Device memory, staging upload
@@ -94,12 +91,12 @@ pub const FrameArena = struct {
             .frame_index = frame_index,
             .needs_compaction = false,
             .allocator = allocator,
-            .active_allocations = std.ArrayList(AllocationInfo).init(allocator),
+            .active_allocations = std.ArrayList(AllocationInfo){},
         };
     }
 
     pub fn deinit(self: *FrameArena) void {
-        self.active_allocations.deinit();
+        self.active_allocations.deinit(self.allocator);
     }
 
     /// Allocate from arena, returns offset within this arena's buffer
@@ -127,7 +124,7 @@ pub const FrameArena = struct {
             self.current_offset = wrap_offset + size;
 
             // Track this allocation
-            try self.active_allocations.append(.{
+            try self.active_allocations.append(self.allocator, .{
                 .managed_buffer = managed_buffer,
                 .offset = offset,
                 .size = size,
@@ -140,7 +137,7 @@ pub const FrameArena = struct {
         self.current_offset = aligned_offset + size;
 
         // Track this allocation
-        try self.active_allocations.append(.{
+        try self.active_allocations.append(self.allocator, .{
             .managed_buffer = managed_buffer,
             .offset = offset,
             .size = size,
@@ -210,13 +207,22 @@ pub const BufferManager = struct {
         graphics_context: *GraphicsContext,
         resource_binder: *ResourceBinder,
     ) !*BufferManager {
-        // Register CVars
-        r_frame_arena_size_mb = try CVars.registerCVar(
-            "r.frame_arena_size_mb",
-            .Int,
-            DEFAULT_FRAME_ARENA_SIZE_MB,
-            .{ .description = "Size in MB for per-frame allocation arenas (materials, instances, dynamic uniforms). Default: 64MB" },
-        );
+        // Get frame arena size from CVar (already registered in cvar.zig)
+        const arena_size_mb: i32 = blk: {
+            if (CVars.getGlobal()) |registry| {
+                if (registry.getAsStringAlloc("r_frame_arena_size_mb", allocator)) |value| {
+                    defer allocator.free(value);
+                    if (std.fmt.parseInt(i32, value, 10)) |parsed| {
+                        break :blk parsed;
+                    } else |_| {
+                        log(.WARN, "buffer_manager", "Failed to parse frame_arena_size_mb CVar, using default {}MB", .{DEFAULT_FRAME_ARENA_SIZE_MB});
+                    }
+                }
+            }
+            break :blk DEFAULT_FRAME_ARENA_SIZE_MB;
+        };
+
+        const arena_size_bytes = @as(usize, @intCast(arena_size_mb)) * 1024 * 1024;
 
         const self = try allocator.create(BufferManager);
         self.* = .{
@@ -239,14 +245,11 @@ pub const BufferManager = struct {
             slot.* = std.ArrayList(Buffer){};
         }
 
-        // Initialize frame arenas with CVar-configurable size
-        const arena_size_mb = r_frame_arena_size_mb.getInt();
-        const arena_size: usize = @as(usize, @intCast(arena_size_mb)) * 1024 * 1024;
-
+        // Initialize frame arenas with size from CVar
         for (&self.frame_arenas, 0..) |*arena, i| {
             const frame_idx = @as(u32, @intCast(i));
             arena.* = FrameArena.init(frame_idx, allocator);
-            arena.capacity = arena_size;
+            arena.capacity = arena_size_bytes;
 
             const arena_name = try std.fmt.allocPrint(allocator, "frame_arena_{d}", .{frame_idx});
             defer allocator.free(arena_name);
@@ -254,7 +257,7 @@ pub const BufferManager = struct {
             // Create the backing buffer (host-visible for direct writes)
             const buffer_config = BufferConfig{
                 .name = arena_name,
-                .size = arena_size,
+                .size = arena_size_bytes,
                 .strategy = .host_visible,
                 .usage = .{
                     .storage_buffer_bit = true,
@@ -267,7 +270,7 @@ pub const BufferManager = struct {
             arena.buffer = managed_buffer.*;
         }
 
-        log(.INFO, "buffer_manager", "BufferManager initialized with {} frame arenas ({d}MB each)", .{ MAX_FRAMES_IN_FLIGHT, arena_size / (1024 * 1024) });
+        log(.INFO, "buffer_manager", "BufferManager initialized with {} frame arenas ({d}MB each)", .{ MAX_FRAMES_IN_FLIGHT, arena_size_bytes / (1024 * 1024) });
         return self;
     }
 

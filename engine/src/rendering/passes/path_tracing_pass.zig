@@ -21,7 +21,7 @@ const AccelerationStructureSet = @import("../../rendering/raytracing/raytracing_
 const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
-const MaterialBindings = @import("../../ecs/systems/material_system.zig").MaterialBindings;
+const MaterialSetData = @import("../../ecs/systems/material_system.zig").MaterialSetData;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const Mesh = @import("../mesh.zig").Mesh;
@@ -104,8 +104,8 @@ pub const PathTracingPass = struct {
     render_system: *RenderSystem,
     texture_manager: *TextureManager,
 
-    // Material bindings for path tracing (opaque handle)
-    material_bindings: MaterialBindings,
+    // Material set data for path tracing - direct access to buffers and textures
+    material_set: *MaterialSetData,
 
     // Path tracing pipeline
     path_tracing_pipeline: PipelineId = undefined,
@@ -142,7 +142,7 @@ pub const PathTracingPass = struct {
         asset_manager: *AssetManager,
         render_system: *RenderSystem,
         texture_manager: *TextureManager,
-        material_bindings: MaterialBindings,
+        material_set: *MaterialSetData,
         swapchain: *const Swapchain,
         width: u32,
         height: u32,
@@ -194,7 +194,7 @@ pub const PathTracingPass = struct {
             .asset_manager = asset_manager,
             .render_system = render_system,
             .texture_manager = texture_manager,
-            .material_bindings = material_bindings,
+            .material_set = material_set,
             .rt_system = rt_system,
             .output_texture = output_texture,
             .width = width,
@@ -293,18 +293,19 @@ pub const PathTracingPass = struct {
             self.output_texture,
         );
 
-        // Bind material buffer (generation tracked automatically)
-        try self.resource_binder.bindStorageBufferNamed(
+        // Bind material buffers (per-frame array for arena allocation)
+        // ResourceBinder will use pending_bind_mask to bind only frames that need updates
+        try self.resource_binder.bindStorageBufferArrayNamed(
             self.path_tracing_pipeline,
             "material_buffer", // The actual binding name from shader
-            self.material_bindings.material_buffer,
+            .{ &self.material_set.material_buffers[0], &self.material_set.material_buffers[1], &self.material_set.material_buffers[2] },
         );
 
-        // Bind texture array from material bindings (generation tracked automatically)
+        // Bind texture array from material set (generation tracked automatically)
         try self.resource_binder.bindTextureArrayNamed(
             self.path_tracing_pipeline,
             "texture_buffer",
-            self.material_bindings.texture_array,
+            &self.material_set.texture_array,
         );
 
         // Bind global UBO for all frames (generation tracked automatically)

@@ -1153,46 +1153,81 @@ pub const ResourceBinder = struct {
                     }
                 },
                 .managed_buffer_array => |frame_buffers| {
-                    // Per-frame buffer arrays (uniform or storage) - bind each frame's buffer individually
+                    // Per-frame buffer arrays (uniform or storage) - bind only current frame
+                    // Uses pending_bind_mask for gradual transition (like acceleration structures)
                     const location = self.lookupBinding(res.name) orelse {
                         log(.ERROR, "resource_binder", "Tracked resource '{s}' has no registered binding location", .{res.name});
                         continue;
                     };
 
-                    for (frame_buffers, 0..) |managed_buffer, frame_idx| {
-                        // Skip if this frame's buffer isn't created yet
-                        if (managed_buffer.generation == 0) continue;
+                    // Get the buffer for the NEXT frame (the one we're about to render)
+                    const next_frame = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+                    const managed_buffer = frame_buffers[next_frame]; // Already a pointer
 
-                        const bind_frame = @as(u32, @intCast(frame_idx));
+                    // Skip if this frame's buffer isn't created yet
+                    if (managed_buffer.generation == 0) continue;
 
-                        switch (location.binding_type) {
-                            .storage_buffer => {
-                                try self.bindStorageBuffer(
-                                    res.pipeline_id,
-                                    res.set,
-                                    res.binding,
-                                    @constCast(&managed_buffer.buffer),
-                                    0,
-                                    managed_buffer.size,
-                                    bind_frame,
-                                );
-                            },
-                            .uniform_buffer => {
-                                try self.bindUniformBuffer(
-                                    res.pipeline_id,
-                                    res.set,
-                                    res.binding,
-                                    @constCast(&managed_buffer.buffer),
-                                    0,
-                                    managed_buffer.size,
-                                    bind_frame,
-                                );
-                            },
-                            else => {
-                                log(.WARN, "resource_binder", "Per-frame buffer array '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
-                            },
-                        }
+                    // Bind with arena_offset if this is an arena-allocated buffer
+                    const offset = managed_buffer.arena_offset;
+
+                    switch (location.binding_type) {
+                        .storage_buffer => {
+                            try self.bindStorageBuffer(
+                                res.pipeline_id,
+                                res.set,
+                                res.binding,
+                                @constCast(&managed_buffer.buffer),
+                                offset,
+                                managed_buffer.size,
+                                next_frame,
+                            );
+                        },
+                        .uniform_buffer => {
+                            try self.bindUniformBuffer(
+                                res.pipeline_id,
+                                res.set,
+                                res.binding,
+                                @constCast(&managed_buffer.buffer),
+                                offset,
+                                managed_buffer.size,
+                                next_frame,
+                            );
+                        },
+                        else => {
+                            log(.WARN, "resource_binder", "Per-frame buffer array '{s}' has unsupported binding type: {}", .{ res.name, location.binding_type });
+                        },
                     }
+
+                    // Check if this is the FIRST frame to see this generation change
+                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    const prev_gen = current_gen - 1;
+                    if (res.last_generation == prev_gen) {
+                        // This is the first frame to process this generation
+                        // Reset mask to 0b111 atomically (only if it was 0)
+                        const expected: u8 = 0;
+                        const mutable_buf = @constCast(managed_buffer);
+                        _ = mutable_buf.pending_bind_mask.cmpxchgStrong(
+                            expected,
+                            0b111,
+                            .acq_rel,
+                            .acquire,
+                        );
+                    }
+
+                    // Clear this frame's bit in the pending bind mask
+                    const frame_bit: u8 = @as(u8, 1) << @intCast(frame_index);
+                    const mutable_buf = @constCast(managed_buffer);
+                    const old_mask = mutable_buf.pending_bind_mask.fetchAnd(~frame_bit, .acq_rel);
+
+                    // Check if mask is complete (all frames have bound)
+                    // If mask is NOT complete, revert last_generation so other frames can still bind
+                    const new_mask = old_mask & ~frame_bit;
+                    if (new_mask != 0) {
+                        // Other frames still need to bind - keep last_generation one behind
+                        res.last_generation = current_gen - 1;
+                    }
+
+                    // else: mask is complete (0), last_generation stays at current_gen
                 },
                 .managed_texture => |managed_texture| {
                     // Get descriptor info from managed texture (need to cast away const for getDescriptorInfo)

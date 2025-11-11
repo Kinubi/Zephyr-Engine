@@ -52,10 +52,14 @@ pub const RenderSystem = struct {
     cached_raytracing_data: [2]?RaytracingData = .{ null, null },
     active_cache_index: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
-    // Instance data SSBO for instanced rendering
+    // Instance data SSBO for instanced rendering (per-frame, from arena)
     // RenderSystem owns and uploads this buffer (parallel to MaterialSystem owning material_buffer)
     // Always valid - starts as dummy buffer, gets replaced with real data
-    instance_buffer: *ManagedBuffer,
+    instance_buffers: [3]ManagedBuffer,
+    instance_capacity: usize = 0, // Current capacity in number of instances
+
+    // Track last instance data for delta detection
+    last_instance_data: std.ArrayList(render_data_types.RasterizationData.InstanceData),
 
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool, buffer_manager: *BufferManager) !RenderSystem {
         // Register with thread pool if provided
@@ -70,8 +74,8 @@ pub const RenderSystem = struct {
             log(.INFO, "render_system", "Registered render_extraction subsystem with thread pool", .{});
         }
 
-        // Create empty dummy instance buffer so descriptor binding is always valid
-        // BufferManager should always be provided
+        // Create empty dummy instance buffers (one per frame) so descriptor binding is always valid
+        // Allocate from frame arenas
         const bm = buffer_manager;
 
         const dummy_instance = render_data_types.RasterizationData.InstanceData{
@@ -79,35 +83,48 @@ pub const RenderSystem = struct {
             .material_index = 0,
         };
 
-        const dummy_buffer = try bm.createBuffer(
-            BufferConfig{
-                .name = "instance_data_buffer_dummy",
-                .size = @sizeOf(render_data_types.RasterizationData.InstanceData),
-                .strategy = .device_local,
-                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-            },
-            0, // frame_index
-        );
+        var instance_buffers: [3]ManagedBuffer = undefined;
+        const dummy_size = @sizeOf(render_data_types.RasterizationData.InstanceData);
 
-        // Upload dummy data
-        const bytes: []const u8 = std.mem.asBytes(&dummy_instance);
-        try bm.updateBuffer(dummy_buffer, bytes, 0);
+        // Allocate dummy buffer for each frame from its arena
+        for (&instance_buffers, 0..) |*buf, frame_idx| {
+            const frame = @as(u32, @intCast(frame_idx));
+
+            const alloc_result = try bm.allocateFromFrameArena(
+                frame,
+                buf,
+                dummy_size,
+                @alignOf(render_data_types.RasterizationData.InstanceData),
+            );
+
+            buf.buffer = alloc_result.buffer.buffer;
+            buf.arena_offset = alloc_result.offset;
+            buf.size = dummy_size;
+            buf.markUpdated();
+
+            // Upload dummy data to this frame's buffer
+            try buf.buffer.map(dummy_size, buf.arena_offset);
+            const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+            const bytes = std.mem.asBytes(&dummy_instance);
+            @memcpy(data_ptr[0..bytes.len], bytes);
+            buf.buffer.unmap();
+        }
 
         return .{
             .allocator = allocator,
             .thread_pool = thread_pool,
             .buffer_manager = buffer_manager,
-            .instance_buffer = dummy_buffer,
+            .instance_buffers = instance_buffers,
+            .instance_capacity = 1, // Start with 1 dummy instance
+            .last_instance_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){},
         };
     }
 
     pub fn deinit(self: *RenderSystem) void {
-        // Clean up instance buffer
-        if (self.buffer_manager) |bm| {
-            bm.destroyBuffer(self.instance_buffer) catch |err| {
-                log(.ERROR, "render_system", "Failed to destroy instance buffer: {}", .{err});
-            };
-        }
+        // Note: instance_buffers are allocated from frame arenas, no need to destroy
+
+        // Clean up tracking
+        self.last_instance_data.deinit(self.allocator);
 
         // Clean up both cache buffers
         for (&self.cached_raster_data) |*data| {
@@ -474,12 +491,17 @@ pub const RenderSystem = struct {
             log(.WARN, "render_system", "Frame budget exceeded in snapshot rebuild! Total: {d:.2}ms (cache: {d:.2}ms) Budget: {d:.2}ms", .{ total_time_ms, cache_build_time_ms, budget_ms });
         }
 
-        // Upload instance data to GPU if we have batches
-        try self.uploadInstanceDataToGPU();
+        // ALWAYS apply instance deltas from snapshot (full delta on reallocation, granular otherwise)
+        if (snapshot.instance_delta) |delta| {
+            if (delta.changed_indices.len > 0) {
+                try self.applyInstanceDeltasFromSnapshot(delta);
+            }
+        }
     }
 
     /// Upload instance data from batches to GPU buffer
     /// Called after cache rebuild when batches are updated
+    /// If snapshot has instance_delta, applies granular updates; otherwise does full rebuild
     fn uploadInstanceDataToGPU(self: *RenderSystem) !void {
         const buffer_manager = self.buffer_manager orelse return;
 
@@ -500,42 +522,354 @@ pub const RenderSystem = struct {
         // Calculate buffer size
         const buffer_size = total_instances * @sizeOf(render_data_types.RasterizationData.InstanceData);
 
-        // Create or resize buffer if needed (dummy buffer has size of 1 instance)
-        const needs_realloc = self.instance_buffer.size < buffer_size;
+        // Check if we need to reallocate (capacity change)
+        const needs_realloc = self.instance_capacity < total_instances;
 
         if (needs_realloc) {
-            // Create new buffer FIRST (before destroying old one)
-            const new_buffer = try buffer_manager.createBuffer(
-                BufferConfig{
-                    .name = "instance_data_buffer",
-                    .size = buffer_size,
-                    .strategy = .device_local,
-                    .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-                },
-                0, // frame_index
-            );
+            log(.INFO, "render_system", "Reallocating instance buffers ({} -> {} instances)", .{
+                self.instance_capacity,
+                total_instances,
+            });
 
-            // Destroy old buffer AFTER new one is created
-            try buffer_manager.destroyBuffer(self.instance_buffer);
+            // Reallocate each frame's buffer from its arena
+            for (&self.instance_buffers, 0..) |*buf, frame_idx| {
+                const frame = @as(u32, @intCast(frame_idx));
 
-            // Set the new buffer
-            self.instance_buffer = new_buffer;
+                const alloc_result = buffer_manager.allocateFromFrameArena(
+                    frame,
+                    buf,
+                    buffer_size,
+                    @alignOf(render_data_types.RasterizationData.InstanceData),
+                ) catch |err| {
+                    if (err == error.ArenaRequiresCompaction) {
+                        log(.WARN, "render_system", "Arena full for frame {}, creating dedicated buffer", .{frame});
+                        // Fall back to dedicated buffer
+                        const buffer_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
+                        defer self.allocator.free(buffer_name);
 
-            log(.INFO, "render_system", "Created instance buffer for {} instances ({} bytes)", .{ total_instances, buffer_size });
+                        const dedicated = try buffer_manager.createBuffer(
+                            .{
+                                .name = buffer_name,
+                                .size = buffer_size,
+                                .strategy = .device_local,
+                                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                            },
+                            frame,
+                        );
+                        buf.* = dedicated.*;
+                        buf.markUpdated();
+                        continue;
+                    }
+                    return err;
+                };
+
+                // Update buffer to point to new arena allocation
+                buf.buffer = alloc_result.buffer.buffer;
+                buf.arena_offset = alloc_result.offset;
+                buf.size = buffer_size;
+                buf.markUpdated();
+            }
+
+            self.instance_capacity = total_instances;
+            log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{total_instances});
+
+            // Full rewrite after reallocation
+            var upload_buffer = std.ArrayList(u8){};
+            defer upload_buffer.deinit(self.allocator);
+            try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+
+            for (raster_data.batches) |batch| {
+                const batch_bytes = std.mem.sliceAsBytes(batch.instances);
+                try upload_buffer.appendSlice(self.allocator, batch_bytes);
+            }
+
+            // Write instance data to all frame buffers
+            for (&self.instance_buffers) |*buf| {
+                try buf.buffer.map(buffer_size, buf.arena_offset);
+                const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
+                buf.buffer.unmap();
+            }
+
+            log(.INFO, "render_system", "Wrote {} instances to all frame buffers after reallocation", .{total_instances});
+
+            // Update tracking
+            self.last_instance_data.clearRetainingCapacity();
+            for (raster_data.batches) |batch| {
+                try self.last_instance_data.appendSlice(self.allocator, batch.instances);
+            }
+        } else {
+            // No reallocation - check for granular changes
+            var upload_buffer = std.ArrayList(u8){};
+            defer upload_buffer.deinit(self.allocator);
+            try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+
+            // Collect all current instance data
+            var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+            defer current_instances.deinit(self.allocator);
+
+            for (raster_data.batches) |batch| {
+                try current_instances.appendSlice(self.allocator, batch.instances);
+            }
+
+            // Detect changes by comparing with last frame
+            var changed_indices = std.ArrayList(u32){};
+            defer changed_indices.deinit(self.allocator);
+
+            const compare_count = @min(current_instances.items.len, self.last_instance_data.items.len);
+
+            for (current_instances.items[0..compare_count], 0..) |current, i| {
+                if (i >= self.last_instance_data.items.len) break;
+                const last = self.last_instance_data.items[i];
+
+                // Compare instance data (transform matrix + material index)
+                if (!std.meta.eql(current, last)) {
+                    try changed_indices.append(self.allocator, @intCast(i));
+                }
+            }
+
+            // Any new instances beyond last count are also "changed"
+            if (current_instances.items.len > self.last_instance_data.items.len) {
+                var i = self.last_instance_data.items.len;
+                while (i < current_instances.items.len) : (i += 1) {
+                    try changed_indices.append(self.allocator, @intCast(i));
+                }
+            }
+
+            if (changed_indices.items.len > 0) {
+                log(.DEBUG, "render_system", "Granular update: {} of {} instances changed", .{
+                    changed_indices.items.len,
+                    total_instances,
+                });
+
+                // Apply granular updates to each frame's buffer
+                for (&self.instance_buffers) |*buf| {
+                    for (changed_indices.items) |idx| {
+                        const instance_data = current_instances.items[idx];
+                        const offset = buf.arena_offset + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
+
+                        try buf.buffer.map(@sizeOf(render_data_types.RasterizationData.InstanceData), offset);
+                        const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                        const bytes = std.mem.asBytes(&instance_data);
+                        @memcpy(data_ptr[0..bytes.len], bytes);
+                        buf.buffer.unmap();
+                    }
+                }
+            } else {
+                log(.TRACE, "render_system", "No instance changes detected", .{});
+            }
+
+            // Update tracking
+            self.last_instance_data.clearRetainingCapacity();
+            try self.last_instance_data.appendSlice(self.allocator, current_instances.items);
+        }
+    }
+
+    /// Apply instance deltas from snapshot (called from update phase on render thread)
+    /// Handles both reallocation (if needed) and granular updates
+    fn applyInstanceDeltasFromSnapshot(
+        self: *RenderSystem,
+        instance_delta: @import("../../threading/game_state_snapshot.zig").InstanceDelta,
+    ) !void {
+        const buffer_manager = self.buffer_manager orelse return;
+
+        // Find max index to determine required capacity
+        var max_index: u32 = 0;
+        for (instance_delta.changed_indices) |idx| {
+            if (idx > max_index) max_index = idx;
+        }
+        const required_capacity = max_index + 1;
+
+        // Check if we need to reallocate
+        const needs_realloc = required_capacity > self.instance_capacity;
+
+        if (needs_realloc) {
+            log(.INFO, "render_system", "Reallocating instance buffers from snapshot delta ({} -> {} instances)", .{
+                self.instance_capacity,
+                required_capacity,
+            });
+
+            const buffer_size = required_capacity * @sizeOf(render_data_types.RasterizationData.InstanceData);
+
+            // Reallocate each frame's buffer from its arena
+            for (&self.instance_buffers, 0..) |*buf, frame_idx| {
+                const frame = @as(u32, @intCast(frame_idx));
+
+                const alloc_result = buffer_manager.allocateFromFrameArena(
+                    frame,
+                    buf,
+                    buffer_size,
+                    @alignOf(render_data_types.RasterizationData.InstanceData),
+                ) catch |err| {
+                    if (err == error.ArenaRequiresCompaction) {
+                        log(.WARN, "render_system", "Arena full for frame {}, creating dedicated buffer", .{frame});
+                        const buffer_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
+                        defer self.allocator.free(buffer_name);
+
+                        const dedicated = try buffer_manager.createBuffer(
+                            .{
+                                .name = buffer_name,
+                                .size = buffer_size,
+                                .strategy = .device_local,
+                                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                            },
+                            frame,
+                        );
+                        buf.* = dedicated.*;
+                        buf.markUpdated();
+                        continue;
+                    }
+                    return err;
+                };
+
+                buf.buffer = alloc_result.buffer.buffer;
+                buf.arena_offset = alloc_result.offset;
+                buf.size = buffer_size;
+                buf.markUpdated();
+            }
+
+            self.instance_capacity = required_capacity;
+            log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{required_capacity});
         }
 
-        // Upload instance data from all batches
-        var upload_buffer = std.ArrayList(u8){};
-        defer upload_buffer.deinit(self.allocator);
+        // Apply delta updates (works for both full deltas and granular deltas)
 
-        try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+        for (&self.instance_buffers) |*buf| {
+            for (instance_delta.changed_indices, 0..) |idx, i| {
+                const instance_data = instance_delta.changed_data[i];
+                const offset = buf.arena_offset + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
 
-        for (raster_data.batches) |batch| {
-            const batch_bytes = std.mem.sliceAsBytes(batch.instances);
-            try upload_buffer.appendSlice(self.allocator, batch_bytes);
+                try buf.buffer.map(@sizeOf(render_data_types.RasterizationData.InstanceData), offset);
+                const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                const bytes = std.mem.asBytes(&instance_data);
+                @memcpy(data_ptr[0..bytes.len], bytes);
+                buf.buffer.unmap();
+            }
+        }
+    }
+
+    /// Calculate instance deltas and store in InstanceDeltasSet component
+    /// ALWAYS creates a delta - on first frame/reallocation, delta contains ALL instances
+    fn calculateInstanceDeltas(
+        self: *RenderSystem,
+        world: *World,
+        renderables: []const components.ExtractedRenderable,
+        asset_manager: *AssetManager,
+    ) !void {
+
+        // Build current instance data in BATCH ORDER (grouped by mesh, sorted by mesh_ptr)
+        // This matches how buildBatches() organizes instances
+
+        // Helper struct to track entity_id with instance data for sorting
+        const InstanceWithEntity = struct {
+            entity_id: EntityId,
+            data: render_data_types.RasterizationData.InstanceData,
+        };
+
+        var mesh_to_instances = std.AutoHashMap(usize, std.ArrayList(InstanceWithEntity)).init(self.allocator);
+        defer {
+            var iter = mesh_to_instances.valueIterator();
+            while (iter.next()) |list| {
+                list.deinit(self.allocator);
+            }
+            mesh_to_instances.deinit();
         }
 
-        try buffer_manager.updateBuffer(self.instance_buffer, upload_buffer.items, 0);
+        // Group instances by mesh (same logic as BatchBuilder)
+        for (renderables) |renderable| {
+            const model = asset_manager.getModel(renderable.model_asset) orelse continue;
+
+            var material_index: u32 = 0;
+            if (renderable.material_buffer_index) |idx| {
+                material_index = idx;
+            }
+
+            for (model.meshes.items) |model_mesh| {
+                const mesh_key = @intFromPtr(model_mesh.geometry.mesh);
+                const result = try mesh_to_instances.getOrPut(mesh_key);
+                if (!result.found_existing) {
+                    result.value_ptr.* = std.ArrayList(InstanceWithEntity){};
+                }
+
+                try result.value_ptr.append(self.allocator, .{
+                    .entity_id = renderable.entity_id,
+                    .data = .{
+                        .transform = renderable.transform.data,
+                        .material_index = material_index,
+                    },
+                });
+            }
+        }
+
+        // Sort mesh keys to ensure deterministic iteration order
+        var mesh_keys = std.ArrayList(usize){};
+        defer mesh_keys.deinit(self.allocator);
+
+        var key_iter = mesh_to_instances.keyIterator();
+        while (key_iter.next()) |key| {
+            try mesh_keys.append(self.allocator, key.*);
+        }
+        std.mem.sort(usize, mesh_keys.items, {}, std.sort.asc(usize));
+
+        // Flatten to array in sorted order (sorting instances within each mesh by entity_id)
+        var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+        defer current_instances.deinit(self.allocator);
+
+        for (mesh_keys.items) |mesh_key| {
+            const instances_list = mesh_to_instances.getPtr(mesh_key).?;
+            // Sort instances within this mesh by entity_id for deterministic ordering
+            std.mem.sort(InstanceWithEntity, instances_list.items, {}, struct {
+                fn lessThan(_: void, a: InstanceWithEntity, b: InstanceWithEntity) bool {
+                    return @intFromEnum(a.entity_id) < @intFromEnum(b.entity_id);
+                }
+            }.lessThan);
+
+            // Append just the instance data
+            for (instances_list.items) |inst_with_entity| {
+                try current_instances.append(self.allocator, inst_with_entity.data);
+            }
+        }
+
+        var changed_indices = std.ArrayList(u32){};
+        defer changed_indices.deinit(self.allocator);
+
+        var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+        defer changed_data.deinit(self.allocator);
+
+        // Generate delta for all instances (simpler approach - always send everything)
+        for (current_instances.items, 0..) |instance, i| {
+            try changed_indices.append(self.allocator, @intCast(i));
+            try changed_data.append(self.allocator, instance);
+        }
+
+        // Always store deltas in InstanceDeltasSet component (even if empty)
+        const singleton_entity = try world.getOrCreateSingletonEntity();
+        var deltas_set = world.getMut(components.InstanceDeltasSet, singleton_entity) orelse blk: {
+            const new_set = components.InstanceDeltasSet.init();
+            world.emplace(components.InstanceDeltasSet, singleton_entity, new_set) catch |err| {
+                log(.ERROR, "render_system", "Failed to emplace InstanceDeltasSet component (is it registered?): {}", .{err});
+                return err;
+            };
+            break :blk world.getMut(components.InstanceDeltasSet, singleton_entity) orelse {
+                log(.ERROR, "render_system", "InstanceDeltasSet component not found after emplace (not registered?)", .{});
+                return error.ComponentNotRegistered;
+            };
+        };
+
+        if (changed_indices.items.len > 0) {
+            const indices_copy = try self.allocator.dupe(u32, changed_indices.items);
+            const data_copy = try self.allocator.dupe(render_data_types.RasterizationData.InstanceData, changed_data.items);
+            deltas_set.setDeltas(self.allocator, indices_copy, data_copy);
+        } else {
+            // Clear deltas if no changes
+            deltas_set.clear();
+        }
+
+        // Update tracking for next frame
+        self.last_instance_data.clearRetainingCapacity();
+
+        log(.DEBUG, "render_system", "Updated last_instance_data with {} instances", .{current_instances.items.len});
+        try self.last_instance_data.appendSlice(self.allocator, current_instances.items);
     }
 
     /// Build caches from snapshot entities (single-threaded)
@@ -562,13 +896,15 @@ pub const RenderSystem = struct {
     /// Branch recommended: features/instanced-rendering (coordinate with geometry_pass.zig changes)
     /// Helper struct for building instanced batches
     const BatchBuilder = struct {
-        // Map mesh_ptr → list of instance indices
-        mesh_to_instances: std.AutoHashMap(usize, std.ArrayList(usize)),
+        const InstanceInfo = struct { obj_idx: usize, entity_id: EntityId };
+
+        // Map mesh_ptr → list of (object_index, entity_id) pairs
+        mesh_to_instances: std.AutoHashMap(usize, std.ArrayList(InstanceInfo)),
         allocator: std.mem.Allocator,
 
         fn init(allocator: std.mem.Allocator) BatchBuilder {
             return .{
-                .mesh_to_instances = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
+                .mesh_to_instances = std.AutoHashMap(usize, std.ArrayList(InstanceInfo)).init(allocator),
                 .allocator = allocator,
             };
         }
@@ -582,13 +918,13 @@ pub const RenderSystem = struct {
         }
 
         /// Add an object to the batch builder
-        fn addObject(self: *BatchBuilder, mesh_ptr: *const Mesh, object_idx: usize) !void {
+        fn addObject(self: *BatchBuilder, mesh_ptr: *const Mesh, object_idx: usize, entity_id: EntityId) !void {
             const mesh_key = @intFromPtr(mesh_ptr);
             const result = try self.mesh_to_instances.getOrPut(mesh_key);
             if (!result.found_existing) {
-                result.value_ptr.* = std.ArrayList(usize){};
+                result.value_ptr.* = std.ArrayList(InstanceInfo){};
             }
-            result.value_ptr.append(self.allocator, object_idx) catch |err| {
+            result.value_ptr.append(self.allocator, .{ .obj_idx = object_idx, .entity_id = entity_id }) catch |err| {
                 // If append fails on a newly created list, remove the HashMap entry to prevent leak
                 if (!result.found_existing) {
                     _ = self.mesh_to_instances.remove(mesh_key);
@@ -606,15 +942,38 @@ pub const RenderSystem = struct {
             const batch_count = self.mesh_to_instances.count();
             const batches = try allocator.alloc(RasterizationData.InstancedBatch, batch_count);
 
-            var batch_idx: usize = 0;
-            var iter = self.mesh_to_instances.iterator();
-            while (iter.next()) |entry| {
-                const indices = entry.value_ptr;
-                const instances = try allocator.alloc(RasterizationData.InstanceData, indices.items.len);
+            // Sort mesh keys to ensure deterministic iteration order (matches calculateInstanceDeltas)
+            var mesh_keys = std.ArrayList(usize){};
+            defer mesh_keys.deinit(allocator);
 
-                // Copy instance data from objects
-                for (indices.items, 0..) |obj_idx, inst_idx| {
-                    const obj = objects[obj_idx];
+            var key_iter = self.mesh_to_instances.keyIterator();
+            while (key_iter.next()) |key| {
+                try mesh_keys.append(allocator, key.*);
+            }
+            std.mem.sort(usize, mesh_keys.items, {}, std.sort.asc(usize));
+
+            // Build batches in sorted order
+            for (mesh_keys.items, 0..) |mesh_key, batch_idx| {
+                const instances_with_entities = self.mesh_to_instances.getPtr(mesh_key).?;
+
+                // Sort instances within this mesh by entity_id for deterministic ordering
+                std.mem.sort(BatchBuilder.InstanceInfo, instances_with_entities.items, {}, struct {
+                    fn lessThan(_: void, a: BatchBuilder.InstanceInfo, b: BatchBuilder.InstanceInfo) bool {
+                        return @intFromEnum(a.entity_id) < @intFromEnum(b.entity_id);
+                    }
+                }.lessThan);
+                const instances = try allocator.alloc(RasterizationData.InstanceData, instances_with_entities.items.len);
+
+                // Copy instance data from objects in sorted order
+                var global_idx: usize = 0;
+                // Calculate global index offset for this batch
+                for (mesh_keys.items[0..batch_idx]) |prev_mesh_key| {
+                    const prev_instances = self.mesh_to_instances.get(prev_mesh_key).?;
+                    global_idx += prev_instances.items.len;
+                }
+
+                for (instances_with_entities.items, 0..) |inst_info, inst_idx| {
+                    const obj = objects[inst_info.obj_idx];
                     instances[inst_idx] = .{
                         .transform = obj.transform,
                         .material_index = obj.material_index,
@@ -622,13 +981,12 @@ pub const RenderSystem = struct {
                 }
 
                 // Get mesh_ptr from first object in batch
-                const first_obj = objects[indices.items[0]];
+                const first_obj = objects[instances_with_entities.items[0].obj_idx];
                 batches[batch_idx] = .{
                     .mesh_handle = .{ .mesh_ptr = first_obj.mesh_handle.mesh_ptr },
                     .instances = instances,
                     .visible = true,
                 };
-                batch_idx += 1;
             }
 
             return batches;
@@ -684,7 +1042,7 @@ pub const RenderSystem = struct {
                 };
 
                 // Register this object with the batch builder
-                try batch_builder.addObject(model_mesh.geometry.mesh, mesh_idx);
+                try batch_builder.addObject(model_mesh.geometry.mesh, mesh_idx, entity_data.entity_id);
 
                 geometries[mesh_idx] = .{
                     .mesh_ptr = model_mesh.geometry.mesh,
@@ -820,8 +1178,15 @@ pub const RenderSystem = struct {
         var batch_builder = BatchBuilder.init(self.allocator);
         defer batch_builder.deinit();
 
-        for (raster_objects, 0..) |obj, idx| {
-            try batch_builder.addObject(obj.mesh_handle.mesh_ptr, idx);
+        // Need to rebuild entity_id mapping since workers don't track it
+        // Iterate through entities in same order as workers did
+        var obj_idx: usize = 0;
+        for (entities) |entity_data| {
+            const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
+            for (model.meshes.items) |model_mesh| {
+                try batch_builder.addObject(model_mesh.geometry.mesh, obj_idx, entity_data.entity_id);
+                obj_idx += 1;
+            }
         }
 
         const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
@@ -1409,6 +1774,85 @@ pub fn prepare(world: *World, dt: f32) !void {
         renderables_set.setRenderables(self.allocator, renderables_copy);
 
         renderables_set.markDirty(is_transform_only);
+
+        // ALWAYS calculate instance deltas for snapshot (full delta on first frame/realloc, granular otherwise)
+        if (extracted_renderables.items.len > 0) {
+            try self.calculateInstanceDeltas(world, extracted_renderables.items, asset_manager);
+        }
+    }
+}
+
+/// Calculate instance deltas and store in InstanceDeltasSet component
+fn calculateInstanceDeltas(
+    self: *RenderSystem,
+    world: *World,
+    renderables: []const components.ExtractedRenderable,
+    asset_manager: *AssetManager,
+) !void {
+    // Build current instance data from renderables
+    var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+    defer current_instances.deinit(self.allocator);
+
+    for (renderables) |renderable| {
+        const model = asset_manager.getModel(renderable.model_asset) orelse continue;
+
+        // Get material_buffer_index from MaterialSet component
+        var material_index: u32 = 0;
+        if (renderable.material_buffer_index) |idx| {
+            material_index = idx;
+        }
+
+        for (model.meshes.items) |_| {
+            try current_instances.append(self.allocator, .{
+                .transform = renderable.transform.data,
+                .material_index = material_index,
+            });
+        }
+    }
+
+    // Compare with last instance data to find changes
+    var changed_indices = std.ArrayList(u32){};
+    defer changed_indices.deinit(self.allocator);
+
+    var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
+    defer changed_data.deinit(self.allocator);
+
+    const compare_count = @min(current_instances.items.len, self.last_instance_data.items.len);
+
+    for (current_instances.items[0..compare_count], 0..) |current, i| {
+        if (i >= self.last_instance_data.items.len) break;
+        const last = self.last_instance_data.items[i];
+
+        if (!std.meta.eql(current, last)) {
+            try changed_indices.append(self.allocator, @intCast(i));
+            try changed_data.append(self.allocator, current);
+        }
+    }
+
+    // Any new instances beyond last count are also "changed"
+    if (current_instances.items.len > self.last_instance_data.items.len) {
+        var i = self.last_instance_data.items.len;
+        while (i < current_instances.items.len) : (i += 1) {
+            try changed_indices.append(self.allocator, @intCast(i));
+            try changed_data.append(self.allocator, current_instances.items[i]);
+        }
+    }
+
+    // Store deltas in InstanceDeltasSet component if any changes found
+    if (changed_indices.items.len > 0) {
+        const singleton_entity = try world.getOrCreateSingletonEntity();
+        var deltas_set = world.get(components.InstanceDeltasSet, singleton_entity) orelse blk: {
+            const new_set = components.InstanceDeltasSet.init();
+            try world.emplace(components.InstanceDeltasSet, singleton_entity, new_set);
+            break :blk world.get(components.InstanceDeltasSet, singleton_entity).?;
+        };
+
+        const indices_copy = try self.allocator.dupe(u32, changed_indices.items);
+        const data_copy = try self.allocator.dupe(render_data_types.RasterizationData.InstanceData, changed_data.items);
+
+        deltas_set.setDeltas(self.allocator, indices_copy, data_copy);
+
+        log(.DEBUG, "render_system", "Calculated {} instance deltas for snapshot", .{changed_indices.items.len});
     }
 }
 

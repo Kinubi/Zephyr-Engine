@@ -25,13 +25,6 @@ pub const ManagedTextureArray = struct {
     size: usize = 0,
 };
 
-/// Opaque handle to material bindings (buffer + textures)
-/// GeometryPass uses this without knowing MaterialSystem internals
-pub const MaterialBindings = struct {
-    material_buffer: *const ManagedBuffer,
-    texture_array: *const ManagedTextureArray,
-};
-
 /// Delta update tracking for a material set
 const MaterialSetDelta = struct {
     allocator: std.mem.Allocator,
@@ -69,21 +62,27 @@ const MaterialSetDelta = struct {
     }
 };
 
-/// Per-set GPU resources
-const MaterialSetData = struct {
+/// Per-set GPU resources (public for GeometryPass access)
+pub const MaterialSetData = struct {
     allocator: std.mem.Allocator,
-    material_buffer: *ManagedBuffer,
+    material_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer, // Per-frame arena-allocated buffers
+    current_capacity: usize, // Number of materials current buffers can hold
     texture_array: ManagedTextureArray,
 
     // Tracking for change detection
     last_texture_ids: std.ArrayList(u64),
     last_materials: std.ArrayList(GPUMaterial),
+    next_materials: std.ArrayList(GPUMaterial), // Staging area for next frame's materials
 
-    // Delta tracking for incremental GPU updates
+    // Delta tracking for incremental GPU updates (main thread)
     pending_delta: MaterialSetDelta,
 
+    // Per-frame ephemeral deltas (render thread) - latest delta supersedes old ones
+    pending_deltas: [MAX_FRAMES_IN_FLIGHT]MaterialSetDelta,
+
     pub fn init(allocator: std.mem.Allocator, buffer_manager: *BufferManager) !MaterialSetData {
-        // Create an empty material buffer (1 dummy material) so binding is always valid
+        // Create dummy per-frame buffers (1 material each) from frame arenas
+        // This ensures binding is always valid even before any materials are added
         const empty_material = GPUMaterial{
             .albedo_idx = 0,
             .roughness_idx = 0,
@@ -100,31 +99,74 @@ const MaterialSetData = struct {
             .occlusion_strength = 1.0,
         };
 
-        const buffer_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_empty", .{});
-        defer allocator.free(buffer_name);
+        var material_buffers: [MAX_FRAMES_IN_FLIGHT]ManagedBuffer = undefined;
 
-        const BufferConfig = buffer_manager_module.BufferConfig;
-        const material_buffer = try buffer_manager.createBuffer(
-            BufferConfig{
-                .name = buffer_name,
+        // Allocate from each frame's arena
+        for (&material_buffers, 0..) |*buf, frame_idx| {
+            const frame = @as(u32, @intCast(frame_idx));
+
+            // Create a managed buffer placeholder (will point to arena)
+            buf.* = ManagedBuffer{
+                .buffer = undefined, // Will be set by allocateFromFrameArena
+                .name = "MaterialBuffer_frame",
                 .size = @sizeOf(GPUMaterial),
-                .strategy = .device_local,
-                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-            },
-            0, // frame_index
-        );
+                .strategy = .host_visible,
+                .created_frame = 0,
+                .generation = 1,
+                .binding_info = null,
+                .arena_offset = 0,
+                .pending_bind_mask = std.atomic.Value(u8).init(0b111),
+            };
 
-        // Upload the dummy material
-        const bytes: []const u8 = std.mem.asBytes(&empty_material);
-        try buffer_manager.updateBuffer(material_buffer, bytes, 0);
+            // Allocate from frame arena
+            const alloc_result = buffer_manager.allocateFromFrameArena(
+                frame,
+                buf,
+                @sizeOf(GPUMaterial),
+                16, // alignment
+            ) catch |err| {
+                // If arena allocation fails, fall back to dedicated buffer
+                log(.WARN, "material_system", "Arena allocation failed for frame {}, using dedicated buffer: {}", .{ frame, err });
+                const buffer_name = try std.fmt.allocPrint(allocator, "MaterialBuffer_frame{}", .{frame});
+                defer allocator.free(buffer_name);
+
+                const BufferConfig = buffer_manager_module.BufferConfig;
+                const dedicated = try buffer_manager.createBuffer(
+                    BufferConfig{
+                        .name = buffer_name,
+                        .size = @sizeOf(GPUMaterial),
+                        .strategy = .device_local,
+                        .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                    },
+                    frame,
+                );
+                buf.* = dedicated.*;
+                buf.markUpdated();
+                continue;
+            };
+
+            // Set buffer to arena buffer with correct offset
+            buf.buffer = alloc_result.buffer.buffer;
+            buf.arena_offset = alloc_result.offset;
+            buf.size = @sizeOf(GPUMaterial);
+
+            // Write dummy material to this frame's allocation
+            try alloc_result.buffer.buffer.map(@sizeOf(GPUMaterial), alloc_result.offset);
+            const data_ptr: [*]u8 = @ptrCast(alloc_result.buffer.buffer.mapped.?);
+            @memcpy(data_ptr[0..@sizeOf(GPUMaterial)], std.mem.asBytes(&empty_material));
+            alloc_result.buffer.buffer.unmap();
+        }
 
         return .{
             .allocator = allocator,
-            .material_buffer = material_buffer,
+            .material_buffers = material_buffers,
+            .current_capacity = 1, // Currently holds 1 dummy material
             .texture_array = .{},
             .last_texture_ids = std.ArrayList(u64){},
             .last_materials = std.ArrayList(GPUMaterial){},
+            .next_materials = std.ArrayList(GPUMaterial){}, // Staging area
             .pending_delta = MaterialSetDelta.init(allocator),
+            .pending_deltas = [_]MaterialSetDelta{MaterialSetDelta.init(allocator)} ** MAX_FRAMES_IN_FLIGHT,
         };
     }
 
@@ -137,14 +179,37 @@ const MaterialSetData = struct {
         // Clean up tracking
         self.last_texture_ids.deinit(self.allocator);
         self.last_materials.deinit(self.allocator);
+        self.next_materials.deinit(self.allocator);
 
-        // Clean up delta
+        // Clean up deltas
         self.pending_delta.deinit();
+        for (&self.pending_deltas) |*delta| {
+            delta.deinit();
+        }
 
-        // Clean up material buffer
-        buffer_manager.destroyBuffer(self.material_buffer) catch |err| {
-            log(.WARN, "material_system", "Failed to destroy material buffer: {}", .{err});
-        };
+        // Free per-frame material buffers from arenas
+        for (&self.material_buffers, 0..) |*buf, frame_idx| {
+            const frame = @as(u32, @intCast(frame_idx));
+
+            // If arena-allocated (arena_offset != 0), free from arena
+            if (buf.arena_offset != 0) {
+                buffer_manager.freeFromFrameArena(frame, buf);
+            } else {
+                // Dedicated buffer - destroy normally
+                buffer_manager.destroyBuffer(buf) catch |err| {
+                    log(.WARN, "material_system", "Failed to destroy material buffer for frame {}: {}", .{ frame, err });
+                };
+            }
+        }
+
+        // Destroy per-frame material buffers
+        for (&self.material_buffers, 0..) |*buf, frame| {
+            if (buf.buffer.buffer != .null_handle) {
+                buffer_manager.destroyBuffer(buf) catch |err| {
+                    log(.WARN, "material_system", "Failed to destroy material buffer for frame {}: {}", .{ frame, err });
+                };
+            }
+        }
     }
 };
 
@@ -260,7 +325,7 @@ pub const MaterialSystem = struct {
             try gop.value_ptr.append(self.allocator, entity);
         }
 
-        // Process each material set (ECS queries, compute indices)
+        // Process each material set (ECS queries, compute indices, build deltas)
         var sets_iter = sets_map.iterator();
         while (sets_iter.next()) |entry| {
             const set_name = entry.key_ptr.*;
@@ -269,8 +334,71 @@ pub const MaterialSystem = struct {
             try self.prepareMaterialSet(world, set_name, entities);
         }
 
-        // Write deltas to MaterialDeltasSet singleton component for snapshot capture
-        try self.writeDeltasToComponent(world);
+        // Write deltas to MaterialDeltasSet component (ALWAYS, like RenderSystem)
+        const singleton_entity = try world.getOrCreateSingletonEntity();
+        var deltas_set = world.getMut(ecs.MaterialDeltasSet, singleton_entity) orelse blk: {
+            try world.emplace(ecs.MaterialDeltasSet, singleton_entity, ecs.MaterialDeltasSet.init(self.allocator));
+            break :blk world.getMut(ecs.MaterialDeltasSet, singleton_entity) orelse {
+                log(.ERROR, "material_system", "MaterialDeltasSet component not found after emplace", .{});
+                return error.ComponentNotRegistered;
+            };
+        };
+
+        // Clear old deltas
+        deltas_set.clear();
+
+        // Build delta array from ALL material sets (like RenderSystem)
+        // Include sets even with empty deltas to ensure proper tracking
+        var deltas_list = std.ArrayList(ecs.MaterialSetDelta){};
+        defer deltas_list.deinit(self.allocator);
+
+        var delta_iter = self.material_sets.iterator();
+        while (delta_iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            const set_data = entry.value_ptr;
+
+            // Copy changed materials (convert from ChangedMaterial to MaterialChange)
+            const changed_materials = try self.allocator.alloc(
+                ecs.MaterialChange,
+                set_data.pending_delta.changed_materials.items.len,
+            );
+            for (set_data.pending_delta.changed_materials.items, 0..) |change, i| {
+                changed_materials[i] = .{
+                    .index = change.index,
+                    .data = change.data,
+                };
+            }
+
+            // Copy texture descriptors
+            const texture_descriptors = try self.allocator.dupe(
+                vk.DescriptorImageInfo,
+                set_data.pending_delta.texture_descriptors,
+            );
+
+            try deltas_list.append(self.allocator, .{
+                .set_name = set_name,
+                .changed_materials = changed_materials,
+                .texture_descriptors = texture_descriptors,
+                .texture_count = set_data.pending_delta.texture_count,
+                .texture_array_dirty = set_data.pending_delta.texture_array_dirty,
+            });
+        }
+
+        // ALWAYS write deltas (even if all are empty arrays) - like RenderSystem
+        deltas_set.deltas = try deltas_list.toOwnedSlice(self.allocator);
+
+        // Update tracking for next frame (AFTER writing to component)
+        var tracking_iter = self.material_sets.iterator();
+        while (tracking_iter.next()) |entry| {
+            const set_data = entry.value_ptr;
+
+            // Update last_materials from next_materials
+            set_data.last_materials.clearRetainingCapacity();
+            try set_data.last_materials.appendSlice(self.allocator, set_data.next_materials.items);
+
+            // Clear pending_delta for next frame
+            set_data.pending_delta.clear();
+        }
     }
 
     /// RENDER THREAD: Apply material deltas from snapshot (thread-safe)
@@ -308,51 +436,79 @@ pub const MaterialSystem = struct {
                 });
             }
 
-            // Apply material buffer updates using granular writes
+            // Apply material buffer updates from delta
             if (snap.changed_materials.len > 0) {
-                // Check if buffer needs resizing first
-                const max_index = blk: {
-                    var max: u32 = 0;
-                    for (snap.changed_materials) |change| {
-                        if (change.index > max) max = change.index;
+                // Find max index to determine required capacity
+                var max_index: u32 = 0;
+                for (snap.changed_materials) |change| {
+                    if (change.index > max_index) {
+                        max_index = change.index;
                     }
-                    break :blk max;
-                };
+                }
+                const required_capacity = max_index + 1;
 
-                const required_size = (max_index + 1) * @sizeOf(GPUMaterial);
-                if (set_data.material_buffer.size < required_size) {
-                    log(.INFO, "material_system", "Resizing material buffer for set '{s}' from {} to {} bytes", .{
+                // Check if we need to reallocate
+                if (required_capacity > set_data.current_capacity) {
+                    log(.INFO, "material_system", "Reallocating material buffers for set '{s}' from {} to {} materials", .{
                         snap.set_name,
-                        set_data.material_buffer.size,
-                        required_size,
+                        set_data.current_capacity,
+                        required_capacity,
                     });
 
-                    // Resize buffer (generation incremented automatically)
-                    try self.buffer_manager.resizeBuffer(
-                        set_data.material_buffer,
-                        required_size,
-                        .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
-                    );
+                    const new_size = required_capacity * @sizeOf(GPUMaterial);
+
+                    // Reallocate each frame's buffer from arena
+                    for (&set_data.material_buffers, 0..) |*buf, frame_idx| {
+                        const frame = @as(u32, @intCast(frame_idx));
+
+                        const alloc_result = self.buffer_manager.allocateFromFrameArena(
+                            frame,
+                            buf,
+                            new_size,
+                            @alignOf(GPUMaterial),
+                        ) catch |err| {
+                            if (err == error.ArenaRequiresCompaction) {
+                                log(.WARN, "material_system", "Arena full for frame {}, creating dedicated buffer", .{frame});
+                                // Fall back to dedicated buffer
+                                const buffer_name = try std.fmt.allocPrint(self.allocator, "material_buffer_{s}_frame{d}_dedicated", .{ snap.set_name, frame });
+                                defer self.allocator.free(buffer_name);
+
+                                const dedicated = try self.buffer_manager.createBuffer(
+                                    .{
+                                        .name = buffer_name,
+                                        .size = new_size,
+                                        .strategy = .device_local,
+                                        .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                                    },
+                                    frame,
+                                );
+                                buf.* = dedicated.*;
+                                buf.markUpdated();
+                                continue;
+                            }
+                            return err;
+                        };
+
+                        buf.buffer = alloc_result.buffer.buffer;
+                        buf.arena_offset = alloc_result.offset;
+                        buf.size = new_size;
+                        buf.markUpdated();
+                    }
+
+                    set_data.current_capacity = required_capacity;
                 }
 
-                // Apply each changed material via small mapped write at offset
-                for (snap.changed_materials) |change| {
-                    const offset = change.index * @sizeOf(GPUMaterial);
-                    const bytes: []const u8 = std.mem.asBytes(&change.data);
-
-                    // For device-local buffers, BufferManager will use staging + small copy at offset
-                    // For host-visible buffers, direct mapped write to small range at offset
-                    try self.buffer_manager.updateBufferRegion(
-                        set_data.material_buffer,
-                        bytes,
-                        offset,
-                    );
+                // Apply all material changes to all 3 frame buffers
+                for (&set_data.material_buffers) |*buf| {
+                    for (snap.changed_materials) |change| {
+                        const offset = buf.arena_offset + (change.index * @sizeOf(GPUMaterial));
+                        try buf.buffer.map(@sizeOf(GPUMaterial), offset);
+                        const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                        const bytes = std.mem.asBytes(&change.data);
+                        @memcpy(data_ptr[0..bytes.len], bytes);
+                        buf.buffer.unmap();
+                    }
                 }
-
-                log(.INFO, "material_system", "Updated {} materials for set '{s}' via delta uploads", .{
-                    snap.changed_materials.len,
-                    snap.set_name,
-                });
             }
         }
     }
@@ -372,8 +528,8 @@ pub const MaterialSystem = struct {
         }
         var set_data = gop.value_ptr;
 
-        // Clear previous frame's delta
-        set_data.pending_delta.clear();
+        // DON'T clear delta here - it will be cleared AFTER writeDeltasToComponent copies it
+        // Clearing here would lose the delta if prepareFromECS is called multiple times per frame
 
         // Track textures and materials for this set
         var texture_map = std.AutoHashMap(u64, u32).init(self.allocator);
@@ -531,22 +687,18 @@ pub const MaterialSystem = struct {
             try set_data.last_texture_ids.appendSlice(self.allocator, current_texture_ids.items);
         }
 
-        // Check if buffer needs resizing (only if material count changed)
-        if (gpu_materials.items.len != set_data.last_materials.items.len) {
-            const new_size = gpu_materials.items.len * @sizeOf(GPUMaterial);
-            if (set_data.material_buffer.size < new_size) {
-                // Mark for resize on render thread - will happen in updateGPUResources
-                log(.INFO, "material_system", "Material buffer resize needed for set '{s}' (count changed {} -> {})", .{
-                    set_name,
-                    set_data.last_materials.items.len,
-                    gpu_materials.items.len,
-                });
-            }
+        // Generate delta for all materials (simpler approach - always send everything)
+        set_data.pending_delta.changed_materials.clearRetainingCapacity();
+        for (gpu_materials.items, 0..) |material, i| {
+            try set_data.pending_delta.changed_materials.append(self.allocator, .{
+                .index = @intCast(i),
+                .data = material,
+            });
         }
 
-        // Update tracking for next frame
-        set_data.last_materials.clearRetainingCapacity();
-        try set_data.last_materials.appendSlice(self.allocator, gpu_materials.items);
+        // Store the current materials for next frame
+        set_data.next_materials.clearRetainingCapacity();
+        try set_data.next_materials.appendSlice(self.allocator, gpu_materials.items);
     }
 
     /// Update a specific material set
@@ -823,84 +975,15 @@ pub const MaterialSystem = struct {
 
     /// Write pending deltas to MaterialDeltasSet singleton component
     /// This allows snapshot system to read deltas without accessing MaterialSystem directly
-    fn writeDeltasToComponent(self: *MaterialSystem, world: *World) !void {
-        // Get or create singleton entity
-        const singleton_entity = try world.getOrCreateSingletonEntity();
-
-        // Get or create the component
-        if (world.getMut(ecs.MaterialDeltasSet, singleton_entity)) |deltas_set| {
-            // Component exists - clear and reuse
-            deltas_set.clear();
-
-            // Build delta array from material sets
-            var deltas_list = std.ArrayList(ecs.MaterialSetDelta){};
-            defer deltas_list.deinit(self.allocator);
-
-            var iter = self.material_sets.iterator();
-            while (iter.next()) |entry| {
-                const set_name = entry.key_ptr.*;
-                const set_data = entry.value_ptr;
-
-                // Only capture if there are changes
-                const has_changes = set_data.pending_delta.changed_materials.items.len > 0 or
-                    set_data.pending_delta.texture_array_dirty;
-
-                if (!has_changes) continue;
-
-                // Copy changed materials
-                var changed_materials: []ecs.MaterialChange = &.{};
-                if (set_data.pending_delta.changed_materials.items.len > 0) {
-                    changed_materials = try self.allocator.alloc(
-                        ecs.MaterialChange,
-                        set_data.pending_delta.changed_materials.items.len,
-                    );
-                    for (set_data.pending_delta.changed_materials.items, 0..) |change, i| {
-                        changed_materials[i] = .{
-                            .index = change.index,
-                            .data = change.data,
-                        };
-                    }
-                }
-
-                // Copy texture descriptors
-                var texture_descriptors: []vk.DescriptorImageInfo = &.{};
-                if (set_data.pending_delta.texture_array_dirty) {
-                    texture_descriptors = try self.allocator.dupe(
-                        vk.DescriptorImageInfo,
-                        set_data.pending_delta.texture_descriptors,
-                    );
-                }
-
-                try deltas_list.append(self.allocator, .{
-                    .set_name = set_name, // Borrow name from MaterialSystem (stable pointer)
-                    .changed_materials = changed_materials,
-                    .texture_descriptors = texture_descriptors,
-                    .texture_count = set_data.pending_delta.texture_count,
-                    .texture_array_dirty = set_data.pending_delta.texture_array_dirty,
-                });
-            }
-
-            deltas_set.deltas = try deltas_list.toOwnedSlice(self.allocator);
-        } else {
-            // Component doesn't exist - create it once
-            try world.emplace(ecs.MaterialDeltasSet, singleton_entity, ecs.MaterialDeltasSet.init(self.allocator));
-        }
-    }
-
-    /// Get opaque material bindings handle for render passes
-    /// Returns bindings for a specific material set by name (e.g., "opaque", "transparent", "character")
+    /// Get or create material set data for render passes
+    /// Returns direct access to MaterialSetData for binding
     /// If the set doesn't exist yet, creates an empty one
-    pub fn getBindings(self: *MaterialSystem, set_name: []const u8) !MaterialBindings {
+    pub fn getOrCreateSet(self: *MaterialSystem, set_name: []const u8) !*MaterialSetData {
         const gop = try self.material_sets.getOrPut(set_name);
         if (!gop.found_existing) {
             gop.value_ptr.* = try MaterialSetData.init(self.allocator, self.buffer_manager);
         }
-
-        const set_data = gop.value_ptr;
-        return MaterialBindings{
-            .material_buffer = set_data.material_buffer,
-            .texture_array = &set_data.texture_array,
-        };
+        return gop.value_ptr;
     }
 };
 
@@ -928,11 +1011,17 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
     const snapshot = frame_info.snapshot orelse return;
 
     // Get the scene from world userdata
-    const scene_ptr = world.getUserData("scene") orelse return;
+    const scene_ptr = world.getUserData("scene") orelse {
+        log(.WARN, "material_system", "No scene in world userdata", .{});
+        return;
+    };
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
     // Get material system from scene
-    const material_system = scene.material_system orelse return;
+    const material_system = scene.material_system orelse {
+        log(.WARN, "material_system", "[UPDATE] No material system in scene", .{});
+        return;
+    };
 
     // Apply material deltas from snapshot (thread-safe)
     try material_system.applySnapshotDeltas(snapshot.material_deltas);

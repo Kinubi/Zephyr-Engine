@@ -1014,7 +1014,6 @@ pub const RaytracingSystem = struct {
     /// Flush ALL pending destruction queues immediately
     /// Use this when disabling the RT pass to clean up before re-enabling
     pub fn flushAllPendingDestruction(self: *RaytracingSystem) void {
-        log(.INFO, "raytracing", "Flushing ALL pending destruction queues", .{});
         for (&self.per_frame_destroy, 0..) |*queue, i| {
             const blas_count = queue.blas_handles.items.len;
             const tlas_count = queue.tlas_handles.items.len;

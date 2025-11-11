@@ -5,8 +5,15 @@ const Camera = @import("../rendering/camera.zig").Camera;
 const Transform = @import("../ecs/components/transform.zig").Transform;
 const MeshRenderer = @import("../ecs/components/mesh_renderer.zig").MeshRenderer;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
+const render_data_types = @import("../rendering/render_data_types.zig");
 
 const Allocator = std.mem.Allocator;
+
+/// Instance data delta for render system
+pub const InstanceDelta = struct {
+    changed_indices: []u32, // Indices of changed instances
+    changed_data: []render_data_types.RasterizationData.InstanceData, // New data for changed instances
+};
 
 /// Change detection metadata from prepare phase
 pub const RenderChangeFlags = struct {
@@ -49,6 +56,9 @@ pub const GameStateSnapshot = struct {
     // These are copied from MaterialDeltasSet singleton component
     material_deltas: []ecs.MaterialSetDelta,
 
+    // Instance data delta updates (from RenderSystem.prepare)
+    instance_delta: ?InstanceDelta,
+
     // Particle system data (if needed)
     // particles: []ParticleData,
 
@@ -86,6 +96,7 @@ pub const GameStateSnapshot = struct {
             .imgui_draw_data = null,
             .render_changes = .{},
             .material_deltas = &.{},
+            .instance_delta = null,
         };
     }
 
@@ -108,6 +119,15 @@ pub const GameStateSnapshot = struct {
         }
         if (self.material_deltas.len > 0) {
             self.allocator.free(self.material_deltas);
+        }
+        // Free instance delta
+        if (self.instance_delta) |delta| {
+            if (delta.changed_indices.len > 0) {
+                self.allocator.free(delta.changed_indices);
+            }
+            if (delta.changed_data.len > 0) {
+                self.allocator.free(delta.changed_data);
+            }
         }
         // Note: imgui_draw_data cleanup handled by ImGuiContext
         self.* = undefined;
@@ -150,9 +170,8 @@ pub fn captureSnapshot(
         .entity_count = 0,
         .point_lights = undefined,
         .point_light_count = 0,
-    };
-
-    // Copy camera state
+        .instance_delta = null,
+    }; // Copy camera state
     // Camera position is stored in the translation column of inverseViewMatrix
     snapshot.camera_position = .{
         .x = camera.inverseViewMatrix.get(3, 0).*,
@@ -232,6 +251,23 @@ pub fn captureSnapshot(
                 .texture_descriptors = texture_descriptors,
                 .texture_count = delta.texture_count,
                 .texture_array_dirty = delta.texture_array_dirty,
+            };
+        }
+    }
+
+    // Capture instance deltas from InstanceDeltasSet singleton component
+    if (world.get(ecs.InstanceDeltasSet, singleton_entity)) |instance_deltas_set| {
+        if (instance_deltas_set.changed_indices.len > 0) {
+            // Deep copy delta data for thread-safe transfer
+            const indices = try allocator.alloc(u32, instance_deltas_set.changed_indices.len);
+            @memcpy(indices, instance_deltas_set.changed_indices);
+
+            const data = try allocator.alloc(@import("../rendering/render_data_types.zig").RasterizationData.InstanceData, instance_deltas_set.changed_data.len);
+            @memcpy(data, instance_deltas_set.changed_data);
+
+            snapshot.instance_delta = InstanceDelta{
+                .changed_indices = indices,
+                .changed_data = data,
             };
         }
     }
