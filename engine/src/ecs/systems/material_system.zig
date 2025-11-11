@@ -15,23 +15,8 @@ const log = @import("../../utils/log.zig").log;
 
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
-/// GPU Material struct (matches shader layout)
-pub const GPUMaterial = extern struct {
-    albedo_idx: u32,
-    roughness_idx: u32,
-    metallic_idx: u32,
-    normal_idx: u32,
-    emissive_idx: u32,
-    occlusion_idx: u32,
-
-    albedo_tint: [4]f32,
-    roughness_factor: f32,
-    metallic_factor: f32,
-    normal_strength: f32,
-    emissive_intensity: f32,
-    emissive_color: [3]f32 align(16),
-    occlusion_strength: f32,
-};
+// Re-export GPUMaterial from component (single source of truth)
+pub const GPUMaterial = ecs.GPUMaterial;
 
 /// Managed texture descriptor array
 pub const ManagedTextureArray = struct {
@@ -47,6 +32,43 @@ pub const MaterialBindings = struct {
     texture_array: *const ManagedTextureArray,
 };
 
+/// Delta update tracking for a material set
+const MaterialSetDelta = struct {
+    allocator: std.mem.Allocator,
+
+    // Material data changes (compact list of changed materials)
+    changed_materials: std.ArrayList(ChangedMaterial),
+
+    // Texture descriptor changes
+    texture_array_dirty: bool = false,
+    texture_descriptors: []vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
+    texture_count: u32 = 0,
+
+    pub const ChangedMaterial = struct {
+        index: u32, // Index in material buffer
+        data: GPUMaterial, // New material data
+    };
+
+    pub fn init(allocator: std.mem.Allocator) MaterialSetDelta {
+        return .{
+            .allocator = allocator,
+            .changed_materials = std.ArrayList(ChangedMaterial){},
+        };
+    }
+
+    pub fn deinit(self: *MaterialSetDelta) void {
+        self.changed_materials.deinit(self.allocator);
+        if (self.texture_descriptors.len > 0) {
+            self.allocator.free(self.texture_descriptors);
+        }
+    }
+
+    pub fn clear(self: *MaterialSetDelta) void {
+        self.changed_materials.clearRetainingCapacity();
+        self.texture_array_dirty = false;
+    }
+};
+
 /// Per-set GPU resources
 const MaterialSetData = struct {
     allocator: std.mem.Allocator,
@@ -56,6 +78,9 @@ const MaterialSetData = struct {
     // Tracking for change detection
     last_texture_ids: std.ArrayList(u64),
     last_materials: std.ArrayList(GPUMaterial),
+
+    // Delta tracking for incremental GPU updates
+    pending_delta: MaterialSetDelta,
 
     pub fn init(allocator: std.mem.Allocator, buffer_manager: *BufferManager) !MaterialSetData {
         // Create an empty material buffer (1 dummy material) so binding is always valid
@@ -99,6 +124,7 @@ const MaterialSetData = struct {
             .texture_array = .{},
             .last_texture_ids = std.ArrayList(u64){},
             .last_materials = std.ArrayList(GPUMaterial){},
+            .pending_delta = MaterialSetDelta.init(allocator),
         };
     }
 
@@ -111,6 +137,9 @@ const MaterialSetData = struct {
         // Clean up tracking
         self.last_texture_ids.deinit(self.allocator);
         self.last_materials.deinit(self.allocator);
+
+        // Clean up delta
+        self.pending_delta.deinit();
 
         // Clean up material buffer
         buffer_manager.destroyBuffer(self.material_buffer) catch |err| {
@@ -239,33 +268,97 @@ pub const MaterialSystem = struct {
 
             try self.prepareMaterialSet(world, set_name, entities);
         }
+
+        // Write deltas to MaterialDeltasSet singleton component for snapshot capture
+        try self.writeDeltasToComponent(world);
     }
 
-    /// RENDER THREAD: Upload GPU buffers using material_buffer_index from snapshot
-    pub fn updateGPUResources(self: *MaterialSystem) !void {
-        // Process all material sets and upload changed data to GPU
-        var iter = self.material_sets.iterator();
-        while (iter.next()) |entry| {
-            const set_name = entry.key_ptr.*;
-            const set_data = entry.value_ptr;
+    /// RENDER THREAD: Apply material deltas from snapshot (thread-safe)
+    pub fn applySnapshotDeltas(
+        self: *MaterialSystem,
+        material_set_snapshots: []const ecs.MaterialSetDelta,
+    ) !void {
+        for (material_set_snapshots) |snap| {
+            // Get the material set data (must already exist - created during prepare)
+            const set_data = self.material_sets.getPtr(snap.set_name) orelse {
+                log(.WARN, "material_system", "Material set '{s}' not found during render thread update", .{snap.set_name});
+                continue;
+            };
 
-            // Upload texture array if changed
-            if (set_data.last_texture_ids.items.len > 0) {
-                // Texture array already built during prepare phase
-                // GPU descriptors will be bound by render passes
+            // Apply texture descriptor updates if needed
+            if (snap.texture_array_dirty) {
+                // Replace texture array with snapshot data
+                if (set_data.texture_array.descriptor_infos.len > 0) {
+                    self.allocator.free(set_data.texture_array.descriptor_infos);
+                }
+
+                // Duplicate snapshot data (snapshot will be freed by snapshot system)
+                set_data.texture_array.descriptor_infos = try self.allocator.dupe(
+                    vk.DescriptorImageInfo,
+                    snap.texture_descriptors,
+                );
+                set_data.texture_array.size = snap.texture_count;
+
+                // Increment generation AFTER writing data, with release ordering
+                _ = set_data.texture_array.generation.fetchAdd(1, .release);
+
+                log(.INFO, "material_system", "Updated texture array for set '{s}' ({} textures)", .{
+                    snap.set_name,
+                    set_data.texture_array.size,
+                });
             }
 
-            // Upload material buffer if changed
-            if (set_data.last_materials.items.len > 0) {
-                // Material buffer already uploaded during prepare phase
-                // This is a no-op for now, but will be proper GPU work when we split it
-            }
+            // Apply material buffer updates using granular writes
+            if (snap.changed_materials.len > 0) {
+                // Check if buffer needs resizing first
+                const max_index = blk: {
+                    var max: u32 = 0;
+                    for (snap.changed_materials) |change| {
+                        if (change.index > max) max = change.index;
+                    }
+                    break :blk max;
+                };
 
-            _ = set_name; // Suppress unused warning
+                const required_size = (max_index + 1) * @sizeOf(GPUMaterial);
+                if (set_data.material_buffer.size < required_size) {
+                    log(.INFO, "material_system", "Resizing material buffer for set '{s}' from {} to {} bytes", .{
+                        snap.set_name,
+                        set_data.material_buffer.size,
+                        required_size,
+                    });
+
+                    // Resize buffer (generation incremented automatically)
+                    try self.buffer_manager.resizeBuffer(
+                        set_data.material_buffer,
+                        required_size,
+                        .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                    );
+                }
+
+                // Apply each changed material via small mapped write at offset
+                for (snap.changed_materials) |change| {
+                    const offset = change.index * @sizeOf(GPUMaterial);
+                    const bytes: []const u8 = std.mem.asBytes(&change.data);
+
+                    // For device-local buffers, BufferManager will use staging + small copy at offset
+                    // For host-visible buffers, direct mapped write to small range at offset
+                    try self.buffer_manager.updateBufferRegion(
+                        set_data.material_buffer,
+                        bytes,
+                        offset,
+                    );
+                }
+
+                log(.INFO, "material_system", "Updated {} materials for set '{s}' via delta uploads", .{
+                    snap.changed_materials.len,
+                    snap.set_name,
+                });
+            }
         }
     }
 
     /// MAIN THREAD: Prepare a specific material set (ECS queries + write component indices)
+    /// NO GPU UPLOADS - only compute deltas for render thread
     fn prepareMaterialSet(
         self: *MaterialSystem,
         world: *World,
@@ -278,6 +371,9 @@ pub const MaterialSystem = struct {
             gop.value_ptr.* = try MaterialSetData.init(self.allocator, self.buffer_manager);
         }
         var set_data = gop.value_ptr;
+
+        // Clear previous frame's delta
+        set_data.pending_delta.clear();
 
         // Track textures and materials for this set
         var texture_map = std.AutoHashMap(u64, u32).init(self.allocator);
@@ -363,7 +459,27 @@ pub const MaterialSystem = struct {
             // Get fresh pointer right before writing to avoid stale pointer issues
             // if ECS storage was reallocated during the loop
             const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
-            material_set.material_buffer_index = @intCast(gpu_materials.items.len);
+            const mat_index: u32 = @intCast(gpu_materials.items.len);
+            material_set.material_buffer_index = mat_index;
+
+            // Compare with last frame to detect changes
+            if (mat_index < set_data.last_materials.items.len) {
+                // Check if material data changed
+                const last_mat = set_data.last_materials.items[mat_index];
+                if (!std.meta.eql(gpu_mat, last_mat)) {
+                    // Material changed - add to delta
+                    try set_data.pending_delta.changed_materials.append(self.allocator, .{
+                        .index = mat_index,
+                        .data = gpu_mat,
+                    });
+                }
+            } else {
+                // New material - add to delta
+                try set_data.pending_delta.changed_materials.append(self.allocator, .{
+                    .index = mat_index,
+                    .data = gpu_mat,
+                });
+            }
 
             try gpu_materials.append(self.allocator, gpu_mat);
         }
@@ -406,27 +522,31 @@ pub const MaterialSystem = struct {
             break :blk false;
         };
 
-        // Check if materials changed
-        const materials_changed = blk: {
-            if (gpu_materials.items.len != set_data.last_materials.items.len) break :blk true;
-            for (gpu_materials.items, set_data.last_materials.items) |curr, last| {
-                if (!std.meta.eql(curr, last)) break :blk true;
-            }
-            break :blk false;
-        };
-
-        // Upload to GPU if changed (still on main thread for now, will move to render thread)
+        // Build texture descriptor array if changed (NO GPU UPLOAD - just prepare data)
         if (textures_changed) {
-            try self.buildTextureArray(set_data, &texture_map, next_texture_idx);
+            try self.buildTextureDescriptorArray(set_data, &texture_map, next_texture_idx);
+            set_data.pending_delta.texture_array_dirty = true;
+
             set_data.last_texture_ids.clearRetainingCapacity();
             try set_data.last_texture_ids.appendSlice(self.allocator, current_texture_ids.items);
         }
 
-        if (materials_changed and gpu_materials.items.len > 0) {
-            try self.uploadMaterialBuffer(set_data, set_name, gpu_materials.items);
-            set_data.last_materials.clearRetainingCapacity();
-            try set_data.last_materials.appendSlice(self.allocator, gpu_materials.items);
+        // Check if buffer needs resizing (only if material count changed)
+        if (gpu_materials.items.len != set_data.last_materials.items.len) {
+            const new_size = gpu_materials.items.len * @sizeOf(GPUMaterial);
+            if (set_data.material_buffer.size < new_size) {
+                // Mark for resize on render thread - will happen in updateGPUResources
+                log(.INFO, "material_system", "Material buffer resize needed for set '{s}' (count changed {} -> {})", .{
+                    set_name,
+                    set_data.last_materials.items.len,
+                    gpu_materials.items.len,
+                });
+            }
         }
+
+        // Update tracking for next frame
+        set_data.last_materials.clearRetainingCapacity();
+        try set_data.last_materials.appendSlice(self.allocator, gpu_materials.items);
     }
 
     /// Update a specific material set
@@ -629,19 +749,19 @@ pub const MaterialSystem = struct {
         return idx;
     }
 
-    /// Build texture descriptor array from texture map
-    fn buildTextureArray(
+    /// Build texture descriptor array from texture map (NO GPU binding - just prepare data)
+    fn buildTextureDescriptorArray(
         self: *MaterialSystem,
         set_data: *MaterialSetData,
         texture_map: *std.AutoHashMap(u64, u32),
         texture_count: u32,
     ) !void {
-        // Free old array
-        if (set_data.texture_array.descriptor_infos.len > 0) {
-            self.allocator.free(set_data.texture_array.descriptor_infos);
+        // Free old pending delta texture array if exists
+        if (set_data.pending_delta.texture_descriptors.len > 0) {
+            self.allocator.free(set_data.pending_delta.texture_descriptors);
         }
 
-        // Allocate new array
+        // Allocate new array for delta
         var descriptors = try self.allocator.alloc(vk.DescriptorImageInfo, texture_count);
 
         // Index 0 = white dummy texture
@@ -667,11 +787,9 @@ pub const MaterialSystem = struct {
             }
         }
 
-        set_data.texture_array.descriptor_infos = descriptors;
-        set_data.texture_array.size = texture_count;
-        // Increment generation AFTER writing data, with release ordering
-        // This ensures all writes above are visible before generation change is seen
-        _ = set_data.texture_array.generation.fetchAdd(1, .release);
+        // Store in delta (no GPU update yet)
+        set_data.pending_delta.texture_descriptors = descriptors;
+        set_data.pending_delta.texture_count = texture_count;
     }
 
     /// Upload material buffer to GPU
@@ -701,6 +819,72 @@ pub const MaterialSystem = struct {
             bytes,
             0, // frame_index
         );
+    }
+
+    /// Write pending deltas to MaterialDeltasSet singleton component
+    /// This allows snapshot system to read deltas without accessing MaterialSystem directly
+    fn writeDeltasToComponent(self: *MaterialSystem, world: *World) !void {
+        // Get or create singleton entity
+        const singleton_entity = try world.getOrCreateSingletonEntity();
+
+        // Get or create the component
+        if (world.getMut(ecs.MaterialDeltasSet, singleton_entity)) |deltas_set| {
+            // Component exists - clear and reuse
+            deltas_set.clear();
+
+            // Build delta array from material sets
+            var deltas_list = std.ArrayList(ecs.MaterialSetDelta){};
+            defer deltas_list.deinit(self.allocator);
+
+            var iter = self.material_sets.iterator();
+            while (iter.next()) |entry| {
+                const set_name = entry.key_ptr.*;
+                const set_data = entry.value_ptr;
+
+                // Only capture if there are changes
+                const has_changes = set_data.pending_delta.changed_materials.items.len > 0 or
+                    set_data.pending_delta.texture_array_dirty;
+
+                if (!has_changes) continue;
+
+                // Copy changed materials
+                var changed_materials: []ecs.MaterialChange = &.{};
+                if (set_data.pending_delta.changed_materials.items.len > 0) {
+                    changed_materials = try self.allocator.alloc(
+                        ecs.MaterialChange,
+                        set_data.pending_delta.changed_materials.items.len,
+                    );
+                    for (set_data.pending_delta.changed_materials.items, 0..) |change, i| {
+                        changed_materials[i] = .{
+                            .index = change.index,
+                            .data = change.data,
+                        };
+                    }
+                }
+
+                // Copy texture descriptors
+                var texture_descriptors: []vk.DescriptorImageInfo = &.{};
+                if (set_data.pending_delta.texture_array_dirty) {
+                    texture_descriptors = try self.allocator.dupe(
+                        vk.DescriptorImageInfo,
+                        set_data.pending_delta.texture_descriptors,
+                    );
+                }
+
+                try deltas_list.append(self.allocator, .{
+                    .set_name = set_name, // Borrow name from MaterialSystem (stable pointer)
+                    .changed_materials = changed_materials,
+                    .texture_descriptors = texture_descriptors,
+                    .texture_count = set_data.pending_delta.texture_count,
+                    .texture_array_dirty = set_data.pending_delta.texture_array_dirty,
+                });
+            }
+
+            deltas_set.deltas = try deltas_list.toOwnedSlice(self.allocator);
+        } else {
+            // Component doesn't exist - create it once
+            try world.emplace(ecs.MaterialDeltasSet, singleton_entity, ecs.MaterialDeltasSet.init(self.allocator));
+        }
     }
 
     /// Get opaque material bindings handle for render passes
@@ -740,17 +924,16 @@ pub fn prepare(world: *World, dt: f32) !void {
 /// RENDER THREAD: Update phase - GPU buffer uploads (uses snapshot data)
 /// SystemScheduler compatibility wrapper
 pub fn update(world: *World, frame_info: *FrameInfo) !void {
-    _ = world;
-
     // Get the snapshot from frame_info
-    const snapshot = frame_info.snapshot;
+    const snapshot = frame_info.snapshot orelse return;
 
-    // TODO: Implement GPU buffer uploads using snapshot.entities[].material_buffer_index
-    // For now, GPU work still happens in prepare phase (will split in next iteration)
-    // The snapshot already has material_buffer_index, just need to:
-    // 1. Group entities by material_buffer_index
-    // 2. Upload material buffers to GPU
-    // 3. Build texture descriptor arrays
+    // Get the scene from world userdata
+    const scene_ptr = world.getUserData("scene") orelse return;
+    const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
-    _ = snapshot;
+    // Get material system from scene
+    const material_system = scene.material_system orelse return;
+
+    // Apply material deltas from snapshot (thread-safe)
+    try material_system.applySnapshotDeltas(snapshot.material_deltas);
 }

@@ -45,6 +45,10 @@ pub const GameStateSnapshot = struct {
     // Change detection metadata (from RenderSystem.prepare)
     render_changes: RenderChangeFlags,
 
+    // Material system delta updates (from MaterialSystem.prepare)
+    // These are copied from MaterialDeltasSet singleton component
+    material_deltas: []ecs.MaterialSetDelta,
+
     // Particle system data (if needed)
     // particles: []ParticleData,
 
@@ -81,6 +85,7 @@ pub const GameStateSnapshot = struct {
             .point_light_count = 0,
             .imgui_draw_data = null,
             .render_changes = .{},
+            .material_deltas = &.{},
         };
     }
 
@@ -90,6 +95,19 @@ pub const GameStateSnapshot = struct {
         }
         if (self.point_lights.len > 0) {
             self.allocator.free(self.point_lights);
+        }
+        // Free material deltas
+        for (self.material_deltas) |*delta| {
+            if (delta.changed_materials.len > 0) {
+                self.allocator.free(delta.changed_materials);
+            }
+            if (delta.texture_descriptors.len > 0) {
+                self.allocator.free(delta.texture_descriptors);
+            }
+            // set_name is owned by MaterialSystem, don't free
+        }
+        if (self.material_deltas.len > 0) {
+            self.allocator.free(self.material_deltas);
         }
         // Note: imgui_draw_data cleanup handled by ImGuiContext
         self.* = undefined;
@@ -123,6 +141,7 @@ pub fn captureSnapshot(
         .delta_time = delta_time,
         .imgui_draw_data = imgui_draw_data,
         .render_changes = render_changes,
+        .material_deltas = &.{}, // Will be populated below
         .camera_position = undefined,
         .camera_view_matrix = undefined,
         .camera_projection_matrix = undefined,
@@ -193,6 +212,29 @@ pub fn captureSnapshot(
         light_index += 1;
     }
     snapshot.point_light_count = light_index;
+
+    // Capture material deltas from MaterialDeltasSet singleton component
+    // (similar to how we read RenderablesSet above)
+    if (world.get(ecs.MaterialDeltasSet, singleton_entity)) |material_deltas_set| {
+        // Allocate and copy deltas for thread-safe transfer
+        snapshot.material_deltas = try allocator.alloc(ecs.MaterialSetDelta, material_deltas_set.deltas.len);
+        for (material_deltas_set.deltas, 0..) |delta, i| {
+            // Deep copy each delta
+            const changed_materials = try allocator.alloc(ecs.MaterialChange, delta.changed_materials.len);
+            @memcpy(changed_materials, delta.changed_materials);
+
+            const texture_descriptors = try allocator.alloc(@import("vulkan").DescriptorImageInfo, delta.texture_descriptors.len);
+            @memcpy(texture_descriptors, delta.texture_descriptors);
+
+            snapshot.material_deltas[i] = .{
+                .set_name = delta.set_name, // Borrowed from MaterialSystem, don't copy
+                .changed_materials = changed_materials,
+                .texture_descriptors = texture_descriptors,
+                .texture_count = delta.texture_count,
+                .texture_array_dirty = delta.texture_array_dirty,
+            };
+        }
+    }
 
     return snapshot;
 }

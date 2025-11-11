@@ -188,23 +188,33 @@ pub const BufferManager = struct {
         data: []const u8,
         _: u32, // frame_index currently unused but reserved for future frame tracking
     ) !void {
+        try self.updateBufferRegion(managed_buffer, data, 0);
+    }
+
+    /// Update a specific region of the buffer (granular updates)
+    pub fn updateBufferRegion(
+        self: *BufferManager,
+        managed_buffer: *ManagedBuffer,
+        data: []const u8,
+        offset: vk.DeviceSize,
+    ) !void {
         switch (managed_buffer.strategy) {
             .device_local => {
                 // Use staging buffer for device-local buffers
-                try self.uploadViaStaging(&managed_buffer.buffer, data);
+                try self.uploadViaStagingWithOffset(&managed_buffer.buffer, data, offset);
             },
             .host_visible => {
-                // Direct write for host-visible buffers
-                try managed_buffer.buffer.map(data.len, 0);
-                managed_buffer.buffer.writeToBuffer(data, data.len, 0);
+                // Direct write for host-visible buffers at offset
+                try managed_buffer.buffer.map(data.len, offset);
+                managed_buffer.buffer.writeToBuffer(data, data.len, offset);
                 managed_buffer.buffer.unmap();
             },
             .host_cached => {
-                // Direct write + manual flush for host-cached buffers
-                try managed_buffer.buffer.map(data.len, 0);
-                managed_buffer.buffer.writeToBuffer(data, data.len, 0);
+                // Direct write + manual flush for host-cached buffers at offset
+                try managed_buffer.buffer.map(data.len, offset);
+                managed_buffer.buffer.writeToBuffer(data, data.len, offset);
                 // Flush for cached memory (Buffer has flush method)
-                try managed_buffer.buffer.flush(data.len, 0);
+                try managed_buffer.buffer.flush(data.len, offset);
                 managed_buffer.buffer.unmap();
             },
         }
@@ -356,6 +366,16 @@ pub const BufferManager = struct {
         dst: *Buffer,
         data: []const u8,
     ) !void {
+        try self.uploadViaStagingWithOffset(dst, data, 0);
+    }
+
+    /// Create staging buffer and upload to device at specific offset
+    fn uploadViaStagingWithOffset(
+        self: *BufferManager,
+        dst: *Buffer,
+        data: []const u8,
+        offset: vk.DeviceSize,
+    ) !void {
         var staging = try Buffer.init(
             self.graphics_context,
             data.len,
@@ -363,13 +383,15 @@ pub const BufferManager = struct {
             .{ .transfer_src_bit = true },
             .{ .host_visible_bit = true, .host_coherent_bit = true },
         );
+        defer staging.deinit();
 
         try staging.map(data.len, 0);
         staging.writeToBuffer(data, data.len, 0);
         staging.unmap();
 
         // Copy from staging to destination buffer using graphics context
-        try self.graphics_context.copyFromStagingBuffer(dst.buffer, &staging, data.len);
+        // GraphicsContext needs to support offset for partial copy
+        try self.graphics_context.copyFromStagingBufferWithOffset(dst.buffer, &staging, data.len, offset);
     }
 
     /// Cleanup buffers in ring slot
