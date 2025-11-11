@@ -282,13 +282,6 @@ pub const MultithreadedBvhBuilder = struct {
                     // Buffer is no longer used, free it
                     var buffer_to_free = old_blas.buffer;
                     buffer_to_free.deinit();
-                    for (self.blas_registry) |*slot| {
-                        if (slot.load(.acquire)) |blas_ptr| {
-                            if (blas_ptr.buffer.buffer == buffer_to_free.buffer) {
-                                slot.store(null, .release);
-                            }
-                        }
-                    }
                 }
             }
 
