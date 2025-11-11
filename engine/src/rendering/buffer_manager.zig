@@ -113,17 +113,19 @@ pub const FrameArena = struct {
 
         // Check if allocation would collide with active allocations
         if (aligned_offset + size > self.capacity) {
-            // Would wrap - check if we'd collide with smallest_used_offset
+            // Would wrap - check if allocation fits from start of arena
             const wrap_offset = std.mem.alignForward(usize, 0, alignment);
-            if (wrap_offset + size > self.smallest_used_offset and self.smallest_used_offset > 0) {
-                // Collision detected - need compaction
-                self.needs_compaction = true;
-                return error.ArenaRequiresCompaction;
-            }
 
             if (wrap_offset + size > self.capacity) {
                 // Single allocation too large for entire arena
                 return error.AllocationTooLarge;
+            }
+
+            // Check if we'd collide with smallest_used_offset
+            if (wrap_offset + size > self.smallest_used_offset and self.smallest_used_offset > 0) {
+                // Collision detected - need compaction
+                self.needs_compaction = true;
+                return error.ArenaRequiresCompaction;
             }
 
             // Safe to wrap

@@ -55,7 +55,7 @@ pub const RenderSystem = struct {
     // Instance data SSBO for instanced rendering (per-frame, from arena)
     // RenderSystem owns and uploads this buffer (parallel to MaterialSystem owning material_buffer)
     // Always valid - starts as dummy buffer, gets replaced with real data
-    instance_buffers: [3]ManagedBuffer,
+    instance_buffers: [3]*ManagedBuffer, // Heap-allocated pointers (similar to MaterialSystem)
     instance_capacity: usize = 0, // Current capacity in number of instances
 
     // Track last instance data for delta detection
@@ -83,12 +83,34 @@ pub const RenderSystem = struct {
             .material_index = 0,
         };
 
-        var instance_buffers: [3]ManagedBuffer = undefined;
+        var instance_buffers: [3]*ManagedBuffer = undefined;
         const dummy_size = @sizeOf(render_data_types.RasterizationData.InstanceData);
 
         // Allocate dummy buffer for each frame from its arena
-        for (&instance_buffers, 0..) |*buf, frame_idx| {
+        for (&instance_buffers, 0..) |*buf_ptr, frame_idx| {
             const frame = @as(u32, @intCast(frame_idx));
+
+            // Allocate heap storage for ManagedBuffer
+            const buf = try allocator.create(ManagedBuffer);
+            errdefer allocator.destroy(buf);
+            buf_ptr.* = buf;
+
+            // Create unique name for each frame's buffer
+            const buffer_name = try std.fmt.allocPrint(allocator, "InstanceBuffer_frame_{d}", .{frame});
+            errdefer allocator.free(buffer_name);
+
+            // Create a managed buffer placeholder (will point to arena)
+            buf.* = ManagedBuffer{
+                .buffer = undefined, // Will be set by allocateFromFrameArena
+                .name = buffer_name,
+                .size = dummy_size,
+                .strategy = .host_visible,
+                .created_frame = 0,
+                .generation = 1,
+                .binding_info = null,
+                .arena_offset = 0,
+                .pending_bind_mask = std.atomic.Value(u8).init(0b111),
+            };
 
             const alloc_result = try bm.allocateFromFrameArena(
                 frame,
@@ -121,7 +143,26 @@ pub const RenderSystem = struct {
     }
 
     pub fn deinit(self: *RenderSystem) void {
-        // Note: instance_buffers are allocated from frame arenas, no need to destroy
+        // Free per-frame instance buffers from arenas
+        if (self.buffer_manager) |bm| {
+            for (&self.instance_buffers, 0..) |buf_ptr, frame_idx| {
+                const frame = @as(u32, @intCast(frame_idx));
+                const buf = buf_ptr;
+
+                // If arena-allocated (arena_offset != 0), free from arena
+                if (buf.arena_offset != 0) {
+                    bm.freeFromFrameArena(frame, buf);
+                    // Free the heap-allocated ManagedBuffer and its name
+                    self.allocator.free(buf.name);
+                    self.allocator.destroy(buf);
+                } else {
+                    // Dedicated buffer - destroy normally
+                    bm.destroyBuffer(buf) catch |err| {
+                        log(.WARN, "render_system", "Failed to destroy instance buffer for frame {}: {}", .{ frame, err });
+                    };
+                }
+            }
+        }
 
         // Clean up tracking
         self.last_instance_data.deinit(self.allocator);
@@ -532,8 +573,9 @@ pub const RenderSystem = struct {
             });
 
             // Reallocate each frame's buffer from its arena
-            for (&self.instance_buffers, 0..) |*buf, frame_idx| {
+            for (&self.instance_buffers, 0..) |*buf_ptr, frame_idx| {
                 const frame = @as(u32, @intCast(frame_idx));
+                const buf = buf_ptr.*;
 
                 const alloc_result = buffer_manager.allocateFromFrameArena(
                     frame,
@@ -543,21 +585,22 @@ pub const RenderSystem = struct {
                 ) catch |err| {
                     if (err == error.ArenaRequiresCompaction) {
                         log(.WARN, "render_system", "Arena full for frame {}, creating dedicated buffer", .{frame});
-                        // Fall back to dedicated buffer
-                        const buffer_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
-                        defer self.allocator.free(buffer_name);
+                        // Fall back to dedicated buffer - free old buffer and create new dedicated one
+                        self.allocator.free(buf.name);
+                        self.allocator.destroy(buf);
 
+                        const dedicated_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
                         const dedicated = try buffer_manager.createBuffer(
                             .{
-                                .name = buffer_name,
+                                .name = dedicated_name,
                                 .size = buffer_size,
                                 .strategy = .device_local,
                                 .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
                             },
                             frame,
                         );
-                        buf.* = dedicated.*;
-                        buf.markUpdated();
+                        buf_ptr.* = dedicated;
+                        dedicated.markUpdated();
                         continue;
                     }
                     return err;
@@ -584,7 +627,7 @@ pub const RenderSystem = struct {
             }
 
             // Write instance data to all frame buffers
-            for (&self.instance_buffers) |*buf| {
+            for (&self.instance_buffers) |buf| {
                 try buf.buffer.map(buffer_size, buf.arena_offset);
                 const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
                 @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
@@ -639,7 +682,7 @@ pub const RenderSystem = struct {
             if (changed_indices.items.len > 0) {
 
                 // Apply granular updates to each frame's buffer
-                for (&self.instance_buffers) |*buf| {
+                for (&self.instance_buffers) |buf| {
                     for (changed_indices.items) |idx| {
                         const instance_data = current_instances.items[idx];
                         const offset = buf.arena_offset + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
@@ -688,8 +731,9 @@ pub const RenderSystem = struct {
             const buffer_size = required_capacity * @sizeOf(render_data_types.RasterizationData.InstanceData);
 
             // Reallocate each frame's buffer from its arena
-            for (&self.instance_buffers, 0..) |*buf, frame_idx| {
+            for (&self.instance_buffers, 0..) |*buf_ptr, frame_idx| {
                 const frame = @as(u32, @intCast(frame_idx));
+                const buf = buf_ptr.*;
 
                 const alloc_result = buffer_manager.allocateFromFrameArena(
                     frame,
@@ -699,20 +743,22 @@ pub const RenderSystem = struct {
                 ) catch |err| {
                     if (err == error.ArenaRequiresCompaction) {
                         log(.WARN, "render_system", "Arena full for frame {}, creating dedicated buffer", .{frame});
-                        const buffer_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
-                        defer self.allocator.free(buffer_name);
+                        // Fall back to dedicated buffer - free old buffer and create new dedicated one
+                        self.allocator.free(buf.name);
+                        self.allocator.destroy(buf);
 
+                        const dedicated_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
                         const dedicated = try buffer_manager.createBuffer(
                             .{
-                                .name = buffer_name,
+                                .name = dedicated_name,
                                 .size = buffer_size,
                                 .strategy = .device_local,
                                 .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
                             },
                             frame,
                         );
-                        buf.* = dedicated.*;
-                        buf.markUpdated();
+                        buf_ptr.* = dedicated;
+                        dedicated.markUpdated();
                         continue;
                     }
                     return err;
@@ -730,7 +776,7 @@ pub const RenderSystem = struct {
 
         // Apply delta updates (works for both full deltas and granular deltas)
 
-        for (&self.instance_buffers) |*buf| {
+        for (&self.instance_buffers) |buf| {
             for (instance_delta.changed_indices, 0..) |idx, i| {
                 const instance_data = instance_delta.changed_data[i];
                 const offset = buf.arena_offset + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));

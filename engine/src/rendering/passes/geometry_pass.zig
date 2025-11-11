@@ -250,9 +250,9 @@ pub const GeometryPass = struct {
         // Buffer is guaranteed to exist after Scene.initRenderGraph()
         // Pass all 3 frame buffers for per-frame binding
         const instance_buf_ptrs = [3]*const ManagedBuffer{
-            &self.render_system.instance_buffers[0],
-            &self.render_system.instance_buffers[1],
-            &self.render_system.instance_buffers[2],
+            self.render_system.instance_buffers[0],
+            self.render_system.instance_buffers[1],
+            self.render_system.instance_buffers[2],
         };
         try self.resource_binder.bindStorageBufferArrayNamed(
             self.geometry_pipeline,

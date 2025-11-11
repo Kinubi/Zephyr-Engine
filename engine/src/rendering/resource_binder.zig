@@ -1161,8 +1161,8 @@ pub const ResourceBinder = struct {
                     };
 
                     // Get the buffer for the NEXT frame (the one we're about to render)
-                    const next_frame = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
-                    const managed_buffer = frame_buffers[next_frame]; // Already a pointer
+                    //const next_frame = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+                    const managed_buffer = frame_buffers[frame_index]; // Already a pointer
 
                     // Skip if this frame's buffer isn't created yet
                     if (managed_buffer.generation == 0) continue;
@@ -1179,7 +1179,7 @@ pub const ResourceBinder = struct {
                                 @constCast(&managed_buffer.buffer),
                                 offset,
                                 managed_buffer.size,
-                                next_frame,
+                                frame_index,
                             );
                         },
                         .uniform_buffer => {
@@ -1190,7 +1190,7 @@ pub const ResourceBinder = struct {
                                 @constCast(&managed_buffer.buffer),
                                 offset,
                                 managed_buffer.size,
-                                next_frame,
+                                frame_index,
                             );
                         },
                         else => {
@@ -1338,7 +1338,7 @@ pub const ResourceBinder = struct {
                     }
 
                     // Clear this frame's bit in the pending bind mask
-                    const frame_bit: u8 = @as(u8, 1) << @intCast(frame_index);
+                    const frame_bit: u8 = @as(u8, 1) << @intCast((frame_index + 1) % MAX_FRAMES_IN_FLIGHT);
                     const old_mask = managed_tlas.pending_bind_mask.fetchAnd(~frame_bit, .acq_rel);
 
                     // Check if mask is complete (all frames have bound)

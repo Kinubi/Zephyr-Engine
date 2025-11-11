@@ -239,18 +239,6 @@ pub const MultithreadedBvhBuilder = struct {
             return &[_]BlasResult{};
         }
 
-        // Log current registry state for debugging
-        log(.DEBUG, "bvh_builder", "=== Registry state before destruction check ===", .{});
-        for (self.blas_registry, 0..) |*slot, i| {
-            if (slot.load(.acquire)) |blas_ptr| {
-                log(.DEBUG, "bvh_builder", "  Slot {}: handle={d}, buffer={d}", .{
-                    i,
-                    @intFromEnum(blas_ptr.acceleration_structure),
-                    @intFromEnum(blas_ptr.buffer.buffer),
-                });
-            }
-        }
-
         // First pass: collect all BLAS, filtering out those still in use
         var temp_results = std.ArrayList(BlasResult){};
 
@@ -271,10 +259,6 @@ pub const MultithreadedBvhBuilder = struct {
 
             if (!still_in_use) {
                 // Safe to destroy - not referenced anywhere
-                log(.INFO, "bvh_builder", "Queuing BLAS for destruction: handle={d}, buffer={d} (no longer in use)", .{
-                    @intFromEnum(old_blas.acceleration_structure),
-                    @intFromEnum(old_blas.buffer.buffer),
-                });
                 try temp_results.append(allocator, old_blas);
             } else {
                 // Still in use - acceleration structure is shared, but buffer might not be
@@ -298,7 +282,13 @@ pub const MultithreadedBvhBuilder = struct {
                     // Buffer is no longer used, free it
                     var buffer_to_free = old_blas.buffer;
                     buffer_to_free.deinit();
-                    log(.DEBUG, "bvh_builder", "Freed unused buffer for shared BLAS", .{});
+                    for (self.blas_registry) |*slot| {
+                        if (slot.load(.acquire)) |blas_ptr| {
+                            if (blas_ptr.buffer.buffer == buffer_to_free.buffer) {
+                                slot.store(null, .release);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -445,14 +435,6 @@ pub fn blasWorkerFn(context: *anyopaque, work_item: WorkItem) void {
     };
 
     if (old_blas_opt) |old_blas| {
-        log(.INFO, "bvh_builder", "Replaced BLAS for geometry {}: old_handle={d}, old_buffer={d} -> new_handle={d}, new_buffer={d}", .{
-            old_blas.geometry_id,
-            @intFromEnum(old_blas.acceleration_structure),
-            @intFromEnum(old_blas.buffer.buffer),
-            @intFromEnum(final_result.acceleration_structure),
-            @intFromEnum(final_result.buffer.buffer),
-        });
-
         // Old BLAS was replaced - queue for deferred destruction using lock-free list
         // Can't destroy immediately because:
         // 1. GPU commands may still be using it (secondary command buffers not yet executed)

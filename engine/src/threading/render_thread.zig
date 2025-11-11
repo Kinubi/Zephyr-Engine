@@ -132,7 +132,7 @@ pub fn mainThreadUpdate(
         freeSnapshot(&ctx.game_state[write_idx]);
     }
 
-    // Capture new snapshot (material deltas captured via World → Scene → MaterialSystem)
+    // Capture new snapshot (material deltas captured directly from MaterialDeltasComponent)
     const frame_idx = ctx.frame_index.fetchAdd(1, .monotonic);
     ctx.game_state[write_idx] = try captureSnapshot(
         ctx.allocator,
