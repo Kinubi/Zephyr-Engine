@@ -795,6 +795,24 @@ pub const RaytracingSystem = struct {
             required_geom_ids[i] = geom.getGeometryId();
         }
 
+        // Count unique geometries (deduplicate required_geom_ids)
+        var unique_geom_count: u32 = 0;
+        var seen_geom_ids = try self.allocator.alloc(bool, self.bvh_builder.max_geometry_id);
+        defer self.allocator.free(seen_geom_ids);
+        @memset(seen_geom_ids, false);
+        
+        // Create mapping from geometry_id to buffer index
+        var geom_id_to_buffer_index = try self.allocator.alloc(u32, self.bvh_builder.max_geometry_id);
+        @memset(geom_id_to_buffer_index, 0);
+        
+        for (required_geom_ids) |geom_id| {
+            if (!seen_geom_ids[geom_id]) {
+                seen_geom_ids[geom_id] = true;
+                geom_id_to_buffer_index[geom_id] = unique_geom_count;
+                unique_geom_count += 1;
+            }
+        }
+
         // Copy geometries for BLAS spawning
         const geometries_copy = try self.allocator.alloc(RenderData.RaytracingData.RTGeometry, rt_data.geometries.len);
         for (rt_data.geometries, 0..) |geom, i| {
@@ -814,9 +832,9 @@ pub const RaytracingSystem = struct {
             };
         }
 
-        // Create atomic BLAS buffer: one slot per geometry
-        // BLAS workers will fill their slots atomically
-        const blas_buffer = try self.allocator.alloc(std.atomic.Value(?*BlasResult), rt_data.geometries.len);
+        // Create atomic BLAS buffer: one slot per UNIQUE geometry (not per instance!)
+        // Multiple instances can share the same BLAS
+        const blas_buffer = try self.allocator.alloc(std.atomic.Value(?*BlasResult), unique_geom_count);
         for (blas_buffer) |*slot| {
             slot.* = std.atomic.Value(?*BlasResult).init(null);
         }
@@ -827,8 +845,9 @@ pub const RaytracingSystem = struct {
             .job_id = @atomicRmw(u64, &self.next_tlas_job_id, .Add, 1, .monotonic),
             .blas_buffer = blas_buffer,
             .filled_count = std.atomic.Value(u32).init(0),
-            .expected_count = @intCast(rt_data.geometries.len),
+            .expected_count = unique_geom_count, // Expect one BLAS per unique geometry
             .required_geometry_ids = required_geom_ids,
+            .geom_id_to_buffer_index = geom_id_to_buffer_index,
             .geometries = geometries_copy,
             .instances = instances_copy,
             .allocator = self.allocator,
