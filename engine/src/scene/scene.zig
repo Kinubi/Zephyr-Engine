@@ -879,8 +879,6 @@ pub const Scene = struct {
             try self.render_graph.?.addPass(&pass.base);
         }
 
-        //self.render_graph.?.disablePass("path_tracing_pass");
-
         // Create and add LightVolumePass (renders after geometry)
         const light_volume_pass = LightVolumePass.create(
             self.allocator,

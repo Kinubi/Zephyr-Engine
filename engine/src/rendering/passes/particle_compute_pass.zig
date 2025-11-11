@@ -176,25 +176,6 @@ pub const ParticleComputePass = struct {
         if (try self.pipeline_system.getPipelineReflection(self.compute_pipeline)) |reflection| {
             var mut_reflection = reflection;
 
-            // DEBUG: Print all storage buffers found by reflection
-            log(.INFO, "particle_compute_pass", "Shader reflection found {} storage buffers:", .{mut_reflection.storage_buffers.items.len});
-            for (mut_reflection.storage_buffers.items) |sb| {
-                log(.INFO, "particle_compute_pass", "  Storage buffer: set={}, binding={}, name='{s}'", .{
-                    sb.set,
-                    sb.binding,
-                    sb.name,
-                });
-            }
-
-            log(.INFO, "particle_compute_pass", "Shader reflection found {} uniform buffers:", .{mut_reflection.uniform_buffers.items.len});
-            for (mut_reflection.uniform_buffers.items) |ub| {
-                log(.INFO, "particle_compute_pass", "  Uniform buffer: set={}, binding={}, name='{s}'", .{
-                    ub.set,
-                    ub.binding,
-                    ub.name,
-                });
-            }
-
             try self.resource_binder.populateFromReflection(mut_reflection);
             mut_reflection.deinit(self.allocator);
         } // Bind all resources and update descriptor sets
