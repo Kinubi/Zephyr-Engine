@@ -868,7 +868,6 @@ pub const RenderSystem = struct {
         // Update tracking for next frame
         self.last_instance_data.clearRetainingCapacity();
 
-        log(.DEBUG, "render_system", "Updated last_instance_data with {} instances", .{current_instances.items.len});
         try self.last_instance_data.appendSlice(self.allocator, current_instances.items);
     }
 
@@ -1812,7 +1811,7 @@ fn calculateInstanceDeltas(
     // Fast path: if counts differ drastically, all instances changed
     const instance_count = current_instances.items.len;
     const last_count = self.last_instance_data.items.len;
-    
+
     // Pre-allocate delta arrays with worst-case capacity
     var changed_indices = std.ArrayList(u32){};
     try changed_indices.ensureTotalCapacity(self.allocator, instance_count);
