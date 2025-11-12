@@ -10,6 +10,25 @@ const std = @import("std");
 pub const Engine = @import("core/engine.zig").Engine;
 pub const EngineConfig = Engine.Config;
 
+// ===== Architecture Improvements =====
+pub const errors = @import("core/errors.zig");
+pub const EngineError = errors.EngineError;
+pub const ErrorContext = errors.ErrorContext;
+pub const ErrorHandler = errors.ErrorHandler;
+pub const RecoveryStrategy = errors.RecoveryStrategy;
+pub const setErrorHandler = errors.setErrorHandler;
+
+pub const resource = @import("core/resource_manager.zig");
+pub const ResourceHandle = resource.Handle;
+pub const ResourceState = resource.ResourceState;
+pub const ResourceManager = resource.ResourceManager;
+pub const ResourceStats = resource.ResourceStats;
+
+pub const config = @import("core/config.zig");
+pub const ConfigManager = config.ConfigManager;
+pub const ConfigValue = config.ConfigValue;
+pub const ConfigEntry = config.ConfigEntry;
+
 // ========== Core Types ==========
 pub const Layer = @import("core/layer.zig").Layer;
 pub const LayerStack = @import("core/layer_stack.zig").LayerStack;

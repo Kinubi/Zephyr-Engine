@@ -6,9 +6,10 @@ Quick navigation to all documentation. Each system has full docs (📖) and/or q
 
 **New to Zephyr-Engine?** Start here:
 1. [Development Roadmap](ROADMAP.md) - Current status and milestones
-2. [ECS System](ECS_SYSTEM.md) - Core architecture
-3. [Asset System](ASSET_SYSTEM.md) - Loading resources
-4. [RenderGraph System](RENDER_GRAPH_SYSTEM.md) - Rendering pipeline
+2. [Architectural Improvements](ARCHITECTURAL_IMPROVEMENTS.md) - NEW! Core improvements ✨
+3. [ECS System](ECS_SYSTEM.md) - Core architecture
+4. [Asset System](ASSET_SYSTEM.md) - Loading resources
+5. [RenderGraph System](RENDER_GRAPH_SYSTEM.md) - Rendering pipeline
 
 ## 📚 Complete System Index
 
@@ -16,6 +17,7 @@ Quick navigation to all documentation. Each system has full docs (📖) and/or q
 
 | System | Full Docs | Quick Ref | Description |
 |--------|-----------|-----------|-------------|
+| **Architectural Improvements** | [📖](ARCHITECTURAL_IMPROVEMENTS.md) | ⏳ | NEW! Error handling, resources, config ✨ |
 | **ECS** | [📖](ECS_SYSTEM.md) | [⚡](ECS_QUICK_REFERENCE.md) | Entity-component-system architecture |
 | **Asset Manager** | [📖](ASSET_SYSTEM.md) | ⏳ | Async asset loading and hot-reload |
 | **Thread Pool** | [📖](ENHANCED_THREAD_POOL.md) | ⏳ | Multi-subsystem work-stealing threads |
