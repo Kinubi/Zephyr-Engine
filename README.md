@@ -4,6 +4,14 @@ A modern, high-performance game engine built in Zig with Vulkan, featuring an En
 
 > **Note**: This project is largely AI-coded with human guidance, architectural decisions, and code review. It serves as an exploration of AI-assisted game engine development.
 
+## 🎉 Recent Improvements
+
+### Architectural Enhancements (November 2025)
+- ✨ **Unified Error Handling** - Consistent error types with rich context and recovery strategies
+- ✨ **Resource Lifetime Management** - Type-safe handles with reference counting and automatic cleanup
+- ✨ **Configuration System** - Centralized, type-safe configuration with validation and persistence
+- 📖 See [Architectural Improvements](docs/ARCHITECTURAL_IMPROVEMENTS.md) for details
+
 ## 🏗️ Architecture
 
 Zephyr-Engine is structured as a **modular engine library** with a separate editor application:
