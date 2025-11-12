@@ -111,6 +111,17 @@ pub fn build(b: *std.Build) !void {
     run_step.dependOn(&run_cmd.step);
 
     // ========== TESTS ==========
+    
+    // Engine architectural improvements tests
+    const engine_arch_tests = b.addTest(.{
+        .root_source_file = b.path("engine/src/test_architectural_improvements.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const run_engine_arch_tests = b.addRunArtifact(engine_arch_tests);
+    
+    // Editor tests
     const editor_test_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),
         .target = target,
@@ -123,8 +134,15 @@ pub fn build(b: *std.Build) !void {
     editor_tests.root_module.addImport("zephyr", engine_mod);
 
     const run_editor_tests = b.addRunArtifact(editor_tests);
+    
+    // Test step runs all tests
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_engine_arch_tests.step);
     test_step.dependOn(&run_editor_tests.step);
+    
+    // Separate test commands
+    const test_arch_step = b.step("test-arch", "Run architectural improvements tests");
+    test_arch_step.dependOn(&run_engine_arch_tests.step);
 }
 
 // Helper function to add SPIRV-Cross to a compile step
