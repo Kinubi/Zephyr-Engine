@@ -223,7 +223,7 @@ pub const App = struct {
             .rotation = Math.Vec3.init(0, 0, 0),
             .scale = Math.Vec3.init(0.5, 0.5, 0.5),
         });
-        log(.INFO, "app", "Scheduled flat vase to be loaded at frame 1000", .{});
+        log(.INFO, "app", "Scheduled flat vase to be loaded at frame 50000", .{});
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
@@ -373,6 +373,7 @@ pub const App = struct {
         // ==================== Initialize ImGui ====================
         log(.INFO, "app", "Initializing ImGui...", .{});
         imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, self.engine.getUnifiedPipelineSystem().?);
+        imgui_context.setGlobalContext(); // Set global pointer now that context is at stable address
 
         ui_renderer = UIRenderer.init(self.allocator);
         log(.INFO, "app", "ImGui initialized", .{});

@@ -10,18 +10,30 @@ const Swapchain = @import("../core/swapchain.zig").Swapchain;
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const log = @import("../utils/log.zig").log;
 const Engine = @import("../core/engine.zig").Engine;
+const CVars = @import("../core/cvar.zig");
 
-/// Context for managing the render thread and double-buffered game state.
+pub const MAX_SNAPSHOT_BUFFERS = 3; // Maximum supported buffer count
+
+// Main thread maintains its own cycling index (stored in threadlocal)
+threadlocal var main_thread_write_idx: usize = 0;
+
+/// Get the current write buffer index (main thread only)
+pub fn getCurrentWriteIndex() usize {
+    return main_thread_write_idx;
+}
+
+/// Context for managing the render thread and multi-buffered game state.
+/// Supports 2 (double) or 3 (triple) buffering controlled by r_snapshot_buffers CVAR.
 pub const RenderThreadContext = struct {
     allocator: Allocator,
 
-    // Double-buffered game state (ping-pong buffers)
-    game_state: [2]GameStateSnapshot,
-    current_read: std.atomic.Value(usize), // Which buffer render thread reads (0 or 1)
+    // Multi-buffered game state (2-3 buffers)
+    game_state: []GameStateSnapshot,
+    buffer_count: u32, // Actual number of buffers in use (2 or 3)
 
-    // Synchronization primitives
-    state_ready: std.Thread.Semaphore, // Main thread signals: new state available
-    frame_consumed: std.Thread.Semaphore, // Render thread signals: frame consumed, main can continue
+    // Vulkan-style per-buffer semaphores (token passing)
+    main_thread_ready: []std.Thread.Semaphore, // Signaled when main thread can write to this buffer
+    render_thread_ready: []std.Thread.Semaphore, // Signaled when render thread can read this buffer
 
     // Thread management
     render_thread: ?std.Thread,
@@ -35,8 +47,7 @@ pub const RenderThreadContext = struct {
 
     // Frame tracking
     frame_index: std.atomic.Value(u64),
-    last_rendered_frame: std.atomic.Value(u64), // Track which frame was last rendered to avoid duplicates
-    // Uses maxInt as sentinel to indicate "not started yet"
+    last_completed_frame: std.atomic.Value(u64), // Last frame completed by render thread
 
     pub fn init(
         allocator: Allocator,
@@ -44,15 +55,43 @@ pub const RenderThreadContext = struct {
         graphics_context: anytype,
         swapchain: anytype,
     ) RenderThreadContext {
+        // Read buffer count from CVAR (default 3 for triple buffering)
+        const buffer_count: u32 = blk: {
+            if (CVars.getGlobal()) |registry| {
+                if (registry.getAsStringAlloc("r_snapshot_buffers", allocator)) |value| {
+                    defer allocator.free(value);
+                    if (std.fmt.parseInt(u32, value, 10)) |parsed| {
+                        break :blk @min(@max(parsed, 2), MAX_SNAPSHOT_BUFFERS);
+                    } else |_| {}
+                }
+            }
+            break :blk 3; // Default to triple buffering
+        };
+
+        // Allocate semaphore arrays based on buffer_count
+        const main_ready = allocator.alloc(std.Thread.Semaphore, buffer_count) catch @panic("Failed to allocate main_thread_ready semaphores");
+        const render_ready = allocator.alloc(std.Thread.Semaphore, buffer_count) catch @panic("Failed to allocate render_thread_ready semaphores");
+
+        // Initialize all semaphores
+        for (0..buffer_count) |i| {
+            main_ready[i] = .{};
+            render_ready[i] = .{};
+            // Initially, main thread owns all buffers (can write to them)
+            main_ready[i].post();
+        }
+
+        // Allocate and initialize game state snapshots
+        const game_state = allocator.alloc(GameStateSnapshot, buffer_count) catch @panic("Failed to allocate game_state buffers");
+        for (0..buffer_count) |i| {
+            game_state[i] = GameStateSnapshot.init(allocator);
+        }
+
         return .{
             .allocator = allocator,
-            .game_state = .{
-                GameStateSnapshot.init(allocator),
-                GameStateSnapshot.init(allocator),
-            },
-            .current_read = std.atomic.Value(usize).init(0),
-            .state_ready = .{},
-            .frame_consumed = .{},
+            .game_state = game_state,
+            .buffer_count = buffer_count,
+            .main_thread_ready = main_ready,
+            .render_thread_ready = render_ready,
             .render_thread = null,
             .shutdown = std.atomic.Value(bool).init(false),
             .worker_pool = worker_pool,
@@ -60,7 +99,7 @@ pub const RenderThreadContext = struct {
             .swapchain = swapchain,
             .engine = null, // Will be set after engine is fully initialized
             .frame_index = std.atomic.Value(u64).init(0),
-            .last_rendered_frame = std.atomic.Value(u64).init(std.math.maxInt(u64)), // Sentinel: not started yet
+            .last_completed_frame = std.atomic.Value(u64).init(0),
         };
     }
 
@@ -71,9 +110,14 @@ pub const RenderThreadContext = struct {
     }
 
     pub fn deinit(self: *RenderThreadContext) void {
-        // Clean up both snapshot buffers
-        self.game_state[0].deinit();
-        self.game_state[1].deinit();
+        // Clean up all snapshot buffers
+        for (0..self.buffer_count) |i| {
+            self.game_state[i].deinit();
+        }
+        // Free allocated arrays
+        self.allocator.free(self.game_state);
+        self.allocator.free(self.main_thread_ready);
+        self.allocator.free(self.render_thread_ready);
     }
 };
 
@@ -86,8 +130,7 @@ pub fn startRenderThread(ctx: *RenderThreadContext) !void {
 
     ctx.shutdown.store(false, .release);
 
-    // Post frame_consumed semaphore initially so main thread can start producing first frame
-    ctx.frame_consumed.post();
+    log(.INFO, "render_thread", "Starting render thread with {} snapshot buffers ({s})", .{ ctx.buffer_count, if (ctx.buffer_count == 2) "double" else "triple" });
 
     ctx.render_thread = try std.Thread.spawn(.{}, renderThreadLoop, .{ctx});
 }
@@ -99,8 +142,10 @@ pub fn stopRenderThread(ctx: *RenderThreadContext) void {
         // Signal shutdown
         ctx.shutdown.store(true, .release);
 
-        // Wake up render thread if it's waiting
-        ctx.state_ready.post();
+        // Wake up render thread if it's waiting on any buffer
+        for (0..ctx.buffer_count) |i| {
+            ctx.render_thread_ready[i].post();
+        }
 
         // Wait for thread to finish
         thread.join();
@@ -110,7 +155,7 @@ pub fn stopRenderThread(ctx: *RenderThreadContext) void {
 }
 
 /// MAIN THREAD: Submit new game state to render thread
-/// This is non-blocking - main thread continues immediately
+/// With triple buffering, main thread can be up to 2 frames ahead
 pub fn mainThreadUpdate(
     ctx: *RenderThreadContext,
     world: *ecs.World,
@@ -118,14 +163,13 @@ pub fn mainThreadUpdate(
     delta_time: f32,
     imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
 ) !void {
-    // BACKPRESSURE: Wait for render thread to consume previous frame
-    // This prevents main thread from getting more than 1 frame ahead
-    // Ensures: no wasted work, low input latency, natural throttling
-    ctx.frame_consumed.wait();
+    // Get the current write buffer (ring buffer: 0, 1, 2, 0, 1, 2, ...)
+    const write_idx = main_thread_write_idx;
 
-    // Determine which buffer to write to (the one render thread is NOT reading)
-    const read_idx = ctx.current_read.load(.acquire);
-    const write_idx = 1 - read_idx;
+    // BACKPRESSURE: Wait for this buffer to be available (Vulkan-style token passing)
+    // This semaphore was posted by render thread when it finished with this buffer,
+    // or was initially signaled at startup
+    ctx.main_thread_ready[write_idx].wait();
 
     // Free old snapshot in the write buffer
     if (ctx.game_state[write_idx].entity_count > 0) {
@@ -141,22 +185,23 @@ pub fn mainThreadUpdate(
         frame_idx,
         delta_time,
         imgui_draw_data,
+        write_idx, // Pass buffer index so snapshot knows which buffer its ImGui data is in
     );
 
-    // Atomically flip buffers
-    ctx.current_read.store(write_idx, .release);
+    // Advance write index for next frame AFTER capturing snapshot
+    // This ensures getCurrentWriteIndex() returns the index we just wrote to
+    // during the same frame's prepare phase (for ImGui synchronization)
+    main_thread_write_idx = (write_idx + 1) % ctx.buffer_count;
 
-    // Signal render thread that new state is available
-    ctx.state_ready.post();
+    // Signal render thread that this buffer is ready (pass the token)
+    ctx.render_thread_ready[write_idx].post();
 }
 
 /// Get the effective frame count (slowest of main thread and render thread)
-/// This represents the actual progress through frames that both threads have completed
 pub fn getEffectiveFrameCount(ctx: *RenderThreadContext) u64 {
     const main_frame = ctx.frame_index.load(.monotonic);
-    const rendered_frame = ctx.last_rendered_frame.load(.acquire);
-    // Return the minimum - the slowest thread dictates the effective frame rate
-    return @min(main_frame, rendered_frame);
+    const completed_frame = ctx.last_completed_frame.load(.acquire);
+    return @min(main_frame, completed_frame);
 }
 
 /// Render thread entry point - runs in separate thread.
@@ -171,31 +216,24 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
     // Get engine pointer (null check for tests)
     const engine_ptr = if (ctx.engine) |eng| @as(*Engine, @ptrCast(@alignCast(eng))) else null;
 
+    // Render thread maintains its own cycling index independently
+    var read_idx: usize = 0;
+
     while (!ctx.shutdown.load(.acquire)) {
-        // Wait for main thread to signal new state (with timeout for shutdown checks)
-        ctx.state_ready.wait();
+        // Wait for main thread to signal this buffer is ready (Vulkan-style token passing)
+        ctx.render_thread_ready[read_idx].wait();
 
         // Check shutdown again in case we were woken to exit
         if (ctx.shutdown.load(.acquire)) break;
 
-        // Get the current snapshot (lock-free read)
-        const read_idx = ctx.current_read.load(.acquire);
         const snapshot = &ctx.game_state[read_idx];
 
         // Skip if snapshot is empty (shouldn't happen in normal operation)
         if (snapshot.entity_count == 0) {
-            // Signal frame consumed before skipping
-            ctx.frame_consumed.post();
-            continue;
-        }
-
-        // Check if we've already rendered this frame (main thread controls frame rate)
-        const last_rendered = ctx.last_rendered_frame.load(.acquire);
-        // Skip if we've already rendered this frame (unless it's the first frame - sentinel value)
-        if (last_rendered != std.math.maxInt(u64) and snapshot.frame_index <= last_rendered) {
-            // We've already rendered this frame, wait for next signal
-            // Signal frame consumed before skipping
-            ctx.frame_consumed.post();
+            // Return buffer to main thread (pass token back)
+            ctx.main_thread_ready[read_idx].post();
+            // Advance to next buffer
+            read_idx = (read_idx + 1) % ctx.buffer_count;
             continue;
         }
 
@@ -226,8 +264,10 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                     @panic("DeviceLost - check stack trace for cause");
                 }
                 log(.ERROR, "render_thread", "beginFrame failed: {}", .{err});
-                // Signal frame consumed before skipping
-                ctx.frame_consumed.post();
+                // Return buffer to main thread on error
+                ctx.main_thread_ready[read_idx].post();
+                // Advance to next buffer before continuing
+                read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
@@ -240,8 +280,10 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 log(.ERROR, "render_thread", "update failed: {}", .{err});
                 // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
-                // Signal frame consumed before skipping
-                ctx.frame_consumed.post();
+                // Return buffer to main thread on error
+                ctx.main_thread_ready[read_idx].post();
+                // Advance to next buffer before continuing
+                read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
@@ -251,33 +293,31 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
                 log(.ERROR, "render_thread", "render failed: {}", .{err});
                 // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
-                // Signal frame consumed before skipping
-                ctx.frame_consumed.post();
+                // Return buffer to main thread on error
+                ctx.main_thread_ready[read_idx].post();
+                // Advance to next buffer before continuing
+                read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
             engine.endFrame(frame_info) catch |err| {
                 log(.ERROR, "render_thread", "endFrame failed: {}", .{err});
-                // Signal frame consumed before skipping
-                ctx.frame_consumed.post();
+                // Return buffer to main thread on error
+                ctx.main_thread_ready[read_idx].post();
+                // Advance to next buffer before continuing
+                read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
-            // Mark this frame as rendered (main thread controls frame rate)
-            ctx.last_rendered_frame.store(snapshot.frame_index, .release);
-
-            // Signal main thread that frame is consumed, can produce next snapshot
-            ctx.frame_consumed.post();
-        } else {
-            // Test mode: Just simulate work without actual engine
-            std.Thread.sleep(std.time.ns_per_ms);
-
-            // Mark frame as rendered even in test mode
-            ctx.last_rendered_frame.store(snapshot.frame_index, .release);
-
-            // Signal main thread even in test mode
-            ctx.frame_consumed.post();
+            // Mark frame as completed
+            ctx.last_completed_frame.store(snapshot.frame_index, .release);
         }
+
+        // Return buffer to main thread (pass token back)
+        // Post BEFORE advancing so main thread gets the token for the buffer we just finished
+        ctx.main_thread_ready[read_idx].post();
+        // Advance read index for next iteration (ring buffer: 0, 1, 2, 0, 1, 2, ...)
+        read_idx = (read_idx + 1) % ctx.buffer_count;
 
         // NOTE: Don't free snapshot here - mainThreadUpdate will free it
         // when it overwrites this buffer with a new snapshot

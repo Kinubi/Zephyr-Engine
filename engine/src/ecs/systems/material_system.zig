@@ -424,20 +424,21 @@ pub const MaterialSystem = struct {
 
             // Apply texture descriptor updates if needed
             if (snap.texture_array_dirty) {
-                // Replace texture array with snapshot data
-                if (set_data.texture_array.descriptor_infos.len > 0) {
-                    self.allocator.free(set_data.texture_array.descriptor_infos);
-                }
-
                 // Duplicate snapshot data (snapshot will be freed by snapshot system)
-                set_data.texture_array.descriptor_infos = try self.allocator.dupe(
+                const new_descriptors = try self.allocator.dupe(
                     vk.DescriptorImageInfo,
                     snap.texture_descriptors,
                 );
-                set_data.texture_array.size = snap.texture_count;
-
-                // Increment generation AFTER writing data, with release ordering
+                
+                // Increment generation FIRST with release semantics to signal change
+                // This ensures any thread checking generation will see the update
                 _ = set_data.texture_array.generation.fetchAdd(1, .release);
+                
+                // Now update the descriptor array pointer
+                // Old array is intentionally leaked to avoid use-after-free
+                // The generation change above will trigger rebinding with the new slice
+                set_data.texture_array.descriptor_infos = new_descriptors;
+                set_data.texture_array.size = snap.texture_count;
 
                 log(.INFO, "material_system", "Updated texture array for set '{s}' ({} textures)", .{
                     snap.set_name,

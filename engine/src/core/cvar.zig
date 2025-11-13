@@ -523,6 +523,9 @@ pub fn ensureGlobal(allocator: std.mem.Allocator) !*CVarRegistry {
     _ = boxed.registerCVar("r_logMemoryAllocs", .Bool, "false", "Log individual memory allocations", CVarFlags{ .archived = false, .read_only = false }, null, null, null, null, null) catch {};
     _ = boxed.registerCVar("r_frame_arena_size_mb", .Int, "64", "Frame arena size in megabytes", CVarFlags{ .archived = true, .read_only = false }, null, null, null, null, null) catch {};
 
+    // Render thread buffering (2 = double buffering, 3 = triple buffering)
+    _ = boxed.registerCVar("r_snapshot_buffers", .Int, "3", "Number of game state snapshot buffers (2-3, higher = more main thread headroom)", CVarFlags{ .archived = true, .read_only = false }, 2, 3, null, null, null) catch {};
+
     // attempt to load archived CVARs persisted on disk
     _ = loadArchivedFromFile(boxed, "cache/cvars.cfg") catch {};
 
