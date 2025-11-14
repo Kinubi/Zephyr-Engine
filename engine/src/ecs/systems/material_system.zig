@@ -3,6 +3,7 @@ const vk = @import("vulkan");
 const buffer_manager_module = @import("../../rendering/buffer_manager.zig");
 const BufferManager = buffer_manager_module.BufferManager;
 const ManagedBuffer = buffer_manager_module.ManagedBuffer;
+const TextureDescriptorManager = @import("../../rendering/texture_descriptor_manager.zig").TextureDescriptorManager;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../../assets/asset_manager.zig").AssetId;
 const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
@@ -18,11 +19,19 @@ const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_F
 // Re-export GPUMaterial from component (single source of truth)
 pub const GPUMaterial = ecs.GPUMaterial;
 
-/// Managed texture descriptor array
+/// Managed texture descriptor array (per-frame, like material buffers)
 pub const ManagedTextureArray = struct {
-    descriptor_infos: []vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
-    generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    size: usize = 0,
+    arena_offsets: [MAX_FRAMES_IN_FLIGHT]usize = [_]usize{0} ** MAX_FRAMES_IN_FLIGHT, // Per-frame offset into descriptor manager's frame arenas
+    generation: u32 = 0,
+    size: usize = 0, // Number of descriptors in the array (same for all frames)
+    pending_bind_mask: std.atomic.Value(u8) = std.atomic.Value(u8).init(0b111),
+
+    /// Mark this texture array as updated - increments generation and sets mask
+    /// Call this after updating arena allocation to trigger rebinding
+    pub fn markUpdated(self: *ManagedTextureArray) void {
+        self.generation +%= 1;
+        self.pending_bind_mask.store(0b111, .release); // All frames need rebinding
+    }
 };
 
 /// Delta update tracking for a material set
@@ -67,7 +76,7 @@ pub const MaterialSetData = struct {
     allocator: std.mem.Allocator,
     material_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer, // Per-frame arena-allocated buffers (heap pointers)
     current_capacity: usize, // Number of materials current buffers can hold
-    texture_array: ManagedTextureArray,
+    texture_arrays: [MAX_FRAMES_IN_FLIGHT]ManagedTextureArray, // Per-frame texture descriptor arrays (each frame has its own copy)
 
     // Tracking for change detection
     last_texture_ids: std.ArrayList(u64),
@@ -171,7 +180,7 @@ pub const MaterialSetData = struct {
             .allocator = allocator,
             .material_buffers = material_buffers,
             .current_capacity = 1, // Currently holds 1 dummy material
-            .texture_array = .{},
+            .texture_arrays = [_]ManagedTextureArray{.{}} ** MAX_FRAMES_IN_FLIGHT,
             .last_texture_ids = std.ArrayList(u64){},
             .last_materials = std.AutoHashMap(ecs.EntityId, GPUMaterial).init(allocator),
             .next_materials = std.ArrayList(GPUMaterial){}, // Staging area
@@ -181,10 +190,8 @@ pub const MaterialSetData = struct {
     }
 
     pub fn deinit(self: *MaterialSetData, buffer_manager: *BufferManager) void {
-        // Clean up texture array
-        if (self.texture_array.descriptor_infos.len > 0) {
-            self.allocator.free(self.texture_array.descriptor_infos);
-        }
+        // Texture descriptors are managed by TextureDescriptorManager's frame arenas
+        // No manual cleanup needed here - arenas are reset each frame
 
         // Clean up tracking
         self.last_texture_ids.deinit(self.allocator);
@@ -223,6 +230,7 @@ pub const MaterialSetData = struct {
 pub const MaterialSystem = struct {
     allocator: std.mem.Allocator,
     buffer_manager: *BufferManager,
+    descriptor_manager: *TextureDescriptorManager,
     asset_manager: *AssetManager,
 
     // GPU resources per material set name (e.g., "opaque", "transparent", "character")
@@ -231,12 +239,14 @@ pub const MaterialSystem = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         buffer_manager: *BufferManager,
+        descriptor_manager: *TextureDescriptorManager,
         asset_manager: *AssetManager,
     ) !*MaterialSystem {
         const self = try allocator.create(MaterialSystem);
         self.* = .{
             .allocator = allocator,
             .buffer_manager = buffer_manager,
+            .descriptor_manager = descriptor_manager,
             .asset_manager = asset_manager,
             .material_sets = std.StringHashMap(MaterialSetData).init(allocator),
         };
@@ -424,25 +434,29 @@ pub const MaterialSystem = struct {
 
             // Apply texture descriptor updates if needed
             if (snap.texture_array_dirty) {
-                // Duplicate snapshot data (snapshot will be freed by snapshot system)
-                const new_descriptors = try self.allocator.dupe(
-                    vk.DescriptorImageInfo,
-                    snap.texture_descriptors,
-                );
-                
-                // Increment generation FIRST with release semantics to signal change
-                // This ensures any thread checking generation will see the update
-                _ = set_data.texture_array.generation.fetchAdd(1, .release);
-                
-                // Now update the descriptor array pointer
-                // Old array is intentionally leaked to avoid use-after-free
-                // The generation change above will trigger rebinding with the new slice
-                set_data.texture_array.descriptor_infos = new_descriptors;
-                set_data.texture_array.size = snap.texture_count;
+                // Allocate from each frame's descriptor arena (like material buffers use buffer arenas)
+                // Each frame gets its own copy from its arena, automatically managed
+                for (&set_data.texture_arrays, 0..) |*tex_array, frame_idx| {
+                    const frame = @as(u32, @intCast(frame_idx));
 
-                log(.INFO, "material_system", "Updated texture array for set '{s}' ({} textures)", .{
+                    // Allocate from this frame's descriptor arena and get offset
+                    const result = try self.descriptor_manager.allocateFromFrame(
+                        frame,
+                        snap.texture_descriptors,
+                    );
+
+                    // Store ONLY the offset for THIS frame (each frame has its own offset)
+                    // Descriptors will be resolved dynamically when binding via getDescriptorsAtOffset
+                    tex_array.arena_offsets[frame] = result.offset;
+                    tex_array.size = snap.texture_count;
+
+                    // Mark this frame's array as updated (increments generation, sets mask to 0b111)
+                    tex_array.markUpdated();
+                }
+
+                log(.INFO, "material_system", "Updated all texture arrays for set '{s}' ({} textures)", .{
                     snap.set_name,
-                    set_data.texture_array.size,
+                    snap.texture_count,
                 });
             }
 
@@ -671,10 +685,18 @@ pub const MaterialSystem = struct {
                 const asset_id = AssetId.fromU64(asset_id_u64);
                 const current_descriptor = self.asset_manager.getTextureDescriptor(asset_id);
 
-                if (current_descriptor != null and idx < set_data.texture_array.descriptor_infos.len) {
-                    const last_descriptor = set_data.texture_array.descriptor_infos[idx];
-                    if (current_descriptor.?.image_view != last_descriptor.image_view) {
-                        break :blk true;
+                // Resolve descriptors from arena to check if they changed
+                if (current_descriptor != null and idx < set_data.texture_arrays[0].size) {
+                    const descriptors = self.descriptor_manager.getDescriptorsAtOffset(
+                        0, // Check frame 0's descriptors
+                        set_data.texture_arrays[0].arena_offsets[0],
+                        set_data.texture_arrays[0].size,
+                    );
+                    if (idx < descriptors.len) {
+                        const last_descriptor = descriptors[idx];
+                        if (current_descriptor.?.image_view != last_descriptor.image_view) {
+                            break :blk true;
+                        }
                     }
                 }
             }
@@ -837,11 +859,19 @@ pub const MaterialSystem = struct {
                 const current_descriptor = self.asset_manager.getTextureDescriptor(asset_id);
 
                 // If we have a valid descriptor now but different from what we built
-                if (current_descriptor != null and idx < set_data.texture_array.descriptor_infos.len) {
-                    const last_descriptor = set_data.texture_array.descriptor_infos[idx];
-                    // Compare image views (main indicator that texture loaded)
-                    if (current_descriptor.?.image_view != last_descriptor.image_view) {
-                        break :blk true;
+                // Resolve descriptors from arena to check if they changed
+                if (current_descriptor != null and idx < set_data.texture_arrays[0].size) {
+                    const descriptors = self.descriptor_manager.getDescriptorsAtOffset(
+                        0, // Check frame 0's descriptors
+                        set_data.texture_arrays[0].arena_offsets[0],
+                        set_data.texture_arrays[0].size,
+                    );
+                    if (idx < descriptors.len) {
+                        const last_descriptor = descriptors[idx];
+                        // Compare image views (main indicator that texture loaded)
+                        if (current_descriptor.?.image_view != last_descriptor.image_view) {
+                            break :blk true;
+                        }
                     }
                 }
             }

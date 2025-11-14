@@ -240,6 +240,7 @@ pub const App = struct {
             gc,
             self.engine.getUnifiedPipelineSystem().?,
             self.engine.getBufferManager().?,
+            self.engine.getDescriptorManager().?,
             self.engine.getTextureManager().?,
             swapchain,
             thread_pool,

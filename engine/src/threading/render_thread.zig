@@ -54,7 +54,7 @@ pub const RenderThreadContext = struct {
         worker_pool: *ThreadPool,
         graphics_context: anytype,
         swapchain: anytype,
-    ) RenderThreadContext {
+    ) !RenderThreadContext {
         // Read buffer count from CVAR (default 3 for triple buffering)
         const buffer_count: u32 = blk: {
             if (CVars.getGlobal()) |registry| {
@@ -69,8 +69,11 @@ pub const RenderThreadContext = struct {
         };
 
         // Allocate semaphore arrays based on buffer_count
-        const main_ready = allocator.alloc(std.Thread.Semaphore, buffer_count) catch @panic("Failed to allocate main_thread_ready semaphores");
-        const render_ready = allocator.alloc(std.Thread.Semaphore, buffer_count) catch @panic("Failed to allocate render_thread_ready semaphores");
+        const main_ready = try allocator.alloc(std.Thread.Semaphore, buffer_count);
+        errdefer allocator.free(main_ready);
+
+        const render_ready = try allocator.alloc(std.Thread.Semaphore, buffer_count);
+        errdefer allocator.free(render_ready);
 
         // Initialize all semaphores
         for (0..buffer_count) |i| {
@@ -81,7 +84,13 @@ pub const RenderThreadContext = struct {
         }
 
         // Allocate and initialize game state snapshots
-        const game_state = allocator.alloc(GameStateSnapshot, buffer_count) catch @panic("Failed to allocate game_state buffers");
+        const game_state = try allocator.alloc(GameStateSnapshot, buffer_count);
+        errdefer {
+            allocator.free(main_ready);
+            allocator.free(render_ready);
+            allocator.free(game_state);
+        }
+
         for (0..buffer_count) |i| {
             game_state[i] = GameStateSnapshot.init(allocator);
         }

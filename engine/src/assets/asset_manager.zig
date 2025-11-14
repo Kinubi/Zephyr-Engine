@@ -492,7 +492,7 @@ pub const AssetManager = struct {
         if (self.asset_to_texture.get(asset_id)) |existing_index| {
             // Replace the existing texture at this index
             const asset_path = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else "unknown";
-            log(.INFO, "enhanced_asset_manager", "[TRACE] Replacing texture at index {} for asset {} (path={s})", .{ existing_index, asset_id.toU64(), asset_path });
+            log(.INFO, "enhanced_asset_manager", "Replacing texture at index {} for asset {} (path={s})", .{ existing_index, asset_id.toU64(), asset_path });
             self.loaded_textures.items[existing_index] = texture;
         } else {
             // Append new texture
@@ -500,7 +500,7 @@ pub const AssetManager = struct {
             // Texture indices start at 1 (0 is reserved for "no texture")
             const index = self.loaded_textures.items.len - 1;
             const asset_path = if (self.registry.getAsset(asset_id)) |metadata| metadata.path else "unknown";
-            log(.INFO, "enhanced_asset_manager", "[TRACE] Added texture asset {} at index {} (path={s})", .{ asset_id.toU64(), index, asset_path });
+            log(.INFO, "enhanced_asset_manager", "Added texture asset {} at index {} (path={s})", .{ asset_id.toU64(), index, asset_path });
             try self.asset_to_texture.put(asset_id, index);
         }
 
