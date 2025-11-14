@@ -5,46 +5,129 @@ const log = @import("../utils/log.zig").log;
 const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 
 /// Frame arena for texture descriptor allocations
-/// Each frame has its own arena that cycles, just like BufferManager's frame arenas
+/// Matches BufferManager's FrameArena pattern with ring-buffer behavior and wrap-around support
 pub const DescriptorArena = struct {
     allocator: std.mem.Allocator,
     /// Large pre-allocated memory pool for descriptors
     memory: []vk.DescriptorImageInfo,
     capacity: usize,
     current_offset: usize,
+    smallest_used_offset: usize, // Track oldest still-referenced allocation
+    frame_index: u32,
+    needs_compaction: bool,
 
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) !DescriptorArena {
+    // Track active allocations for proper wrap-around and compaction
+    active_allocations: std.ArrayList(AllocationInfo),
+
+    pub const AllocationInfo = struct {
+        offset: usize,
+        size: usize,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize, frame_index: u32) !DescriptorArena {
         const memory = try allocator.alloc(vk.DescriptorImageInfo, capacity);
         return .{
             .allocator = allocator,
             .memory = memory,
             .capacity = capacity,
             .current_offset = 0,
+            .smallest_used_offset = 0,
+            .frame_index = frame_index,
+            .needs_compaction = false,
+            .active_allocations = std.ArrayList(AllocationInfo){},
         };
     }
 
     pub fn deinit(self: *DescriptorArena) void {
+        self.active_allocations.deinit(self.allocator);
         self.allocator.free(self.memory);
     }
 
-    /// Allocate space for descriptors from this arena
+    /// Allocate space for descriptors from this arena with wrap-around support
     /// Returns a slice pointing into the arena's memory
-    pub fn allocate(self: *DescriptorArena, count: usize) ![]vk.DescriptorImageInfo {
+    /// Matches BufferManager's allocation pattern
+    pub fn allocate(self: *DescriptorArena, count: usize) !struct { offset: usize, slice: []vk.DescriptorImageInfo } {
+        // Check if allocation fits from current position
         if (self.current_offset + count > self.capacity) {
-            return error.ArenaFull;
+            // Would wrap - check if allocation fits from start of arena
+            if (count > self.capacity) {
+                // Single allocation too large for entire arena
+                return error.AllocationTooLarge;
+            }
+
+            // Check if we'd collide with smallest_used_offset (still-active old allocations)
+            if (count > self.smallest_used_offset and self.smallest_used_offset > 0) {
+                // Collision detected - need compaction
+                self.needs_compaction = true;
+                return error.ArenaRequiresCompaction;
+            }
+
+            // Safe to wrap around to start
+            const offset: usize = 0;
+            self.current_offset = count;
+
+            // Track this allocation
+            try self.active_allocations.append(self.allocator, .{
+                .offset = offset,
+                .size = count,
+            });
+
+            return .{
+                .offset = offset,
+                .slice = self.memory[offset..][0..count],
+            };
         }
 
-        const start = self.current_offset;
+        // Normal allocation without wrap
+        const offset = self.current_offset;
         self.current_offset += count;
 
-        return self.memory[start..][0..count];
+        // Track this allocation
+        try self.active_allocations.append(self.allocator, .{
+            .offset = offset,
+            .size = count,
+        });
+
+        return .{
+            .offset = offset,
+            .slice = self.memory[offset..][0..count],
+        };
     }
 
-    /// Reset the arena for the next frame cycle
-    /// Unlike BufferManager which tracks allocations, we just reset the offset
-    /// since descriptor data gets copied in and doesn't need lifecycle tracking
+    /// Free an allocation and update smallest_used_offset
+    /// Called when a ManagedTextureArray is no longer referencing this offset
+    pub fn freeAllocation(self: *DescriptorArena, offset: usize) void {
+        // Find and remove the allocation
+        var i: usize = 0;
+        while (i < self.active_allocations.items.len) {
+            if (self.active_allocations.items[i].offset == offset) {
+                _ = self.active_allocations.swapRemove(i);
+                break;
+            }
+            i += 1;
+        }
+
+        // Recalculate smallest_used_offset
+        self.smallest_used_offset = self.capacity; // Start at end
+        for (self.active_allocations.items) |alloc| {
+            if (alloc.offset < self.smallest_used_offset) {
+                self.smallest_used_offset = alloc.offset;
+            }
+        }
+
+        // If no allocations left, reset
+        if (self.active_allocations.items.len == 0) {
+            self.smallest_used_offset = 0;
+        }
+    }
+
+    /// Explicitly reset arena (clears all tracking)
+    /// Used for full arena reset, not typically called during normal operation
     pub fn reset(self: *DescriptorArena) void {
         self.current_offset = 0;
+        self.smallest_used_offset = 0;
+        self.active_allocations.clearRetainingCapacity();
+        self.needs_compaction = false;
     }
 };
 
@@ -60,20 +143,17 @@ pub const TextureDescriptorManager = struct {
 
     pub fn init(allocator: std.mem.Allocator) !*TextureDescriptorManager {
         const self = try allocator.create(TextureDescriptorManager);
+        self.allocator = allocator;
 
-        for (&self.frame_arenas) |*arena| {
-            arena.* = try DescriptorArena.init(allocator, DEFAULT_CAPACITY_PER_FRAME);
+        // Initialize each frame arena with its frame index
+        for (&self.frame_arenas, 0..) |*arena, i| {
+            arena.* = try DescriptorArena.init(allocator, DEFAULT_CAPACITY_PER_FRAME, @intCast(i));
         }
 
         log(.INFO, "texture_descriptor_manager", "TextureDescriptorManager initialized with {} frame arenas ({} descriptors each)", .{
             MAX_FRAMES_IN_FLIGHT,
             DEFAULT_CAPACITY_PER_FRAME,
         });
-
-        self.* = .{
-            .allocator = allocator,
-            .frame_arenas = self.frame_arenas,
-        };
 
         return self;
     }
@@ -87,7 +167,8 @@ pub const TextureDescriptorManager = struct {
 
     /// Allocate texture descriptors from a specific frame's arena
     /// Copies the source descriptors into the arena and returns offset + slice
-    /// The offset is stable across arena resets (like material buffer offsets)
+    /// The offset is stable and can be used to retrieve descriptors later
+    /// Supports wrap-around allocation like BufferManager
     pub fn allocateFromFrame(
         self: *TextureDescriptorManager,
         frame_index: u32,
@@ -98,26 +179,64 @@ pub const TextureDescriptorManager = struct {
         }
 
         const arena = &self.frame_arenas[frame_index];
-        const offset = arena.current_offset; // Save offset before allocation
-        const dest = try arena.allocate(source_descriptors.len);
+        
+        // Allocate with wrap-around support
+        const result = try arena.allocate(source_descriptors.len);
 
         // Copy descriptors into arena memory
-        @memcpy(dest, source_descriptors);
+        @memcpy(result.slice, source_descriptors);
 
         return .{
-            .offset = offset,
-            .descriptors = dest,
+            .offset = result.offset,
+            .descriptors = result.slice,
         };
     }
 
+    /// Free a descriptor allocation, updating the arena's smallest_used_offset
+    /// Should be called when a ManagedTextureArray is being destroyed or reallocated
+    pub fn freeAllocation(self: *TextureDescriptorManager, frame_index: u32, offset: usize) void {
+        if (frame_index >= MAX_FRAMES_IN_FLIGHT) return;
+        self.frame_arenas[frame_index].freeAllocation(offset);
+    }
+
     /// Reset a frame's arena (for explicit reset only, not called per-frame)
-    /// Normally the arena works as a ring buffer - keeps allocating until full,
-    /// then old allocations get naturally overwritten on wrap-around
-    /// This is the same pattern as BufferManager's frame arenas
+    /// Normally the arena works as a ring buffer with wrap-around
     pub fn resetFrameArena(self: *TextureDescriptorManager, frame_index: u32) void {
         if (frame_index >= MAX_FRAMES_IN_FLIGHT) return;
 
         self.frame_arenas[frame_index].reset();
+    }
+
+    /// Compact a frame's arena by rebuilding it without gaps
+    /// Called when arena reports needs_compaction after failed wrap-around
+    /// Unlike BufferManager, we don't need to copy GPU data - just rebuild the allocation tracking
+    pub fn compactFrameArena(self: *TextureDescriptorManager, frame_index: u32) !void {
+        if (frame_index >= MAX_FRAMES_IN_FLIGHT) return error.InvalidFrameIndex;
+
+        const arena = &self.frame_arenas[frame_index];
+        
+        // For descriptor arenas, compaction is simpler than BufferManager:
+        // We don't need to move GPU memory, just rebuild the memory layout
+        // and update the offsets in all ManagedTextureArray instances that reference this arena
+        //
+        // However, we CAN'T easily update the offsets in ManagedTextureArray from here
+        // because we don't have references to them.
+        //
+        // Solution: Just reset the arena and let the next allocation rebuild naturally.
+        // The old offsets become invalid, but generation tracking will trigger rebinding.
+        log(.WARN, "texture_descriptor_manager", "Frame {} descriptor arena requires compaction - resetting arena (generation tracking will trigger rebinds)", .{frame_index});
+        
+        arena.reset();
+    }
+
+    /// Check if any arenas need compaction and perform it
+    /// Call this at the start of each frame before any allocations
+    pub fn compactArenasIfNeeded(self: *TextureDescriptorManager) !void {
+        for (&self.frame_arenas, 0..) |*arena, i| {
+            if (arena.needs_compaction) {
+                try self.compactFrameArena(@intCast(i));
+            }
+        }
     }
 
     /// Get descriptors from arena using offset (for binding after arena reset)
