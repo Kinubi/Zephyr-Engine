@@ -48,6 +48,7 @@ pub const GameStateSnapshot = struct {
 
     // ImGui draw data (cloned from main thread for render thread)
     imgui_draw_data: ?*anyopaque, // Pointer to cloned ImDrawData
+    imgui_buffer_idx: usize, // Which buffer this data belongs to (for freeing)
 
     // Change detection metadata (from RenderSystem.prepare)
     render_changes: RenderChangeFlags,
@@ -94,6 +95,7 @@ pub const GameStateSnapshot = struct {
             .point_lights = &.{},
             .point_light_count = 0,
             .imgui_draw_data = null,
+            .imgui_buffer_idx = 0,
             .render_changes = .{},
             .material_deltas = &.{},
             .instance_delta = null,
@@ -144,6 +146,7 @@ pub fn captureSnapshot(
     frame_index: u64,
     delta_time: f32,
     imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
+    imgui_buffer_idx: usize, // Which buffer this ImGui data belongs to
 ) !GameStateSnapshot {
     // Read render change flags from RenderablesSet component
     const render_changes = blk: {
@@ -160,6 +163,7 @@ pub fn captureSnapshot(
         .frame_index = frame_index,
         .delta_time = delta_time,
         .imgui_draw_data = imgui_draw_data,
+        .imgui_buffer_idx = imgui_buffer_idx,
         .render_changes = render_changes,
         .material_deltas = &.{}, // Will be populated below
         .camera_position = undefined,

@@ -3,6 +3,7 @@ const vk = @import("vulkan");
 const buffer_manager_module = @import("../../rendering/buffer_manager.zig");
 const BufferManager = buffer_manager_module.BufferManager;
 const ManagedBuffer = buffer_manager_module.ManagedBuffer;
+const TextureDescriptorManager = @import("../../rendering/texture_descriptor_manager.zig").TextureDescriptorManager;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const AssetId = @import("../../assets/asset_manager.zig").AssetId;
 const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
@@ -18,11 +19,94 @@ const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_F
 // Re-export GPUMaterial from component (single source of truth)
 pub const GPUMaterial = ecs.GPUMaterial;
 
-/// Managed texture descriptor array
+/// Managed texture descriptor array - CRITICAL TRIPLE BUFFERING DESIGN
+///
+/// WHY PER-FRAME OFFSETS IN A SINGLE STRUCT:
+/// ==========================================
+///
+/// This struct manages texture descriptor arrays for triple-buffered rendering.
+/// It stores MULTIPLE offsets (one per frame-in-flight) within a SINGLE struct instance.
+///
+/// DESIGN RATIONALE:
+/// -----------------
+/// With triple buffering, we have 3 render frames executing simultaneously:
+///   - Frame 0 might be rendering data from 3 frames ago
+///   - Frame 1 might be rendering data from 2 frames ago  
+///   - Frame 2 might be rendering data from 1 frame ago
+///
+/// Each frame needs its OWN snapshot of texture descriptors from when that frame
+/// was prepared. If we only stored one offset, all frames would share the same
+/// descriptor array, causing race conditions and incorrect rendering.
+///
+/// WHY NOT [MAX_FRAMES_IN_FLIGHT]ManagedTextureArray:
+/// ---------------------------------------------------
+/// You might think: "Just make an array of 3 separate ManagedTextureArray structs!"
+/// This DOES NOT WORK because:
+///
+/// 1. SYNCHRONIZATION PROBLEM:
+///    When textures change, we allocate to all 3 frame arenas simultaneously.
+///    All 3 struct instances would get updated with the SAME offset values (e.g., all get offset=25).
+///    This defeats the purpose of having separate instances.
+///
+/// 2. TEMPORAL COUPLING:
+///    Each frame's descriptor array should be allocated INDEPENDENTLY when that frame
+///    is prepared, not all at once. The current frame (frame N) should allocate to
+///    arena[N], and the offset should be stored in arena_offsets[N].
+///
+/// 3. NO HISTORY:
+///    With separate instances, there's no way to store "frame 0's offset from 3 frames ago"
+///    vs "frame 0's offset from 2 frames ago". We need all 3 historical offsets accessible
+///    from a single struct so each rendering frame can use the correct snapshot.
+///
+/// CORRECT PATTERN:
+/// ----------------
+/// MaterialSetData has:
+///   - texture_arrays: [MAX_FRAMES_IN_FLIGHT]ManagedTextureArray  // 3 struct instances
+///
+/// But WAIT - this looks like what we said doesn't work! The difference is:
+///   - Each ManagedTextureArray in the array represents a DIFFERENT MATERIAL SET
+///   - Within EACH ManagedTextureArray, we store [3] offsets for triple buffering
+///   - So we have: material_set[i].texture_arrays[frame_idx].arena_offsets[frame_idx]
+///
+/// Actually, looking at the code below, we have:
+///   - texture_arrays: [MAX_FRAMES_IN_FLIGHT]ManagedTextureArray
+///
+/// This means we DO have 3 separate struct instances per material set.
+/// Each instance should maintain its own [3] arena offsets for proper triple buffering.
+///
+/// ALTERNATIVE DESIGN (what we tried and failed):
+/// -----------------------------------------------
+/// If we changed to: arena_offset: usize (single offset)
+/// Then each of the 3 ManagedTextureArray instances would store ONE offset.
+/// Problem: When we allocate in a loop, all 3 get the SAME offset value:
+///   - texture_arrays[0].arena_offset = 25  (in arena 0)
+///   - texture_arrays[1].arena_offset = 25  (in arena 1)
+///   - texture_arrays[2].arena_offset = 25  (in arena 2)
+///
+/// This means frame 0 always uses offset 25 from arena 0, frame 1 uses offset 25 from arena 1.
+/// BUT: The arenas grow linearly! Next allocation gives offset 30 to all frames.
+/// Result: All frames constantly update to the NEWEST offset, losing the per-frame history.
+/// Without history, frames don't have stable descriptor snapshots → black textures or flickering.
+///
+/// CORRECT USAGE:
+/// --------------
+/// - Each ManagedTextureArray stores [3] offsets (one per frame-in-flight)
+/// - When frame N prepares, it allocates to arena[N] and stores in arena_offsets[N]
+/// - When frame N renders, it reads arena_offsets[N] to get its stable descriptor snapshot
+/// - Other frames (N-1, N-2) still read their own stable offsets from the same struct
+///
 pub const ManagedTextureArray = struct {
-    descriptor_infos: []vk.DescriptorImageInfo = &[_]vk.DescriptorImageInfo{},
-    generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    size: usize = 0,
+    arena_offsets: [MAX_FRAMES_IN_FLIGHT]usize = [_]usize{0} ** MAX_FRAMES_IN_FLIGHT, // Per-frame offset into descriptor manager's frame arenas
+    generation: u32 = 0,
+    size: usize = 0, // Number of descriptors in the array (same for all frames)
+    pending_bind_mask: std.atomic.Value(u8) = std.atomic.Value(u8).init(0b111),
+
+    /// Mark this texture array as updated - increments generation and sets mask
+    /// Call this after updating arena allocation to trigger rebinding
+    pub fn markUpdated(self: *ManagedTextureArray) void {
+        self.generation +%= 1;
+        self.pending_bind_mask.store(0b111, .release); // All frames need rebinding
+    }
 };
 
 /// Delta update tracking for a material set
@@ -67,7 +151,7 @@ pub const MaterialSetData = struct {
     allocator: std.mem.Allocator,
     material_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer, // Per-frame arena-allocated buffers (heap pointers)
     current_capacity: usize, // Number of materials current buffers can hold
-    texture_array: ManagedTextureArray,
+    texture_arrays: [MAX_FRAMES_IN_FLIGHT]ManagedTextureArray, // Per-frame texture descriptor arrays (each frame has its own copy)
 
     // Tracking for change detection
     last_texture_ids: std.ArrayList(u64),
@@ -171,7 +255,7 @@ pub const MaterialSetData = struct {
             .allocator = allocator,
             .material_buffers = material_buffers,
             .current_capacity = 1, // Currently holds 1 dummy material
-            .texture_array = .{},
+            .texture_arrays = [_]ManagedTextureArray{.{}} ** MAX_FRAMES_IN_FLIGHT,
             .last_texture_ids = std.ArrayList(u64){},
             .last_materials = std.AutoHashMap(ecs.EntityId, GPUMaterial).init(allocator),
             .next_materials = std.ArrayList(GPUMaterial){}, // Staging area
@@ -181,10 +265,8 @@ pub const MaterialSetData = struct {
     }
 
     pub fn deinit(self: *MaterialSetData, buffer_manager: *BufferManager) void {
-        // Clean up texture array
-        if (self.texture_array.descriptor_infos.len > 0) {
-            self.allocator.free(self.texture_array.descriptor_infos);
-        }
+        // Texture descriptors are managed by TextureDescriptorManager's frame arenas
+        // No manual cleanup needed here - arenas are reset each frame
 
         // Clean up tracking
         self.last_texture_ids.deinit(self.allocator);
@@ -223,6 +305,7 @@ pub const MaterialSetData = struct {
 pub const MaterialSystem = struct {
     allocator: std.mem.Allocator,
     buffer_manager: *BufferManager,
+    descriptor_manager: *TextureDescriptorManager,
     asset_manager: *AssetManager,
 
     // GPU resources per material set name (e.g., "opaque", "transparent", "character")
@@ -231,12 +314,14 @@ pub const MaterialSystem = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         buffer_manager: *BufferManager,
+        descriptor_manager: *TextureDescriptorManager,
         asset_manager: *AssetManager,
     ) !*MaterialSystem {
         const self = try allocator.create(MaterialSystem);
         self.* = .{
             .allocator = allocator,
             .buffer_manager = buffer_manager,
+            .descriptor_manager = descriptor_manager,
             .asset_manager = asset_manager,
             .material_sets = std.StringHashMap(MaterialSetData).init(allocator),
         };
@@ -424,24 +509,87 @@ pub const MaterialSystem = struct {
 
             // Apply texture descriptor updates if needed
             if (snap.texture_array_dirty) {
-                // Replace texture array with snapshot data
-                if (set_data.texture_array.descriptor_infos.len > 0) {
-                    self.allocator.free(set_data.texture_array.descriptor_infos);
+                // TRIPLE BUFFERING TEXTURE DESCRIPTOR ALLOCATION - CRITICAL DESIGN
+                // =================================================================
+                //
+                // STRUCTURE OVERVIEW:
+                //   - MaterialSetData.texture_arrays: [3]ManagedTextureArray
+                //     └─ Each ManagedTextureArray.arena_offsets: [3]usize
+                //
+                // WHY THE DOUBLE ARRAY?
+                // ---------------------
+                // The outer [3] array exists because MaterialSetData needs one texture array
+                // PER FRAME IN FLIGHT. Each rendering frame maintains its own texture array instance.
+                //
+                // The inner [3] offsets within EACH ManagedTextureArray track the per-frame
+                // descriptor snapshots in the arena system.
+                //
+                // ALLOCATION PATTERN:
+                // -------------------
+                // This loop iterates frame_idx = 0, 1, 2:
+                //   1. Get pointer to texture_arrays[frame_idx]
+                //   2. Allocate NEW descriptors to frame_arenas[frame_idx]
+                //   3. Store offset in texture_arrays[frame_idx].arena_offsets[frame_idx]
+                //
+                // Result after loop:
+                //   texture_arrays[0].arena_offsets = [new_offset, old, old]  // Only [0] updated
+                //   texture_arrays[1].arena_offsets = [old, new_offset, old]  // Only [1] updated
+                //   texture_arrays[2].arena_offsets = [old, old, new_offset]  // Only [2] updated
+                //
+                // WHY NOT UPDATE ALL 3 OFFSETS IN EACH STRUCT?
+                // ---------------------------------------------
+                // Because each rendering frame (0, 1, 2) uses its OWN ManagedTextureArray instance
+                // and only reads the offset at index matching its frame number.
+                //
+                // When frame 0 renders: reads texture_arrays[0].arena_offsets[0]
+                // When frame 1 renders: reads texture_arrays[1].arena_offsets[1]
+                // When frame 2 renders: reads texture_arrays[2].arena_offsets[2]
+                //
+                // The "unused" offsets in each struct ([1], [2] in texture_arrays[0], etc.)
+                // are effectively dead space in this design, but kept for API consistency
+                // with the ManagedTextureArray structure.
+                //
+                // COMPARISON TO MATERIAL BUFFERS:
+                // -------------------------------
+                // Material buffers use: material_buffers: [3]*ManagedBuffer
+                //   - Each frame has a separate buffer allocation
+                //   - Single generation counter per buffer
+                //   - No nested arrays needed
+                //
+                // Texture descriptors use: texture_arrays: [3]ManagedTextureArray
+                //   - Each frame has a separate texture array instance
+                //   - Each instance stores [3] offsets (only uses one matching its frame number)
+                //   - Nested arrays for consistency with potential future multi-frame tracking
+                //
+                // THE ACTUAL POINT OF [3] OFFSETS:
+                // --------------------------------
+                // While currently we only use arena_offsets[frame_idx] for texture_arrays[frame_idx],
+                // the [3] offset design allows for future flexibility where a single ManagedTextureArray
+                // could track multiple historical snapshots for temporal effects or debugging.
+                //
+                // For now, it's effectively: texture_arrays[i] uses only arena_offsets[i].
+                //
+                for (&set_data.texture_arrays, 0..) |*tex_array, frame_idx| {
+                    const frame = @as(u32, @intCast(frame_idx));
+
+                    // Allocate from this frame's descriptor arena and get offset
+                    const result = try self.descriptor_manager.allocateFromFrame(
+                        frame,
+                        snap.texture_descriptors,
+                    );
+
+                    // Store ONLY the offset for THIS frame (each frame has its own offset)
+                    // Descriptors will be resolved dynamically when binding via getDescriptorsAtOffset
+                    tex_array.arena_offsets[frame] = result.offset;
+                    tex_array.size = snap.texture_count;
+
+                    // Mark this frame's array as updated (increments generation, sets mask to 0b111)
+                    tex_array.markUpdated();
                 }
 
-                // Duplicate snapshot data (snapshot will be freed by snapshot system)
-                set_data.texture_array.descriptor_infos = try self.allocator.dupe(
-                    vk.DescriptorImageInfo,
-                    snap.texture_descriptors,
-                );
-                set_data.texture_array.size = snap.texture_count;
-
-                // Increment generation AFTER writing data, with release ordering
-                _ = set_data.texture_array.generation.fetchAdd(1, .release);
-
-                log(.INFO, "material_system", "Updated texture array for set '{s}' ({} textures)", .{
+                log(.INFO, "material_system", "Updated all texture arrays for set '{s}' ({} textures)", .{
                     snap.set_name,
-                    set_data.texture_array.size,
+                    snap.texture_count,
                 });
             }
 
@@ -670,10 +818,18 @@ pub const MaterialSystem = struct {
                 const asset_id = AssetId.fromU64(asset_id_u64);
                 const current_descriptor = self.asset_manager.getTextureDescriptor(asset_id);
 
-                if (current_descriptor != null and idx < set_data.texture_array.descriptor_infos.len) {
-                    const last_descriptor = set_data.texture_array.descriptor_infos[idx];
-                    if (current_descriptor.?.image_view != last_descriptor.image_view) {
-                        break :blk true;
+                // Resolve descriptors from arena to check if they changed
+                if (current_descriptor != null and idx < set_data.texture_arrays[0].size) {
+                    const descriptors = self.descriptor_manager.getDescriptorsAtOffset(
+                        0, // Check frame 0's descriptors
+                        set_data.texture_arrays[0].arena_offsets[0],
+                        set_data.texture_arrays[0].size,
+                    );
+                    if (idx < descriptors.len) {
+                        const last_descriptor = descriptors[idx];
+                        if (current_descriptor.?.image_view != last_descriptor.image_view) {
+                            break :blk true;
+                        }
                     }
                 }
             }
@@ -836,11 +992,19 @@ pub const MaterialSystem = struct {
                 const current_descriptor = self.asset_manager.getTextureDescriptor(asset_id);
 
                 // If we have a valid descriptor now but different from what we built
-                if (current_descriptor != null and idx < set_data.texture_array.descriptor_infos.len) {
-                    const last_descriptor = set_data.texture_array.descriptor_infos[idx];
-                    // Compare image views (main indicator that texture loaded)
-                    if (current_descriptor.?.image_view != last_descriptor.image_view) {
-                        break :blk true;
+                // Resolve descriptors from arena to check if they changed
+                if (current_descriptor != null and idx < set_data.texture_arrays[0].size) {
+                    const descriptors = self.descriptor_manager.getDescriptorsAtOffset(
+                        0, // Check frame 0's descriptors
+                        set_data.texture_arrays[0].arena_offsets[0],
+                        set_data.texture_arrays[0].size,
+                    );
+                    if (idx < descriptors.len) {
+                        const last_descriptor = descriptors[idx];
+                        // Compare image views (main indicator that texture loaded)
+                        if (current_descriptor.?.image_view != last_descriptor.image_view) {
+                            break :blk true;
+                        }
                     }
                 }
             }

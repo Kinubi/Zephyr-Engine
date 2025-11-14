@@ -19,6 +19,7 @@ const MaterialSystemMod = @import("../ecs/systems/material_system.zig");
 const MaterialSystem = MaterialSystemMod.MaterialSystem;
 // NOTE: MaterialBufferSet deprecated - MaterialSystem now directly queries components
 const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
+const TextureDescriptorManager = @import("../rendering/texture_descriptor_manager.zig").TextureDescriptorManager;
 const RenderGraph = @import("../rendering/render_graph.zig").RenderGraph;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const GlobalUbo = @import("../rendering/frameinfo.zig").GlobalUbo;
@@ -659,6 +660,7 @@ pub const Scene = struct {
         graphics_context: *GraphicsContext,
         pipeline_system: *UnifiedPipelineSystem,
         buffer_manager: *BufferManager,
+        descriptor_manager: *TextureDescriptorManager,
         texture_manager: *TextureManager,
         swapchain: *Swapchain,
         thread_pool: *ThreadPool,
@@ -672,6 +674,7 @@ pub const Scene = struct {
         self.material_system = try MaterialSystem.init(
             self.allocator,
             buffer_manager,
+            descriptor_manager,
             self.asset_manager,
         );
 
@@ -723,6 +726,7 @@ pub const Scene = struct {
             self.ecs_world,
             global_ubo_set,
             opaque_material_set,
+            descriptor_manager,
             swapchain.hdr_format,
             try swapchain.depthFormat(),
             &self.render_system,
@@ -866,6 +870,7 @@ pub const Scene = struct {
             &self.render_system,
             texture_manager,
             path_tracing_material_set,
+            descriptor_manager,
             swapchain,
             width,
             height,

@@ -134,7 +134,8 @@ pub const BaseRenderPass = struct {
         texture: *const ManagedTexture,
 
         /// Texture array for shader descriptor array (uses bindTextureArrayNamed)
-        texture_array: *const ManagedTextureArray,
+        /// Pass per-frame array like: .{ &set.texture_arrays[0], &set.texture_arrays[1], &set.texture_arrays[2] }
+        texture_array: [zephyr.MAX_FRAMES_IN_FLIGHT]*const ManagedTextureArray,
 
         /// Per-frame texture array (uses bindManagedTexturePerFrameNamed)
         texture_per_frame: [zephyr.MAX_FRAMES_IN_FLIGHT]*const ManagedTexture,

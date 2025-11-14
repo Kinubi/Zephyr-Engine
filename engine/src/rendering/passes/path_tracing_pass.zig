@@ -22,6 +22,7 @@ const ThreadPool = @import("../../threading/thread_pool.zig").ThreadPool;
 const GlobalUboSet = @import("../ubo_set.zig").GlobalUboSet;
 const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
 const MaterialSetData = @import("../../ecs/systems/material_system.zig").MaterialSetData;
+const TextureDescriptorManager = @import("../texture_descriptor_manager.zig").TextureDescriptorManager;
 const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const Mesh = @import("../mesh.zig").Mesh;
@@ -106,6 +107,7 @@ pub const PathTracingPass = struct {
 
     // Material set data for path tracing - direct access to buffers and textures
     material_set: *MaterialSetData,
+    descriptor_manager: *TextureDescriptorManager,
 
     // Path tracing pipeline
     path_tracing_pipeline: PipelineId = undefined,
@@ -143,6 +145,7 @@ pub const PathTracingPass = struct {
         render_system: *RenderSystem,
         texture_manager: *TextureManager,
         material_set: *MaterialSetData,
+        descriptor_manager: *TextureDescriptorManager,
         swapchain: *const Swapchain,
         width: u32,
         height: u32,
@@ -195,6 +198,7 @@ pub const PathTracingPass = struct {
             .render_system = render_system,
             .texture_manager = texture_manager,
             .material_set = material_set,
+            .descriptor_manager = descriptor_manager,
             .rt_system = rt_system,
             .output_texture = output_texture,
             .width = width,
@@ -305,7 +309,8 @@ pub const PathTracingPass = struct {
         try self.resource_binder.bindTextureArrayNamed(
             self.path_tracing_pipeline,
             "texture_buffer",
-            &self.material_set.texture_array,
+            &self.material_set.texture_arrays,
+            self.descriptor_manager,
         );
 
         // Bind global UBO for all frames (generation tracked automatically)

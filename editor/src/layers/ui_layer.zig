@@ -78,6 +78,14 @@ pub const UILayer = struct {
         return self.pending_imgui_draw_data;
     }
 
+    /// Free old ImGui cloned data for a specific buffer index
+    /// Must be called after buffer is freed (after semaphore wait)
+    pub fn freeOldImGuiBuffer(self: *UILayer, buffer_idx: usize) void {
+        _ = self;
+        const imgui_ctx = @import("../ui/backend/imgui_context.zig");
+        imgui_ctx.freeOldBufferData(buffer_idx);
+    }
+
     const vtable = Layer.VTable{
         .attach = attach,
         .detach = detach,
@@ -249,7 +257,9 @@ pub const UILayer = struct {
         }
 
         // Finalize ImGui frame and store draw data for passing to render thread via snapshot
-        self.pending_imgui_draw_data = self.imgui_context.endFrame();
+        // Use the same buffer index as the snapshot to keep them synchronized
+        const write_idx = zephyr.getCurrentWriteIndex();
+        self.pending_imgui_draw_data = try self.imgui_context.endFrame(write_idx);
     }
 
     /// RENDER THREAD: Convert ImGui draw data to Vulkan commands

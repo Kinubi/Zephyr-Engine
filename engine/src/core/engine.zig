@@ -17,6 +17,7 @@ const MemoryTracker = memory_tracker_module.MemoryTracker;
 const MemoryBudget = memory_tracker_module.MemoryBudget;
 const CVarRegistry = @import("cvar.zig").CVarRegistry;
 const BufferManager = @import("../rendering/buffer_manager.zig").BufferManager;
+const TextureDescriptorManager = @import("../rendering/texture_descriptor_manager.zig").TextureDescriptorManager;
 const ResourceBinder = @import("../rendering/resource_binder.zig").ResourceBinder;
 const UnifiedPipelineSystem = @import("../rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 const MaterialSystem = @import("../ecs/systems/material_system.zig").MaterialSystem;
@@ -30,6 +31,7 @@ const startRenderThread = @import("../threading/render_thread.zig").startRenderT
 const stopRenderThread = @import("../threading/render_thread.zig").stopRenderThread;
 const mainThreadUpdate = @import("../threading/render_thread.zig").mainThreadUpdate;
 const rtGetEffectiveFrameCount = @import("../threading/render_thread.zig").getEffectiveFrameCount;
+const rtGetCurrentWriteIndex = @import("../threading/render_thread.zig").getCurrentWriteIndex;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -64,6 +66,7 @@ pub const Engine = struct {
     unified_pipeline_system: ?*UnifiedPipelineSystem = null,
     resource_binder: ?*ResourceBinder = null,
     buffer_manager: ?*BufferManager = null,
+    descriptor_manager: ?*TextureDescriptorManager = null,
     material_system: ?*MaterialSystem = null,
     texture_manager: ?*TextureManager = null,
 
@@ -237,7 +240,7 @@ pub const Engine = struct {
         if (config.enable_render_thread) {
             log(.INFO, "render_thread", "Render thread ENABLED in config", .{});
 
-            engine.render_thread_context = RenderThreadContext.init(
+            engine.render_thread_context = try RenderThreadContext.init(
                 allocator,
                 engine.thread_pool,
                 &engine.graphics_context,
@@ -298,6 +301,11 @@ pub const Engine = struct {
         log(.INFO, "engine", "Cleaning up MaterialSystem...", .{});
         if (self.material_system) |ms| {
             ms.deinit();
+        }
+
+        log(.INFO, "engine", "Cleaning up TextureDescriptorManager...", .{});
+        if (self.descriptor_manager) |dm| {
+            dm.deinit();
         }
 
         log(.INFO, "engine", "Cleaning up ResourceBinder...", .{});
@@ -532,12 +540,13 @@ pub const Engine = struct {
     /// Capture game state and signal render thread (Phase 2.0)
     /// Only call this if render thread is enabled
     /// This should be called from the main/game thread before beginFrame()
+    /// Returns the buffer index that was just freed (for cleanup)
     pub fn captureAndSignalRenderThread(
         self: *Engine,
         world: anytype, // *ecs.World or compatible
         camera: anytype, // *Camera or compatible
         imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
-    ) !void {
+    ) !usize {
         if (!self.use_render_thread) {
             return error.RenderThreadNotEnabled;
         }
@@ -547,7 +556,7 @@ pub const Engine = struct {
             const current_time = c.glfwGetTime();
             const dt: f32 = @floatCast(current_time - self.last_frame_time);
 
-            try mainThreadUpdate(
+            return try mainThreadUpdate(
                 ctx,
                 world,
                 camera,
@@ -567,6 +576,13 @@ pub const Engine = struct {
             return rtGetEffectiveFrameCount(ctx);
         }
         return 0;
+    }
+
+    /// Get the current write buffer index (main thread only)
+    /// Used to determine which buffer slot to free old data from
+    pub fn getCurrentWriteIndex(self: *Engine) usize {
+        _ = self;
+        return rtGetCurrentWriteIndex();
     }
 
     // === Rendering System Management ===
@@ -649,10 +665,14 @@ pub const Engine = struct {
             self.render_layer.setTextureManager(tm);
         }
 
+        // Initialize TextureDescriptorManager (manages per-frame texture descriptor arenas)
+        self.descriptor_manager = try TextureDescriptorManager.init(self.allocator);
+
         // Initialize MaterialSystem (handles both materials and textures now)
         self.material_system = try MaterialSystem.init(
             self.allocator,
             self.buffer_manager.?,
+            self.descriptor_manager.?,
             self.asset_manager.?,
         );
 
@@ -679,6 +699,11 @@ pub const Engine = struct {
     /// Get the buffer manager instance
     pub fn getBufferManager(self: *Engine) ?*BufferManager {
         return self.buffer_manager;
+    }
+
+    /// Get the texture descriptor manager instance
+    pub fn getDescriptorManager(self: *Engine) ?*TextureDescriptorManager {
+        return self.descriptor_manager;
     }
 
     /// Get the material system instance

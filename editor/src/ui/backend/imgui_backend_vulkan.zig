@@ -29,13 +29,13 @@ pub const ImGuiVulkanBackend = struct {
     font_texture: ?*Texture = null,
     font_texture_id: c.ImTextureID = 0,
 
-    // Dynamic vertex and index buffers using engine's Buffer class
-    vertex_buffer: ?Buffer = null,
-    index_buffer: ?Buffer = null,
+    // Dynamic vertex and index buffers using engine's Buffer class (per-frame for triple buffering)
+    vertex_buffers: [MAX_FRAMES_IN_FLIGHT]?Buffer = [_]?Buffer{null} ** MAX_FRAMES_IN_FLIGHT,
+    index_buffers: [MAX_FRAMES_IN_FLIGHT]?Buffer = [_]?Buffer{null} ** MAX_FRAMES_IN_FLIGHT,
 
-    // Current buffer sizes
-    vertex_buffer_size: usize = 0,
-    index_buffer_size: usize = 0,
+    // Current buffer sizes (per-frame)
+    vertex_buffer_sizes: [MAX_FRAMES_IN_FLIGHT]usize = [_]usize{0} ** MAX_FRAMES_IN_FLIGHT,
+    index_buffer_sizes: [MAX_FRAMES_IN_FLIGHT]usize = [_]usize{0} ** MAX_FRAMES_IN_FLIGHT,
 
     // Track if resources need setup
     resources_need_setup: bool = true,
@@ -75,12 +75,18 @@ pub const ImGuiVulkanBackend = struct {
     pub fn deinit(self: *ImGuiVulkanBackend) void {
         self.gc.vkd.deviceWaitIdle(self.gc.dev) catch {};
 
-        if (self.vertex_buffer) |*vb| {
-            vb.deinit();
+        // Clean up all per-frame vertex buffers
+        for (&self.vertex_buffers) |*vb| {
+            if (vb.*) |*buffer| {
+                buffer.deinit();
+            }
         }
 
-        if (self.index_buffer) |*ib| {
-            ib.deinit();
+        // Clean up all per-frame index buffers
+        for (&self.index_buffers) |*ib| {
+            if (ib.*) |*buffer| {
+                buffer.deinit();
+            }
         }
 
         if (self.font_texture) |ft| {
@@ -284,7 +290,7 @@ pub const ImGuiVulkanBackend = struct {
         }
     }
 
-    fn updateBuffers(self: *ImGuiVulkanBackend, draw_data: [*c]c.ImDrawData) !void {
+    fn updateBuffers(self: *ImGuiVulkanBackend, draw_data: [*c]c.ImDrawData, frame_index: u32) !void {
         if (draw_data == null) return;
 
         const vertex_size = @as(usize, @intCast(draw_data.*.TotalVtxCount)) * @sizeOf(c.ImDrawVert);
@@ -292,33 +298,36 @@ pub const ImGuiVulkanBackend = struct {
 
         if (vertex_size == 0 or index_size == 0) return;
 
-        // Create or resize vertex buffer
-        if (self.vertex_buffer == null or vertex_size > self.vertex_buffer_size) {
-            if (self.vertex_buffer) |*vb| {
+        // Use per-frame buffers
+        const frame_idx = frame_index % MAX_FRAMES_IN_FLIGHT;
+
+        // Create or resize vertex buffer for this frame
+        if (self.vertex_buffers[frame_idx] == null or vertex_size > self.vertex_buffer_sizes[frame_idx]) {
+            if (self.vertex_buffers[frame_idx]) |*vb| {
                 vb.deinit();
             }
 
-            self.vertex_buffer = try Buffer.init(self.gc, @sizeOf(c.ImDrawVert), @as(u32, @intCast(draw_data.*.TotalVtxCount)), .{ .vertex_buffer_bit = true, .transfer_dst_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true });
-            self.vertex_buffer_size = vertex_size;
+            self.vertex_buffers[frame_idx] = try Buffer.init(self.gc, @sizeOf(c.ImDrawVert), @as(u32, @intCast(draw_data.*.TotalVtxCount)), .{ .vertex_buffer_bit = true, .transfer_dst_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true });
+            self.vertex_buffer_sizes[frame_idx] = vertex_size;
 
-            try self.vertex_buffer.?.map(vk.WHOLE_SIZE, 0);
+            try self.vertex_buffers[frame_idx].?.map(vk.WHOLE_SIZE, 0);
         }
 
-        // Create or resize index buffer
-        if (self.index_buffer == null or index_size > self.index_buffer_size) {
-            if (self.index_buffer) |*ib| {
+        // Create or resize index buffer for this frame
+        if (self.index_buffers[frame_idx] == null or index_size > self.index_buffer_sizes[frame_idx]) {
+            if (self.index_buffers[frame_idx]) |*ib| {
                 ib.deinit();
             }
 
-            self.index_buffer = try Buffer.init(self.gc, @sizeOf(c.ImDrawIdx), @as(u32, @intCast(draw_data.*.TotalIdxCount)), .{ .index_buffer_bit = true, .transfer_dst_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true });
-            self.index_buffer_size = index_size;
+            self.index_buffers[frame_idx] = try Buffer.init(self.gc, @sizeOf(c.ImDrawIdx), @as(u32, @intCast(draw_data.*.TotalIdxCount)), .{ .index_buffer_bit = true, .transfer_dst_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true });
+            self.index_buffer_sizes[frame_idx] = index_size;
 
-            try self.index_buffer.?.map(vk.WHOLE_SIZE, 0);
+            try self.index_buffers[frame_idx].?.map(vk.WHOLE_SIZE, 0);
         }
 
-        // Copy vertex and index data
-        var vtx_dst = @as([*]c.ImDrawVert, @ptrCast(@alignCast(self.vertex_buffer.?.mapped.?)));
-        var idx_dst = @as([*]c.ImDrawIdx, @ptrCast(@alignCast(self.index_buffer.?.mapped.?)));
+        // Copy vertex and index data to this frame's buffers
+        var vtx_dst = @as([*]c.ImDrawVert, @ptrCast(@alignCast(self.vertex_buffers[frame_idx].?.mapped.?)));
+        var idx_dst = @as([*]c.ImDrawIdx, @ptrCast(@alignCast(self.index_buffers[frame_idx].?.mapped.?)));
 
         var n: usize = 0;
         while (n < draw_data.*.CmdListsCount) : (n += 1) {
@@ -362,10 +371,11 @@ pub const ImGuiVulkanBackend = struct {
             self.resources_need_setup = false;
         }
 
-        // Update vertex and index buffers
-        try self.updateBuffers(draw_data);
+        // Update vertex and index buffers for this frame
+        try self.updateBuffers(draw_data, frame_index);
 
-        if (self.vertex_buffer == null or self.index_buffer == null) return;
+        const frame_idx = frame_index % MAX_FRAMES_IN_FLIGHT;
+        if (self.vertex_buffers[frame_idx] == null or self.index_buffers[frame_idx] == null) return;
 
         // Setup dynamic rendering with load operation (preserve existing framebuffer)
         const rendering = DynamicRenderingHelper.init(
@@ -383,10 +393,10 @@ pub const ImGuiVulkanBackend = struct {
         // Bind ImGui pipeline with descriptor sets
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.pipeline_id.?, frame_index);
 
-        // Bind vertex and index buffers
+        // Bind vertex and index buffers for this frame
         const vb_offset: vk.DeviceSize = 0;
-        self.gc.vkd.cmdBindVertexBuffers(cmd, 0, 1, @ptrCast(&self.vertex_buffer.?.buffer), @ptrCast(&vb_offset));
-        self.gc.vkd.cmdBindIndexBuffer(cmd, self.index_buffer.?.buffer, 0, .uint16);
+        self.gc.vkd.cmdBindVertexBuffers(cmd, 0, 1, @ptrCast(&self.vertex_buffers[frame_idx].?.buffer), @ptrCast(&vb_offset));
+        self.gc.vkd.cmdBindIndexBuffer(cmd, self.index_buffers[frame_idx].?.buffer, 0, .uint16);
 
         // Setup orthographic projection matrix in push constants
         const L: f32 = draw_data.*.DisplayPos.x;

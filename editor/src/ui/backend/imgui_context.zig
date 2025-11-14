@@ -11,6 +11,27 @@ const texture_manager = @import("texture_manager.zig");
 const ImGuiGlfwInput = @import("imgui_glfw_input.zig").ImGuiGlfwInput;
 const UnifiedPipelineSystem = zephyr.UnifiedPipelineSystem;
 
+pub const MAX_IMGUI_BUFFERS = 3; // Maximum for triple buffering
+
+// Global ImGui context pointer (set during init)
+var global_imgui_context: ?*ImGuiContext = null;
+
+/// Free old ImGui draw data for a specific buffer index
+/// Called after render thread signals buffer is ready (after semaphore wait)
+/// This processes deferred cleanup - freeing data that was queued MAX_FRAMES_IN_FLIGHT ago
+pub fn freeOldBufferData(buffer_idx: usize) void {
+    const ctx = global_imgui_context orelse return;
+    if (buffer_idx >= ctx.deferred_cleanup.len) return;
+    
+    // Process all deferred cleanups for this frame slot
+    // These are allocations from MAX_FRAMES_IN_FLIGHT ago that are now safe to free
+    var list = &ctx.deferred_cleanup[buffer_idx];
+    for (list.items) |old_data| {
+        ctx.freeClonedDrawData(old_data);
+    }
+    list.clearRetainingCapacity();
+}
+
 pub const ImGuiContext = struct {
     allocator: std.mem.Allocator,
     gc: *GraphicsContext,
@@ -18,13 +39,40 @@ pub const ImGuiContext = struct {
     vulkan_backend: *ImGuiVulkanBackend,
     glfw_input: ImGuiGlfwInput,
 
-    // Double-buffered cloned draw data for render thread
-    cloned_draw_data: [2]?*c.ImDrawData = [_]?*c.ImDrawData{null} ** 2,
-    current_write_buffer: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    // Multi-buffered cloned draw data for render thread (2-3 buffers)
+    cloned_draw_data: []?*c.ImDrawData,
+    buffer_count: u32,
+    
+    // Deferred cleanup: old draw data queued for deletion after MAX_FRAMES_IN_FLIGHT
+    deferred_cleanup: [MAX_IMGUI_BUFFERS]std.ArrayList(*c.ImDrawData),
+    current_cleanup_frame: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, gc: *GraphicsContext, window: *c.GLFWwindow, swapchain: *Swapchain, pipeline_system: *UnifiedPipelineSystem) !ImGuiContext {
+        // Read buffer count from CVAR to match render thread
+        const buffer_count: u32 = blk: {
+            if (zephyr.cvar.getGlobal()) |registry| {
+                if (registry.getAsStringAlloc("r_snapshot_buffers", allocator)) |value| {
+                    defer allocator.free(value);
+                    if (std.fmt.parseInt(u32, value, 10)) |parsed| {
+                        break :blk @min(@max(parsed, 2), MAX_IMGUI_BUFFERS);
+                    } else |_| {}
+                }
+            }
+            break :blk 3; // Default to triple buffering
+        };
+
+        // Allocate draw data buffer array
+        const cloned_draw_data = try allocator.alloc(?*c.ImDrawData, buffer_count);
+        for (cloned_draw_data) |*slot| {
+            slot.* = null;
+        }
+        
+        // Initialize deferred cleanup lists (using empty struct literal)
+        const deferred_cleanup: [MAX_IMGUI_BUFFERS]std.ArrayList(*c.ImDrawData) = [_]std.ArrayList(*c.ImDrawData){std.ArrayList(*c.ImDrawData){}} ** MAX_IMGUI_BUFFERS;
+
         // Initialize ImGui context
         if (c.ImGui_CreateContext(null) == null) {
+            allocator.free(cloned_draw_data);
             return error.ImGuiCreateContextFailure;
         }
 
@@ -51,14 +99,6 @@ pub const ImGuiContext = struct {
         // Initialize our lightweight GLFW input handler (cast window pointer)
         const glfw_input = ImGuiGlfwInput.init(@ptrCast(window));
 
-        const ctx = ImGuiContext{
-            .allocator = allocator,
-            .gc = gc,
-            .window = window,
-            .vulkan_backend = backend_ptr,
-            .glfw_input = glfw_input,
-        };
-
         // Initialize the global texture manager now that we have a stable
         // backend pointer. If this fails, the deferred destroy above will
         // clean up the heap allocation.
@@ -67,16 +107,47 @@ pub const ImGuiContext = struct {
         // Ownership transferred; don't destroy on error path.
         should_destroy_backend = false;
 
+        const ctx = ImGuiContext{
+            .allocator = allocator,
+            .gc = gc,
+            .window = window,
+            .vulkan_backend = backend_ptr,
+            .glfw_input = glfw_input,
+            .cloned_draw_data = cloned_draw_data,
+            .buffer_count = buffer_count,
+            .deferred_cleanup = deferred_cleanup,
+        };
+
+        // Note: global_imgui_context will be set after ctx is at its stable location
+        // (see setGlobalContext method)
+
         return ctx;
     }
 
+    /// Set the global context pointer (call after init when context is at stable address)
+    pub fn setGlobalContext(self: *ImGuiContext) void {
+        global_imgui_context = self;
+    }
+
     pub fn deinit(self: *ImGuiContext) void {
+        // Clear global pointer
+        global_imgui_context = null;
+
+        // Clean up any remaining deferred draw data
+        for (&self.deferred_cleanup) |*list| {
+            for (list.items) |draw_data| {
+                self.freeClonedDrawData(draw_data);
+            }
+            list.deinit(self.allocator);
+        }
+
         // Clean up cloned draw data
-        inline for (0..2) |i| {
+        for (0..self.buffer_count) |i| {
             if (self.cloned_draw_data[i]) |draw_data| {
                 self.freeClonedDrawData(draw_data);
             }
         }
+        self.allocator.free(self.cloned_draw_data);
 
         // Tear down UI texture manager first (it may reference the backend),
         // then destroy the backend and ImGui context.
@@ -96,29 +167,23 @@ pub const ImGuiContext = struct {
 
     /// MAIN THREAD: Finalize ImGui frame and clone draw data for render thread
     /// Returns pointer to cloned draw data that should be stored in snapshot
-    pub fn endFrame(self: *ImGuiContext) ?*anyopaque {
+    /// Uses main_thread_write_idx from render_thread.zig to stay synchronized
+    pub fn endFrame(self: *ImGuiContext, write_idx: usize) !?*anyopaque {
         // Finalize ImGui frame to generate draw data
         c.ImGui_EndFrame();
         c.ImGui_Render();
 
         const src_draw_data = c.ImGui_GetDrawData() orelse return null;
 
-        // Determine which buffer to write to (flip-flop)
-        const write_idx = self.current_write_buffer.load(.monotonic);
-        const next_idx = 1 - write_idx;
-
-        // Free old cloned data in the buffer we're about to overwrite
-        if (self.cloned_draw_data[next_idx]) |old_data| {
-            self.freeClonedDrawData(old_data);
-            self.cloned_draw_data[next_idx] = null;
+        // Queue old cloned data for deferred cleanup (after MAX_FRAMES_IN_FLIGHT)
+        // This ensures render thread has finished using it before we free it
+        if (self.cloned_draw_data[write_idx]) |old_data| {
+            try self.deferred_cleanup[write_idx].append(self.allocator, old_data);
         }
 
-        // Deep clone the draw data
+        // Deep clone the draw data into the slot matching snapshot buffer index
         const cloned = self.cloneDrawData(src_draw_data) catch return null;
-        self.cloned_draw_data[next_idx] = cloned;
-
-        // Atomically flip to the new buffer
-        self.current_write_buffer.store(next_idx, .release);
+        self.cloned_draw_data[write_idx] = cloned;
 
         return @ptrCast(cloned);
     }

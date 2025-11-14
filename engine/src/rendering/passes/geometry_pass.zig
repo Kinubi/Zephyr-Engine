@@ -15,6 +15,7 @@ const Resource = @import("../unified_pipeline_system.zig").Resource;
 const ResourceBinder = @import("../resource_binder.zig").ResourceBinder;
 const BufferManager = @import("../buffer_manager.zig").BufferManager;
 const ManagedBuffer = @import("../buffer_manager.zig").ManagedBuffer;
+const TextureDescriptorManager = @import("../texture_descriptor_manager.zig").TextureDescriptorManager;
 const AssetManager = @import("../../assets/asset_manager.zig").AssetManager;
 const MaterialSystem = @import("../../ecs/systems/material_system.zig").MaterialSystem;
 const MaterialSetData = @import("../../ecs/systems/material_system.zig").MaterialSetData;
@@ -48,6 +49,7 @@ pub const GeometryPass = struct {
 
     // Material set data for this pass - direct access to buffers and textures
     material_set: *MaterialSetData,
+    descriptor_manager: *TextureDescriptorManager,
 
     // Swapchain formats
     swapchain_color_format: vk.Format,
@@ -74,6 +76,7 @@ pub const GeometryPass = struct {
         ecs_world: *World,
         global_ubo_set: *GlobalUboSet,
         material_set: *MaterialSetData,
+        descriptor_manager: *TextureDescriptorManager,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
         render_system: *RenderSystem,
@@ -95,6 +98,7 @@ pub const GeometryPass = struct {
             .ecs_world = ecs_world,
             .global_ubo_set = global_ubo_set,
             .material_set = material_set,
+            .descriptor_manager = descriptor_manager,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .render_system = render_system,
@@ -234,7 +238,8 @@ pub const GeometryPass = struct {
         try self.resource_binder.bindTextureArrayNamed(
             self.geometry_pipeline,
             "textures",
-            &self.material_set.texture_array,
+            &self.material_set.texture_arrays,
+            self.descriptor_manager,
         );
 
         // Bind global UBO for all frames (generation tracked automatically)

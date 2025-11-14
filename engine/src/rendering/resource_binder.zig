@@ -7,6 +7,7 @@ const Buffer = @import("../core/buffer.zig").Buffer;
 const Texture = @import("../core/texture.zig").Texture;
 const ShaderReflection = @import("../assets/shader_compiler.zig").ShaderReflection;
 const ManagedBuffer = @import("buffer_manager.zig").ManagedBuffer;
+const TextureDescriptorManager = @import("texture_descriptor_manager.zig").TextureDescriptorManager;
 const ManagedTexture = @import("texture_manager.zig").ManagedTexture;
 const ManagedTextureArray = @import("../ecs/systems/material_system.zig").ManagedTextureArray;
 const ManagedTLAS = @import("../rendering/raytracing/raytracing_system.zig").ManagedTLAS;
@@ -656,7 +657,8 @@ pub const ResourceBinder = struct {
         self: *ResourceBinder,
         pipeline_id: PipelineId,
         binding_name: []const u8,
-        managed_textures: *const ManagedTextureArray,
+        frame_textures: *const [MAX_FRAMES_IN_FLIGHT]ManagedTextureArray,
+        descriptor_manager: *TextureDescriptorManager,
     ) !void {
         const location = self.lookupBinding(binding_name) orelse {
             log(.ERROR, "resource_binder", "Unknown binding name: '{s}'", .{binding_name});
@@ -668,21 +670,34 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        // Always register for generation tracking
-        try self.updateTextureArrayByName(binding_name, pipeline_id, managed_textures);
+        // Convert array to pointer array for registration
+        const ptr_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedTextureArray = .{
+            &frame_textures[0],
+            &frame_textures[1],
+            &frame_textures[2],
+        };
 
-        // Don't bind if generation is 0 (not created yet) or if descriptor array is empty
-        // Use acquire ordering to ensure we see all writes that happened before generation increment
-        if (managed_textures.generation.load(.acquire) == 0 or managed_textures.descriptor_infos.len == 0) {
-            return;
-        }
+        // Register ALL frames' texture arrays for per-frame generation tracking
+        try self.registerTextureArrayByName(binding_name, pipeline_id, ptr_array, descriptor_manager);
 
-        // Bind descriptor array for all frames
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+        // Bind each frame's texture array to its corresponding frame
+        for (frame_textures, 0..) |*managed_texture_array, frame_idx| {
+            if (managed_texture_array.generation == 0 or managed_texture_array.size == 0) {
+                // Texture array not created yet - skip initial bind, updateFrame will bind it later
+                continue;
+            }
+
             const frame_index = @as(u32, @intCast(frame_idx));
 
+            // Resolve descriptors from arena using THIS FRAME's offset (like ManagedBuffer resolves buffer handle)
+            const descriptors = descriptor_manager.getDescriptorsAtOffset(
+                frame_index,
+                managed_texture_array.arena_offsets[frame_index],
+                managed_texture_array.size,
+            );
+
             const resource = Resource{
-                .image_array = managed_textures.descriptor_infos,
+                .image_array = descriptors,
             };
 
             try self.pipeline_system.bindResource(pipeline_id, location.set, location.binding, resource, frame_index);
@@ -953,6 +968,49 @@ pub const ResourceBinder = struct {
     }
 
     /// Register a managed texture array for automatic generation tracking
+    /// Register a per-frame texture array for automatic generation tracking
+    /// Each frame's texture array is tracked individually with mask-based binding
+    fn registerTextureArrayByName(
+        self: *ResourceBinder,
+        binding_name: []const u8,
+        pipeline_id: PipelineId,
+        frame_textures: [MAX_FRAMES_IN_FLIGHT]*const ManagedTextureArray,
+        descriptor_manager: *TextureDescriptorManager,
+    ) !void {
+        // Look up the binding location
+        const location = self.lookupBinding(binding_name) orelse {
+            log(.ERROR, "resource_binder", "Cannot track texture array '{s}': binding not found", .{binding_name});
+            return error.UnknownBinding;
+        };
+
+        // Check if we're already tracking this resource
+        for (self.tracked_resources.items) |*res| {
+            if (std.mem.eql(u8, res.name, binding_name) and
+                res.pipeline_id.hash == pipeline_id.hash)
+            {
+                // Update existing resource - copy the texture array and descriptor manager
+                res.resource = .{ .managed_texture_array = frame_textures };
+                res.descriptor_manager = descriptor_manager;
+                res.set = location.set;
+                res.binding = location.binding;
+                // Don't update last_generation - that happens in updateFrame
+                return;
+            }
+        }
+
+        // Register new tracked resource with per-frame texture array
+        const owned_name = try self.allocator.dupe(u8, binding_name);
+        try self.tracked_resources.append(self.allocator, BoundResource{
+            .name = owned_name,
+            .set = location.set,
+            .binding = location.binding,
+            .pipeline_id = pipeline_id,
+            .resource = .{ .managed_texture_array = frame_textures },
+            .descriptor_manager = descriptor_manager,
+            .last_generation = 0, // Will bind on first updateFrame
+        });
+    }
+
     fn updateTextureArrayByName(
         self: *ResourceBinder,
         binding_name: []const u8,
@@ -1070,7 +1128,7 @@ pub const ResourceBinder = struct {
                 res.pipeline_id.hash == pipeline_id.hash)
             {
                 // Update existing resource - copy the texture array
-                res.resource = .{ .managed_texture_array = frame_textures };
+                res.resource = .{ .managed_texture_per_frame = frame_textures };
                 res.set = location.set;
                 res.binding = location.binding;
                 // Don't update last_generation - that happens in updateFrame
@@ -1085,7 +1143,7 @@ pub const ResourceBinder = struct {
             .set = location.set,
             .binding = location.binding,
             .pipeline_id = pipeline_id,
-            .resource = .{ .managed_texture_array = frame_textures },
+            .resource = .{ .managed_texture_per_frame = frame_textures },
             .last_generation = 0, // Will bind on first updateFrame
         });
     }
@@ -1248,36 +1306,8 @@ pub const ResourceBinder = struct {
                         );
                     }
                 },
-                .texture_array => |arr| {
-                    // Cast back to ManagedTextureArray to access descriptor_infos
-
-                    const managed_textures: *const ManagedTextureArray = @ptrCast(@alignCast(arr.ptr));
-
-                    // Don't rebind if descriptor array is empty
-                    if (managed_textures.descriptor_infos.len == 0) {
-                        continue;
-                    }
-
-                    // Rebind the texture array for ALL frames
-                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                        const bind_frame = @as(u32, @intCast(frame_idx));
-
-                        const resource = Resource{
-                            .image_array = managed_textures.descriptor_infos,
-                        };
-
-                        try self.pipeline_system.bindResource(
-                            res.pipeline_id,
-                            res.set,
-                            res.binding,
-                            resource,
-                            bind_frame,
-                        );
-                    }
-                },
-                .managed_texture_array => |frame_textures| {
-                    // Per-frame texture arrays - bind each frame's texture individually
-
+                .managed_texture_per_frame => |frame_textures| {
+                    // Per-frame individual textures - bind each frame's texture
                     for (frame_textures, 0..) |managed_texture, frame_idx| {
                         // Skip if this frame's texture isn't created yet
                         if (managed_texture.generation == 0) continue;
@@ -1292,6 +1322,108 @@ pub const ResourceBinder = struct {
                             descriptor_info.image_view,
                             descriptor_info.sampler,
                             descriptor_info.image_layout,
+                            bind_frame,
+                        );
+                    }
+                },
+                .managed_texture_array => |frame_textures| {
+                    // Per-frame texture arrays - bind only current frame
+                    // Uses pending_bind_mask for gradual transition (like acceleration structures)
+                    const managed_texture_array = frame_textures[frame_index];
+
+                    // Skip if this frame's texture array isn't created yet
+                    if (managed_texture_array.generation == 0 or managed_texture_array.size == 0) continue;
+
+                    // Resolve descriptors from arena using THIS FRAME's offset (like ManagedBuffer resolves buffer handle)
+                    const descriptor_manager = res.descriptor_manager orelse {
+                        log(.ERROR, "resource_binder", "Texture array '{s}' missing descriptor_manager", .{res.name});
+                        continue;
+                    };
+                    
+                    const descriptors = descriptor_manager.getDescriptorsAtOffset(
+                        frame_index,
+                        managed_texture_array.arena_offsets[frame_index], // Use THIS frame's offset
+                        managed_texture_array.size,
+                    );
+
+                    // Bind the texture array for this frame
+                    const resource = Resource{
+                        .image_array = descriptors,
+                    };
+                    try self.pipeline_system.bindResource(
+                        res.pipeline_id,
+                        res.set,
+                        res.binding,
+                        resource,
+                        frame_index,
+                    );
+
+                    // Check if this is the FIRST frame to see this generation change
+                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    const prev_gen = current_gen - 1;
+                    if (res.last_generation == prev_gen) {
+                        // This is the first frame to process this generation
+                        // Reset mask to 0b111 atomically (only if it was 0)
+                        const expected: u8 = 0;
+                        const mutable_tex = @constCast(managed_texture_array);
+                        _ = mutable_tex.pending_bind_mask.cmpxchgStrong(
+                            expected,
+                            0b111,
+                            .acq_rel,
+                            .acquire,
+                        );
+                    }
+
+                    // Clear this frame's bit in the pending bind mask
+                    const frame_bit: u8 = @as(u8, 1) << @intCast(frame_index);
+                    const mutable_tex = @constCast(managed_texture_array);
+                    const old_mask = mutable_tex.pending_bind_mask.fetchAnd(~frame_bit, .acq_rel);
+
+                    // Check if mask is complete (all frames have bound)
+                    // If mask is NOT complete, revert last_generation so other frames can still bind
+                    const new_mask = old_mask & ~frame_bit;
+                    if (new_mask != 0) {
+                        // Other frames still need to bind - keep last_generation one behind
+                        res.last_generation = current_gen - 1;
+                    }
+
+                    // else: mask is complete (0), last_generation stays at current_gen
+                },
+                .texture_array => |arr| {
+                    // Old-style texture array (shared across all frames, no per-frame tracking)
+                    // Cast back to ManagedTextureArray
+                    const managed_textures: *const ManagedTextureArray = @ptrCast(@alignCast(arr.ptr));
+
+                    // Don't rebind if descriptor array is empty
+                    if (managed_textures.size == 0) {
+                        continue;
+                    }
+
+                    // Resolve descriptors from arena (assuming frame 0 for old-style shared arrays)
+                    const descriptor_manager = res.descriptor_manager orelse {
+                        log(.ERROR, "resource_binder", "Old-style texture array '{s}' missing descriptor_manager", .{res.name});
+                        continue;
+                    };
+                    
+                    const descriptors = descriptor_manager.getDescriptorsAtOffset(
+                        0, // Use frame 0 for old-style shared arrays
+                        managed_textures.arena_offsets[0],
+                        managed_textures.size,
+                    );
+
+                    // Rebind the texture array for ALL frames
+                    for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
+                        const bind_frame = @as(u32, @intCast(frame_idx));
+
+                        const resource = Resource{
+                            .image_array = descriptors,
+                        };
+
+                        try self.pipeline_system.bindResource(
+                            res.pipeline_id,
+                            res.set,
+                            res.binding,
+                            resource,
                             bind_frame,
                         );
                     }
@@ -1515,12 +1647,14 @@ const BoundResource = struct {
     pipeline_id: PipelineId,
     resource: ResourceVariant,
     last_generation: u32,
+    descriptor_manager: ?*TextureDescriptorManager = null, // For resolving texture array descriptors
 
     const ResourceVariant = union(enum) {
         managed_buffer: *const ManagedBuffer,
         managed_buffer_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer, // Per-frame buffers
         managed_texture: *const ManagedTexture,
-        managed_texture_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedTexture, // Per-frame textures
+        managed_texture_per_frame: [MAX_FRAMES_IN_FLIGHT]*const ManagedTexture, // Per-frame individual textures
+        managed_texture_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedTextureArray, // Per-frame texture descriptor arrays
         texture: TextureResource,
         texture_array: TextureArrayResource,
         acceleration_structure: AccelerationStructureResource,
@@ -1563,9 +1697,19 @@ const BoundResource = struct {
                 break :blk max_gen;
             },
             .managed_texture => |tex| tex.generation,
+            .managed_texture_per_frame => |tex_array| blk: {
+                // For per-frame individual textures, return the MAX generation across all frames
+                var max_gen: u32 = 0;
+                for (tex_array) |tex| {
+                    if (tex.generation > max_gen) {
+                        max_gen = tex.generation;
+                    }
+                }
+                break :blk max_gen;
+            },
             .managed_texture_array => |tex_array| blk: {
                 // For per-frame texture arrays, return the MAX generation across all frames
-                // This ensures we rebind ALL frames when ANY texture changes
+                // This ensures we rebind ALL frames when ANY texture array changes
                 var max_gen: u32 = 0;
                 for (tex_array) |tex| {
                     if (tex.generation > max_gen) {

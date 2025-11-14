@@ -223,7 +223,7 @@ pub const App = struct {
             .rotation = Math.Vec3.init(0, 0, 0),
             .scale = Math.Vec3.init(0.5, 0.5, 0.5),
         });
-        log(.INFO, "app", "Scheduled flat vase to be loaded at frame 1000", .{});
+        log(.INFO, "app", "Scheduled flat vase to be loaded at frame 50000", .{});
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
@@ -240,6 +240,7 @@ pub const App = struct {
             gc,
             self.engine.getUnifiedPipelineSystem().?,
             self.engine.getBufferManager().?,
+            self.engine.getDescriptorManager().?,
             self.engine.getTextureManager().?,
             swapchain,
             thread_pool,
@@ -373,6 +374,7 @@ pub const App = struct {
         // ==================== Initialize ImGui ====================
         log(.INFO, "app", "Initializing ImGui...", .{});
         imgui_context = try ImGuiContext.init(self.allocator, gc, @ptrCast(window.window.?), swapchain, self.engine.getUnifiedPipelineSystem().?);
+        imgui_context.setGlobalContext(); // Set global pointer now that context is at stable address
 
         ui_renderer = UIRenderer.init(self.allocator);
         log(.INFO, "app", "ImGui initialized", .{});
@@ -459,7 +461,11 @@ pub const App = struct {
             // This copies data from World into snapshot for render thread to use
             // Pass ImGui draw data captured during prepare() to avoid data race
             const imgui_data = ui_layer.getImGuiDrawData();
-            try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera, imgui_data);
+            const freed_buffer_idx = try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera, imgui_data);
+            
+            // Free old ImGui cloned data for the buffer that was just freed
+            // (now safe - render thread signaled it's done via semaphore wait)
+            ui_layer.freeOldImGuiBuffer(freed_buffer_idx);
 
             // Main thread continues immediately without blocking on GPU
             // The render thread will:

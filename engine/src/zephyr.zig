@@ -55,7 +55,9 @@ pub const PipelineBuilder = @import("rendering/pipeline_builder.zig");
 
 // ========== Threading ==========
 pub const ThreadPool = @import("threading/thread_pool.zig").ThreadPool;
-pub const RenderThreadContext = @import("threading/render_thread.zig").RenderThreadContext;
+const render_thread_module = @import("threading/render_thread.zig");
+pub const RenderThreadContext = render_thread_module.RenderThreadContext;
+pub const getCurrentWriteIndex = render_thread_module.getCurrentWriteIndex;
 pub const startRenderThread = @import("threading/render_thread.zig").startRenderThread;
 pub const stopRenderThread = @import("threading/render_thread.zig").stopRenderThread;
 pub const mainThreadUpdate = @import("threading/render_thread.zig").mainThreadUpdate;
