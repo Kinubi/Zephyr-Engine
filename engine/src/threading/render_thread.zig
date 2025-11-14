@@ -79,7 +79,11 @@ pub const RenderThreadContext = struct {
         for (0..buffer_count) |i| {
             main_ready[i] = .{};
             render_ready[i] = .{};
-            // Initially, main thread owns all buffers (can write to them)
+        }
+
+        // Initially signal all buffers as available for main thread
+        // Dynamic gap is managed by tryWait logic in mainThreadUpdate
+        for (0..buffer_count) |i| {
             main_ready[i].post();
         }
 
@@ -176,10 +180,27 @@ pub fn mainThreadUpdate(
     // Get the current write buffer (ring buffer: 0, 1, 2, 0, 1, 2, ...)
     const write_idx = main_thread_write_idx;
 
-    // BACKPRESSURE: Wait for this buffer to be available (Vulkan-style token passing)
-    // This semaphore was posted by render thread when it finished with this buffer,
-    // or was initially signaled at startup
-    ctx.main_thread_ready[write_idx].wait();
+    // DYNAMIC BACKPRESSURE: Allow variable gap between main and render threads
+    // Try multiple buffers back in order: 2 back, 1 back, current
+    // This minimizes latency while preventing render thread from falling too far behind
+    
+    // Calculate indices for 2 back and 1 back
+    const prev_1 = if (write_idx == 0) ctx.buffer_count - 1 else write_idx - 1;
+    const prev_2 = if (prev_1 == 0) ctx.buffer_count - 1 else prev_1 - 1;
+
+    // Try 2 frames back first (smallest gap)
+    if (ctx.main_thread_ready[prev_2].timedWait(0)) |_| {
+        // Success: 2 frames back was available, minimal latency
+    } else |_| {
+        // Try 1 frame back
+        if (ctx.main_thread_ready[prev_1].timedWait(0)) |_| {
+            // Success: 1 frame back was available
+        } else |_| {
+            // Must wait for current buffer (blocking) - enforces maximum gap
+            ctx.main_thread_ready[write_idx].wait();
+        }
+    }
+    // In all cases, we have permission to write to write_idx
 
     // Note: Application should free old ImGui buffer data here (e.g., UILayer.freeOldImGuiBuffer)
     // The buffer is now available, so old cloned data can be safely freed
@@ -208,7 +229,9 @@ pub fn mainThreadUpdate(
 
     // Signal render thread that this buffer is ready (pass the token)
     ctx.render_thread_ready[write_idx].post();
-    
+
+    std.log.info("[main_thread] Finished frame {} buffer {}", .{ frame_idx, write_idx });
+
     // Return the buffer index that was freed (for old data cleanup)
     return write_idx;
 }
@@ -327,6 +350,8 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
 
             // Mark frame as completed
             ctx.last_completed_frame.store(snapshot.frame_index, .release);
+
+            std.log.info("[render_thread] Finished frame {} buffer {}", .{ snapshot.frame_index, read_idx });
         }
 
         // Return buffer to main thread (pass token back)
