@@ -183,7 +183,7 @@ pub fn mainThreadUpdate(
     // DYNAMIC BACKPRESSURE: Allow variable gap between main and render threads
     // Try multiple buffers back in order: 2 back, 1 back, current
     // This minimizes latency while preventing render thread from falling too far behind
-    
+
     // Calculate indices for 2 back and 1 back
     const prev_1 = if (write_idx == 0) ctx.buffer_count - 1 else write_idx - 1;
     const prev_2 = if (prev_1 == 0) ctx.buffer_count - 1 else prev_1 - 1;
@@ -229,8 +229,6 @@ pub fn mainThreadUpdate(
 
     // Signal render thread that this buffer is ready (pass the token)
     ctx.render_thread_ready[write_idx].post();
-
-    std.log.info("[main_thread] Finished frame {} buffer {}", .{ frame_idx, write_idx });
 
     // Return the buffer index that was freed (for old data cleanup)
     return write_idx;
@@ -350,8 +348,6 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
 
             // Mark frame as completed
             ctx.last_completed_frame.store(snapshot.frame_index, .release);
-
-            std.log.info("[render_thread] Finished frame {} buffer {}", .{ snapshot.frame_index, read_idx });
         }
 
         // Return buffer to main thread (pass token back)

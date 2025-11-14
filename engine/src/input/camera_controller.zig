@@ -50,8 +50,8 @@ pub const CameraController = struct {
                     c.GLFW_KEY_A => self.keys.a = true,
                     c.GLFW_KEY_S => self.keys.s = true,
                     c.GLFW_KEY_D => self.keys.d = true,
-                    c.GLFW_KEY_SPACE => self.keys.up = true,
-                    c.GLFW_KEY_LEFT_CONTROL, c.GLFW_KEY_RIGHT_CONTROL => self.keys.down = true,
+                    c.GLFW_KEY_LEFT_CONTROL, c.GLFW_KEY_RIGHT_CONTROL => self.keys.up = true,
+                    c.GLFW_KEY_SPACE => self.keys.down = true,
                     c.GLFW_KEY_LEFT_SHIFT, c.GLFW_KEY_RIGHT_SHIFT => self.keys.fast = true,
                     else => return false,
                 }
@@ -64,8 +64,8 @@ pub const CameraController = struct {
                     c.GLFW_KEY_A => self.keys.a = false,
                     c.GLFW_KEY_S => self.keys.s = false,
                     c.GLFW_KEY_D => self.keys.d = false,
-                    c.GLFW_KEY_SPACE => self.keys.up = false,
-                    c.GLFW_KEY_LEFT_CONTROL, c.GLFW_KEY_RIGHT_CONTROL => self.keys.down = false,
+                    c.GLFW_KEY_LEFT_CONTROL, c.GLFW_KEY_RIGHT_CONTROL => self.keys.up = false,
+                    c.GLFW_KEY_SPACE => self.keys.down = false,
                     c.GLFW_KEY_LEFT_SHIFT, c.GLFW_KEY_RIGHT_SHIFT => self.keys.fast = false,
                     else => return false,
                 }
@@ -94,7 +94,7 @@ pub const CameraController = struct {
                 if (self.last_mouse_valid) {
                     const dx = x - self.last_mouse_x;
                     const dy = y - self.last_mouse_y;
-                    self.rotation.y -= @as(f32, @floatCast(dx)) * self.look_speed * 0.002; // sensitivity
+                    self.rotation.y += @as(f32, @floatCast(dx)) * self.look_speed * 0.002; // sensitivity
                     self.rotation.x -= @as(f32, @floatCast(dy)) * self.look_speed * 0.002;
                     // Clamp pitch
                     self.rotation.x = std.math.clamp(self.rotation.x, -1.5, 1.5);
