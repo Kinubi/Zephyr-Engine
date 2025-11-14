@@ -461,7 +461,11 @@ pub const App = struct {
             // This copies data from World into snapshot for render thread to use
             // Pass ImGui draw data captured during prepare() to avoid data race
             const imgui_data = ui_layer.getImGuiDrawData();
-            try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera, imgui_data);
+            const freed_buffer_idx = try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera, imgui_data);
+            
+            // Free old ImGui cloned data for the buffer that was just freed
+            // (now safe - render thread signaled it's done via semaphore wait)
+            ui_layer.freeOldImGuiBuffer(freed_buffer_idx);
 
             // Main thread continues immediately without blocking on GPU
             // The render thread will:

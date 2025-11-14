@@ -31,6 +31,7 @@ const startRenderThread = @import("../threading/render_thread.zig").startRenderT
 const stopRenderThread = @import("../threading/render_thread.zig").stopRenderThread;
 const mainThreadUpdate = @import("../threading/render_thread.zig").mainThreadUpdate;
 const rtGetEffectiveFrameCount = @import("../threading/render_thread.zig").getEffectiveFrameCount;
+const rtGetCurrentWriteIndex = @import("../threading/render_thread.zig").getCurrentWriteIndex;
 const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
@@ -539,12 +540,13 @@ pub const Engine = struct {
     /// Capture game state and signal render thread (Phase 2.0)
     /// Only call this if render thread is enabled
     /// This should be called from the main/game thread before beginFrame()
+    /// Returns the buffer index that was just freed (for cleanup)
     pub fn captureAndSignalRenderThread(
         self: *Engine,
         world: anytype, // *ecs.World or compatible
         camera: anytype, // *Camera or compatible
         imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
-    ) !void {
+    ) !usize {
         if (!self.use_render_thread) {
             return error.RenderThreadNotEnabled;
         }
@@ -554,7 +556,7 @@ pub const Engine = struct {
             const current_time = c.glfwGetTime();
             const dt: f32 = @floatCast(current_time - self.last_frame_time);
 
-            try mainThreadUpdate(
+            return try mainThreadUpdate(
                 ctx,
                 world,
                 camera,
@@ -574,6 +576,13 @@ pub const Engine = struct {
             return rtGetEffectiveFrameCount(ctx);
         }
         return 0;
+    }
+
+    /// Get the current write buffer index (main thread only)
+    /// Used to determine which buffer slot to free old data from
+    pub fn getCurrentWriteIndex(self: *Engine) usize {
+        _ = self;
+        return rtGetCurrentWriteIndex();
     }
 
     // === Rendering System Management ===

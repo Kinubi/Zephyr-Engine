@@ -13,18 +13,23 @@ const UnifiedPipelineSystem = zephyr.UnifiedPipelineSystem;
 
 pub const MAX_IMGUI_BUFFERS = 3; // Maximum for triple buffering
 
-// Global ImGui context pointer (set during init, used for freeing old buffers)
+// Global ImGui context pointer (set during init)
 var global_imgui_context: ?*ImGuiContext = null;
 
-/// Free old ImGui draw data for a specific buffer (called after semaphore wait)
-/// This is safe to call from any thread after the render thread has posted main_thread_ready
+/// Free old ImGui draw data for a specific buffer index
+/// Called after render thread signals buffer is ready (after semaphore wait)
+/// This processes deferred cleanup - freeing data that was queued MAX_FRAMES_IN_FLIGHT ago
 pub fn freeOldBufferData(buffer_idx: usize) void {
-    const ctx = global_imgui_context orelse return; // Context not yet initialized
-    if (buffer_idx >= ctx.cloned_draw_data.len) return; // Safety check
-    if (ctx.cloned_draw_data[buffer_idx]) |old_data| {
+    const ctx = global_imgui_context orelse return;
+    if (buffer_idx >= ctx.deferred_cleanup.len) return;
+    
+    // Process all deferred cleanups for this frame slot
+    // These are allocations from MAX_FRAMES_IN_FLIGHT ago that are now safe to free
+    var list = &ctx.deferred_cleanup[buffer_idx];
+    for (list.items) |old_data| {
         ctx.freeClonedDrawData(old_data);
-        ctx.cloned_draw_data[buffer_idx] = null;
     }
+    list.clearRetainingCapacity();
 }
 
 pub const ImGuiContext = struct {
@@ -37,6 +42,10 @@ pub const ImGuiContext = struct {
     // Multi-buffered cloned draw data for render thread (2-3 buffers)
     cloned_draw_data: []?*c.ImDrawData,
     buffer_count: u32,
+    
+    // Deferred cleanup: old draw data queued for deletion after MAX_FRAMES_IN_FLIGHT
+    deferred_cleanup: [MAX_IMGUI_BUFFERS]std.ArrayList(*c.ImDrawData),
+    current_cleanup_frame: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, gc: *GraphicsContext, window: *c.GLFWwindow, swapchain: *Swapchain, pipeline_system: *UnifiedPipelineSystem) !ImGuiContext {
         // Read buffer count from CVAR to match render thread
@@ -57,6 +66,9 @@ pub const ImGuiContext = struct {
         for (cloned_draw_data) |*slot| {
             slot.* = null;
         }
+        
+        // Initialize deferred cleanup lists (using empty struct literal)
+        const deferred_cleanup: [MAX_IMGUI_BUFFERS]std.ArrayList(*c.ImDrawData) = [_]std.ArrayList(*c.ImDrawData){std.ArrayList(*c.ImDrawData){}} ** MAX_IMGUI_BUFFERS;
 
         // Initialize ImGui context
         if (c.ImGui_CreateContext(null) == null) {
@@ -103,6 +115,7 @@ pub const ImGuiContext = struct {
             .glfw_input = glfw_input,
             .cloned_draw_data = cloned_draw_data,
             .buffer_count = buffer_count,
+            .deferred_cleanup = deferred_cleanup,
         };
 
         // Note: global_imgui_context will be set after ctx is at its stable location
@@ -119,6 +132,14 @@ pub const ImGuiContext = struct {
     pub fn deinit(self: *ImGuiContext) void {
         // Clear global pointer
         global_imgui_context = null;
+
+        // Clean up any remaining deferred draw data
+        for (&self.deferred_cleanup) |*list| {
+            for (list.items) |draw_data| {
+                self.freeClonedDrawData(draw_data);
+            }
+            list.deinit(self.allocator);
+        }
 
         // Clean up cloned draw data
         for (0..self.buffer_count) |i| {
@@ -147,15 +168,18 @@ pub const ImGuiContext = struct {
     /// MAIN THREAD: Finalize ImGui frame and clone draw data for render thread
     /// Returns pointer to cloned draw data that should be stored in snapshot
     /// Uses main_thread_write_idx from render_thread.zig to stay synchronized
-    pub fn endFrame(self: *ImGuiContext, write_idx: usize) ?*anyopaque {
+    pub fn endFrame(self: *ImGuiContext, write_idx: usize) !?*anyopaque {
         // Finalize ImGui frame to generate draw data
         c.ImGui_EndFrame();
         c.ImGui_Render();
 
         const src_draw_data = c.ImGui_GetDrawData() orelse return null;
 
-        // TODO: Free old cloned data (currently leaking but with per-frame GPU buffers, leak is small)
-        // The GPU vertex/index buffers are now per-frame and reused, so the major leak is fixed
+        // Queue old cloned data for deferred cleanup (after MAX_FRAMES_IN_FLIGHT)
+        // This ensures render thread has finished using it before we free it
+        if (self.cloned_draw_data[write_idx]) |old_data| {
+            try self.deferred_cleanup[write_idx].append(self.allocator, old_data);
+        }
 
         // Deep clone the draw data into the slot matching snapshot buffer index
         const cloned = self.cloneDrawData(src_draw_data) catch return null;

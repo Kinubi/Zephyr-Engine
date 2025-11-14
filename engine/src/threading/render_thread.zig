@@ -165,13 +165,14 @@ pub fn stopRenderThread(ctx: *RenderThreadContext) void {
 
 /// MAIN THREAD: Submit new game state to render thread
 /// With triple buffering, main thread can be up to 2 frames ahead
+/// Returns the buffer index that was just freed (for cleanup)
 pub fn mainThreadUpdate(
     ctx: *RenderThreadContext,
     world: *ecs.World,
     camera: anytype,
     delta_time: f32,
     imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
-) !void {
+) !usize {
     // Get the current write buffer (ring buffer: 0, 1, 2, 0, 1, 2, ...)
     const write_idx = main_thread_write_idx;
 
@@ -179,6 +180,9 @@ pub fn mainThreadUpdate(
     // This semaphore was posted by render thread when it finished with this buffer,
     // or was initially signaled at startup
     ctx.main_thread_ready[write_idx].wait();
+
+    // Note: Application should free old ImGui buffer data here (e.g., UILayer.freeOldImGuiBuffer)
+    // The buffer is now available, so old cloned data can be safely freed
 
     // Free old snapshot in the write buffer
     if (ctx.game_state[write_idx].entity_count > 0) {
@@ -204,6 +208,9 @@ pub fn mainThreadUpdate(
 
     // Signal render thread that this buffer is ready (pass the token)
     ctx.render_thread_ready[write_idx].post();
+    
+    // Return the buffer index that was freed (for old data cleanup)
+    return write_idx;
 }
 
 /// Get the effective frame count (slowest of main thread and render thread)
