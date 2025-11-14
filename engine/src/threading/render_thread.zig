@@ -177,40 +177,71 @@ pub fn mainThreadUpdate(
     delta_time: f32,
     imgui_draw_data: ?*anyopaque, // ImGui draw data from UI layer
 ) !usize {
-    // Get the current write buffer (ring buffer: 0, 1, 2, 0, 1, 2, ...)
     const write_idx = main_thread_write_idx;
 
-    // DYNAMIC BACKPRESSURE: Allow variable gap between main and render threads
-    // Try multiple buffers back in order: 2 back, 1 back, current
-    // This minimizes latency while preventing render thread from falling too far behind
+    // DYNAMIC BACKPRESSURE MECHANISM:
+    // This implements a variable-gap triple buffering system that adapts to render thread performance.
+    //
+    // Traditional triple buffering enforces a fixed 3-frame gap between main and render threads,
+    // which means UI changes take 3 frames to appear on screen. This dynamic approach reduces
+    // latency during normal operation while still providing headroom when the render thread stutters.
+    //
+    // Strategy: Try to acquire buffers in order of preference (smallest gap first):
+    //   1. Try 2 frames back (write_idx - 2): If available, gap is only 1 frame - minimal latency
+    //   2. Try 1 frame back (write_idx - 1): If available, gap is 2 frames - moderate latency
+    //   3. Wait on current (write_idx):       Block until available - enforces max 3-frame gap
+    //
+    // How it works:
+    // - If render thread is keeping up, it frees buffers quickly and main thread can proceed
+    //   with minimal gap (often running just 1 frame ahead instead of 3)
+    // - If render thread stutters (shader compilation, heavy GPU work), main thread will
+    //   eventually hit the blocking wait(), preventing runaway frame generation
+    // - Each successful timedWait(0) consumes a semaphore token, allowing write to write_idx
+    //
+    // Example scenarios:
+    // Buffer sequence: 0 -> 1 -> 2 -> 0 -> 1 -> 2...
+    //
+    // Scenario A (render keeping up):
+    //   - Main at buffer 0, tries buffer 1 (2 back) - SUCCESS - proceeds immediately, 1 frame gap
+    //   - Render thread is fast enough to keep freeing buffers ahead of main thread
+    //
+    // Scenario B (render behind):
+    //   - Main at buffer 0, tries buffer 1 (2 back) - TIMEOUT (render still using it)
+    //   - Tries buffer 2 (1 back) - TIMEOUT (render still using it)
+    //   - Waits on buffer 0 (current) - BLOCKS until render frees it, enforces max gap
+    //
+    // Benefits:
+    // - UI responsiveness: Changes appear faster when GPU is not bottleneck
+    // - Stutter isolation: Render thread stutters don't immediately block main thread
+    // - Automatic adaptation: System naturally adjusts gap based on relative thread speeds
 
-    // Calculate indices for 2 back and 1 back
+    // Calculate the two previous buffer indices (wrapping around at buffer_count)
     const prev_1 = if (write_idx == 0) ctx.buffer_count - 1 else write_idx - 1;
     const prev_2 = if (prev_1 == 0) ctx.buffer_count - 1 else prev_1 - 1;
 
-    // Try 2 frames back first (smallest gap)
+    // Try to acquire the oldest buffer first (smallest gap = best latency)
     if (ctx.main_thread_ready[prev_2].timedWait(0)) |_| {
-        // Success: 2 frames back was available, minimal latency
+        // Success: Render thread already finished with prev_2, we can proceed with minimal gap
+        // The main thread is running close behind the render thread (1 frame gap)
     } else |_| {
-        // Try 1 frame back
+        // Timeout: prev_2 not available yet, try the next oldest buffer
         if (ctx.main_thread_ready[prev_1].timedWait(0)) |_| {
-            // Success: 1 frame back was available
+            // Success: prev_1 is available, proceed with moderate gap (2 frame gap)
         } else |_| {
-            // Must wait for current buffer (blocking) - enforces maximum gap
+            // Both old buffers still in use - must wait for current buffer to be freed
+            // This is a blocking wait that enforces the maximum gap of (buffer_count - 1) frames
+            // Only happens when render thread is significantly behind main thread
             ctx.main_thread_ready[write_idx].wait();
         }
     }
-    // In all cases, we have permission to write to write_idx
+    // At this point, we have successfully acquired a semaphore token and can safely
+    // write to write_idx. The render thread won't touch this buffer until we signal it.
 
-    // Note: Application should free old ImGui buffer data here (e.g., UILayer.freeOldImGuiBuffer)
-    // The buffer is now available, so old cloned data can be safely freed
-
-    // Free old snapshot in the write buffer
+    // Free old snapshot and capture new one
     if (ctx.game_state[write_idx].entity_count > 0) {
         freeSnapshot(&ctx.game_state[write_idx]);
     }
 
-    // Capture new snapshot (material deltas captured directly from MaterialDeltasComponent)
     const frame_idx = ctx.frame_index.fetchAdd(1, .monotonic);
     ctx.game_state[write_idx] = try captureSnapshot(
         ctx.allocator,
@@ -219,18 +250,12 @@ pub fn mainThreadUpdate(
         frame_idx,
         delta_time,
         imgui_draw_data,
-        write_idx, // Pass buffer index so snapshot knows which buffer its ImGui data is in
+        write_idx,
     );
 
-    // Advance write index for next frame AFTER capturing snapshot
-    // This ensures getCurrentWriteIndex() returns the index we just wrote to
-    // during the same frame's prepare phase (for ImGui synchronization)
     main_thread_write_idx = (write_idx + 1) % ctx.buffer_count;
-
-    // Signal render thread that this buffer is ready (pass the token)
     ctx.render_thread_ready[write_idx].post();
 
-    // Return the buffer index that was freed (for old data cleanup)
     return write_idx;
 }
 
@@ -241,122 +266,74 @@ pub fn getEffectiveFrameCount(ctx: *RenderThreadContext) u64 {
     return @min(main_frame, completed_frame);
 }
 
-/// Render thread entry point - runs in separate thread.
-/// This is the function that the render thread executes in a loop.
 fn renderThreadLoop(ctx: *RenderThreadContext) void {
     renderThreadLoopImpl(ctx) catch |err| {
-        log(.ERROR, "render_thread", "Render thread crashed with error: {}", .{err});
+        log(.ERROR, "render_thread", "Render thread crashed: {}", .{err});
     };
 }
 
 fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
-    // Get engine pointer (null check for tests)
     const engine_ptr = if (ctx.engine) |eng| @as(*Engine, @ptrCast(@alignCast(eng))) else null;
-
-    // Render thread maintains its own cycling index independently
     var read_idx: usize = 0;
 
     while (!ctx.shutdown.load(.acquire)) {
-        // Wait for main thread to signal this buffer is ready (Vulkan-style token passing)
         ctx.render_thread_ready[read_idx].wait();
 
-        // Check shutdown again in case we were woken to exit
         if (ctx.shutdown.load(.acquire)) break;
 
         const snapshot = &ctx.game_state[read_idx];
 
-        // Skip if snapshot is empty (shouldn't happen in normal operation)
         if (snapshot.entity_count == 0) {
-            // Return buffer to main thread (pass token back)
             ctx.main_thread_ready[read_idx].post();
-            // Advance to next buffer
             read_idx = (read_idx + 1) % ctx.buffer_count;
             continue;
         }
 
-        // If we have an engine, do the full frame rendering
         if (engine_ptr) |engine| {
-            // ============================================
-            // PHASE 2.1 Render Thread Responsibilities:
-            //
-            // 1. Begin frame (acquire swapchain image)
-            // 2. Update (Vulkan descriptor updates)
-            // 3. Render (Vulkan draw commands)
-            // 4. End frame (submit & present)
-            //
-            // IMPORTANT: NO ECS queries on render thread!
-            // - Main thread called scene.prepareFrame() which did ECS queries AND applied PT toggles
-            // - Main thread captured snapshot for us to use
-            // - We only do Vulkan work (descriptor updates + draw commands)
-            // ============================================
+            // Render thread: beginFrame -> update -> render -> endFrame
+            // No ECS queries - main thread captured snapshot for us
 
             const frame_info = engine.beginFrame() catch |err| {
-                // If window is closed, treat as shutdown signal
-                if (err == error.WindowClosed) {
-                    break;
-                }
-                // DeviceLost is fatal - panic to see stack trace
+                if (err == error.WindowClosed) break;
                 if (err == error.DeviceLost) {
-                    log(.ERROR, "render_thread", "FATAL: DeviceLost error - panicking to see stack trace", .{});
-                    @panic("DeviceLost - check stack trace for cause");
+                    log(.ERROR, "render_thread", "FATAL: DeviceLost", .{});
+                    @panic("DeviceLost - check stack trace");
                 }
                 log(.ERROR, "render_thread", "beginFrame failed: {}", .{err});
-                // Return buffer to main thread on error
                 ctx.main_thread_ready[read_idx].post();
-                // Advance to next buffer before continuing
                 read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
-            // Set snapshot reference in frame_info for thread-safe access
             frame_info.snapshot = snapshot;
 
-            // PHASE 2.1: Update phase does Vulkan descriptor updates (render thread)
-            // This calls render_graph.update() which updates descriptor sets
             engine.update(frame_info) catch |err| {
                 log(.ERROR, "render_thread", "update failed: {}", .{err});
-                // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
-                // Return buffer to main thread on error
                 ctx.main_thread_ready[read_idx].post();
-                // Advance to next buffer before continuing
                 read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
-            // PHASE 2.1: Render phase does Vulkan draw commands (render thread)
-            // This calls render_graph.execute() which records command buffers
             engine.render(frame_info) catch |err| {
                 log(.ERROR, "render_thread", "render failed: {}", .{err});
-                // Still try to end frame to avoid getting stuck
                 _ = engine.endFrame(frame_info) catch {};
-                // Return buffer to main thread on error
                 ctx.main_thread_ready[read_idx].post();
-                // Advance to next buffer before continuing
                 read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
             engine.endFrame(frame_info) catch |err| {
                 log(.ERROR, "render_thread", "endFrame failed: {}", .{err});
-                // Return buffer to main thread on error
                 ctx.main_thread_ready[read_idx].post();
-                // Advance to next buffer before continuing
                 read_idx = (read_idx + 1) % ctx.buffer_count;
                 continue;
             };
 
-            // Mark frame as completed
             ctx.last_completed_frame.store(snapshot.frame_index, .release);
         }
 
-        // Return buffer to main thread (pass token back)
-        // Post BEFORE advancing so main thread gets the token for the buffer we just finished
         ctx.main_thread_ready[read_idx].post();
-        // Advance read index for next iteration (ring buffer: 0, 1, 2, 0, 1, 2, ...)
         read_idx = (read_idx + 1) % ctx.buffer_count;
-
-        // NOTE: Don't free snapshot here - mainThreadUpdate will free it
-        // when it overwrites this buffer with a new snapshot
     }
 }
