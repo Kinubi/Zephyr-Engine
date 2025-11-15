@@ -31,7 +31,7 @@ pub const GPUMaterial = ecs.GPUMaterial;
 /// -----------------
 /// With triple buffering, we have 3 render frames executing simultaneously:
 ///   - Frame 0 might be rendering data from 3 frames ago
-///   - Frame 1 might be rendering data from 2 frames ago  
+///   - Frame 1 might be rendering data from 2 frames ago
 ///   - Frame 2 might be rendering data from 1 frame ago
 ///
 /// Each frame needs its OWN snapshot of texture descriptors from when that frame
@@ -99,13 +99,14 @@ pub const ManagedTextureArray = struct {
     arena_offsets: [MAX_FRAMES_IN_FLIGHT]usize = [_]usize{0} ** MAX_FRAMES_IN_FLIGHT, // Per-frame offset into descriptor manager's frame arenas
     generation: u32 = 0,
     size: usize = 0, // Number of descriptors in the array (same for all frames)
-    pending_bind_mask: std.atomic.Value(u8) = std.atomic.Value(u8).init(0b111),
+    pending_bind_mask: std.atomic.Value(u8) = std.atomic.Value(u8).init((@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1),
 
     /// Mark this texture array as updated - increments generation and sets mask
     /// Call this after updating arena allocation to trigger rebinding
     pub fn markUpdated(self: *ManagedTextureArray) void {
         self.generation +%= 1;
-        self.pending_bind_mask.store(0b111, .release); // All frames need rebinding
+        const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
+        self.pending_bind_mask.store(all_frames_mask, .release); // All frames need rebinding
     }
 };
 
@@ -208,7 +209,7 @@ pub const MaterialSetData = struct {
                 .generation = 1,
                 .binding_info = null,
                 .arena_offset = 0,
-                .pending_bind_mask = std.atomic.Value(u8).init(0b111),
+                .pending_bind_mask = std.atomic.Value(u8).init((@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1),
             };
 
             // Allocate from frame arena
@@ -583,7 +584,7 @@ pub const MaterialSystem = struct {
                                 // Arena needs compaction - compact and retry
                                 log(.WARN, "material_system", "Frame {} descriptor arena requires compaction, compacting and retrying", .{frame});
                                 try self.descriptor_manager.compactFrameArena(frame);
-                                
+
                                 // Retry allocation after compaction
                                 break :blk try self.descriptor_manager.allocateFromFrame(
                                     frame,

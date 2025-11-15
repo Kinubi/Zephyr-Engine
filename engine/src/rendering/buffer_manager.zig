@@ -62,7 +62,8 @@ pub const ManagedBuffer = struct {
     /// Call this whenever buffer content/location changes (resize, arena allocation, compaction)
     pub fn markUpdated(self: *ManagedBuffer) void {
         self.generation +%= 1;
-        self.pending_bind_mask.store(0b111, .release); // All frames need rebinding
+        const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
+        self.pending_bind_mask.store(all_frames_mask, .release); // All frames need rebinding
     }
 };
 

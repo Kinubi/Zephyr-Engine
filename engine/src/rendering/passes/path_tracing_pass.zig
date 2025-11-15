@@ -302,7 +302,7 @@ pub const PathTracingPass = struct {
         try self.resource_binder.bindStorageBufferArrayNamed(
             self.path_tracing_pipeline,
             "material_buffer", // The actual binding name from shader
-            .{ self.material_set.material_buffers[0], self.material_set.material_buffers[1], self.material_set.material_buffers[2] },
+            self.material_set.material_buffers,
         );
 
         // Bind texture array from material set (generation tracked automatically)

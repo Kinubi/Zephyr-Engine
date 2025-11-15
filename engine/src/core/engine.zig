@@ -101,7 +101,7 @@ pub const Engine = struct {
 
         pub const RendererConfig = struct {
             enable_ray_tracing: bool = true,
-            max_frames_in_flight: u32 = 3,
+            max_frames_in_flight: u32 = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT,
         };
     };
 

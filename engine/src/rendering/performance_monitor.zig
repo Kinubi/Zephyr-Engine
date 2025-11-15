@@ -3,9 +3,11 @@ const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const log = @import("../utils/log.zig").log;
 
+const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+
 /// Performance monitoring with CPU and GPU timing
 pub const PerformanceMonitor = struct {
-    const MAX_FRAMES = 3; // Match MAX_FRAMES_IN_FLIGHT
+    const MAX_FRAMES = MAX_FRAMES_IN_FLIGHT;
     const MAX_PASSES = 16; // Maximum number of passes to track
     const QUERIES_PER_FRAME = MAX_PASSES * 2 + 2; // Frame start/end + per-pass begin/end
     const QUERY_RESULT_CAPACITY = QUERIES_PER_FRAME * 2; // Timestamp + availability per query
