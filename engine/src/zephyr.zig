@@ -118,4 +118,4 @@ pub const cvar = @import("core/cvar.zig");
 // ===== Constants =====
 /// Maximum number of frames that can be in-flight simultaneously
 /// This affects command buffer allocation and synchronization
-pub const MAX_FRAMES_IN_FLIGHT: u32 = 3;
+pub const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;

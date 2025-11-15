@@ -18,6 +18,7 @@ const WorkItem = @import("../../threading/thread_pool.zig").WorkItem;
 const log = @import("../../utils/log.zig").log;
 const Scene = @import("../../scene/scene.zig").Scene;
 const ecs = @import("../world.zig");
+const MAX_FRAMES_IN_FLIGHT = @import("../../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
 const BufferManager = @import("../../rendering/buffer_manager.zig").BufferManager;
 const BufferConfig = @import("../../rendering/buffer_manager.zig").BufferConfig;
 const ManagedBuffer = @import("../../rendering/buffer_manager.zig").ManagedBuffer;
@@ -55,7 +56,7 @@ pub const RenderSystem = struct {
     // Instance data SSBO for instanced rendering (per-frame, from arena)
     // RenderSystem owns and uploads this buffer (parallel to MaterialSystem owning material_buffer)
     // Always valid - starts as dummy buffer, gets replaced with real data
-    instance_buffers: [3]*ManagedBuffer, // Heap-allocated pointers (similar to MaterialSystem)
+    instance_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer, // Heap-allocated pointers (similar to MaterialSystem)
     instance_capacity: usize = 0, // Current capacity in number of instances
 
     // Track last instance data for delta detection
@@ -83,7 +84,7 @@ pub const RenderSystem = struct {
             .material_index = 0,
         };
 
-        var instance_buffers: [3]*ManagedBuffer = undefined;
+        var instance_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = undefined;
         const dummy_size = @sizeOf(render_data_types.RasterizationData.InstanceData);
 
         // Allocate dummy buffer for each frame from its arena
@@ -109,7 +110,7 @@ pub const RenderSystem = struct {
                 .generation = 1,
                 .binding_info = null,
                 .arena_offset = 0,
-                .pending_bind_mask = std.atomic.Value(u8).init(0b111),
+                .pending_bind_mask = std.atomic.Value(u8).init((@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1),
             };
 
             const alloc_result = try bm.allocateFromFrameArena(

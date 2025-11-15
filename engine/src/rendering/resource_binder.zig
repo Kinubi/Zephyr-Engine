@@ -670,12 +670,11 @@ pub const ResourceBinder = struct {
             return error.BindingTypeMismatch;
         }
 
-        // Convert array to pointer array for registration
-        const ptr_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedTextureArray = .{
-            &frame_textures[0],
-            &frame_textures[1],
-            &frame_textures[2],
-        };
+        // Convert pointer-to-array into array-of-pointers for registration
+        var ptr_array: [MAX_FRAMES_IN_FLIGHT]*const ManagedTextureArray = undefined;
+        for (frame_textures, 0..) |*tex, i| {
+            ptr_array[i] = tex;
+        }
 
         // Register ALL frames' texture arrays for per-frame generation tracking
         try self.registerTextureArrayByName(binding_name, pipeline_id, ptr_array, descriptor_manager);
@@ -1257,16 +1256,17 @@ pub const ResourceBinder = struct {
                     }
 
                     // Check if this is the FIRST frame to see this generation change
-                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    // If so, we need to reset the mask (all frames need to bind)
                     const prev_gen = current_gen - 1;
                     if (res.last_generation == prev_gen) {
                         // This is the first frame to process this generation
-                        // Reset mask to 0b111 atomically (only if it was 0)
+                        // Reset mask atomically (only if it was 0)
                         const expected: u8 = 0;
+                        const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
                         const mutable_buf = @constCast(managed_buffer);
                         _ = mutable_buf.pending_bind_mask.cmpxchgStrong(
                             expected,
-                            0b111,
+                            all_frames_mask,
                             .acq_rel,
                             .acquire,
                         );
@@ -1339,7 +1339,7 @@ pub const ResourceBinder = struct {
                         log(.ERROR, "resource_binder", "Texture array '{s}' missing descriptor_manager", .{res.name});
                         continue;
                     };
-                    
+
                     const descriptors = descriptor_manager.getDescriptorsAtOffset(
                         frame_index,
                         managed_texture_array.arena_offsets[frame_index], // Use THIS frame's offset
@@ -1359,16 +1359,17 @@ pub const ResourceBinder = struct {
                     );
 
                     // Check if this is the FIRST frame to see this generation change
-                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    // If so, we need to reset the mask (all frames need to bind)
                     const prev_gen = current_gen - 1;
                     if (res.last_generation == prev_gen) {
                         // This is the first frame to process this generation
-                        // Reset mask to 0b111 atomically (only if it was 0)
+                        // Reset mask atomically (only if it was 0)
                         const expected: u8 = 0;
+                        const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
                         const mutable_tex = @constCast(managed_texture_array);
                         _ = mutable_tex.pending_bind_mask.cmpxchgStrong(
                             expected,
-                            0b111,
+                            all_frames_mask,
                             .acq_rel,
                             .acquire,
                         );
@@ -1404,7 +1405,7 @@ pub const ResourceBinder = struct {
                         log(.ERROR, "resource_binder", "Old-style texture array '{s}' missing descriptor_manager", .{res.name});
                         continue;
                     };
-                    
+
                     const descriptors = descriptor_manager.getDescriptorsAtOffset(
                         0, // Use frame 0 for old-style shared arrays
                         managed_textures.arena_offsets[0],
@@ -1455,15 +1456,16 @@ pub const ResourceBinder = struct {
                     );
 
                     // Check if this is the FIRST frame to see this generation change
-                    // If so, we need to reset the mask to 0b111 (all frames need to bind)
+                    // If so, we need to reset the mask (all frames need to bind)
                     const prev_gen = current_gen - 1;
                     if (res.last_generation == prev_gen) {
                         // This is the first frame to process this generation
-                        // Reset mask to 0b111 atomically (only if it was 0)
+                        // Reset mask atomically (only if it was 0)
                         const expected: u8 = 0;
+                        const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
                         _ = managed_tlas.pending_bind_mask.cmpxchgStrong(
                             expected,
-                            0b111,
+                            all_frames_mask,
                             .acq_rel,
                             .acquire,
                         );

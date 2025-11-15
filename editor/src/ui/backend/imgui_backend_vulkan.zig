@@ -14,7 +14,7 @@ const PipelineId = zephyr.PipelineId;
 const Resource = zephyr.Resource;
 const ResourceBinder = zephyr.ResourceBinder;
 const DynamicRenderingHelper = zephyr.DynamicRenderingHelper;
-const MAX_FRAMES_IN_FLIGHT = 3; // TODO: Get from engine config
+const MAX_FRAMES_IN_FLIGHT = zephyr.MAX_FRAMES_IN_FLIGHT;
 
 pub const ImGuiVulkanBackend = struct {
     allocator: std.mem.Allocator,

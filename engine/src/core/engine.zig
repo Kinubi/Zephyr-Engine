@@ -101,7 +101,7 @@ pub const Engine = struct {
 
         pub const RendererConfig = struct {
             enable_ray_tracing: bool = true,
-            max_frames_in_flight: u32 = 3,
+            max_frames_in_flight: u32 = @import("swapchain.zig").MAX_FRAMES_IN_FLIGHT,
         };
     };
 
@@ -429,6 +429,11 @@ pub const Engine = struct {
         // 4.5. Begin frame for buffer manager (cleanup old buffers)
         if (self.buffer_manager) |bm| {
             bm.beginFrame(self.frame_info.current_frame);
+        }
+
+        // 4.6. Begin frame for descriptor manager (compact arenas if needed)
+        if (self.descriptor_manager) |dm| {
+            try dm.beginFrame(self.frame_info.current_frame);
         }
 
         // 5. Get window size for extent

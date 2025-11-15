@@ -677,7 +677,8 @@ pub const RaytracingSystem = struct {
                 // CRITICAL: Set pending bind mask BEFORE incrementing generation
                 // This prevents race where frames see generation change before mask is set
                 // Use .release ordering to ensure mask write is visible before generation increment
-                default_set.tlas.pending_bind_mask.store(0b111, .release);
+                const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
+                default_set.tlas.pending_bind_mask.store(all_frames_mask, .release);
 
                 // Increment generation atomically (for descriptor tracking)
                 // Resource binder will see this change and bind each frame,

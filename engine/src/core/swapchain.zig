@@ -7,10 +7,24 @@ const ManagedTexture = @import("../rendering/texture_manager.zig").ManagedTextur
 const glfw = @import("glfw");
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
 const log = @import("../utils/log.zig").log;
+const CVars = @import("cvar.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const MAX_FRAMES_IN_FLIGHT = 3;
+pub const MAX_FRAMES_IN_FLIGHT = 4; // Compile-time maximum for array sizes
+
+/// Get the runtime frames-in-flight value from CVar (defaults to 4 if CVar not available)
+pub fn getFramesInFlight(allocator: std.mem.Allocator) u32 {
+    if (CVars.getGlobal()) |registry| {
+        if (registry.getAsStringAlloc("r_frames_in_flight", allocator)) |value| {
+            defer allocator.free(value);
+            if (std.fmt.parseInt(u32, value, 10)) |parsed| {
+                return @min(parsed, MAX_FRAMES_IN_FLIGHT);
+            } else |_| {}
+        }
+    }
+    return MAX_FRAMES_IN_FLIGHT;
+}
 
 pub const Swapchain = struct {
     pub const PresentState = enum {
@@ -39,6 +53,8 @@ pub const Swapchain = struct {
     swap_images: []SwapImage,
     // HDR textures per frame-in-flight (decoupled from swapchain images)
     hdr_textures: [MAX_FRAMES_IN_FLIGHT]*ManagedTexture = undefined,
+    // Runtime frames in flight (from CVar, <= MAX_FRAMES_IN_FLIGHT)
+    frames_in_flight: u32,
     image_index: u32 = 0,
     use_viewport_texture: bool = false,
     compute: bool = false, // Whether to use compute shaders in the swapchain
@@ -47,8 +63,12 @@ pub const Swapchain = struct {
         var swapchain = try initRecycle(gc, allocator, extent, .null_handle, .null_handle);
         swapchain.texture_manager = texture_manager;
 
+        // Read runtime frames-in-flight from CVar
+        swapchain.frames_in_flight = getFramesInFlight(allocator);
+        log(.INFO, "swapchain", "Using {} frames in flight (max: {})", .{ swapchain.frames_in_flight, MAX_FRAMES_IN_FLIGHT });
+
         // Create HDR textures per frame-in-flight (independent of swapchain image count)
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        for (0..swapchain.frames_in_flight) |i| {
             var hdr_name_buf: [64]u8 = undefined;
             const hdr_name = try std.fmt.bufPrint(&hdr_name_buf, "swapchain_hdr_{}", .{i});
 
@@ -115,10 +135,6 @@ pub const Swapchain = struct {
         swapchain.compute_finished = compute_finished;
         swapchain.compute_fence = compute_fence;
 
-        // Create render pass and framebuffers for ImGui compatibility
-        try swapchain.createRenderPass();
-        try swapchain.createFramebuffers();
-
         return swapchain;
     }
 
@@ -134,7 +150,7 @@ pub const Swapchain = struct {
 
         var image_count = caps.min_image_count + 1;
         if (caps.max_image_count > 0) {
-            image_count = @min(image_count, caps.max_image_count);
+            image_count = @min(@max(image_count, MAX_FRAMES_IN_FLIGHT), caps.max_image_count);
         }
 
         const qfi = [_]u32{ gc.graphics_queue.family, gc.present_queue.family, gc.compute_queue.family };
@@ -180,6 +196,7 @@ pub const Swapchain = struct {
         // }
 
         // std.mem.swap(vk.Semaphore, &swap_images[result.image_index].image_acquired, &next_image_acquired);
+        const runtime_frames = getFramesInFlight(allocator);
         return Swapchain{
             .gc = gc,
             .allocator = allocator,
@@ -190,13 +207,12 @@ pub const Swapchain = struct {
             .handle = handle,
             .render_pass = old_render_pass,
             .swap_images = swap_images,
+            .frames_in_flight = runtime_frames,
         };
     }
 
     fn deinitExceptSwapchain(self: *Swapchain) void {
         for (self.swap_images) |*si| si.deinit(self.gc);
-        self.gc.vkd.destroyRenderPass(self.gc.dev, self.render_pass, null);
-        self.destroyFramebuffers();
     }
 
     /// Clean up HDR textures (only called during full shutdown, not recreation)
@@ -210,7 +226,7 @@ pub const Swapchain = struct {
 
     pub fn waitForAllFences(self: *Swapchain) !void {
         var i: usize = 0;
-        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
+        while (i < self.frames_in_flight) : (i += 1) {
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.frame_fence[i]), .true, std.math.maxInt(u64));
             _ = try self.gc.vkd.waitForFences(self.gc.dev, 1, @ptrCast(&self.compute_fence[i]), .true, std.math.maxInt(u64));
         }
@@ -223,7 +239,7 @@ pub const Swapchain = struct {
         self.deinitExceptSwapchain();
         self.gc.vkd.destroySwapchainKHR(self.gc.dev, self.handle, null);
         var i: usize = 0;
-        while (i < MAX_FRAMES_IN_FLIGHT) : (i += 1) {
+        while (i < self.frames_in_flight) : (i += 1) {
             self.gc.vkd.destroySemaphore(self.gc.dev, self.image_acquired[i], null);
             self.gc.vkd.destroyFence(self.gc.dev, self.frame_fence[i], null);
             // Compute sync
@@ -375,146 +391,9 @@ pub const Swapchain = struct {
             self.recreate(extent) catch |err| {
                 log(.ERROR, "swapchain", "Failed to recreate swapchain: {any}", .{err});
             };
-            try self.createFramebuffers();
         } else if (present_result != .success) {
             return error.ImagePresentFailed;
         }
-    }
-
-    pub fn createRenderPass(self: *Swapchain) !void {
-        const attachments = [_]vk.AttachmentDescription{
-            .{
-                .flags = .{},
-                .format = self.surface_format.format,
-                .samples = .{ .@"1_bit" = true },
-                .load_op = .clear,
-                .store_op = .store,
-                .stencil_load_op = .dont_care,
-                .stencil_store_op = .dont_care,
-                .initial_layout = .undefined,
-                .final_layout = .present_src_khr,
-            },
-            .{
-                .flags = .{},
-                .format = try findDepthFormat(self.gc.*),
-                .samples = .{ .@"1_bit" = true },
-                .load_op = .clear,
-                .store_op = .dont_care,
-                .stencil_load_op = .dont_care,
-                .stencil_store_op = .dont_care,
-                .initial_layout = .undefined,
-                .final_layout = .depth_stencil_attachment_optimal,
-            },
-        };
-
-        const color_attachment_ref = [_]vk.AttachmentReference{.{
-            .attachment = 0,
-            .layout = .color_attachment_optimal,
-        }};
-
-        const depth_attachment_ref = vk.AttachmentReference{
-            .attachment = 1,
-            .layout = .depth_stencil_attachment_optimal,
-        };
-
-        const subpass = [_]vk.SubpassDescription{
-            .{
-                .flags = .{},
-                .pipeline_bind_point = .graphics,
-                .input_attachment_count = 0,
-                .p_input_attachments = undefined,
-                .color_attachment_count = color_attachment_ref.len,
-                .p_color_attachments = &color_attachment_ref,
-                .p_resolve_attachments = null,
-                .p_depth_stencil_attachment = &depth_attachment_ref,
-                .preserve_attachment_count = 0,
-                .p_preserve_attachments = undefined,
-            },
-        };
-
-        const dependencies = [_]vk.SubpassDependency{.{
-            .src_subpass = vk.SUBPASS_EXTERNAL,
-            .dst_subpass = 0,
-            .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-            .src_access_mask = .{},
-            .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-            .dst_access_mask = .{ .color_attachment_write_bit = true, .depth_stencil_attachment_write_bit = true },
-            .dependency_flags = .{},
-        }};
-
-        self.render_pass = try self.gc.vkd.createRenderPass(self.gc.dev, &.{
-            .flags = .{},
-            .attachment_count = attachments.len,
-            .p_attachments = &attachments,
-            .subpass_count = subpass.len,
-            .p_subpasses = &subpass,
-            .dependency_count = dependencies.len,
-            .p_dependencies = &dependencies,
-        }, null);
-    }
-
-    pub fn createFramebuffers(self: *Swapchain) !void {
-        const framebuffers = try self.allocator.alloc(vk.Framebuffer, self.swap_images.len);
-        errdefer self.allocator.free(framebuffers);
-
-        var i: usize = 0;
-        errdefer for (framebuffers[0..i]) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
-
-        for (framebuffers, 0..framebuffers.len) |*fb, j| {
-            const attachments = [_]vk.ImageView{ self.swap_images[j].view, self.swap_images[j].depth_image_view };
-            fb.* = try self.gc.vkd.createFramebuffer(self.gc.dev, &vk.FramebufferCreateInfo{
-                .flags = .{},
-                .render_pass = self.render_pass,
-                .attachment_count = attachments.len,
-                .p_attachments = &attachments,
-                .width = self.extent.width,
-                .height = self.extent.height,
-                .layers = 1,
-            }, null);
-            i += 1;
-        }
-
-        self.framebuffers = framebuffers;
-    }
-    pub fn destroyFramebuffers(self: *Swapchain) void {
-        for (self.framebuffers) |fb| self.gc.vkd.destroyFramebuffer(self.gc.dev, fb, null);
-        self.allocator.free(self.framebuffers);
-    }
-
-    pub fn beginSwapChainRenderPass(self: *Swapchain, frame_info: FrameInfo) void {
-        const clear_values = [_]vk.ClearValue{
-            .{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } },
-            .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
-        };
-        const scissor = vk.Rect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = self.extent,
-        };
-
-        const render_pass_info = vk.RenderPassBeginInfo{
-            .render_pass = self.render_pass,
-            .framebuffer = self.framebuffers[self.image_index],
-            .render_area = scissor,
-            .clear_value_count = clear_values.len,
-            .p_clear_values = &clear_values,
-        };
-
-        self.gc.vkd.cmdBeginRenderPass(frame_info.command_buffer, &render_pass_info, .@"inline");
-        const viewport = vk.Viewport{
-            .x = 0,
-            .y = 0,
-            .width = @as(f32, @floatFromInt(self.extent.width)),
-            .height = @as(f32, @floatFromInt(self.extent.height)),
-            .min_depth = 0,
-            .max_depth = 1,
-        };
-
-        self.gc.vkd.cmdSetViewport(frame_info.command_buffer, 0, 1, @as([*]const vk.Viewport, @ptrCast(&viewport)));
-        self.gc.vkd.cmdSetScissor(frame_info.command_buffer, 0, 1, @as([*]const vk.Rect2D, @ptrCast(&scissor)));
-    }
-
-    pub fn endSwapChainRenderPass(self: *Swapchain, frame_info: FrameInfo) void {
-        self.gc.vkd.cmdEndRenderPass(frame_info.command_buffer);
     }
 
     pub fn acquireNextImage(

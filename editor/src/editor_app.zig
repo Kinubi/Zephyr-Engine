@@ -5,7 +5,7 @@ const zephyr = @import("zephyr");
 const Window = zephyr.Window;
 const GraphicsContext = zephyr.GraphicsContext;
 const Swapchain = zephyr.Swapchain;
-const MAX_FRAMES_IN_FLIGHT = 3; // TODO: Get from engine config
+const MAX_FRAMES_IN_FLIGHT = zephyr.MAX_FRAMES_IN_FLIGHT;
 const Buffer = zephyr.Buffer;
 const Texture = zephyr.Texture;
 
@@ -462,7 +462,7 @@ pub const App = struct {
             // Pass ImGui draw data captured during prepare() to avoid data race
             const imgui_data = ui_layer.getImGuiDrawData();
             const freed_buffer_idx = try self.engine.captureAndSignalRenderThread(&new_ecs_world, &camera, imgui_data);
-            
+
             // Free old ImGui cloned data for the buffer that was just freed
             // (now safe - render thread signaled it's done via semaphore wait)
             ui_layer.freeOldImGuiBuffer(freed_buffer_idx);

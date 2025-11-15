@@ -3,9 +3,11 @@ const vk = @import("vulkan");
 const GraphicsContext = @import("../core/graphics_context.zig").GraphicsContext;
 const log = @import("../utils/log.zig").log;
 
+const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+
 /// Performance monitoring with CPU and GPU timing
 pub const PerformanceMonitor = struct {
-    const MAX_FRAMES = 3; // Match MAX_FRAMES_IN_FLIGHT
+    const MAX_FRAMES = MAX_FRAMES_IN_FLIGHT;
     const MAX_PASSES = 16; // Maximum number of passes to track
     const QUERIES_PER_FRAME = MAX_PASSES * 2 + 2; // Frame start/end + per-pass begin/end
     const QUERY_RESULT_CAPACITY = QUERIES_PER_FRAME * 2; // Timestamp + availability per query
@@ -409,7 +411,7 @@ pub const PerformanceMonitor = struct {
 
     /// Get current performance statistics
     pub fn getStats(self: *PerformanceMonitor) PerformanceStats {
-        const prev_idx = if (self.current_frame_idx == 0) MAX_FRAMES - 1 else (self.current_frame_idx -% 1);
+        const prev_idx = (self.current_frame_idx + MAX_FRAMES - 1) % MAX_FRAMES;
         const prev_frame = &self.frame_times[prev_idx];
 
         const fps = if (self.avg_cpu_time_ms > 0.0) 1000.0 / self.avg_cpu_time_ms else 0.0;

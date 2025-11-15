@@ -231,7 +231,7 @@ pub const GeometryPass = struct {
         try self.resource_binder.bindStorageBufferArrayNamed(
             self.geometry_pipeline,
             "MaterialBuffer",
-            .{ self.material_set.material_buffers[0], self.material_set.material_buffers[1], self.material_set.material_buffers[2] },
+            self.material_set.material_buffers,
         );
 
         // Bind texture array from material set (generation tracked automatically)
@@ -253,12 +253,11 @@ pub const GeometryPass = struct {
         // Bind instance data SSBO from render system (generation tracked automatically)
         // RenderSystem owns and manages this buffer (starts as dummy, gets replaced when instances exist)
         // Buffer is guaranteed to exist after Scene.initRenderGraph()
-        // Pass all 3 frame buffers for per-frame binding
-        const instance_buf_ptrs = [3]*const ManagedBuffer{
-            self.render_system.instance_buffers[0],
-            self.render_system.instance_buffers[1],
-            self.render_system.instance_buffers[2],
-        };
+        // Pass all frame buffers for per-frame binding
+        var instance_buf_ptrs: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer = undefined;
+        for (self.render_system.instance_buffers, 0..) |buf, i| {
+            instance_buf_ptrs[i] = buf;
+        }
         try self.resource_binder.bindStorageBufferArrayNamed(
             self.geometry_pipeline,
             "InstanceDataBuffer",
