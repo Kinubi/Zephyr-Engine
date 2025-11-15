@@ -411,7 +411,7 @@ pub const PerformanceMonitor = struct {
 
     /// Get current performance statistics
     pub fn getStats(self: *PerformanceMonitor) PerformanceStats {
-        const prev_idx = if (self.current_frame_idx == 0) MAX_FRAMES - 1 else (self.current_frame_idx -% 1);
+        const prev_idx = (self.current_frame_idx + MAX_FRAMES - 1) % MAX_FRAMES;
         const prev_frame = &self.frame_times[prev_idx];
 
         const fps = if (self.avg_cpu_time_ms > 0.0) 1000.0 / self.avg_cpu_time_ms else 0.0;

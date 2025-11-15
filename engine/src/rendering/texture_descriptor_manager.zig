@@ -55,8 +55,8 @@ pub const DescriptorArena = struct {
                 return error.AllocationTooLarge;
             }
 
-            // Check if we'd collide with smallest_used_offset (still-active old allocations)
-            if (count > self.smallest_used_offset and self.smallest_used_offset > 0) {
+            // Check if we'd collide with active allocations when wrapping
+            if (self.active_allocations.items.len > 0 and count > self.smallest_used_offset) {
                 // Collision detected - need compaction
                 self.needs_compaction = true;
                 return error.ArenaRequiresCompaction;
@@ -80,7 +80,16 @@ pub const DescriptorArena = struct {
 
         // Normal allocation without wrap
         const offset = self.current_offset;
-        self.current_offset += count;
+        const new_offset = self.current_offset + count;
+        
+        // Check if we're in wrapped region and would collide with active allocations
+        if (offset < self.smallest_used_offset and new_offset > self.smallest_used_offset) {
+            // Collision detected - need compaction
+            self.needs_compaction = true;
+            return error.ArenaRequiresCompaction;
+        }
+        
+        self.current_offset = new_offset;
 
         // Track this allocation
         try self.active_allocations.append(self.allocator, .{
@@ -98,26 +107,30 @@ pub const DescriptorArena = struct {
     /// Called when a ManagedTextureArray is no longer referencing this offset
     pub fn freeAllocation(self: *DescriptorArena, offset: usize) void {
         // Find and remove the allocation
-        var i: usize = 0;
-        while (i < self.active_allocations.items.len) {
-            if (self.active_allocations.items[i].offset == offset) {
+        const was_smallest = (offset == self.smallest_used_offset);
+        var found = false;
+        
+        for (self.active_allocations.items, 0..) |alloc, i| {
+            if (alloc.offset == offset) {
                 _ = self.active_allocations.swapRemove(i);
+                found = true;
                 break;
             }
-            i += 1;
         }
 
-        // Recalculate smallest_used_offset
-        self.smallest_used_offset = self.capacity; // Start at end
-        for (self.active_allocations.items) |alloc| {
-            if (alloc.offset < self.smallest_used_offset) {
-                self.smallest_used_offset = alloc.offset;
+        // Only recalculate if we removed the smallest allocation or nothing was found
+        if (!found or was_smallest) {
+            if (self.active_allocations.items.len == 0) {
+                self.smallest_used_offset = 0;
+            } else {
+                // Recalculate smallest_used_offset
+                self.smallest_used_offset = self.capacity;
+                for (self.active_allocations.items) |alloc| {
+                    if (alloc.offset < self.smallest_used_offset) {
+                        self.smallest_used_offset = alloc.offset;
+                    }
+                }
             }
-        }
-
-        // If no allocations left, reset
-        if (self.active_allocations.items.len == 0) {
-            self.smallest_used_offset = 0;
         }
     }
 
@@ -163,6 +176,16 @@ pub const TextureDescriptorManager = struct {
             arena.deinit();
         }
         self.allocator.destroy(self);
+    }
+
+    /// Begin a new frame - compact arenas if needed before allocations
+    pub fn beginFrame(self: *TextureDescriptorManager, frame_index: u32) !void {
+        if (frame_index >= MAX_FRAMES_IN_FLIGHT) return error.InvalidFrameIndex;
+        
+        const arena = &self.frame_arenas[frame_index];
+        if (arena.needs_compaction) {
+            try self.compactFrameArena(frame_index);
+        }
     }
 
     /// Allocate texture descriptors from a specific frame's arena
@@ -230,7 +253,8 @@ pub const TextureDescriptorManager = struct {
     }
 
     /// Check if any arenas need compaction and perform it
-    /// Call this at the start of each frame before any allocations
+    /// NOTE: Prefer using beginFrame() for per-frame compaction. This function compacts all
+    /// arenas and is useful for manual compaction scenarios.
     pub fn compactArenasIfNeeded(self: *TextureDescriptorManager) !void {
         for (&self.frame_arenas, 0..) |*arena, i| {
             if (arena.needs_compaction) {

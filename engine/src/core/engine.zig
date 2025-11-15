@@ -431,6 +431,11 @@ pub const Engine = struct {
             bm.beginFrame(self.frame_info.current_frame);
         }
 
+        // 4.6. Begin frame for descriptor manager (compact arenas if needed)
+        if (self.descriptor_manager) |dm| {
+            try dm.beginFrame(self.frame_info.current_frame);
+        }
+
         // 5. Get window size for extent
         var width: c_int = 0;
         var height: c_int = 0;
