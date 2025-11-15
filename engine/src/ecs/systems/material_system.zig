@@ -574,25 +574,18 @@ pub const MaterialSystem = struct {
                     const frame = @as(u32, @intCast(frame_idx));
 
                     // Allocate from this frame's descriptor arena and get offset
-                    // Handle wrap-around and compaction like BufferManager
+                    // Compaction is handled proactively at frame boundaries via descriptor_manager.beginFrame()
+                    // If we get ArenaRequiresCompaction here, it means we've exhausted the arena mid-frame
                     const result = self.descriptor_manager.allocateFromFrame(
                         frame,
                         snap.texture_descriptors,
-                    ) catch |err| blk: {
+                    ) catch |err| {
                         if (err == error.ArenaRequiresCompaction) {
-                            // Arena needs compaction - compact and retry
-                            log(.WARN, "material_system", "Frame {} descriptor arena requires compaction, compacting and retrying", .{frame});
-                            try self.descriptor_manager.compactFrameArena(frame);
-                            
-                            // Retry allocation after compaction
-                            break :blk try self.descriptor_manager.allocateFromFrame(
-                                frame,
-                                snap.texture_descriptors,
-                            );
+                            log(.ERROR, "material_system", "Frame {} descriptor arena exhausted mid-frame (capacity too small or fragmentation issue)", .{frame});
                         } else {
                             log(.ERROR, "material_system", "Failed to allocate texture descriptors for frame {}: {}", .{ frame, err });
-                            return err;
                         }
+                        return err;
                     };
 
                     // Store ONLY the offset for THIS frame (each frame has its own offset)

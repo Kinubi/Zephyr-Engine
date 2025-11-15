@@ -118,8 +118,13 @@ pub const DescriptorArena = struct {
             }
         }
 
-        // Only recalculate if we removed the smallest allocation or nothing was found
-        if (!found or was_smallest) {
+        if (!found) {
+            log(.WARN, "texture_descriptor_manager", "Attempted to free unknown allocation at offset {}", .{offset});
+            return;
+        }
+
+        // Only recalculate if we removed the smallest allocation
+        if (was_smallest) {
             if (self.active_allocations.items.len == 0) {
                 self.smallest_used_offset = 0;
             } else {
