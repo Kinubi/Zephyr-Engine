@@ -23,4 +23,27 @@ pub const MaterialSet = struct {
     pub fn initMasked(alpha_cutoff: f32) MaterialSet {
         return .{ .set_name = "masked", .shader_variant = "pbr_standard", .alpha_cutoff = alpha_cutoff };
     }
+
+    /// Serialize MaterialSet component
+    pub fn serialize(self: MaterialSet, serializer: anytype, writer: anytype) !void {
+        _ = serializer;
+        try writer.beginObject();
+        
+        try writer.objectField("set_name");
+        try writer.write(self.set_name);
+        
+        try writer.objectField("shader_variant");
+        try writer.write(self.shader_variant);
+        
+        try writer.objectField("casts_shadows");
+        try writer.write(self.casts_shadows);
+        
+        try writer.objectField("receives_shadows");
+        try writer.write(self.receives_shadows);
+        
+        try writer.objectField("alpha_cutoff");
+        try writer.write(self.alpha_cutoff);
+        
+        try writer.endObject();
+    }
 };

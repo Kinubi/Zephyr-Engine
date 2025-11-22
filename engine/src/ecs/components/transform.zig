@@ -48,6 +48,29 @@ pub const Transform = struct {
         return t;
     }
 
+    /// Serialize Transform component
+    pub fn jsonSerialize(self: Transform, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        try writer.objectField("position");
+        try writer.write(self.position);
+        
+        try writer.objectField("rotation");
+        try writer.write(self.rotation);
+        
+        try writer.objectField("scale");
+        try writer.write(self.scale);
+        
+        if (self.parent) |parent_id| {
+            if (serializer.getEntityUuid(parent_id)) |uuid| {
+                try writer.objectField("parent");
+                try writer.print("\"{s}\"", .{uuid});
+            }
+        }
+        
+        try writer.endObject();
+    }
+
     /// Create a Transform with position, rotation, and scale
     pub fn initFull(pos: math.Vec3, rot: math.Vec3, scl: math.Vec3) Transform {
         return .{

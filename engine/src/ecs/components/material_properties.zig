@@ -33,6 +33,23 @@ pub const AlbedoMaterial = struct {
             .color_tint = color,
         };
     }
+
+    /// Serialize AlbedoMaterial component
+    pub fn serialize(self: AlbedoMaterial, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.texture_id.isValid()) {
+            if (serializer.getAssetPath(self.texture_id)) |path| {
+                try writer.objectField("texture");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("color");
+        try writer.write(self.color_tint);
+        
+        try writer.endObject();
+    }
 };
 
 /// Roughness material component
@@ -67,6 +84,23 @@ pub const RoughnessMaterial = struct {
             .texture_id = AssetId.invalid,
             .factor = factor,
         };
+    }
+
+    /// Serialize RoughnessMaterial component
+    pub fn serialize(self: RoughnessMaterial, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.texture_id.isValid()) {
+            if (serializer.getAssetPath(self.texture_id)) |path| {
+                try writer.objectField("texture");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("factor");
+        try writer.write(self.factor);
+        
+        try writer.endObject();
     }
 };
 
@@ -103,6 +137,23 @@ pub const MetallicMaterial = struct {
             .factor = factor,
         };
     }
+
+    /// Serialize MetallicMaterial component
+    pub fn serialize(self: MetallicMaterial, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.texture_id.isValid()) {
+            if (serializer.getAssetPath(self.texture_id)) |path| {
+                try writer.objectField("texture");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("factor");
+        try writer.write(self.factor);
+        
+        try writer.endObject();
+    }
 };
 
 /// Normal map material component
@@ -129,6 +180,23 @@ pub const NormalMaterial = struct {
             .texture_id = texture,
             .strength = strength,
         };
+    }
+
+    /// Serialize NormalMaterial component
+    pub fn serialize(self: NormalMaterial, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.texture_id.isValid()) {
+            if (serializer.getAssetPath(self.texture_id)) |path| {
+                try writer.objectField("texture");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("strength");
+        try writer.write(self.strength);
+        
+        try writer.endObject();
     }
 };
 
@@ -171,6 +239,26 @@ pub const EmissiveMaterial = struct {
             .intensity = intensity,
         };
     }
+
+    /// Serialize EmissiveMaterial component
+    pub fn serialize(self: EmissiveMaterial, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.texture_id.isValid()) {
+            if (serializer.getAssetPath(self.texture_id)) |path| {
+                try writer.objectField("texture");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("color");
+        try writer.write(self.color);
+        
+        try writer.objectField("intensity");
+        try writer.write(self.intensity);
+        
+        try writer.endObject();
+    }
 };
 
 /// Occlusion material component (optional)
@@ -188,5 +276,22 @@ pub const OcclusionMaterial = struct {
             .texture_id = texture,
             .strength = 1.0,
         };
+    }
+
+    /// Serialize OcclusionMaterial component
+    pub fn serialize(self: OcclusionMaterial, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.texture_id.isValid()) {
+            if (serializer.getAssetPath(self.texture_id)) |path| {
+                try writer.objectField("texture");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("strength");
+        try writer.write(self.strength);
+        
+        try writer.endObject();
     }
 };

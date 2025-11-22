@@ -41,4 +41,33 @@ pub const ParticleEmitter = struct {
         self.velocity_min = min;
         self.velocity_max = max;
     }
+
+    /// Serialize ParticleEmitter component
+    pub fn serialize(self: ParticleEmitter, serializer: anytype, writer: anytype) !void {
+        _ = serializer;
+        try writer.beginObject();
+        
+        try writer.objectField("emission_rate");
+        try writer.write(self.emission_rate);
+        
+        try writer.objectField("particle_lifetime");
+        try writer.write(self.particle_lifetime);
+        
+        try writer.objectField("velocity_min");
+        try writer.write(self.velocity_min);
+        
+        try writer.objectField("velocity_max");
+        try writer.write(self.velocity_max);
+        
+        try writer.objectField("color");
+        try writer.write(self.color);
+        
+        try writer.objectField("spawn_offset");
+        try writer.write(self.spawn_offset);
+        
+        try writer.objectField("active");
+        try writer.write(self.active);
+        
+        try writer.endObject();
+    }
 };

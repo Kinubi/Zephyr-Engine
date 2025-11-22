@@ -109,112 +109,47 @@ pub const Camera = struct {
         self.projection_dirty = true;
     }
 
-    /// Set field of view (perspective only)
-    pub fn setFov(self: *Camera, fov: f32) void {
-        self.fov = fov;
-        self.projection_dirty = true;
-    }
-
-    /// Set aspect ratio (perspective only)
-    pub fn setAspectRatio(self: *Camera, aspect_ratio: f32) void {
-        self.aspect_ratio = aspect_ratio;
-        self.projection_dirty = true;
-    }
-
-    /// Set near/far planes
-    pub fn setClipPlanes(self: *Camera, near: f32, far: f32) void {
-        self.near_plane = near;
-        self.far_plane = far;
-        self.projection_dirty = true;
-    }
-
-    /// Mark this camera as the primary/active camera
-    pub fn setPrimary(self: *Camera, is_primary: bool) void {
-        self.is_primary = is_primary;
-    }
-
-    // ========================================================================
-    // Matrix Calculations
-    // ========================================================================
-
-    /// Update projection matrix if dirty
-    /// Called automatically by getProjectionMatrix()
-    fn updateProjectionMatrix(self: *Camera) void {
-        if (!self.projection_dirty) {
-            return;
-        }
-
+    /// Serialize Camera component
+    pub fn serialize(self: Camera, serializer: anytype, writer: anytype) !void {
+        _ = serializer;
+        try writer.beginObject();
+        
+        try writer.objectField("projection_type");
         switch (self.projection_type) {
-            .perspective => {
-                const fov_rad = math.radians(self.fov);
-                const tan_half_fov = @tan(fov_rad / 2.0);
-
-                self.projection_matrix = math.Mat4x4.zero();
-                self.projection_matrix.get(0, 0).* = 1.0 / (self.aspect_ratio * tan_half_fov);
-                self.projection_matrix.get(1, 1).* = 1.0 / tan_half_fov;
-                self.projection_matrix.get(2, 2).* = self.far_plane / (self.far_plane - self.near_plane);
-                self.projection_matrix.get(2, 3).* = 1.0;
-                self.projection_matrix.get(3, 2).* = -(self.far_plane * self.near_plane) / (self.far_plane - self.near_plane);
-            },
-            .orthographic => {
-                self.projection_matrix = math.Mat4x4.identity();
-                self.projection_matrix.get(0, 0).* = 2.0 / (self.ortho_right - self.ortho_left);
-                self.projection_matrix.get(1, 1).* = 2.0 / (self.ortho_bottom - self.ortho_top);
-                self.projection_matrix.get(2, 2).* = 1.0 / (self.far_plane - self.near_plane);
-                self.projection_matrix.get(3, 0).* = -(self.ortho_right + self.ortho_left) / (self.ortho_right - self.ortho_left);
-                self.projection_matrix.get(3, 1).* = -(self.ortho_bottom + self.ortho_top) / (self.ortho_bottom - self.ortho_top);
-                self.projection_matrix.get(3, 2).* = -self.near_plane / (self.far_plane - self.near_plane);
-            },
+            .perspective => try writer.write("perspective"),
+            .orthographic => try writer.write("orthographic"),
         }
-
-        self.projection_dirty = false;
-    }
-
-    /// Get the projection matrix (updates if dirty)
-    pub fn getProjectionMatrix(self: *Camera) math.Mat4x4 {
-        self.updateProjectionMatrix();
-        return self.projection_matrix;
-    }
-
-    /// Build view matrix from Transform component's world matrix
-    /// Transform's world matrix is the camera's model matrix (position/rotation in world)
-    /// View matrix is the inverse of model matrix
-    pub fn getViewMatrix(camera_world_matrix: math.Mat4x4) math.Mat4x4 {
-        // For now, return identity - will be computed by CameraSystem using Transform
-        // This is a static helper for the system to use
-        _ = camera_world_matrix;
-        return math.Mat4x4.identity();
-    }
-
-    // ========================================================================
-    // ECS Integration
-    // ========================================================================
-
-    /// ECS update method - updates projection matrix if needed
-    pub fn update(self: *Camera, dt: f32) void {
-        _ = dt;
-        self.updateProjectionMatrix();
-    }
-
-    /// Render extraction context for CameraSystem
-    pub const RenderContext = struct {
-        /// Output: the primary camera (if found)
-        primary_camera: ?*const Camera = null,
-        /// Output: projection matrix of primary camera
-        projection_matrix: math.Mat4x4 = math.Mat4x4.identity(),
-        /// Output: view matrix from Transform + Camera
-        view_matrix: math.Mat4x4 = math.Mat4x4.identity(),
-    };
-
-    /// ECS render method - extracts camera data to context
-    /// The first primary camera found will be used
-    pub fn render(self: *const Camera, context: *RenderContext) void {
-        // If this is the primary camera and we haven't found one yet
-        if (self.is_primary and context.primary_camera == null) {
-            context.primary_camera = self;
-            context.projection_matrix = self.projection_matrix;
-            // Note: view_matrix will be filled by CameraSystem using Transform
+        
+        try writer.objectField("is_primary");
+        try writer.write(self.is_primary);
+        
+        try writer.objectField("near_plane");
+        try writer.write(self.near_plane);
+        
+        try writer.objectField("far_plane");
+        try writer.write(self.far_plane);
+        
+        if (self.projection_type == .perspective) {
+            try writer.objectField("fov");
+            try writer.write(self.fov);
+            
+            try writer.objectField("aspect_ratio");
+            try writer.write(self.aspect_ratio);
+        } else {
+            try writer.objectField("ortho_left");
+            try writer.write(self.ortho_left);
+            
+            try writer.objectField("ortho_right");
+            try writer.write(self.ortho_right);
+            
+            try writer.objectField("ortho_bottom");
+            try writer.write(self.ortho_bottom);
+            
+            try writer.objectField("ortho_top");
+            try writer.write(self.ortho_top);
         }
+        
+        try writer.endObject();
     }
 };
 

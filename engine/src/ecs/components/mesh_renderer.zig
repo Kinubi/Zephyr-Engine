@@ -48,6 +48,39 @@ pub const MeshRenderer = struct {
         };
     }
 
+    /// Serialize MeshRenderer component
+    pub fn serialize(self: MeshRenderer, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.model_asset) |asset_id| {
+            if (serializer.getAssetPath(asset_id)) |path| {
+                try writer.objectField("model_asset");
+                try writer.write(path);
+            }
+        }
+        
+        if (self.texture_asset) |asset_id| {
+            if (serializer.getAssetPath(asset_id)) |path| {
+                try writer.objectField("texture_asset");
+                try writer.write(path);
+            }
+        }
+        
+        try writer.objectField("enabled");
+        try writer.write(self.enabled);
+        
+        try writer.objectField("layer");
+        try writer.write(self.layer);
+        
+        try writer.objectField("casts_shadows");
+        try writer.write(self.casts_shadows);
+        
+        try writer.objectField("receives_shadows");
+        try writer.write(self.receives_shadows);
+        
+        try writer.endObject();
+    }
+
     /// Set the model asset
     pub fn setModel(self: *MeshRenderer, model: AssetId) void {
         self.model_asset = model;

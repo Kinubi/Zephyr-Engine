@@ -48,20 +48,44 @@ pub const ScriptComponent = struct {
     /// automatic per-frame execution. This mirrors the "Apply" action in the
     /// editor: update the stored script without changing its execution state.
     pub fn initDefault(script: []const u8) ScriptComponent {
-        return ScriptComponent.init(script, false, false);
+        return ScriptComponent{
+            .script = script,
+            .asset = null,
+            .enabled = true,
+            .run_on_update = false,
+            .run_once = false,
+        };
     }
 
-    /// Convenience initializer for one-shot execution on the next update tick.
-    /// This mirrors the "Run Next Update" button in the editor.
-    pub fn initOneShot(script: []const u8) ScriptComponent {
-        return ScriptComponent.init(script, true, true);
-    }
-
-    /// Component-level update (called by World.update when iterating components)
-    /// Script execution itself is performed by the ScriptingSystem so this
-    /// method is a no-op; it exists to satisfy the `World.update` contract.
-    pub fn update(self: *ScriptComponent, dt: f32) void {
-        _ = self;
-        _ = dt; // no-op; ScriptingSystem will poll ScriptComponent entries
+    /// Serialize ScriptComponent
+    pub fn serialize(self: ScriptComponent, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+        
+        if (self.asset) |asset_id| {
+            if (asset_id.isValid()) {
+                if (serializer.getAssetPath(asset_id)) |path| {
+                    try writer.objectField("asset");
+                    try writer.write(path);
+                }
+            }
+        }
+        
+        // If no asset, or as a fallback/override, we might want to save the script content?
+        // For now, let's only save script content if there is no asset.
+        if (self.asset == null or !self.asset.?.isValid()) {
+            try writer.objectField("script");
+            try writer.write(self.script);
+        }
+        
+        try writer.objectField("enabled");
+        try writer.write(self.enabled);
+        
+        try writer.objectField("run_on_update");
+        try writer.write(self.run_on_update);
+        
+        try writer.objectField("run_once");
+        try writer.write(self.run_once);
+        
+        try writer.endObject();
     }
 };

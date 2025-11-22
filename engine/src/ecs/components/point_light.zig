@@ -52,4 +52,33 @@ pub const PointLight = struct {
             .range = range,
         };
     }
+
+    /// Serialize PointLight component
+    pub fn serialize(self: PointLight, serializer: anytype, writer: anytype) !void {
+        _ = serializer;
+        try writer.beginObject();
+        
+        try writer.objectField("color");
+        try writer.write(self.color);
+        
+        try writer.objectField("intensity");
+        try writer.write(self.intensity);
+        
+        try writer.objectField("range");
+        try writer.write(self.range);
+        
+        try writer.objectField("constant");
+        try writer.write(self.constant);
+        
+        try writer.objectField("linear");
+        try writer.write(self.linear);
+        
+        try writer.objectField("quadratic");
+        try writer.write(self.quadratic);
+        
+        try writer.objectField("cast_shadows");
+        try writer.write(self.cast_shadows);
+        
+        try writer.endObject();
+    }
 };

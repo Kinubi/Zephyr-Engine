@@ -21,4 +21,13 @@ pub const Name = struct {
     pub fn deinit(self: *Name, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
     }
+
+    /// Serialize Name component
+    pub fn serialize(self: Name, serializer: anytype, writer: anytype) !void {
+        _ = serializer;
+        try writer.beginObject();
+        try writer.objectField("name");
+        try writer.write(self.name);
+        try writer.endObject();
+    }
 };

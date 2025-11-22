@@ -52,6 +52,7 @@ const Name = ecs.Name;
 const UuidComponent = ecs.UuidComponent;
 
 const GameObject = @import("game_object.zig").GameObject;
+const SceneSerializer = @import("scene_serializer.zig").SceneSerializer;
 
 /// Scene represents a game level/map
 /// Provides high-level API for creating game objects backed by ECS
@@ -132,6 +133,21 @@ pub const Scene = struct {
             .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
         };
         return scene;
+    }
+
+    /// Save the scene to a JSON file
+    pub fn save(self: *Scene, file_path: []const u8) !void {
+        var file = try std.fs.cwd().createFile(file_path, .{});
+        defer file.close();
+
+        var buffered_writer = std.io.bufferedWriter(file.writer());
+        const writer = buffered_writer.writer();
+
+        var serializer = SceneSerializer.init(self);
+        var json_writer = std.json.writeStream(writer, .{ .whitespace = .indent_4 });
+        
+        try serializer.serialize(&json_writer);
+        try buffered_writer.flush();
     }
 
     /// Set the performance monitor for profiling
