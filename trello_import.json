@@ -1,0 +1,255 @@
+{
+  "name": "Zephyr Engine Development",
+  "lists": [
+    {
+      "name": "🚨 High Priority / Next Up",
+      "cards": [
+        {
+          "name": "Scene Serialization (Save/Load)",
+          "desc": "Implement JSON serialization for Scene and GameObjects to enable persistent world building. See docs/SCENE_SERIALIZATION_DESIGN.md for details.",
+          "labels": ["Feature", "High Priority"]
+        },
+        {
+          "name": "Material Editor",
+          "desc": "Implement visual material creation and editing in the Editor. Link to MaterialSystem and MaterialSet architecture.",
+          "labels": ["Editor", "High Priority"]
+        },
+        {
+          "name": "Physics Integration",
+          "desc": "Integrate a physics engine (Jolt/PhysX/zphysics). Add RigidBody and BoxCollider components.",
+          "labels": ["Engine", "High Priority"]
+        },
+        {
+          "name": "Asset Importer",
+          "desc": "Implement drag-and-drop support for importing .obj, .gltf, .png files. Auto-generate .meta files.",
+          "labels": ["Editor", "High Priority"]
+        },
+        {
+          "name": "Scripting Integration",
+          "desc": "Wire up the scripting subsystem to ECS. Create ScriptComponent and ScriptSystem.",
+          "labels": ["Engine", "High Priority"]
+        },
+        {
+          "name": "Play Mode",
+          "desc": "Implement Editor state machine (Edit vs Play). Serialize scene to memory on Play, deserialize on Stop.",
+          "labels": ["Editor", "High Priority"]
+        }
+      ]
+    },
+    {
+      "name": "Scene Serialization (Active Feature)",
+      "cards": [
+        {
+          "name": "Create SceneSerializer Struct",
+          "desc": "Define serialize(scene, writer) and deserialize(scene, reader).",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement Serialize Interface for Components",
+          "desc": "Create mixin/interface for components to define jsonSerialize/jsonDeserialize.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement Transform Serialization",
+          "desc": "Serialize Position, Rotation (Quat), Scale. Handle Parent-Child relationships (store parent's persistent ID).",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement MeshRenderer Serialization",
+          "desc": "Serialize model_asset (AssetId -> Path), texture_asset (AssetId -> Path), flags.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement Material System Serialization",
+          "desc": "Serialize MaterialSet, AlbedoMaterial, RoughnessMaterial, MetallicMaterial, NormalMaterial, EmissiveMaterial.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement PointLight Serialization",
+          "desc": "Serialize color, intensity, radius.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement Name Serialization",
+          "desc": "Serialize entity name string.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement Scene.save()",
+          "desc": "Iterate entities, collect components, write JSON.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Implement Scene.load()",
+          "desc": "Clear scene, parse JSON, re-create entities, re-link hierarchy (2-pass), request assets.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Editor: Add Save/Load Menu Items",
+          "desc": "Add to File menu. Open file dialog or save to fixed path.",
+          "labels": ["Editor"]
+        }
+      ]
+    },
+    {
+      "name": "Done",
+      "cards": [
+        {
+          "name": "Define Scene File Format (JSON)",
+          "desc": "Design JSON schema. Decide on Entity ID handling (runtime vs persistent UUIDs) and Asset ID handling (paths vs UUIDs).",
+          "labels": ["Design"]
+        },
+        {
+          "name": "Implement UuidComponent",
+          "desc": "Create UuidComponent and update Scene spawn methods to attach it.",
+          "labels": ["Implementation"]
+        },
+        {
+          "name": "Asset Management: Path Lookup",
+          "desc": "Ensure AssetManager can return file path for AssetId (for saving) and AssetId for file path (for loading).",
+          "labels": ["Engine"]
+        }
+      ]
+    },
+    {
+      "name": "Technical Debt",
+      "cards": [
+        {
+          "name": "Move BLAS ownership to Mesh/Geometry",
+          "desc": "Refactor BLAS ownership from global registry to Mesh/Geometry struct. (rendering/geometry.zig)",
+          "labels": ["Refactor", "High Priority"]
+        },
+        {
+          "name": "Remove global BLAS registry",
+          "desc": "Remove the global BLAS registry in multithreaded_bvh_builder.zig.",
+          "labels": ["Refactor", "High Priority"]
+        },
+        {
+          "name": "Implement mesh deduplication for instancing",
+          "desc": "Optimize instancing by deduplicating meshes in render_system.zig.",
+          "labels": ["Optimization", "High Priority"]
+        },
+        {
+          "name": "Implement asset streaming system",
+          "desc": "Implement proper asset streaming in asset_manager.zig.",
+          "labels": ["Feature", "High Priority"]
+        },
+        {
+          "name": "Archetype-based storage optimization",
+          "desc": "Optimize ECS storage using archetypes (ecs/world.zig).",
+          "labels": ["Optimization", "Medium Priority"]
+        },
+        {
+          "name": "Comprehensive asset validation",
+          "desc": "Add validation logic to asset_manager.zig.",
+          "labels": ["Maintenance", "Medium Priority"]
+        },
+        {
+          "name": "Automatic shader variant generation",
+          "desc": "Automate shader variant generation in shader_compiler.zig.",
+          "labels": ["Feature", "Medium Priority"]
+        },
+        {
+          "name": "Work-stealing job queue",
+          "desc": "Implement work-stealing for ThreadPool (threading/thread_pool.zig).",
+          "labels": ["Optimization", "Medium Priority"]
+        }
+      ]
+    },
+    {
+      "name": "Backlog - Rendering",
+      "cards": [
+        {
+          "name": "Frustum Culling (CPU)",
+          "desc": "Implement CPU-side frustum culling.",
+          "labels": ["Optimization"]
+        },
+        {
+          "name": "Occlusion Culling (GPU)",
+          "desc": "Implement GPU-side occlusion culling.",
+          "labels": ["Optimization"]
+        },
+        {
+          "name": "Distance-based LOD",
+          "desc": "Implement LOD system based on distance.",
+          "labels": ["Optimization"]
+        },
+        {
+          "name": "Shadow Mapping",
+          "desc": "Implement shadow mapping for rasterization path.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Volumetric Light Scattering",
+          "desc": "Implement volumetric lighting.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Post-processing Pipeline",
+          "desc": "Implement Bloom, Tonemapping, FXAA.",
+          "labels": ["Feature"]
+        }
+      ]
+    },
+    {
+      "name": "Backlog - Editor",
+      "cards": [
+        {
+          "name": "Undo/Redo System",
+          "desc": "Implement Command pattern for editor actions.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Selection System",
+          "desc": "Multi-entity selection with outlines.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Editor Camera",
+          "desc": "Separate Editor camera from Game camera.",
+          "labels": ["Feature"]
+        }
+      ]
+    },
+    {
+      "name": "Backlog - ECS & Systems",
+      "cards": [
+        {
+          "name": "Multi-component Queries",
+          "desc": "Support queries for multiple components (Transform + MeshRenderer + Custom).",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Event System for Components",
+          "desc": "Events for component changes.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Prefab System",
+          "desc": "Implement Prefabs for entity templates.",
+          "labels": ["Feature"]
+        }
+      ]
+    },
+    {
+      "name": "Backlog - Assets",
+      "cards": [
+        {
+          "name": "GLTF/GLB Support",
+          "desc": "Add support for GLTF/GLB models.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Compressed Texture Support",
+          "desc": "Support BC7, ASTC formats.",
+          "labels": ["Feature"]
+        },
+        {
+          "name": "Asset Bundles",
+          "desc": "Implement asset packaging/bundles.",
+          "labels": ["Feature"]
+        }
+      ]
+    }
+  ]
+}

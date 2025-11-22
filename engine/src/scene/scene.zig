@@ -49,6 +49,7 @@ const MeshRenderer = ecs.MeshRenderer;
 const Camera = ecs.Camera;
 const PointLight = ecs.PointLight;
 const Name = ecs.Name;
+const UuidComponent = ecs.UuidComponent;
 
 const GameObject = @import("game_object.zig").GameObject;
 
@@ -212,6 +213,9 @@ pub const Scene = struct {
         };
         try self.ecs_world.emplace(ecs.MaterialSet, entity, material_set);
 
+        // Add UuidComponent
+        try self.ecs_world.emplace(UuidComponent, entity, UuidComponent.init());
+
         // Add material property components (only if textures are provided)
         if (albedo_texture_id.toU64() != 0) {
             const albedo_mat = ecs.AlbedoMaterial.initWithTint(albedo_texture_id, material_params.albedo_color);
@@ -359,6 +363,9 @@ pub const Scene = struct {
             try self.ecs_world.emplace(Name, entity, name_component);
         }
 
+        // Add UuidComponent
+        try self.ecs_world.emplace(UuidComponent, entity, UuidComponent.init());
+
         const game_object = GameObject{
             .entity_id = entity,
             .scene = self,
@@ -394,6 +401,9 @@ pub const Scene = struct {
         }
         camera.setPrimary(true); // First camera is primary by default
         try self.ecs_world.emplace(Camera, entity, camera);
+
+        // Add UuidComponent
+        try self.ecs_world.emplace(UuidComponent, entity, UuidComponent.init());
 
         const game_object = GameObject{
             .entity_id = entity,

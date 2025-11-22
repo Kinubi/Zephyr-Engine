@@ -18,6 +18,7 @@ pub const Camera = @import("ecs/components/camera.zig").Camera;
 pub const PointLight = @import("ecs/components/point_light.zig").PointLight;
 pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").ParticleEmitter;
 pub const Name = @import("ecs/components/name.zig").Name;
+pub const UuidComponent = @import("ecs/components/uuid.zig").UuidComponent;
 
 // Material Components
 pub const MaterialSet = @import("ecs/components/material_set.zig").MaterialSet;
