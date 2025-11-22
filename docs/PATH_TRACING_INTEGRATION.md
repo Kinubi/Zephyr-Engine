@@ -1,6 +1,6 @@
 # Path Tracing Integration
 
-**Last Updated**: October 24, 2025  
+**Last Updated**: November 22, 2025
 **Status**: ✅ Complete
 
 ## Overview
@@ -13,12 +13,14 @@ This document describes the Path Tracing system integration with the rendering p
 - **Performance**: ~5ms GPU time for typical scenes
 - **BVH Building**: Async on ThreadPool (bvh_building subsystem)
 - **Integration**: Reads light data (binding 7) and particle data (binding 8)
+- **Resource Management**: Uses `AccelerationStructureSet` and `MaterialSet` for automatic generation tracking
 
 ## Architecture
 
 ### System Components
 
 - **PathTracingPass**: Ray traces scene geometry using BVH (TLAS/BLAS)
+- **RaytracingSystem**: Manages `AccelerationStructureSet`s (TLAS/BLAS) with generation tracking
 - **LightVolumePass**: Manages point lights with instanced rendering
 - **ParticleSystem**: GPU-accelerated particle simulation and rendering
 
@@ -28,6 +30,7 @@ This document describes the Path Tracing system integration with the rendering p
 2. ✅ Path tracer incorporates particles as emissive geometry
 3. ✅ Minimize data duplication through shared buffers
 4. ✅ Support dynamic updates (lights moving, particles spawning/dying)
+5. ✅ Automatic resource rebinding via generation tracking
 
 ---
 
@@ -66,38 +69,30 @@ layout(set = 0, binding = 7) buffer LightBuffer {
 ```zig
 // Reference to lighting volume pass (for light buffer access)
 lighting_volume_pass: ?*LightingVolumePass,
+// Acceleration Structure Set (TLAS + BLAS)
+accel_set: ?*AccelerationStructureSet,
 ```
 
 **Descriptor Binding:**
 - **Binding 7**: Light buffer (SSBO) - shared with lighting volume pass
-  - Type: Storage Buffer
-  - Access: Read-only in path tracer
-  - Update: When lighting_volume_pass indicates lights changed
+- **Binding "rs"**: TLAS from `accel_set`
+- **Binding "material_buffer"**: Material data from `material_set`
+- **Binding "texture_buffer"**: Texture array from `material_set`
 
 **Update Pattern:**
+The system now uses `ResourceBinder` with named bindings and generation tracking. Manual descriptor updates are no longer needed for most resources.
+
 ```zig
-pub fn updateDescriptors(self: *PathTracingPass) !void {
-    // ... existing bindings 0-6 ...
-    
-    // Binding 7: Light buffer (if lighting volume pass exists)
-    if (self.lighting_volume_pass) |lvp| {
-        if (lvp.light_buffer) |light_buf| {
-            const light_resource = Resource{
-                .buffer = .{
-                    .buffer = light_buf.buffer,
-                    .offset = 0,
-                    .range = light_buf.size,
-                },
-            };
-            for (0..MAX_FRAMES_IN_FLIGHT) |frame_idx| {
-                try self.pipeline_system.bindResource(
-                    self.path_tracing_pipeline,
-                    0, 7,
-                    light_resource,
-                    @intCast(frame_idx)
-                );
-            }
-        }
+// In setup():
+self.accel_set = try self.rt_system.createSet("default");
+
+// Bind TLAS (generation tracked automatically)
+try self.resource_binder.bindAccelerationStructureNamed(
+    self.path_tracing_pipeline,
+    "rs",
+    &self.accel_set.?.tlas,
+);
+```
     }
 }
 ```
