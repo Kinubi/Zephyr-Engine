@@ -151,6 +151,58 @@ pub const Camera = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize Camera component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !Camera {
+        _ = serializer;
+        var cam = Camera.init();
+        
+        if (value.object.get("projection_type")) |val| {
+            if (val == .string) {
+                if (std.mem.eql(u8, val.string, "perspective")) cam.projection_type = .perspective;
+                if (std.mem.eql(u8, val.string, "orthographic")) cam.projection_type = .orthographic;
+            }
+        }
+        
+        if (value.object.get("is_primary")) |val| {
+            if (val == .bool) cam.is_primary = val.bool;
+        }
+        
+        if (value.object.get("near_plane")) |val| {
+            if (val == .float) cam.near_plane = @floatCast(val.float);
+        }
+        
+        if (value.object.get("far_plane")) |val| {
+            if (val == .float) cam.far_plane = @floatCast(val.float);
+        }
+        
+        if (value.object.get("fov")) |val| {
+            if (val == .float) cam.fov = @floatCast(val.float);
+        }
+        
+        if (value.object.get("aspect_ratio")) |val| {
+            if (val == .float) cam.aspect_ratio = @floatCast(val.float);
+        }
+        
+        if (value.object.get("ortho_left")) |val| {
+            if (val == .float) cam.ortho_left = @floatCast(val.float);
+        }
+        
+        if (value.object.get("ortho_right")) |val| {
+            if (val == .float) cam.ortho_right = @floatCast(val.float);
+        }
+        
+        if (value.object.get("ortho_bottom")) |val| {
+            if (val == .float) cam.ortho_bottom = @floatCast(val.float);
+        }
+        
+        if (value.object.get("ortho_top")) |val| {
+            if (val == .float) cam.ortho_top = @floatCast(val.float);
+        }
+        
+        cam.projection_dirty = true;
+        return cam;
+    }
 };
 
 // ============================================================================

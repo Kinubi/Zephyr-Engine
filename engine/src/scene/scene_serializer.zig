@@ -9,12 +9,18 @@ const UuidComponent = @import("../ecs/components/uuid.zig").UuidComponent;
 pub const SceneSerializer = struct {
     scene: *Scene,
     allocator: std.mem.Allocator,
+    uuid_map: std.AutoHashMap(UuidComponent, ecs.EntityId),
 
     pub fn init(scene: *Scene) SceneSerializer {
         return .{
             .scene = scene,
             .allocator = scene.allocator,
+            .uuid_map = std.AutoHashMap(UuidComponent, ecs.EntityId).init(scene.allocator),
         };
+    }
+
+    pub fn deinit(self: *SceneSerializer) void {
+        self.uuid_map.deinit();
     }
 
     /// Helper to get UUID for an entity ID
@@ -31,6 +37,11 @@ pub const SceneSerializer = struct {
     /// For serialization we just need path lookup. Deserialization needs path->ID.
     pub fn getAssetId(self: *SceneSerializer, path: []const u8) ?AssetId {
         return self.scene.asset_manager.getAssetId(path);
+    }
+
+    /// Helper to get Entity ID for a UUID (used during deserialization)
+    pub fn getEntityId(self: *SceneSerializer, uuid: UuidComponent) ?ecs.EntityId {
+        return self.uuid_map.get(uuid);
     }
 
     /// Serialize the entire scene to a JSON writer
@@ -84,10 +95,95 @@ pub const SceneSerializer = struct {
         try writer.endObject(); // scene
     }
 
-    fn serializeComponent(self: *SceneSerializer, comptime T: type, name: []const u8, entity: ecs.EntityId, writer: anytype) !void {
+    fn serializeComponent(self: *SceneSerializer, comptime T: type, comp_name: []const u8, entity: ecs.EntityId, writer: anytype) !void {
         if (self.scene.ecs_world.get(T, entity)) |component| {
-            try writer.objectField(name);
+            try writer.objectField(comp_name);
             try component.serialize(self, writer);
         }
+    }
+
+    /// Deserialize a scene from a JSON value tree
+    pub fn deserialize(self: *SceneSerializer, root: std.json.Value) !void {
+        if (root != .object) return error.InvalidSceneFormat;
+        
+        // Verify scene name if present (optional)
+        // if (root.object.get("name")) |name_val| { ... }
+
+        const entities_val = root.object.get("entities") orelse return error.MissingEntitiesField;
+        if (entities_val != .array) return error.InvalidEntitiesFormat;
+
+        // Pass 1: Create all entities and register their UUIDs
+        for (entities_val.array.items) |entity_val| {
+            if (entity_val != .object) continue;
+            
+            const uuid_val = entity_val.object.get("uuid") orelse continue;
+            if (uuid_val != .string) continue;
+            
+            const uuid = try UuidComponent.fromString(uuid_val.string);
+            
+            // Create entity in world
+            const entity = try self.scene.ecs_world.createEntity();
+            try self.scene.ecs_world.add(entity, uuid);
+            try self.scene.entities.append(entity);
+            
+            // Map UUID to EntityId for reference resolution
+            try self.uuid_map.put(uuid, entity);
+        }
+
+        // Pass 2: Deserialize components
+        for (entities_val.array.items) |entity_val| {
+            if (entity_val != .object) continue;
+            
+            const uuid_val = entity_val.object.get("uuid") orelse continue;
+            const uuid = try UuidComponent.fromString(uuid_val.string);
+            const entity = self.uuid_map.get(uuid) orelse continue;
+            
+            const components_val = entity_val.object.get("components") orelse continue;
+            if (components_val != .object) continue;
+            
+            // Core components
+            try self.deserializeComponent(ecs.Name, "Name", entity, components_val);
+            try self.deserializeComponent(ecs.Transform, "Transform", entity, components_val);
+            try self.deserializeComponent(ecs.MeshRenderer, "MeshRenderer", entity, components_val);
+            try self.deserializeComponent(ecs.Camera, "Camera", entity, components_val);
+            try self.deserializeComponent(ecs.PointLight, "PointLight", entity, components_val);
+            try self.deserializeComponent(ecs.ScriptComponent, "ScriptComponent", entity, components_val);
+            try self.deserializeComponent(ecs.ParticleEmitter, "ParticleEmitter", entity, components_val);
+            try self.deserializeComponent(ecs.MaterialSet, "MaterialSet", entity, components_val);
+            
+            // Material property components
+            try self.deserializeComponent(ecs.AlbedoMaterial, "AlbedoMaterial", entity, components_val);
+            try self.deserializeComponent(ecs.RoughnessMaterial, "RoughnessMaterial", entity, components_val);
+            try self.deserializeComponent(ecs.MetallicMaterial, "MetallicMaterial", entity, components_val);
+            try self.deserializeComponent(ecs.NormalMaterial, "NormalMaterial", entity, components_val);
+            try self.deserializeComponent(ecs.EmissiveMaterial, "EmissiveMaterial", entity, components_val);
+            try self.deserializeComponent(ecs.OcclusionMaterial, "OcclusionMaterial", entity, components_val);
+        }
+    }
+
+    fn deserializeComponent(self: *SceneSerializer, comptime T: type, entity: ecs.EntityId, components_val: std.json.Value) !void {
+        if (components_val.object.get(name(T))) |comp_val| {
+            const component = try T.deserialize(self, comp_val);
+            try self.scene.ecs_world.add(entity, component);
+        }
+    }
+    
+    // Helper to get component name string (must match serialize)
+    fn name(comptime T: type) []const u8 {
+        if (T == ecs.Name) return "Name";
+        if (T == ecs.Transform) return "Transform";
+        if (T == ecs.MeshRenderer) return "MeshRenderer";
+        if (T == ecs.Camera) return "Camera";
+        if (T == ecs.PointLight) return "PointLight";
+        if (T == ecs.ScriptComponent) return "ScriptComponent";
+        if (T == ecs.ParticleEmitter) return "ParticleEmitter";
+        if (T == ecs.MaterialSet) return "MaterialSet";
+        if (T == ecs.AlbedoMaterial) return "AlbedoMaterial";
+        if (T == ecs.RoughnessMaterial) return "RoughnessMaterial";
+        if (T == ecs.MetallicMaterial) return "MetallicMaterial";
+        if (T == ecs.NormalMaterial) return "NormalMaterial";
+        if (T == ecs.EmissiveMaterial) return "EmissiveMaterial";
+        if (T == ecs.OcclusionMaterial) return "OcclusionMaterial";
+        return "Unknown";
     }
 };

@@ -88,4 +88,37 @@ pub const ScriptComponent = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize ScriptComponent
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !ScriptComponent {
+        var script_comp = ScriptComponent.initDefault("");
+        
+        if (value.object.get("asset")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    script_comp.asset = id;
+                }
+            }
+        }
+        
+        if (value.object.get("script")) |val| {
+            if (val == .string) {
+                script_comp.script = try serializer.allocator.dupe(u8, val.string);
+            }
+        }
+        
+        if (value.object.get("enabled")) |val| {
+            if (val == .bool) script_comp.enabled = val.bool;
+        }
+        
+        if (value.object.get("run_on_update")) |val| {
+            if (val == .bool) script_comp.run_on_update = val.bool;
+        }
+        
+        if (value.object.get("run_once")) |val| {
+            if (val == .bool) script_comp.run_once = val.bool;
+        }
+        
+        return script_comp;
+    }
 };

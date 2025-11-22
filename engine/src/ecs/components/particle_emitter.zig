@@ -70,4 +70,39 @@ pub const ParticleEmitter = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize ParticleEmitter component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !ParticleEmitter {
+        var pe = ParticleEmitter.init();
+        
+        if (value.object.get("emission_rate")) |val| {
+            if (val == .float) pe.emission_rate = @floatCast(val.float);
+        }
+        
+        if (value.object.get("particle_lifetime")) |val| {
+            if (val == .float) pe.particle_lifetime = @floatCast(val.float);
+        }
+        
+        if (value.object.get("velocity_min")) |val| {
+            pe.velocity_min = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+        }
+        
+        if (value.object.get("velocity_max")) |val| {
+            pe.velocity_max = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+        }
+        
+        if (value.object.get("color")) |val| {
+            pe.color = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+        }
+        
+        if (value.object.get("spawn_offset")) |val| {
+            pe.spawn_offset = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+        }
+        
+        if (value.object.get("active")) |val| {
+            if (val == .bool) pe.active = val.bool;
+        }
+        
+        return pe;
+    }
 };

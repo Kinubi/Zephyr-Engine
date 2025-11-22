@@ -30,4 +30,14 @@ pub const Name = struct {
         try writer.write(self.name);
         try writer.endObject();
     }
+
+    /// Deserialize Name component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !Name {
+        if (value.object.get("name")) |name_val| {
+            if (name_val == .string) {
+                return Name.init(serializer.allocator, name_val.string);
+            }
+        }
+        return Name.init(serializer.allocator, "Entity");
+    }
 };

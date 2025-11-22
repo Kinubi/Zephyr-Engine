@@ -46,4 +46,50 @@ pub const MaterialSet = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize MaterialSet component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !MaterialSet {
+        var ms = MaterialSet.initOpaque();
+        
+        if (value.object.get("set_name")) |val| {
+            if (val == .string) {
+                if (std.mem.eql(u8, val.string, "opaque")) {
+                    ms.set_name = "opaque";
+                } else if (std.mem.eql(u8, val.string, "transparent")) {
+                    ms.set_name = "transparent";
+                } else if (std.mem.eql(u8, val.string, "masked")) {
+                    ms.set_name = "masked";
+                } else {
+                    // Fallback: duplicate (potential leak if not managed)
+                    ms.set_name = try serializer.allocator.dupe(u8, val.string);
+                }
+            }
+        }
+        
+        if (value.object.get("shader_variant")) |val| {
+            if (val == .string) {
+                if (std.mem.eql(u8, val.string, "pbr_standard")) {
+                    ms.shader_variant = "pbr_standard";
+                } else if (std.mem.eql(u8, val.string, "unlit")) {
+                    ms.shader_variant = "unlit";
+                } else {
+                    ms.shader_variant = try serializer.allocator.dupe(u8, val.string);
+                }
+            }
+        }
+        
+        if (value.object.get("casts_shadows")) |val| {
+            if (val == .bool) ms.casts_shadows = val.bool;
+        }
+        
+        if (value.object.get("receives_shadows")) |val| {
+            if (val == .bool) ms.receives_shadows = val.bool;
+        }
+        
+        if (value.object.get("alpha_cutoff")) |val| {
+            if (val == .float) ms.alpha_cutoff = @floatCast(val.float);
+        }
+        
+        return ms;
+    }
 };

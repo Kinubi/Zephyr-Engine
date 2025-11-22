@@ -67,18 +67,29 @@ pub const PointLight = struct {
         try writer.objectField("range");
         try writer.write(self.range);
         
-        try writer.objectField("constant");
-        try writer.write(self.constant);
-        
-        try writer.objectField("linear");
-        try writer.write(self.linear);
-        
-        try writer.objectField("quadratic");
-        try writer.write(self.quadratic);
-        
         try writer.objectField("cast_shadows");
         try writer.write(self.cast_shadows);
         
         try writer.endObject();
+    }
+
+    /// Deserialize PointLight component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !PointLight {
+        var pl = PointLight.init();
+        
+        if (value.object.get("color")) |val| {
+            pl.color = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+        }
+        if (value.object.get("intensity")) |val| {
+            if (val == .float) pl.intensity = @floatCast(val.float);
+        }
+        if (value.object.get("range")) |val| {
+            if (val == .float) pl.range = @floatCast(val.float);
+        }
+        if (value.object.get("cast_shadows")) |val| {
+            if (val == .bool) pl.cast_shadows = val.bool;
+        }
+        
+        return pl;
     }
 };

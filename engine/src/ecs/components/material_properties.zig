@@ -1,3 +1,4 @@
+const std = @import("std");
 const AssetId = @import("../../assets/asset_types.zig").AssetId;
 
 /// Albedo (base color) material component
@@ -49,6 +50,25 @@ pub const AlbedoMaterial = struct {
         try writer.write(self.color_tint);
         
         try writer.endObject();
+    }
+
+    /// Deserialize AlbedoMaterial component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !AlbedoMaterial {
+        var mat = AlbedoMaterial.initColor([_]f32{1, 1, 1, 1});
+        
+        if (value.object.get("texture")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    mat.texture_id = id;
+                }
+            }
+        }
+        
+        if (value.object.get("color")) |val| {
+            mat.color_tint = try std.json.parseFromValue([4]f32, serializer.allocator, val, .{});
+        }
+        
+        return mat;
     }
 };
 
@@ -102,6 +122,25 @@ pub const RoughnessMaterial = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize RoughnessMaterial component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !RoughnessMaterial {
+        var mat = RoughnessMaterial.initConstant(0.5);
+        
+        if (value.object.get("texture")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    mat.texture_id = id;
+                }
+            }
+        }
+        
+        if (value.object.get("factor")) |val| {
+            if (val == .float) mat.factor = @floatCast(val.float);
+        }
+        
+        return mat;
+    }
 };
 
 /// Metallic material component
@@ -154,6 +193,25 @@ pub const MetallicMaterial = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize MetallicMaterial component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !MetallicMaterial {
+        var mat = MetallicMaterial.initConstant(0.0);
+        
+        if (value.object.get("texture")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    mat.texture_id = id;
+                }
+            }
+        }
+        
+        if (value.object.get("factor")) |val| {
+            if (val == .float) mat.factor = @floatCast(val.float);
+        }
+        
+        return mat;
+    }
 };
 
 /// Normal map material component
@@ -197,6 +255,25 @@ pub const NormalMaterial = struct {
         try writer.write(self.strength);
         
         try writer.endObject();
+    }
+
+    /// Deserialize NormalMaterial component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !NormalMaterial {
+        var mat = NormalMaterial.initWithStrength(AssetId.invalid, 1.0);
+        
+        if (value.object.get("texture")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    mat.texture_id = id;
+                }
+            }
+        }
+        
+        if (value.object.get("strength")) |val| {
+            if (val == .float) mat.strength = @floatCast(val.float);
+        }
+        
+        return mat;
     }
 };
 
@@ -259,6 +336,29 @@ pub const EmissiveMaterial = struct {
         
         try writer.endObject();
     }
+
+    /// Deserialize EmissiveMaterial component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !EmissiveMaterial {
+        var mat = EmissiveMaterial.initColor([_]f32{0, 0, 0}, 1.0);
+        
+        if (value.object.get("texture")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    mat.texture_id = id;
+                }
+            }
+        }
+        
+        if (value.object.get("color")) |val| {
+            mat.color = try std.json.parseFromValue([3]f32, serializer.allocator, val, .{});
+        }
+        
+        if (value.object.get("intensity")) |val| {
+            if (val == .float) mat.intensity = @floatCast(val.float);
+        }
+        
+        return mat;
+    }
 };
 
 /// Occlusion material component (optional)
@@ -293,5 +393,24 @@ pub const OcclusionMaterial = struct {
         try writer.write(self.strength);
         
         try writer.endObject();
+    }
+
+    /// Deserialize OcclusionMaterial component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !OcclusionMaterial {
+        var mat = OcclusionMaterial.init(AssetId.invalid);
+        
+        if (value.object.get("texture")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    mat.texture_id = id;
+                }
+            }
+        }
+        
+        if (value.object.get("strength")) |val| {
+            if (val == .float) mat.strength = @floatCast(val.float);
+        }
+        
+        return mat;
     }
 };

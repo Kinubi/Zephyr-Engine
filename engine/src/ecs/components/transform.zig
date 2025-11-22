@@ -1,6 +1,7 @@
 const std = @import("std");
 const math = @import("../../utils/math.zig");
 const EntityId = @import("../entity_registry.zig").EntityId;
+const UuidComponent = @import("uuid.zig").UuidComponent;
 
 /// Transform component for ECS entities
 /// Supports local transforms with optional parent-child hierarchies
@@ -69,6 +70,33 @@ pub const Transform = struct {
         }
         
         try writer.endObject();
+    }
+
+    /// Deserialize Transform component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !Transform {
+        var transform = Transform.init();
+        
+        if (value.object.get("position")) |pos_val| {
+            transform.position = try std.json.parseFromValue(math.Vec3, serializer.allocator, pos_val, .{});
+        }
+        
+        if (value.object.get("rotation")) |rot_val| {
+            transform.rotation = try std.json.parseFromValue(math.Quat, serializer.allocator, rot_val, .{});
+        }
+        
+        if (value.object.get("scale")) |scale_val| {
+            transform.scale = try std.json.parseFromValue(math.Vec3, serializer.allocator, scale_val, .{});
+        }
+        
+        if (value.object.get("parent")) |parent_val| {
+            if (parent_val == .string) {
+                const uuid = try UuidComponent.fromString(parent_val.string);
+                transform.parent = serializer.getEntityId(uuid);
+            }
+        }
+        
+        transform.dirty = true;
+        return transform;
     }
 
     /// Create a Transform with position, rotation, and scale

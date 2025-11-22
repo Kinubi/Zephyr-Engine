@@ -150,6 +150,26 @@ pub const Scene = struct {
         try buffered_writer.flush();
     }
 
+    /// Load the scene from a JSON file
+    pub fn load(self: *Scene, file_path: []const u8) !void {
+        const file = try std.fs.cwd().openFile(file_path, .{});
+        defer file.close();
+        
+        const file_size = (try file.stat()).size;
+        const buffer = try self.allocator.alloc(u8, file_size);
+        defer self.allocator.free(buffer);
+        
+        _ = try file.readAll(buffer);
+        
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, buffer, .{});
+        defer parsed.deinit();
+        
+        var serializer = SceneSerializer.init(self);
+        defer serializer.deinit();
+        
+        try serializer.deserialize(parsed.value);
+    }
+
     /// Set the performance monitor for profiling
     pub fn setPerformanceMonitor(self: *Scene, monitor: ?*PerformanceMonitor) void {
         self.performance_monitor = monitor;
