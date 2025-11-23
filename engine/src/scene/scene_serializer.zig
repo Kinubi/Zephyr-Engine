@@ -7,6 +7,7 @@ const LoadPriority = AssetManagerMod.LoadPriority;
 const AssetType = AssetManagerMod.AssetType;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const UuidComponent = @import("../ecs/components/uuid.zig").UuidComponent;
+const GameObject = @import("game_object.zig").GameObject;
 
 /// Handles serialization and deserialization of Scenes to/from JSON
 pub const SceneSerializer = struct {
@@ -53,26 +54,26 @@ pub const SceneSerializer = struct {
     /// Serialize the entire scene to a JSON writer
     pub fn jsonStringify(self: *SceneSerializer, writer: anytype) !void {
         try writer.beginObject();
-        
+
         try writer.objectField("name");
         try writer.write(self.scene.name);
-        
+
         try writer.objectField("entities");
         try writer.beginArray();
-        
+
         for (self.scene.entities.items) |entity| {
             // Only serialize entities with a UUID component
             if (self.scene.ecs_world.get(UuidComponent, entity)) |uuid_comp| {
                 try writer.beginObject();
-                
+
                 try writer.objectField("uuid");
                 const uuid_str = try std.fmt.allocPrint(self.allocator, "{f}", .{uuid_comp});
                 defer self.allocator.free(uuid_str);
                 try writer.write(uuid_str);
-                
+
                 try writer.objectField("components");
                 try writer.beginObject();
-                
+
                 // Core components
                 try self.serializeComponent(ecs.Name, entity, writer);
                 try self.serializeComponent(ecs.Transform, entity, writer);
@@ -82,7 +83,7 @@ pub const SceneSerializer = struct {
                 try self.serializeComponent(ecs.ScriptComponent, entity, writer);
                 try self.serializeComponent(ecs.ParticleEmitter, entity, writer);
                 try self.serializeComponent(ecs.MaterialSet, entity, writer);
-                
+
                 // Material property components
                 try self.serializeComponent(ecs.AlbedoMaterial, entity, writer);
                 try self.serializeComponent(ecs.RoughnessMaterial, entity, writer);
@@ -92,11 +93,11 @@ pub const SceneSerializer = struct {
                 try self.serializeComponent(ecs.OcclusionMaterial, entity, writer);
 
                 try writer.endObject(); // components
-                
+
                 try writer.endObject(); // entity
             }
         }
-        
+
         try writer.endArray(); // entities
         try writer.endObject(); // scene
     }
@@ -111,7 +112,7 @@ pub const SceneSerializer = struct {
     /// Deserialize a scene from a JSON value tree
     pub fn deserialize(self: *SceneSerializer, root: std.json.Value) !void {
         if (root != .object) return error.InvalidSceneFormat;
-        
+
         // Verify scene name if present (optional)
         // if (root.object.get("name")) |name_val| { ... }
 
@@ -121,17 +122,21 @@ pub const SceneSerializer = struct {
         // Pass 1: Create all entities and register their UUIDs
         for (entities_val.array.items) |entity_val| {
             if (entity_val != .object) continue;
-            
+
             const uuid_val = entity_val.object.get("uuid") orelse continue;
             if (uuid_val != .string) continue;
-            
+
             const uuid = try UuidComponent.fromString(uuid_val.string);
-            
+
             // Create entity in world
             const entity = try self.scene.ecs_world.createEntity();
             try self.scene.ecs_world.emplace(UuidComponent, entity, uuid);
             try self.scene.entities.append(self.allocator, entity);
-            
+            try self.scene.game_objects.append(self.scene.allocator, GameObject{
+                .entity_id = entity,
+                .scene = self.scene,
+            });
+
             // Map UUID to EntityId for reference resolution
             try self.uuid_map.put(uuid, entity);
         }
@@ -139,14 +144,14 @@ pub const SceneSerializer = struct {
         // Pass 2: Deserialize components
         for (entities_val.array.items) |entity_val| {
             if (entity_val != .object) continue;
-            
+
             const uuid_val = entity_val.object.get("uuid") orelse continue;
             const uuid = try UuidComponent.fromString(uuid_val.string);
             const entity = self.uuid_map.get(uuid) orelse continue;
-            
+
             const components_val = entity_val.object.get("components") orelse continue;
             if (components_val != .object) continue;
-            
+
             // Core components
             try self.deserializeComponent(ecs.Name, entity, components_val);
             try self.deserializeComponent(ecs.Transform, entity, components_val);
@@ -156,7 +161,7 @@ pub const SceneSerializer = struct {
             try self.deserializeComponent(ecs.ScriptComponent, entity, components_val);
             try self.deserializeComponent(ecs.ParticleEmitter, entity, components_val);
             try self.deserializeComponent(ecs.MaterialSet, entity, components_val);
-            
+
             // Material property components
             try self.deserializeComponent(ecs.AlbedoMaterial, entity, components_val);
             try self.deserializeComponent(ecs.RoughnessMaterial, entity, components_val);
@@ -173,8 +178,6 @@ pub const SceneSerializer = struct {
             try self.scene.ecs_world.emplace(T, entity, component);
         }
     }
-    
-
 
     /// Helper to load a model asset (async)
     pub fn loadModel(self: *SceneSerializer, path: []const u8) !AssetId {

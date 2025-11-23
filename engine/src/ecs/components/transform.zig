@@ -53,16 +53,16 @@ pub const Transform = struct {
     /// Serialize Transform component
     pub fn jsonSerialize(self: Transform, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
-        
+
         try writer.objectField("position");
         try writer.write(self.position);
-        
+
         try writer.objectField("rotation");
         try writer.write(self.rotation);
-        
+
         try writer.objectField("scale");
         try writer.write(self.scale);
-        
+
         if (self.parent) |parent_id| {
             if (serializer.getEntityUuid(parent_id)) |uuid| {
                 try writer.objectField("parent");
@@ -71,39 +71,39 @@ pub const Transform = struct {
                 try writer.write(uuid_str);
             }
         }
-        
+
         try writer.endObject();
     }
 
     /// Deserialize Transform component
     pub fn deserialize(serializer: anytype, value: std.json.Value) !Transform {
         var transform = Transform.init();
-        
+
         if (value.object.get("position")) |pos_val| {
             const parsed = try std.json.parseFromValue(math.Vec3, serializer.allocator, pos_val, .{});
             transform.position = parsed.value;
             parsed.deinit();
         }
-        
+
         if (value.object.get("rotation")) |rot_val| {
             const parsed = try std.json.parseFromValue(math.Quat, serializer.allocator, rot_val, .{});
             transform.rotation = parsed.value;
             parsed.deinit();
         }
-        
+
         if (value.object.get("scale")) |scale_val| {
             const parsed = try std.json.parseFromValue(math.Vec3, serializer.allocator, scale_val, .{});
             transform.scale = parsed.value;
             parsed.deinit();
         }
-        
+
         if (value.object.get("parent")) |parent_val| {
             if (parent_val == .string) {
                 const uuid = try UuidComponent.fromString(parent_val.string);
                 transform.parent = serializer.getEntityId(uuid);
             }
         }
-        
+
         transform.dirty = true;
         return transform;
     }

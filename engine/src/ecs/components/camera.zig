@@ -182,42 +182,42 @@ pub const Camera = struct {
     pub fn jsonSerialize(self: Camera, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
-        
+
         try writer.objectField("projection_type");
         switch (self.projection_type) {
             .perspective => try writer.write("perspective"),
             .orthographic => try writer.write("orthographic"),
         }
-        
+
         try writer.objectField("is_primary");
         try writer.write(self.is_primary);
-        
+
         try writer.objectField("near_plane");
         try writer.write(self.near_plane);
-        
+
         try writer.objectField("far_plane");
         try writer.write(self.far_plane);
-        
+
         if (self.projection_type == .perspective) {
             try writer.objectField("fov");
             try writer.write(self.fov);
-            
+
             try writer.objectField("aspect_ratio");
             try writer.write(self.aspect_ratio);
         } else {
             try writer.objectField("ortho_left");
             try writer.write(self.ortho_left);
-            
+
             try writer.objectField("ortho_right");
             try writer.write(self.ortho_right);
-            
+
             try writer.objectField("ortho_bottom");
             try writer.write(self.ortho_bottom);
-            
+
             try writer.objectField("ortho_top");
             try writer.write(self.ortho_top);
         }
-        
+
         try writer.endObject();
     }
 
@@ -225,58 +225,50 @@ pub const Camera = struct {
     pub fn deserialize(serializer: anytype, value: std.json.Value) !Camera {
         _ = serializer;
         var cam = Camera.init();
-        
+
         if (value.object.get("projection_type")) |val| {
             if (val == .string) {
                 if (std.mem.eql(u8, val.string, "perspective")) cam.projection_type = .perspective;
                 if (std.mem.eql(u8, val.string, "orthographic")) cam.projection_type = .orthographic;
             }
         }
-        
+
         if (value.object.get("is_primary")) |val| {
             if (val == .bool) cam.is_primary = val.bool;
         }
-        
+
         if (value.object.get("near_plane")) |val| {
-            if (val == .float) cam.near_plane = @floatCast(val.float)
-            else if (val == .integer) cam.near_plane = @floatFromInt(val.integer);
+            if (val == .float) cam.near_plane = @floatCast(val.float) else if (val == .integer) cam.near_plane = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("far_plane")) |val| {
-            if (val == .float) cam.far_plane = @floatCast(val.float)
-            else if (val == .integer) cam.far_plane = @floatFromInt(val.integer);
+            if (val == .float) cam.far_plane = @floatCast(val.float) else if (val == .integer) cam.far_plane = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("fov")) |val| {
-            if (val == .float) cam.fov = @floatCast(val.float)
-            else if (val == .integer) cam.fov = @floatFromInt(val.integer);
+            if (val == .float) cam.fov = @floatCast(val.float) else if (val == .integer) cam.fov = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("aspect_ratio")) |val| {
-            if (val == .float) cam.aspect_ratio = @floatCast(val.float)
-            else if (val == .integer) cam.aspect_ratio = @floatFromInt(val.integer);
+            if (val == .float) cam.aspect_ratio = @floatCast(val.float) else if (val == .integer) cam.aspect_ratio = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("ortho_left")) |val| {
-            if (val == .float) cam.ortho_left = @floatCast(val.float)
-            else if (val == .integer) cam.ortho_left = @floatFromInt(val.integer);
+            if (val == .float) cam.ortho_left = @floatCast(val.float) else if (val == .integer) cam.ortho_left = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("ortho_right")) |val| {
-            if (val == .float) cam.ortho_right = @floatCast(val.float)
-            else if (val == .integer) cam.ortho_right = @floatFromInt(val.integer);
+            if (val == .float) cam.ortho_right = @floatCast(val.float) else if (val == .integer) cam.ortho_right = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("ortho_bottom")) |val| {
-            if (val == .float) cam.ortho_bottom = @floatCast(val.float)
-            else if (val == .integer) cam.ortho_bottom = @floatFromInt(val.integer);
+            if (val == .float) cam.ortho_bottom = @floatCast(val.float) else if (val == .integer) cam.ortho_bottom = @floatFromInt(val.integer);
         }
-        
+
         if (value.object.get("ortho_top")) |val| {
-            if (val == .float) cam.ortho_top = @floatCast(val.float)
-            else if (val == .integer) cam.ortho_top = @floatFromInt(val.integer);
+            if (val == .float) cam.ortho_top = @floatCast(val.float) else if (val == .integer) cam.ortho_top = @floatFromInt(val.integer);
         }
-        
+
         cam.projection_dirty = true;
         return cam;
     }

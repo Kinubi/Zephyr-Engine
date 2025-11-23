@@ -59,26 +59,26 @@ pub const PointLight = struct {
     pub fn jsonSerialize(self: PointLight, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
-        
+
         try writer.objectField("color");
         try writer.write(self.color);
-        
+
         try writer.objectField("intensity");
         try writer.write(self.intensity);
-        
+
         try writer.objectField("range");
         try writer.write(self.range);
-        
+
         try writer.objectField("cast_shadows");
         try writer.write(self.cast_shadows);
-        
+
         try writer.endObject();
     }
 
     /// Deserialize PointLight component
     pub fn deserialize(serializer: anytype, value: std.json.Value) !PointLight {
         var pl = PointLight.init();
-        
+
         if (value.object.get("color")) |val| {
             const parsed = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
             pl.color = parsed.value;
@@ -93,7 +93,7 @@ pub const PointLight = struct {
         if (value.object.get("cast_shadows")) |val| {
             if (val == .bool) pl.cast_shadows = val.bool;
         }
-        
+
         return pl;
     }
 };

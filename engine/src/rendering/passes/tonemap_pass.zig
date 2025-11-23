@@ -217,12 +217,12 @@ pub const TonemapPass = struct {
     fn reset(ctx: *RenderPass) void {
         const self: *TonemapPass = @fieldParentPtr("base", ctx);
         self.resource_binder.clear();
-        
+
         if (self.cached_pipeline_handle != .null_handle) {
             self.pipeline_system.destroyPipeline(self.pipeline);
             self.cached_pipeline_handle = .null_handle;
         }
-        
+
         log(.INFO, "tonemap_pass", "Reset resources", .{});
     }
 };

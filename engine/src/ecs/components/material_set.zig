@@ -29,22 +29,22 @@ pub const MaterialSet = struct {
     pub fn jsonSerialize(self: MaterialSet, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
-        
+
         try writer.objectField("set_name");
         try writer.write(self.set_name);
-        
+
         try writer.objectField("shader_variant");
         try writer.write(self.shader_variant);
-        
+
         try writer.objectField("casts_shadows");
         try writer.write(self.casts_shadows);
-        
+
         try writer.objectField("receives_shadows");
         try writer.write(self.receives_shadows);
-        
+
         try writer.objectField("alpha_cutoff");
         try writer.write(self.alpha_cutoff);
-        
+
         try writer.endObject();
     }
 
@@ -52,7 +52,7 @@ pub const MaterialSet = struct {
     pub fn deserialize(serializer: anytype, value: std.json.Value) !MaterialSet {
         _ = serializer;
         var ms = MaterialSet.initOpaque();
-        
+
         if (value.object.get("set_name")) |val| {
             if (val == .string) {
                 if (std.mem.eql(u8, val.string, "opaque")) {
@@ -67,7 +67,7 @@ pub const MaterialSet = struct {
                 }
             }
         }
-        
+
         if (value.object.get("shader_variant")) |val| {
             if (val == .string) {
                 if (std.mem.eql(u8, val.string, "pbr_standard")) {
@@ -80,19 +80,19 @@ pub const MaterialSet = struct {
                 }
             }
         }
-        
+
         if (value.object.get("casts_shadows")) |val| {
             if (val == .bool) ms.casts_shadows = val.bool;
         }
-        
+
         if (value.object.get("receives_shadows")) |val| {
             if (val == .bool) ms.receives_shadows = val.bool;
         }
-        
+
         if (value.object.get("alpha_cutoff")) |val| {
             if (val == .float) ms.alpha_cutoff = @floatCast(val.float);
         }
-        
+
         return ms;
     }
 };

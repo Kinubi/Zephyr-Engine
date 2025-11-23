@@ -72,7 +72,7 @@ pub const ScriptComponent = struct {
     /// Serialize ScriptComponent
     pub fn jsonSerialize(self: ScriptComponent, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
-        
+
         if (self.asset) |asset_id| {
             if (asset_id.isValid()) {
                 if (serializer.getAssetPath(asset_id)) |path| {
@@ -81,30 +81,30 @@ pub const ScriptComponent = struct {
                 }
             }
         }
-        
+
         // If no asset, or as a fallback/override, we might want to save the script content?
         // For now, let's only save script content if there is no asset.
         if (self.asset == null or !self.asset.?.isValid()) {
             try writer.objectField("script");
             try writer.write(self.script);
         }
-        
+
         try writer.objectField("enabled");
         try writer.write(self.enabled);
-        
+
         try writer.objectField("run_on_update");
         try writer.write(self.run_on_update);
-        
+
         try writer.objectField("run_once");
         try writer.write(self.run_once);
-        
+
         try writer.endObject();
     }
 
     /// Deserialize ScriptComponent
     pub fn deserialize(serializer: anytype, value: std.json.Value) !ScriptComponent {
         var script_comp = ScriptComponent.initDefault("");
-        
+
         if (value.object.get("asset")) |path_val| {
             if (path_val == .string) {
                 if (serializer.getAssetId(path_val.string)) |id| {
@@ -112,26 +112,26 @@ pub const ScriptComponent = struct {
                 }
             }
         }
-        
+
         if (value.object.get("script")) |val| {
             if (val == .string) {
                 script_comp.script = try serializer.allocator.dupe(u8, val.string);
                 script_comp.owns_memory = true;
             }
         }
-        
+
         if (value.object.get("enabled")) |val| {
             if (val == .bool) script_comp.enabled = val.bool;
         }
-        
+
         if (value.object.get("run_on_update")) |val| {
             if (val == .bool) script_comp.run_on_update = val.bool;
         }
-        
+
         if (value.object.get("run_once")) |val| {
             if (val == .bool) script_comp.run_once = val.bool;
         }
-        
+
         return script_comp;
     }
 };

@@ -372,7 +372,7 @@ pub const PathTracingPass = struct {
         if (self.accel_set) |set| {
             if (set.tlas.generation.load(.acquire) == 0) {
                 // TLAS not ready yet, skip dispatch
-                
+
                 // Clear the HDR texture to black to avoid garbage
                 if (frame_info.hdr_texture) |hdr_tex| {
                     const clear_color = vk.ClearColorValue{ .float_32 = .{ 0.0, 0.0, 0.0, 1.0 } };
@@ -383,7 +383,7 @@ pub const PathTracingPass = struct {
                         .base_array_layer = 0,
                         .layer_count = 1,
                     };
-                    
+
                     self.graphics_context.vkd.cmdClearColorImage(
                         cmd,
                         hdr_tex.image,
@@ -393,7 +393,7 @@ pub const PathTracingPass = struct {
                         @ptrCast(&subresource_range),
                     );
                 }
-                
+
                 return;
             }
         }
@@ -578,13 +578,13 @@ pub const PathTracingPass = struct {
     fn reset(ctx: *RenderPass) void {
         const self: *PathTracingPass = @fieldParentPtr("base", ctx);
         self.resource_binder.clear();
-        
+
         // Destroy the old pipeline to avoid dangling resources
         if (self.cached_pipeline_handle != .null_handle) {
             self.pipeline_system.destroyPipeline(self.path_tracing_pipeline);
             self.cached_pipeline_handle = .null_handle;
         }
-        
+
         log(.INFO, "path_tracing_pass", "Reset resources", .{});
     }
 };

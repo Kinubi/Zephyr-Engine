@@ -401,13 +401,13 @@ pub const GeometryPass = struct {
     fn reset(ctx: *RenderPass) void {
         const self: *GeometryPass = @fieldParentPtr("base", ctx);
         self.resource_binder.clear();
-        
+
         // Destroy the old pipeline to avoid dangling resources
         if (self.cached_pipeline_handle != .null_handle) {
             self.pipeline_system.destroyPipeline(self.geometry_pipeline);
             self.cached_pipeline_handle = .null_handle;
         }
-        
+
         log(.INFO, "geometry_pass", "Reset resources", .{});
     }
 };
