@@ -112,25 +112,24 @@ pub const Mat4 = struct {
         } };
     }
     pub fn mul(self: Mat4, other: Mat4) Mat4 {
-        const col01 = simd.buildColumnPair(other.data[0..], 0, 1);
-        const col23 = simd.buildColumnPair(other.data[0..], 2, 3);
-        var result: [16]f32 = undefined;
-        var row: usize = 0;
-        while (row < 4) : (row += 1) {
-            const row_values = [_]f32{
-                self.data[row * 4 + 0],
-                self.data[row * 4 + 1],
-                self.data[row * 4 + 2],
-                self.data[row * 4 + 3],
-            };
-            const dots01 = simd.dot4x2(row_values, col01);
-            const dots23 = simd.dot4x2(row_values, col23);
-            result[row * 4 + 0] = dots01[0];
-            result[row * 4 + 1] = dots01[1];
-            result[row * 4 + 2] = dots23[0];
-            result[row * 4 + 3] = dots23[1];
+        var result = Mat4.zero();
+        var i: usize = 0;
+        while (i < 4) : (i += 1) {
+            var j: usize = 0;
+            while (j < 4) : (j += 1) {
+                var sum: f32 = 0.0;
+                var k: usize = 0;
+                while (k < 4) : (k += 1) {
+                    // Column-major: data[col * 4 + row]
+                    // C[row=j, col=i] = sum(A[row=j, col=k] * B[row=k, col=i])
+                    // A index: k * 4 + j
+                    // B index: i * 4 + k
+                    sum += self.data[k * 4 + j] * other.data[i * 4 + k];
+                }
+                result.data[i * 4 + j] = sum;
+            }
         }
-        return Mat4{ .data = result };
+        return result;
     }
     pub fn translation(v: Vec3) Mat4 {
         var m = Mat4.identity();

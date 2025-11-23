@@ -398,12 +398,15 @@ pub const Scene = struct {
         // Update or add MeshRenderer component
         if (self.ecs_world.has(MeshRenderer, entity)) {
             const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
-            mr.setModel(model_id);
-            mr.setTexture(texture_id);
+            mr.model_asset = model_id;
         } else {
-            const mesh_renderer = MeshRenderer.initWithTexture(model_id, texture_id);
+            const mesh_renderer = MeshRenderer.init(model_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
         }
+
+        // Update AlbedoMaterial with the texture
+        const albedo_mat = ecs.AlbedoMaterial.init(texture_id);
+        try self.ecs_world.emplace(ecs.AlbedoMaterial, entity, albedo_mat);
 
         log(.INFO, "scene", "Updated assets for entity {} -> model:{s} texture:{s}", .{ @intFromEnum(entity), model_path, texture_path });
     }

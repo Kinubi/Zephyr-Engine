@@ -422,37 +422,7 @@ pub const SceneHierarchyPanel = struct {
                 // MeshRenderer component
                 if (scene.ecs_world.get(MeshRenderer, entity)) |mesh_renderer| {
                     if (c.ImGui_CollapsingHeader("Mesh Renderer", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderMeshRendererInspector(mesh_renderer);
-
-                        // Accept drag-and-drop onto the Mesh Renderer inspector area
-                        if (c.ImGui_BeginDragDropTarget()) {
-                            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
-                            if (payload != null) {
-                                if (payload.*.Data) |data_any| {
-                                    const data_ptr: [*]const u8 = @ptrCast(data_any);
-                                    const data_size: usize = @intCast(payload.*.DataSize);
-
-                                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
-                                    if (path_opt) |path_buf| {
-                                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
-                                        path_buf[data_size] = 0;
-                                        const path_slice = path_buf[0..data_size];
-
-                                        // Route based on extension
-                                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
-                                            scene.updateModelForEntity(entity, path_slice) catch {};
-                                        } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
-                                            scene.updateTextureForEntity(entity, path_slice) catch {};
-                                        } else {
-                                            // If unknown, try both model+texture update using same path
-                                            scene.updatePropAssets(entity, path_slice, path_slice) catch {};
-                                        }
-
-                                        std.heap.page_allocator.free(path_buf);
-                                    }
-                                }
-                            }
-                        }
+                        self.renderMeshRendererInspector(scene, entity, mesh_renderer);
                     }
                 }
 
@@ -646,6 +616,72 @@ pub const SceneHierarchyPanel = struct {
                         }
                     }
                 }
+
+                c.ImGui_Spacing();
+                c.ImGui_Separator();
+                c.ImGui_Spacing();
+
+                // "Add Component" button centered
+                const avail_width = c.ImGui_GetContentRegionAvail().x;
+                const button_width: f32 = 150.0;
+                c.ImGui_SetCursorPosX((avail_width - button_width) * 0.5);
+
+                if (c.ImGui_Button("Add Component")) {
+                    c.ImGui_OpenPopup("AddComponentPopup", 0);
+                }
+
+                if (c.ImGui_BeginPopup("AddComponentPopup", 0)) {
+                    // MeshRenderer
+                    if (!scene.ecs_world.has(MeshRenderer, entity)) {
+                        if (c.ImGui_MenuItem("Mesh Renderer")) {
+                            _ = scene.ecs_world.emplace(MeshRenderer, entity, .{
+                                .model_asset = null,
+                                .enabled = true,
+                                .layer = 0,
+                                .casts_shadows = true,
+                                .receives_shadows = true,
+                            }) catch {};
+                        }
+                    }
+
+                    // PointLight
+                    if (!scene.ecs_world.has(PointLight, entity)) {
+                        if (c.ImGui_MenuItem("Point Light")) {
+                            _ = scene.ecs_world.emplace(PointLight, entity, .{
+                                .color = Math.Vec3.init(1.0, 1.0, 1.0),
+                                .intensity = 1.0,
+                                .range = 10.0
+                            }) catch {};
+                        }
+                    }
+
+                    // Camera
+                    if (!scene.ecs_world.has(Camera, entity)) {
+                        if (c.ImGui_MenuItem("Camera")) {
+                            _ = scene.ecs_world.emplace(Camera, entity, Camera.init()) catch {};
+                        }
+                    }
+
+                    // ParticleEmitter
+                    if (!scene.ecs_world.has(ParticleEmitter, entity)) {
+                        if (c.ImGui_MenuItem("Particle Emitter")) {
+                            _ = scene.ecs_world.emplace(ParticleEmitter, entity, ParticleEmitter.init()) catch {};
+                        }
+                    }
+
+                    // ScriptComponent
+                    if (!scene.ecs_world.has(ScriptComponent, entity)) {
+                        if (c.ImGui_MenuItem("Script")) {
+                            const default_script = "-- New Script\nfunction init()\nend\n\nfunction update(dt)\nend\n";
+                            // Allocate script in scene allocator
+                            if (scene.allocator.dupe(u8, default_script)) |script_mem| {
+                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initDefault(script_mem)) catch {};
+                            } else |_| {}
+                        }
+                    }
+
+                    c.ImGui_EndPopup();
+                }
             }
         }
         c.ImGui_End();
@@ -751,21 +787,68 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render MeshRenderer component inspector
-    fn renderMeshRendererInspector(self: *SceneHierarchyPanel, mesh_renderer: *const MeshRenderer) void {
-        _ = self;
-
+    fn renderMeshRendererInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, mesh_renderer: *const MeshRenderer) void {
+        // Model Asset
         if (mesh_renderer.model_asset) |model_id| {
             const model_u64: u64 = @intFromEnum(model_id);
-            c.ImGui_Text("Model ID: %llu", model_u64);
+            if (scene.asset_manager.getAssetPath(model_id)) |path| {
+                c.ImGui_Text("Model: %s", path.ptr);
+            } else {
+                c.ImGui_Text("Model ID: %llu", model_u64);
+            }
         } else {
             c.ImGui_Text("Model: None");
         }
 
-        if (mesh_renderer.texture_asset) |tex_id| {
-            const texture_u64: u64 = @intFromEnum(tex_id);
-            c.ImGui_Text("Texture ID: %llu", texture_u64);
-        } else {
-            c.ImGui_Text("Texture: None");
+        // Accept drag-and-drop onto the Model text
+        if (c.ImGui_BeginDragDropTarget()) {
+            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+            if (payload != null) {
+                if (payload.*.Data) |data_any| {
+                    const data_ptr: [*]const u8 = @ptrCast(data_any);
+                    const data_size: usize = @intCast(payload.*.DataSize);
+
+                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                    if (path_opt) |path_buf| {
+                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                        path_buf[data_size] = 0;
+                        const path_slice = path_buf[0..data_size];
+
+                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
+                            scene.updateModelForEntity(entity, path_slice) catch {};
+                        }
+
+                        std.heap.page_allocator.free(path_buf);
+                    }
+                }
+            }
+            c.ImGui_EndDragDropTarget();
+        }
+
+        // Button to load model manually (useful if drag-and-drop is not available)
+        if (c.ImGui_Button("Load Model...")) {
+            c.ImGui_OpenPopup("LoadModelPopup", 0);
+        }
+
+        if (c.ImGui_BeginPopup("LoadModelPopup", 0)) {
+            c.ImGui_Text("Enter Model Path:");
+            // Use temp buffer for input
+            _ = c.ImGui_InputText("##model_path", &self.temp_buffer[0], self.temp_buffer.len, 0);
+            
+            if (c.ImGui_Button("Load")) {
+                // Determine length
+                var len: usize = 0;
+                while (len < self.temp_buffer.len) : (len += 1) {
+                    if (self.temp_buffer[len] == 0) break;
+                }
+                
+                if (len > 0) {
+                    const path = self.temp_buffer[0..len];
+                    scene.updateModelForEntity(entity, path) catch {};
+                    c.ImGui_CloseCurrentPopup();
+                }
+            }
+            c.ImGui_EndPopup();
         }
 
         const enabled_str: [*:0]const u8 = if (mesh_renderer.enabled) "Yes" else "No";

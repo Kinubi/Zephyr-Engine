@@ -5,16 +5,6 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Scene Hierarchy Context Menu",
-          "desc": "Implement right-click context menu in the Scene Hierarchy Panel.\n\nRequirements:\n1. Right-click in open space -> 'Add Entity' (parented to scene root).\n2. Right-click on an existing entity -> 'Add Entity' (parented to that entity).",
-          "labels": ["Editor", "Feature"]
-        },
-        {
-          "name": "Component Inspector Dropdown",
-          "desc": "Allow adding components to entities via the Inspector.\n\nRequirements:\n1. Add a dropdown menu 'Add Component' to the Inspector panel.\n2. List available components (MeshRenderer, PointLight, Script, etc.).\n3. On selection, add the component to the selected entity.",
-          "labels": ["Editor", "Feature"]
-        },
-        {
           "name": "Material Editor",
           "desc": "Implement a dedicated Editor window for creating and modifying materials.\n\nImplementation Details:\n1. Create `editor/src/windows/material_editor.zig`.\n2. Subscribe to selection events. When an entity is selected, query its `MaterialSet` and property components (`AlbedoMaterial`, etc.).\n3. Use `ImGui.colorEdit4` for albedo/emissive colors, `ImGui.sliderFloat` for roughness/metallic/normal strength.\n4. Add drag-and-drop targets for textures (accepting Asset IDs).\n5. Apply changes immediately to the ECS components, which `MaterialSystem` picks up next frame.",
           "labels": ["Editor", "High Priority"]
@@ -44,6 +34,16 @@
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Component Inspector Dropdown",
+          "desc": "Allow adding components to entities via the Inspector.\n\nRequirements:\n1. Add a dropdown menu 'Add Component' to the Inspector panel.\n2. List available components (MeshRenderer, PointLight, Script, etc.).\n3. On selection, add the component to the selected entity.",
+          "labels": ["Editor", "Feature"]
+        },
+        {
+          "name": "Scene Hierarchy Context Menu",
+          "desc": "Implement right-click context menu in the Scene Hierarchy Panel.\n\nRequirements:\n1. Right-click in open space -> 'Add Entity' (parented to scene root).\n2. Right-click on an existing entity -> 'Add Entity' (parented to that entity).",
+          "labels": ["Editor", "Feature"]
+        },
         {
           "name": "Editor: Add Save/Load Menu Items",
           "desc": "Add 'Save Scene' and 'Load Scene' to the main menu bar in the Editor UI (`editor/src/main.zig` or `editor_app.zig`).\n\nImplementation Details:\n1. Integrate a file dialog library (e.g., `nfd-zig` or `nativefiledialog`) to get absolute paths.\n2. In the `File` menu, call `nfd.saveDialog` / `nfd.openDialog` filtering for `.json`.\n3. On success, call `self.scene.save(path)` or `self.scene.load(path)`.\n4. Handle errors (e.g., file permission, invalid JSON) and show an error popup via `ImGui.openPopup`.",
