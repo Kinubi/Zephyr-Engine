@@ -1,5 +1,6 @@
 const std = @import("std");
 const math = @import("../../utils/math.zig");
+const log = @import("../../utils/log.zig").log;
 const EntityId = @import("../entity_registry.zig").EntityId;
 const UuidComponent = @import("uuid.zig").UuidComponent;
 
@@ -100,7 +101,12 @@ pub const Transform = struct {
         if (value.object.get("parent")) |parent_val| {
             if (parent_val == .string) {
                 const uuid = try UuidComponent.fromString(parent_val.string);
-                transform.parent = serializer.getEntityId(uuid);
+                const parent_id = serializer.getEntityId(uuid);
+                if (parent_id) |pid| {
+                    transform.parent = pid;
+                } else {
+                    log(.WARN, "transform", "Failed to resolve parent UUID: {s}", .{parent_val.string});
+                }
             }
         }
 
