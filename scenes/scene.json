@@ -1,0 +1,301 @@
+{
+    "name": "cornell_box",
+    "entities": [
+        {
+            "uuid": "37d87c77-2d9e-43e7-807c-39242917f994",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 2,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 2,
+                        "y": 0.10000000149011612,
+                        "z": 2
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "4a4e3305-fb0d-4fa6-97a0-4881f8e530fe",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -2,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 2,
+                        "y": 0.10000000149011612,
+                        "z": 2
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "fdaefff1-9e75-4786-920c-3bff88cbe1c6",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 2
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 2,
+                        "y": 2,
+                        "z": 0.10000000149011612
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/error.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "a37efa67-0452-4a92-9842-6c4e6643f2b0",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": -2,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 0.10000000149011612,
+                        "y": 2,
+                        "z": 2
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "0572cc38-e7d3-40bc-9538-1e58a03f07b9",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 2,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 0.10000000149011612,
+                        "y": 2,
+                        "z": 2
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                }
+            }
+        },
+        {
+            "uuid": "8bdb0303-5423-4716-bfc9-bb2a716578bc",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 1.2000000476837158,
+                        "y": -0.949999988079071,
+                        "z": 0.5
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 0.800000011920929,
+                        "y": 0.800000011920929,
+                        "z": 0.800000011920929
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/flat_vase.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "ParticleEmitter": {
+                    "emission_rate": 50,
+                    "particle_lifetime": 2.5,
+                    "velocity_min": {
+                        "x": -1.5,
+                        "y": 5,
+                        "z": -1.5
+                    },
+                    "velocity_max": {
+                        "x": 1.5,
+                        "y": 8,
+                        "z": 1.5
+                    },
+                    "color": {
+                        "x": 1,
+                        "y": 0.800000011920929,
+                        "z": 0.30000001192092896
+                    },
+                    "spawn_offset": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "active": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                "RoughnessMaterial": {
+                    "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-roughness3.png",
+                    "factor": 1
+                }
+            }
+        }
+    ]
+}

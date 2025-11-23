@@ -91,6 +91,7 @@ pub const ParticlePass = struct {
         .execute = executeImpl,
         .teardown = teardownImpl,
         .checkValidity = checkValidityImpl,
+        .reset = reset,
     };
 
     fn checkValidityImpl(base: *RenderPass) bool {
@@ -275,5 +276,20 @@ pub const ParticlePass = struct {
     /// Set the compute pass that produces particles
     pub fn setComputePass(self: *ParticlePass, compute_pass: *ParticleComputePass) void {
         self.compute_pass = compute_pass;
+    }
+
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
+    fn reset(ctx: *RenderPass) void {
+        const self: *ParticlePass = @fieldParentPtr("base", ctx);
+        self.resource_binder.clear();
+
+        if (self.cached_pipeline_handle != .null_handle) {
+            self.pipeline_system.destroyPipeline(self.particle_pipeline);
+            self.cached_pipeline_handle = .null_handle;
+        }
+
+        log(.INFO, "particle_pass", "Reset resources", .{});
     }
 };

@@ -114,6 +114,7 @@ pub const GeometryPass = struct {
         .execute = executeImpl,
         .teardown = teardownImpl,
         .checkValidity = checkValidityImpl,
+        .reset = reset,
     };
 
     fn checkValidityImpl(base: *RenderPass) bool {
@@ -392,6 +393,22 @@ pub const GeometryPass = struct {
         // Pipeline cleanup handled by UnifiedPipelineSystem
         self.allocator.destroy(self);
         log(.INFO, "geometry_pass", "Teardown complete", .{});
+    }
+
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
+    fn reset(ctx: *RenderPass) void {
+        const self: *GeometryPass = @fieldParentPtr("base", ctx);
+        self.resource_binder.clear();
+
+        // Destroy the old pipeline to avoid dangling resources
+        if (self.cached_pipeline_handle != .null_handle) {
+            self.pipeline_system.destroyPipeline(self.geometry_pipeline);
+            self.cached_pipeline_handle = .null_handle;
+        }
+
+        log(.INFO, "geometry_pass", "Reset resources", .{});
     }
 };
 

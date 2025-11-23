@@ -329,6 +329,11 @@ pub const BaseComputePass = struct {
 
     /// Consolidated cleanup logic
     fn cleanupResources(self: *BaseComputePass) void {
+        // Destroy pipeline
+        if (self.pipeline) |id| {
+            self.pipeline_system.destroyPipeline(id);
+        }
+
         // Deinit resource binder
         self.resource_binder.deinit();
 

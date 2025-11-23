@@ -644,6 +644,8 @@ pub const Engine = struct {
         try self.ecs_world.?.registerComponent(ecs.ParticleComponent);
         try self.ecs_world.?.registerComponent(ecs.ParticleEmitter);
         try self.ecs_world.?.registerComponent(ecs.ScriptComponent);
+        try self.ecs_world.?.registerComponent(ecs.UuidComponent);
+        try self.ecs_world.?.registerComponent(ecs.Name);
 
         // Register material components
         try self.ecs_world.?.registerComponent(ecs.MaterialSet);

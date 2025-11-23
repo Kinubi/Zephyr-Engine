@@ -1,6 +1,7 @@
 const std = @import("std");
 const math = @import("../../utils/math.zig");
 const EntityId = @import("../entity_registry.zig").EntityId;
+const UuidComponent = @import("uuid.zig").UuidComponent;
 
 /// Transform component for ECS entities
 /// Supports local transforms with optional parent-child hierarchies
@@ -11,6 +12,7 @@ const EntityId = @import("../entity_registry.zig").EntityId;
 /// Files: transform.zig (change rotation field), game_object.zig (implement get/setRotation)
 /// Branch: maintenance
 pub const Transform = struct {
+    pub const json_name = "Transform";
     /// Local position relative to parent (or world if no parent)
     position: math.Vec3,
 
@@ -46,6 +48,64 @@ pub const Transform = struct {
         var t = init();
         t.position = pos;
         return t;
+    }
+
+    /// Serialize Transform component
+    pub fn jsonSerialize(self: Transform, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+
+        try writer.objectField("position");
+        try writer.write(self.position);
+
+        try writer.objectField("rotation");
+        try writer.write(self.rotation);
+
+        try writer.objectField("scale");
+        try writer.write(self.scale);
+
+        if (self.parent) |parent_id| {
+            if (serializer.getEntityUuid(parent_id)) |uuid| {
+                try writer.objectField("parent");
+                var buf: [36]u8 = undefined;
+                const uuid_str = try std.fmt.bufPrint(&buf, "{f}", .{uuid});
+                try writer.write(uuid_str);
+            }
+        }
+
+        try writer.endObject();
+    }
+
+    /// Deserialize Transform component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !Transform {
+        var transform = Transform.init();
+
+        if (value.object.get("position")) |pos_val| {
+            const parsed = try std.json.parseFromValue(math.Vec3, serializer.allocator, pos_val, .{});
+            transform.position = parsed.value;
+            parsed.deinit();
+        }
+
+        if (value.object.get("rotation")) |rot_val| {
+            const parsed = try std.json.parseFromValue(math.Quat, serializer.allocator, rot_val, .{});
+            transform.rotation = parsed.value;
+            parsed.deinit();
+        }
+
+        if (value.object.get("scale")) |scale_val| {
+            const parsed = try std.json.parseFromValue(math.Vec3, serializer.allocator, scale_val, .{});
+            transform.scale = parsed.value;
+            parsed.deinit();
+        }
+
+        if (value.object.get("parent")) |parent_val| {
+            if (parent_val == .string) {
+                const uuid = try UuidComponent.fromString(parent_val.string);
+                transform.parent = serializer.getEntityId(uuid);
+            }
+        }
+
+        transform.dirty = true;
+        return transform;
     }
 
     /// Create a Transform with position, rotation, and scale

@@ -441,6 +441,13 @@ pub const ParticleSystem = struct {
             // Transform dirty flag will trigger GPU emitter update in scene
         }
     }
+
+    /// Reset the particle system
+    pub fn reset(self: *ParticleSystem) void {
+        self.emitter_count = 0;
+        self.last_particle_count = 0;
+        log(.INFO, "particle_system", "ParticleSystem reset", .{});
+    }
 };
 
 /// Compute shader uniform buffer

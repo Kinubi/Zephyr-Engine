@@ -1,8 +1,8 @@
 # Raytracing Acceleration Structure Sets - Implementation Plan
 
-**Date**: November 7, 2025  
-**Status**: 🚧 PLANNING  
-**Branch**: `feature/buffer-manager`
+**Date**: November 22, 2025  
+**Status**: ✅ COMPLETE  
+**Branch**: `master`
 
 ---
 
@@ -12,33 +12,7 @@ Refactor RaytracingSystem to use **named acceleration structure sets** with gene
 
 ---
 
-## Current Architecture
-
-```zig
-// Single TLAS registry (no sets)
-TlasRegistry {
-    current: atomic<?*TlasEntry>  // One TLAS for entire scene
-}
-
-// BLAS stored in BVH builder
-MultithreadedBvhBuilder {
-    blas_registry: HashMap<GeometryHash, BlasResult>
-}
-
-// PathTracingPass
-const tlas = rt_system.getTlas();  // Gets current TLAS handle
-// Binds directly, no generation tracking
-```
-
-**Problems:**
-- No generation tracking → Pass can't detect TLAS changes
-- No named sets → Can't have multiple AS sets for different scenes/levels
-- BLAS scattered in builder registry → Hard to track which BLAS belong to which set
-- Manual descriptor rebinding → Pass must check every frame
-
----
-
-## Target Architecture
+## Current Architecture (Implemented)
 
 ```zig
 // Named AS sets (like MaterialBufferSet/TextureSet)
@@ -47,7 +21,29 @@ pub const AccelerationStructureSet = struct {
     name: []const u8,
     
     // BLAS list for this set (geometries)
-    blas_list: std.ArrayList(BlasHandle),
+    blas_handles: std.ArrayList(BlasHandle),
+    
+    // TLAS for this set (scene)
+    tlas: ManagedTLAS,
+    
+    // Geometry buffers (vertex/index arrays) with generation tracking
+    geometry_buffers: ManagedGeometryBuffers,
+    
+    // Tracking
+    dirty: bool = true,
+    rebuild_cooldown_frames: u32 = 0,
+};
+```
+
+**Status:**
+- ✅ Named sets implemented
+- ✅ Generation tracking for TLAS and geometry buffers
+- ✅ Integration with PathTracingPass
+- ✅ Automatic descriptor rebinding via ResourceBinder
+
+---
+
+## Previous Architecture (Deprecated)
     
     // TLAS for this set (scene)
     managed_tlas: ManagedTLAS,

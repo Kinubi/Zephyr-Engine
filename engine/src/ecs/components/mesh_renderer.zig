@@ -6,6 +6,7 @@ const AssetId = @import("../../assets/asset_types.zig").AssetId;
 /// Material properties are defined via MaterialSystem ECS components
 /// Used by RenderSystem to extract renderable geometry and feed to GenericRenderer
 pub const MeshRenderer = struct {
+    pub const json_name = "MeshRenderer";
     /// Model asset reference (vertex/index buffers)
     model_asset: ?AssetId = null,
 
@@ -46,6 +47,82 @@ pub const MeshRenderer = struct {
             .casts_shadows = true,
             .receives_shadows = true,
         };
+    }
+
+    /// Serialize MeshRenderer component
+    pub fn jsonSerialize(self: MeshRenderer, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+
+        if (self.model_asset) |asset_id| {
+            if (asset_id.isValid()) {
+                if (serializer.getAssetPath(asset_id)) |path| {
+                    try writer.objectField("model_asset");
+                    try writer.write(path);
+                }
+            }
+        }
+
+        if (self.texture_asset) |asset_id| {
+            if (asset_id.isValid()) {
+                if (serializer.getAssetPath(asset_id)) |path| {
+                    try writer.objectField("texture_asset");
+                    try writer.write(path);
+                }
+            }
+        }
+
+        try writer.objectField("enabled");
+        try writer.write(self.enabled);
+
+        try writer.objectField("layer");
+        try writer.write(self.layer);
+
+        try writer.objectField("casts_shadows");
+        try writer.write(self.casts_shadows);
+
+        try writer.objectField("receives_shadows");
+        try writer.write(self.receives_shadows);
+
+        try writer.endObject();
+    }
+
+    /// Deserialize MeshRenderer component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !MeshRenderer {
+        var mr = MeshRenderer.init(AssetId.invalid);
+
+        if (value.object.get("model_asset")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.loadModel(path_val.string) catch null) |id| {
+                    mr.model_asset = id;
+                }
+            }
+        }
+
+        if (value.object.get("texture_asset")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
+                    mr.texture_asset = id;
+                }
+            }
+        }
+
+        if (value.object.get("enabled")) |val| {
+            if (val == .bool) mr.enabled = val.bool;
+        }
+
+        if (value.object.get("casts_shadows")) |val| {
+            if (val == .bool) mr.casts_shadows = val.bool;
+        }
+
+        if (value.object.get("receives_shadows")) |val| {
+            if (val == .bool) mr.receives_shadows = val.bool;
+        }
+
+        if (value.object.get("layer")) |val| {
+            if (val == .integer) mr.layer = @intCast(val.integer);
+        }
+
+        return mr;
     }
 
     /// Set the model asset

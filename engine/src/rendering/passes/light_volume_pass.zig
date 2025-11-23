@@ -130,6 +130,7 @@ pub const LightVolumePass = struct {
         .execute = executeImpl,
         .teardown = teardownImpl,
         .checkValidity = checkValidityImpl,
+        .reset = reset,
     };
 
     fn checkValidityImpl(base: *RenderPass) bool {
@@ -321,5 +322,20 @@ pub const LightVolumePass = struct {
 
         self.light_system.deinit();
         self.allocator.destroy(self);
+    }
+
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
+    fn reset(ctx: *RenderPass) void {
+        const self: *LightVolumePass = @fieldParentPtr("base", ctx);
+        self.resource_binder.clear();
+
+        if (self.cached_pipeline_handle != .null_handle) {
+            self.pipeline_system.destroyPipeline(self.light_volume_pipeline);
+            self.cached_pipeline_handle = .null_handle;
+        }
+
+        log(.INFO, "light_volume_pass", "Reset resources", .{});
     }
 };

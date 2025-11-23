@@ -189,7 +189,7 @@ pub const UILayer = struct {
         };
 
         // Render UI viewport (always visible) - CPU recording only
-        self.ui_renderer.render();
+        self.ui_renderer.render(self.scene);
 
         // Publish UI capture state for engine layers (base→overlays dispatch means
         // SceneLayer has already seen events this frame; still, this keeps a stable

@@ -81,6 +81,7 @@ pub const TonemapPass = struct {
         .execute = executeImpl,
         .teardown = teardownImpl,
         .checkValidity = checkValidityImpl,
+        .reset = reset,
     };
 
     fn setupImpl(base: *RenderPass, graph: *RenderGraph) !void {
@@ -208,6 +209,21 @@ pub const TonemapPass = struct {
             .b8g8r8a8_srgb, .r8g8b8a8_srgb, .a8b8g8r8_srgb_pack32 => true,
             else => false,
         };
+    }
+
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
+    fn reset(ctx: *RenderPass) void {
+        const self: *TonemapPass = @fieldParentPtr("base", ctx);
+        self.resource_binder.clear();
+
+        if (self.cached_pipeline_handle != .null_handle) {
+            self.pipeline_system.destroyPipeline(self.pipeline);
+            self.cached_pipeline_handle = .null_handle;
+        }
+
+        log(.INFO, "tonemap_pass", "Reset resources", .{});
     }
 };
 

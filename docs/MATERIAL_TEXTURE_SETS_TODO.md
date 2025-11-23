@@ -65,10 +65,10 @@
 
 ## NEXT PRIORITIES
 
-### 1. Path Tracing Integration (NEXT)
-- Convert PathTracingPass to use material_set
-- Test ray tracing with new texture indexing
-- Verify material buffer binding in ray tracing shaders
+### 1. Path Tracing Integration ✅ (COMPLETED)
+- Convert PathTracingPass to use material_set ✅
+- Test ray tracing with new texture indexing ✅
+- Verify material buffer binding in ray tracing shaders ✅
 
 ### 2. Performance Testing
 - Measure rebuild frequency

@@ -43,6 +43,21 @@ pub fn DenseSet(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (comptime std.meta.hasFn(T, "deinit")) {
+                const deinit_fn = @field(T, "deinit");
+                const ArgsTuple = std.meta.ArgsTuple(@TypeOf(deinit_fn));
+                const args_len = std.meta.fields(ArgsTuple).len;
+                // Check if deinit takes an allocator argument (self + allocator = 2 args)
+                const takes_allocator = args_len == 2;
+
+                for (self.components.items) |*comp| {
+                    if (takes_allocator) {
+                        comp.deinit(self.allocator);
+                    } else {
+                        comp.deinit();
+                    }
+                }
+            }
             self.entities.deinit(self.allocator);
             self.components.deinit(self.allocator);
             self.versions.deinit(self.allocator);
@@ -102,6 +117,20 @@ pub fn DenseSet(comptime T: type) type {
         pub fn remove(self: *Self, entity: EntityId) bool {
             const idx = self.sparse.get(entity) orelse return false;
 
+            // Deinit the component being removed
+            if (comptime std.meta.hasFn(T, "deinit")) {
+                const deinit_fn = @field(T, "deinit");
+                const ArgsTuple = std.meta.ArgsTuple(@TypeOf(deinit_fn));
+                const args_len = std.meta.fields(ArgsTuple).len;
+                const takes_allocator = args_len == 2;
+
+                if (takes_allocator) {
+                    self.components.items[idx].deinit(self.allocator);
+                } else {
+                    self.components.items[idx].deinit();
+                }
+            }
+
             const last_idx = self.components.items.len - 1;
 
             // If not the last element, swap with last
@@ -133,6 +162,20 @@ pub fn DenseSet(comptime T: type) type {
 
         /// Clear all components
         pub fn clear(self: *Self) void {
+            if (comptime std.meta.hasFn(T, "deinit")) {
+                const deinit_fn = @field(T, "deinit");
+                const ArgsTuple = std.meta.ArgsTuple(@TypeOf(deinit_fn));
+                const args_len = std.meta.fields(ArgsTuple).len;
+                const takes_allocator = args_len == 2;
+
+                for (self.components.items) |*comp| {
+                    if (takes_allocator) {
+                        comp.deinit(self.allocator);
+                    } else {
+                        comp.deinit();
+                    }
+                }
+            }
             self.entities.clearRetainingCapacity();
             self.components.clearRetainingCapacity();
             self.versions.clearRetainingCapacity();

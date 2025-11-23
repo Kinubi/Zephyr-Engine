@@ -1147,6 +1147,16 @@ pub const ResourceBinder = struct {
         });
     }
 
+    /// Clear all tracked resources (used when scene is cleared)
+    pub fn clear(self: *ResourceBinder) void {
+        self.tracked_resources.clearRetainingCapacity();
+        self.bound_uniform_buffers.clearRetainingCapacity();
+        self.bound_textures.clearRetainingCapacity();
+        self.bound_storage_buffers.clearRetainingCapacity();
+        self.bound_acceleration_structures.clearRetainingCapacity();
+        log(.INFO, "resource_binder", "Cleared all tracked resources", .{});
+    }
+
     /// Update descriptor bindings for a specific pipeline and frame
     /// Automatically rebinds any buffers whose VkBuffer handle has changed
     /// AND checks tracked managed buffers for generation changes

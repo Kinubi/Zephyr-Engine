@@ -418,6 +418,11 @@ pub const BaseRenderPass = struct {
     /// Consolidated cleanup logic for both destroy() and teardownImpl()
     /// This ensures all allocated resources are properly freed
     fn cleanupResources(self: *BaseRenderPass) void {
+        // Destroy pipeline
+        if (self.pipeline) |id| {
+            self.pipeline_system.destroyPipeline(id);
+        }
+
         // Deinit resource binder
         self.resource_binder.deinit();
 

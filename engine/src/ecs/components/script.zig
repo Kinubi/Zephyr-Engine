@@ -7,6 +7,7 @@ const AssetId = @import("../../assets/asset_types.zig").AssetId;
 /// the script source; optionally it can reference an `AssetId` so the editor
 /// and asset manager can track hot-reload and lifecycle.
 pub const ScriptComponent = struct {
+    pub const json_name = "ScriptComponent";
     /// Pointer to NUL-terminated script source or a slice owned elsewhere
     script: []const u8,
     /// Optional asset ID if this script was registered as an asset
@@ -20,6 +21,8 @@ pub const ScriptComponent = struct {
     /// will be set to false by the ScriptingSystem (useful for one-shot
     /// initialization scripts attached to entities).
     run_once: bool,
+    /// If true, the script string is owned by this component and should be freed on deinit
+    owns_memory: bool = false,
 
     pub fn init(script: []const u8, run_on_update: bool, run_once: bool) ScriptComponent {
         return ScriptComponent{
@@ -28,6 +31,7 @@ pub const ScriptComponent = struct {
             .enabled = true,
             .run_on_update = run_on_update,
             .run_once = run_once,
+            .owns_memory = false,
         };
     }
 
@@ -41,6 +45,7 @@ pub const ScriptComponent = struct {
             .enabled = true,
             .run_on_update = run_on_update,
             .run_once = run_once,
+            .owns_memory = false,
         };
     }
 
@@ -48,20 +53,85 @@ pub const ScriptComponent = struct {
     /// automatic per-frame execution. This mirrors the "Apply" action in the
     /// editor: update the stored script without changing its execution state.
     pub fn initDefault(script: []const u8) ScriptComponent {
-        return ScriptComponent.init(script, false, false);
+        return ScriptComponent{
+            .script = script,
+            .asset = null,
+            .enabled = true,
+            .run_on_update = false,
+            .run_once = false,
+            .owns_memory = false,
+        };
     }
 
-    /// Convenience initializer for one-shot execution on the next update tick.
-    /// This mirrors the "Run Next Update" button in the editor.
-    pub fn initOneShot(script: []const u8) ScriptComponent {
-        return ScriptComponent.init(script, true, true);
+    pub fn deinit(self: ScriptComponent, allocator: std.mem.Allocator) void {
+        if (self.owns_memory) {
+            allocator.free(self.script);
+        }
     }
 
-    /// Component-level update (called by World.update when iterating components)
-    /// Script execution itself is performed by the ScriptingSystem so this
-    /// method is a no-op; it exists to satisfy the `World.update` contract.
-    pub fn update(self: *ScriptComponent, dt: f32) void {
-        _ = self;
-        _ = dt; // no-op; ScriptingSystem will poll ScriptComponent entries
+    /// Serialize ScriptComponent
+    pub fn jsonSerialize(self: ScriptComponent, serializer: anytype, writer: anytype) !void {
+        try writer.beginObject();
+
+        if (self.asset) |asset_id| {
+            if (asset_id.isValid()) {
+                if (serializer.getAssetPath(asset_id)) |path| {
+                    try writer.objectField("asset");
+                    try writer.write(path);
+                }
+            }
+        }
+
+        // If no asset, or as a fallback/override, we might want to save the script content?
+        // For now, let's only save script content if there is no asset.
+        if (self.asset == null or !self.asset.?.isValid()) {
+            try writer.objectField("script");
+            try writer.write(self.script);
+        }
+
+        try writer.objectField("enabled");
+        try writer.write(self.enabled);
+
+        try writer.objectField("run_on_update");
+        try writer.write(self.run_on_update);
+
+        try writer.objectField("run_once");
+        try writer.write(self.run_once);
+
+        try writer.endObject();
+    }
+
+    /// Deserialize ScriptComponent
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !ScriptComponent {
+        var script_comp = ScriptComponent.initDefault("");
+
+        if (value.object.get("asset")) |path_val| {
+            if (path_val == .string) {
+                if (serializer.getAssetId(path_val.string)) |id| {
+                    script_comp.asset = id;
+                }
+            }
+        }
+
+        if (value.object.get("script")) |val| {
+            if (val == .string) {
+                script_comp.script = try serializer.allocator.dupe(u8, val.string);
+                script_comp.owns_memory = true;
+            }
+        }
+
+        if (value.object.get("enabled")) |val| {
+            if (val == .bool) script_comp.enabled = val.bool;
+        }
+
+        if (value.object.get("run_on_update")) |val| {
+            if (val == .bool) script_comp.run_on_update = val.bool;
+        }
+
+        if (value.object.get("run_once")) |val| {
+            if (val == .bool) script_comp.run_once = val.bool;
+        }
+
+        return script_comp;
     }
 };

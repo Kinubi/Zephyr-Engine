@@ -375,12 +375,20 @@
 - [ ] Memory profiling and leak detection
 - [ ] GPU memory budget tracking
 - [ ] Error handling standardization
+- [ ] **Move BLAS ownership to Mesh/Geometry** (rendering/geometry.zig)
+- [ ] **Remove global BLAS registry** (rendering/raytracing/multithreaded_bvh_builder.zig)
+- [ ] **Implement mesh deduplication for instancing** (ecs/systems/render_system.zig)
+- [ ] **Implement asset streaming system** (assets/asset_manager.zig)
 
 ### Medium Priority
 - [ ] Cross-platform file watching (currently Linux-only)
 - [ ] More comprehensive unit tests
 - [ ] Shader validation in CI/CD
 - [ ] Performance regression tests
+- [ ] **Archetype-based storage optimization** (ecs/world.zig)
+- [ ] **Comprehensive asset validation** (assets/asset_manager.zig)
+- [ ] **Automatic shader variant generation** (assets/shader_compiler.zig)
+- [ ] **Work-stealing job queue** (threading/thread_pool.zig)
 
 ### Low Priority
 - [ ] Code documentation (inline comments)

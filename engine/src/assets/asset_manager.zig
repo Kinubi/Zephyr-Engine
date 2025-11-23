@@ -399,31 +399,33 @@ pub const AssetManager = struct {
         }
         self.loaded_models.deinit(self.allocator);
 
-        // Clean up loaded scripts
-        for (self.loaded_scripts.items) |script_holder| {
-            // Free the duplicated source buffer
-            if (script_holder.source.len > 0) {
-                self.allocator.free(script_holder.source);
-            }
-            self.allocator.destroy(script_holder);
+        // Clean up scripts
+        for (self.loaded_scripts.items) |holder| {
+            self.allocator.free(holder.source);
+            self.allocator.destroy(holder);
         }
         self.loaded_scripts.deinit(self.allocator);
 
-        // Clean up mappings
         self.asset_to_texture.deinit();
         self.asset_to_model.deinit();
         self.asset_to_script.deinit();
         self.pending_requests.deinit();
-
-        // Clean up texture descriptors
-        if (self.texture_image_infos.len > 0) {
-            self.allocator.free(self.texture_image_infos);
-        }
-
-        log(.INFO, "enhanced_asset_manager", "Enhanced asset manager deinitialized", .{});
     }
 
-    /// Load asset asynchronously with priority
+    /// Get the file path for a given asset ID
+    pub fn getAssetPath(self: *AssetManager, asset_id: AssetId) ?[]const u8 {
+        if (self.registry.getAsset(asset_id)) |metadata| {
+            return metadata.path;
+        }
+        return null;
+    }
+
+    /// Get the asset ID for a given file path
+    pub fn getAssetId(self: *AssetManager, path: []const u8) ?AssetId {
+        return self.registry.getAssetId(path);
+    }
+
+    /// Request async load of an asset
     pub fn loadAssetAsync(self: *AssetManager, file_path: []const u8, asset_type: AssetType, priority: LoadPriority) !AssetId {
         // Register or get existing asset ID
         const asset_id = try self.registry.registerAsset(file_path, asset_type);

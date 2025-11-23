@@ -280,6 +280,11 @@ pub const World = struct {
         return self.userdata.get(key);
     }
 
+    /// Remove user data
+    pub fn removeUserData(self: *World, key: []const u8) bool {
+        return self.userdata.remove(key);
+    }
+
     /// Check if any components of type T have changed since last check.
     /// Automatically updates last_checked_version for this component type.
     /// Returns true if any components changed.

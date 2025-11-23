@@ -5,6 +5,7 @@ const math = @import("../../utils/math.zig");
 /// Works with Transform component for positioning and orientation
 /// Supports perspective and orthographic projections
 pub const Camera = struct {
+    pub const json_name = "Camera";
     /// Camera projection type
     pub const ProjectionType = enum {
         perspective,
@@ -109,112 +110,167 @@ pub const Camera = struct {
         self.projection_dirty = true;
     }
 
-    /// Set field of view (perspective only)
+    /// Set field of view
     pub fn setFov(self: *Camera, fov: f32) void {
         self.fov = fov;
         self.projection_dirty = true;
     }
 
-    /// Set aspect ratio (perspective only)
+    /// Set aspect ratio
     pub fn setAspectRatio(self: *Camera, aspect_ratio: f32) void {
         self.aspect_ratio = aspect_ratio;
         self.projection_dirty = true;
     }
 
-    /// Set near/far planes
-    pub fn setClipPlanes(self: *Camera, near: f32, far: f32) void {
-        self.near_plane = near;
-        self.far_plane = far;
-        self.projection_dirty = true;
-    }
-
-    /// Mark this camera as the primary/active camera
+    /// Set whether this is the primary camera
     pub fn setPrimary(self: *Camera, is_primary: bool) void {
         self.is_primary = is_primary;
     }
 
-    // ========================================================================
-    // Matrix Calculations
-    // ========================================================================
-
-    /// Update projection matrix if dirty
-    /// Called automatically by getProjectionMatrix()
-    fn updateProjectionMatrix(self: *Camera) void {
-        if (!self.projection_dirty) {
-            return;
-        }
-
+    /// Update projection matrix based on current settings
+    pub fn updateProjectionMatrix(self: *Camera) void {
         switch (self.projection_type) {
             .perspective => {
-                const fov_rad = math.radians(self.fov);
-                const tan_half_fov = @tan(fov_rad / 2.0);
-
+                const tanHalfFovy = @tan(math.radians(self.fov) / 2.0);
                 self.projection_matrix = math.Mat4x4.zero();
-                self.projection_matrix.get(0, 0).* = 1.0 / (self.aspect_ratio * tan_half_fov);
-                self.projection_matrix.get(1, 1).* = 1.0 / tan_half_fov;
-                self.projection_matrix.get(2, 2).* = self.far_plane / (self.far_plane - self.near_plane);
-                self.projection_matrix.get(2, 3).* = 1.0;
-                self.projection_matrix.get(3, 2).* = -(self.far_plane * self.near_plane) / (self.far_plane - self.near_plane);
+                self.projection_matrix.data[0] = 1.0 / (self.aspect_ratio * tanHalfFovy);
+                self.projection_matrix.data[5] = 1.0 / (tanHalfFovy);
+                self.projection_matrix.data[10] = self.far_plane / (self.far_plane - self.near_plane);
+                self.projection_matrix.data[11] = 1.0;
+                self.projection_matrix.data[14] = -(self.far_plane * self.near_plane) / (self.far_plane - self.near_plane);
             },
             .orthographic => {
                 self.projection_matrix = math.Mat4x4.identity();
-                self.projection_matrix.get(0, 0).* = 2.0 / (self.ortho_right - self.ortho_left);
-                self.projection_matrix.get(1, 1).* = 2.0 / (self.ortho_bottom - self.ortho_top);
-                self.projection_matrix.get(2, 2).* = 1.0 / (self.far_plane - self.near_plane);
-                self.projection_matrix.get(3, 0).* = -(self.ortho_right + self.ortho_left) / (self.ortho_right - self.ortho_left);
-                self.projection_matrix.get(3, 1).* = -(self.ortho_bottom + self.ortho_top) / (self.ortho_bottom - self.ortho_top);
-                self.projection_matrix.get(3, 2).* = -self.near_plane / (self.far_plane - self.near_plane);
+                self.projection_matrix.data[0] = 2.0 / (self.ortho_right - self.ortho_left);
+                self.projection_matrix.data[5] = 2.0 / (self.ortho_bottom - self.ortho_top);
+                self.projection_matrix.data[10] = 1.0 / (self.far_plane - self.near_plane);
+                self.projection_matrix.data[12] = -(self.ortho_right + self.ortho_left) / (self.ortho_right - self.ortho_left);
+                self.projection_matrix.data[13] = -(self.ortho_bottom + self.ortho_top) / (self.ortho_bottom - self.ortho_top);
+                self.projection_matrix.data[14] = -self.near_plane / (self.far_plane - self.near_plane);
             },
         }
-
         self.projection_dirty = false;
     }
 
-    /// Get the projection matrix (updates if dirty)
+    /// Get the projection matrix, updating it if necessary
     pub fn getProjectionMatrix(self: *Camera) math.Mat4x4 {
-        self.updateProjectionMatrix();
+        if (self.projection_dirty) {
+            self.updateProjectionMatrix();
+        }
         return self.projection_matrix;
     }
 
-    /// Build view matrix from Transform component's world matrix
-    /// Transform's world matrix is the camera's model matrix (position/rotation in world)
-    /// View matrix is the inverse of model matrix
-    pub fn getViewMatrix(camera_world_matrix: math.Mat4x4) math.Mat4x4 {
-        // For now, return identity - will be computed by CameraSystem using Transform
-        // This is a static helper for the system to use
-        _ = camera_world_matrix;
-        return math.Mat4x4.identity();
+    /// Update camera state (called every frame)
+    pub fn update(self: *Camera, delta_time: f32) void {
+        _ = delta_time;
+        if (self.projection_dirty) {
+            self.updateProjectionMatrix();
+        }
     }
 
-    // ========================================================================
-    // ECS Integration
-    // ========================================================================
-
-    /// ECS update method - updates projection matrix if needed
-    pub fn update(self: *Camera, dt: f32) void {
-        _ = dt;
-        self.updateProjectionMatrix();
-    }
-
-    /// Render extraction context for CameraSystem
     pub const RenderContext = struct {
-        /// Output: the primary camera (if found)
-        primary_camera: ?*const Camera = null,
-        /// Output: projection matrix of primary camera
-        projection_matrix: math.Mat4x4 = math.Mat4x4.identity(),
-        /// Output: view matrix from Transform + Camera
-        view_matrix: math.Mat4x4 = math.Mat4x4.identity(),
+        primary_camera: ?*Camera = null,
     };
 
-    /// ECS render method - extracts camera data to context
-    /// The first primary camera found will be used
-    pub fn render(self: *const Camera, context: *RenderContext) void {
-        // If this is the primary camera and we haven't found one yet
-        if (self.is_primary and context.primary_camera == null) {
+    pub fn render(self: *Camera, context: *RenderContext) void {
+        if (self.is_primary) {
             context.primary_camera = self;
-            context.projection_matrix = self.projection_matrix;
-            // Note: view_matrix will be filled by CameraSystem using Transform
         }
+    }
+
+    /// Serialize Camera component
+    pub fn jsonSerialize(self: Camera, serializer: anytype, writer: anytype) !void {
+        _ = serializer;
+        try writer.beginObject();
+
+        try writer.objectField("projection_type");
+        switch (self.projection_type) {
+            .perspective => try writer.write("perspective"),
+            .orthographic => try writer.write("orthographic"),
+        }
+
+        try writer.objectField("is_primary");
+        try writer.write(self.is_primary);
+
+        try writer.objectField("near_plane");
+        try writer.write(self.near_plane);
+
+        try writer.objectField("far_plane");
+        try writer.write(self.far_plane);
+
+        if (self.projection_type == .perspective) {
+            try writer.objectField("fov");
+            try writer.write(self.fov);
+
+            try writer.objectField("aspect_ratio");
+            try writer.write(self.aspect_ratio);
+        } else {
+            try writer.objectField("ortho_left");
+            try writer.write(self.ortho_left);
+
+            try writer.objectField("ortho_right");
+            try writer.write(self.ortho_right);
+
+            try writer.objectField("ortho_bottom");
+            try writer.write(self.ortho_bottom);
+
+            try writer.objectField("ortho_top");
+            try writer.write(self.ortho_top);
+        }
+
+        try writer.endObject();
+    }
+
+    /// Deserialize Camera component
+    pub fn deserialize(serializer: anytype, value: std.json.Value) !Camera {
+        _ = serializer;
+        var cam = Camera.init();
+
+        if (value.object.get("projection_type")) |val| {
+            if (val == .string) {
+                if (std.mem.eql(u8, val.string, "perspective")) cam.projection_type = .perspective;
+                if (std.mem.eql(u8, val.string, "orthographic")) cam.projection_type = .orthographic;
+            }
+        }
+
+        if (value.object.get("is_primary")) |val| {
+            if (val == .bool) cam.is_primary = val.bool;
+        }
+
+        if (value.object.get("near_plane")) |val| {
+            if (val == .float) cam.near_plane = @floatCast(val.float) else if (val == .integer) cam.near_plane = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("far_plane")) |val| {
+            if (val == .float) cam.far_plane = @floatCast(val.float) else if (val == .integer) cam.far_plane = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("fov")) |val| {
+            if (val == .float) cam.fov = @floatCast(val.float) else if (val == .integer) cam.fov = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("aspect_ratio")) |val| {
+            if (val == .float) cam.aspect_ratio = @floatCast(val.float) else if (val == .integer) cam.aspect_ratio = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("ortho_left")) |val| {
+            if (val == .float) cam.ortho_left = @floatCast(val.float) else if (val == .integer) cam.ortho_left = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("ortho_right")) |val| {
+            if (val == .float) cam.ortho_right = @floatCast(val.float) else if (val == .integer) cam.ortho_right = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("ortho_bottom")) |val| {
+            if (val == .float) cam.ortho_bottom = @floatCast(val.float) else if (val == .integer) cam.ortho_bottom = @floatFromInt(val.integer);
+        }
+
+        if (value.object.get("ortho_top")) |val| {
+            if (val == .float) cam.ortho_top = @floatCast(val.float) else if (val == .integer) cam.ortho_top = @floatFromInt(val.integer);
+        }
+
+        cam.projection_dirty = true;
+        return cam;
     }
 };
 

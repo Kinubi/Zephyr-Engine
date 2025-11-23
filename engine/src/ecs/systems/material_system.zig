@@ -1159,6 +1159,16 @@ pub const MaterialSystem = struct {
         }
         return gop.value_ptr;
     }
+
+    /// Reset the material system (clear all sets)
+    pub fn reset(self: *MaterialSystem) void {
+        var iter = self.material_sets.valueIterator();
+        while (iter.next()) |set_data| {
+            set_data.deinit(self.buffer_manager);
+        }
+        self.material_sets.clearRetainingCapacity();
+        log(.INFO, "material_system", "MaterialSystem reset", .{});
+    }
 };
 
 /// MAIN THREAD: Prepare phase - ECS queries, compute indices, write to components
