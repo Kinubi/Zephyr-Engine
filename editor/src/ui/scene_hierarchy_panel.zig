@@ -12,6 +12,7 @@ const Camera = ecs.Camera;
 const PointLight = ecs.PointLight;
 const ParticleEmitter = ecs.ParticleEmitter;
 const ScriptComponent = ecs.ScriptComponent;
+const Name = ecs.Name;
 
 const Scene = zephyr.Scene;
 const Math = zephyr.math;
@@ -116,6 +117,67 @@ pub const SceneHierarchyPanel = struct {
 
         const node_open = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags);
 
+        // Context menu for entity operations
+        if (c.ImGui_BeginPopupContextItem()) {
+            std.debug.print("DEBUG: Entity Context Menu Opened for {d}\n", .{@intFromEnum(entity)});
+            if (c.ImGui_MenuItem("Delete Entity")) {
+                // Create a temporary GameObject wrapper to pass to destroyObject
+                // This is safe because destroyObject only uses the entity_id to find and remove the object
+                const zephyr_game_object = @import("zephyr").GameObject;
+                var temp_obj = zephyr_game_object{ .entity_id = entity, .scene = scene };
+                scene.destroyObject(&temp_obj);
+
+                // remove from selection if present
+                const needle = [_]EntityId{entity};
+                const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                if (maybe_idx) |i| {
+                    _ = self.selected_entities.swapRemove(i);
+                }
+            }
+            // Add child entity
+            if (c.ImGui_MenuItem("Add Child Empty Entity")) {
+                std.debug.print("DEBUG: Clicked Add Child Empty Entity\n", .{});
+                const child = scene.spawnEmpty("Child") catch null;
+                if (child) |c_obj| {
+                    const child_id = c_obj.entity_id;
+                    std.debug.print("DEBUG: Spawned entity {d}\n", .{@intFromEnum(child_id)});
+
+                    if (scene.ecs_world.getMut(Transform, child_id)) |t| {
+                        t.parent = entity;
+                        t.dirty = true;
+                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(child_id), @intFromEnum(entity)});
+                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
+                    } else {
+                        std.debug.print("DEBUG: Failed to get Transform for {d}\n", .{@intFromEnum(child_id)});
+                    }
+                } else {
+                    std.debug.print("DEBUG: Failed to spawn child entity\n", .{});
+                }
+            }
+            // Add child cube
+            if (c.ImGui_MenuItem("Add Child Cube")) {
+                std.debug.print("DEBUG: Clicked Add Child Cube\n", .{});
+                const child = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch null;
+                if (child) |c_obj| {
+                    const child_id = c_obj.entity_id;
+                    std.debug.print("DEBUG: Spawned entity {d}\n", .{@intFromEnum(child_id)});
+
+                    // Directly set parent on the Transform component to ensure hierarchy is updated
+                    if (scene.ecs_world.getMut(Transform, child_id)) |t| {
+                        t.parent = entity;
+                        t.dirty = true;
+                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(child_id), @intFromEnum(entity)});
+                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
+                    } else {
+                        std.debug.print("DEBUG: Failed to get Transform for {d}\n", .{@intFromEnum(child_id)});
+                    }
+                } else {
+                    std.debug.print("DEBUG: Failed to spawn child entity\n", .{});
+                }
+            }
+            c.ImGui_EndPopup();
+        }
+
         // Accept drag-and-drop onto the entity entry (ASSET_PATH payloads)
         if (c.ImGui_BeginDragDropTarget()) {
             const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
@@ -211,51 +273,6 @@ pub const SceneHierarchyPanel = struct {
             self.request_inspector_focus = true;
         }
 
-        // Context menu for entity operations
-        if (c.ImGui_BeginPopupContextItem()) {
-            if (c.ImGui_MenuItem("Delete Entity")) {
-                // Create a temporary GameObject wrapper to pass to destroyObject
-                // This is safe because destroyObject only uses the entity_id to find and remove the object
-                const zephyr_game_object = @import("zephyr").GameObject;
-                var temp_obj = zephyr_game_object{ .entity_id = entity, .scene = scene };
-                scene.destroyObject(&temp_obj);
-
-                // remove from selection if present
-                const needle = [_]EntityId{entity};
-                const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
-                if (maybe_idx) |i| {
-                    _ = self.selected_entities.swapRemove(i);
-                }
-            }
-            // Add child entity
-            if (c.ImGui_MenuItem("Create Empty Entity")) {
-                const child = scene.spawnEmpty("Child") catch null;
-                if (child) |c_obj| {
-                    // Directly set parent on the Transform component to ensure hierarchy is updated
-                    if (scene.ecs_world.get(Transform, c_obj.entity_id)) |t| {
-                        t.parent = entity;
-                        t.dirty = true;
-                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(c_obj.entity_id), @intFromEnum(entity)});
-                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
-                    }
-                }
-            }
-            // Add child cube
-            if (c.ImGui_MenuItem("Create Cube")) {
-                const child = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch null;
-                if (child) |c_obj| {
-                    // Directly set parent on the Transform component to ensure hierarchy is updated
-                    if (scene.ecs_world.get(Transform, c_obj.entity_id)) |t| {
-                        t.parent = entity;
-                        t.dirty = true;
-                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(c_obj.entity_id), @intFromEnum(entity)});
-                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
-                    }
-                }
-            }
-            c.ImGui_EndPopup();
-        }
-
         // Render children if open
         if (node_open and has_children) {
             if (children_map.get(entity)) |children| {
@@ -321,12 +338,18 @@ pub const SceneHierarchyPanel = struct {
 
             // Context menu for background (creating new entities)
             // We use a specific ID for the window context menu to avoid conflict with item context menus
+            
+            if (c.ImGui_IsWindowHovered(c.ImGuiHoveredFlags_AllowWhenBlockedByPopup) and !c.ImGui_IsAnyItemHovered() and c.ImGui_IsMouseClicked(1)) {
+                c.ImGui_OpenPopup("WindowContext", 0);
+            }
 
-            if (c.ImGui_BeginPopupContextWindow()) {
-                if (c.ImGui_MenuItem("Create Empty Entity")) {
+            if (c.ImGui_BeginPopup("WindowContext", 0)) {
+                std.debug.print("DEBUG: Window Context Menu Opened\n", .{});
+                if (c.ImGui_MenuItem("Create Root Empty Entity")) {
                     _ = scene.spawnEmpty("Empty Entity") catch {};
                 }
-                if (c.ImGui_MenuItem("Create Cube")) {
+                if (c.ImGui_MenuItem("Create Root Cube")) {
+                    std.debug.print("DEBUG: Clicked Create Root Cube\n", .{});
                     _ = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch {};
                 }
                 if (c.ImGui_MenuItem("Create Point Light")) {
