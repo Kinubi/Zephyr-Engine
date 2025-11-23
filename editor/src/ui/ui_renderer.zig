@@ -284,13 +284,15 @@ pub const UIRenderer = struct {
         if (c.ImGui_BeginMainMenuBar()) {
             if (c.ImGui_BeginMenu("File")) {
                 if (c.ImGui_MenuItem("Save Scene...")) {
-                    const default_name = "scene.json";
+                    const default_name = "scenes/scene.json";
                     @memcpy(self.scene_filename_buffer[0..default_name.len], default_name);
                     self.scene_filename_buffer[default_name.len] = 0;
                     self.show_save_scene_popup = true;
                 }
                 if (c.ImGui_MenuItem("Load Scene...")) {
-                    self.scene_filename_buffer[0] = 0;
+                    const default_name = "scenes/scene.json";
+                    @memcpy(self.scene_filename_buffer[0..default_name.len], default_name);
+                    self.scene_filename_buffer[default_name.len] = 0;
                     self.show_load_scene_popup = true;
                 }
                 c.ImGui_EndMenu();
