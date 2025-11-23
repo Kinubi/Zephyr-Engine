@@ -197,6 +197,25 @@ pub const Scene = struct {
         // Clear existing scene first
         self.clear();
 
+        // Clean up old render graph resources before creating new ones
+        if (self.render_graph) |*graph| {
+            graph.deinit();
+            self.render_graph = null;
+        }
+        if (self.particle_system) |ps| {
+            ps.deinit();
+            self.allocator.destroy(ps);
+            self.particle_system = null;
+        }
+        if (self.material_system) |ms| {
+            ms.deinit();
+            self.allocator.destroy(ms);
+            self.material_system = null;
+        }
+
+        // Initialize Render Graph and Systems
+        try self.initRenderGraphResources();
+
         // Restore render_system since clear() removed it
         try self.ecs_world.setUserData("render_system", @ptrCast(self.render_system));
 
@@ -217,10 +236,17 @@ pub const Scene = struct {
             defer serializer.deinit();
 
             try serializer.deserialize(parsed.value);
-        }
 
-        // Initialize Render Graph and Systems
-        try self.initRenderGraphResources();
+            // Register deserialized particle emitters
+            for (self.game_objects.items) |game_obj| {
+                const entity = game_obj.entity_id;
+                if (self.ecs_world.get(ecs.ParticleEmitter, entity)) |emitter| {
+                    if (self.ecs_world.get(Transform, entity)) |transform| {
+                        try self.registerEmitterWithSystem(entity, emitter.*, transform.*);
+                    }
+                }
+            }
+        }
     }
 
     /// Set the performance monitor for profiling
@@ -548,19 +574,23 @@ pub const Scene = struct {
 
         try self.ecs_world.emplace(ecs.ParticleEmitter, entity, emitter);
 
+        try self.registerEmitterWithSystem(entity, emitter, transform.*);
+    }
+
+    fn registerEmitterWithSystem(self: *Scene, entity: EntityId, emitter: ecs.ParticleEmitter, transform: Transform) !void {
         // Register emitter with GPU via ParticleSystem
         if (self.particle_system) |ps| {
             // Create GPU emitter struct
             const gpu_emitter = vertex_formats.GPUEmitter{
                 .position = .{ transform.position.x, transform.position.y, transform.position.z },
-                .is_active = 1,
+                .is_active = if (emitter.active) 1 else 0,
                 .velocity_min = .{ emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z },
                 .velocity_max = .{ emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z },
                 .color_start = .{ emitter.color.x, emitter.color.y, emitter.color.z, 1.0 },
                 .color_end = .{ emitter.color.x * 0.5, emitter.color.y * 0.5, emitter.color.z * 0.5, 0.0 }, // Fade to darker
-                .lifetime_min = particle_lifetime * 0.8,
-                .lifetime_max = particle_lifetime * 1.2,
-                .spawn_rate = emission_rate,
+                .lifetime_min = emitter.particle_lifetime * 0.8,
+                .lifetime_max = emitter.particle_lifetime * 1.2,
+                .spawn_rate = emitter.emission_rate,
                 .accumulated_spawn_time = 0.0,
                 .particles_per_spawn = 1,
             };
