@@ -10,7 +10,6 @@ pub const ExtractedRenderable = struct {
     transform: Math.Mat4x4,
     model_asset: AssetId,
     material_buffer_index: ?u32,
-    texture_asset: ?AssetId,
     layer: u8,
     casts_shadows: bool,
     receives_shadows: bool,

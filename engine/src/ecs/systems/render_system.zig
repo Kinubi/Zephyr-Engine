@@ -214,7 +214,6 @@ pub const RenderSystem = struct {
     pub const RenderableEntity = struct {
         model_asset: AssetTypeId,
         material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
-        texture_asset: ?AssetTypeId,
         world_matrix: math.Mat4x4,
         layer: u8,
         casts_shadows: bool,
@@ -318,7 +317,6 @@ pub const RenderSystem = struct {
             try renderables.append(self.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_buffer_index = material_buffer_index,
-                .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
                 .casts_shadows = renderer.casts_shadows,
@@ -368,7 +366,6 @@ pub const RenderSystem = struct {
             out.append(ctx.system.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_buffer_index = material_buffer_index,
-                .texture_asset = renderer.getTextureAsset(),
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
                 .casts_shadows = renderer.casts_shadows,
@@ -1776,7 +1773,6 @@ pub fn prepare(world: *World, dt: f32) !void {
                 .transform = world_matrix,
                 .model_asset = renderer.model_asset.?,
                 .material_buffer_index = material_buffer_index,
-                .texture_asset = renderer.texture_asset,
                 .layer = renderer.layer,
                 .casts_shadows = renderer.casts_shadows,
                 .receives_shadows = renderer.receives_shadows,

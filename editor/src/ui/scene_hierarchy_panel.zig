@@ -12,6 +12,7 @@ const Camera = ecs.Camera;
 const PointLight = ecs.PointLight;
 const ParticleEmitter = ecs.ParticleEmitter;
 const ScriptComponent = ecs.ScriptComponent;
+const Name = ecs.Name;
 
 const Scene = zephyr.Scene;
 const Math = zephyr.math;
@@ -35,11 +36,25 @@ pub const SceneHierarchyPanel = struct {
     // When true, applying the script will set it to run every frame
     script_auto_run: bool = false,
 
+    // List of entities to force open in the tree view
+    nodes_to_open: std.ArrayList(EntityId) = std.ArrayList(EntityId){},
+
+    // Renaming state
+    renaming_entity: ?EntityId = null,
+    rename_buffer: [256]u8 = undefined,
+
+    // Arena for per-frame hierarchy tree construction
+    hierarchy_arena: std.heap.ArenaAllocator,
+
     pub fn init() SceneHierarchyPanel {
-        var panel = SceneHierarchyPanel{};
+        var panel = SceneHierarchyPanel{
+            .hierarchy_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+        };
         panel.selected_entities = std.ArrayList(EntityId){};
-        // Zero script buffer length sentinel (not strictly required)
+        panel.nodes_to_open = std.ArrayList(EntityId){};
+        // Zero buffers
         panel.script_buffer[0] = 0;
+        panel.temp_buffer[0] = 0;
         return panel;
     }
 
@@ -48,6 +63,8 @@ pub const SceneHierarchyPanel = struct {
         // even if the list is empty) so we don't leak if capacity was
         // allocated earlier.
         self.selected_entities.deinit(std.heap.page_allocator);
+        self.nodes_to_open.deinit(std.heap.page_allocator);
+        self.hierarchy_arena.deinit();
     }
 
     /// Render the hierarchy panel and inspector
@@ -61,6 +78,254 @@ pub const SceneHierarchyPanel = struct {
         }
     }
 
+    /// Recursively draw entity node and its children
+    fn drawEntityNode(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, children_map: *std.AutoHashMap(EntityId, std.ArrayListUnmanaged(EntityId))) void {
+        var id_buf: [32]u8 = undefined;
+        const id_str = std.fmt.bufPrintZ(&id_buf, "{}", .{@intFromEnum(entity)}) catch "0";
+        c.ImGui_PushID(id_str.ptr);
+        defer c.ImGui_PopID();
+
+        // Check if this entity is selected (multi-select support)
+        var is_selected: bool = false;
+        for (self.selected_entities.items) |eid| {
+            if (eid == entity) {
+                is_selected = true;
+                break;
+            }
+        }
+
+        // Build entity label with component info
+        var label_buf: [128]u8 = undefined;
+        const label = self.buildEntityLabel(scene.ecs_world, entity, &label_buf) catch "Entity";
+
+        // Determine flags
+        var flags = c.ImGuiTreeNodeFlags_OpenOnArrow | c.ImGuiTreeNodeFlags_OpenOnDoubleClick | c.ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (is_selected) flags |= c.ImGuiTreeNodeFlags_Selected;
+
+        const has_children = children_map.contains(entity);
+        if (!has_children) {
+            flags |= c.ImGuiTreeNodeFlags_Leaf | c.ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        }
+
+        // Check if we need to force open this node
+        var open_idx: usize = 0;
+        while (open_idx < self.nodes_to_open.items.len) {
+            if (self.nodes_to_open.items[open_idx] == entity) {
+                c.ImGui_SetNextItemOpen(true, c.ImGuiCond_Always);
+                _ = self.nodes_to_open.swapRemove(open_idx);
+                // Don't increment open_idx, as we swapped
+            } else {
+                open_idx += 1;
+            }
+        }
+
+        var node_open: bool = false;
+        if (self.renaming_entity == entity) {
+            // Render tree node with empty label to preserve layout/arrow
+            node_open = c.ImGui_TreeNodeEx("##dummy", flags);
+
+            c.ImGui_SameLine();
+
+            c.ImGui_SetNextItemWidth(c.ImGui_GetContentRegionAvail().x);
+
+            // Focus if just started
+            if (c.ImGui_IsWindowFocused(c.ImGuiFocusedFlags_RootAndChildWindows) and !c.ImGui_IsAnyItemActive() and !c.ImGui_IsMouseClicked(0)) {
+                c.ImGui_SetKeyboardFocusHere();
+            }
+
+            const enter_pressed = c.ImGui_InputText("##rename", &self.rename_buffer, self.rename_buffer.len, c.ImGuiInputTextFlags_EnterReturnsTrue | c.ImGuiInputTextFlags_AutoSelectAll);
+
+            if (enter_pressed or c.ImGui_IsItemDeactivatedAfterEdit()) {
+                // Commit rename
+                const new_len = std.mem.indexOfScalar(u8, &self.rename_buffer, 0) orelse self.rename_buffer.len;
+                const new_name = self.rename_buffer[0..new_len];
+
+                if (new_name.len > 0) {
+                    if (scene.ecs_world.getMut(Name, entity)) |name_comp| {
+                        name_comp.deinit(scene.allocator);
+                        name_comp.name = scene.allocator.dupe(u8, new_name) catch "Entity";
+                    } else {
+                        _ = scene.ecs_world.emplace(Name, entity, Name.init(scene.allocator, new_name) catch Name.initStatic("Entity")) catch {};
+                    }
+                }
+                self.renaming_entity = null;
+            } else if (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape)) {
+                // Cancel
+                self.renaming_entity = null;
+            }
+        } else {
+            node_open = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags);
+
+            // Double click to rename
+            if (c.ImGui_IsItemHovered(c.ImGuiHoveredFlags_None) and c.ImGui_IsMouseDoubleClicked(0)) {
+                self.renaming_entity = entity;
+
+                // Populate buffer
+                var current_name: []const u8 = "Entity";
+                if (scene.ecs_world.get(Name, entity)) |name_comp| {
+                    current_name = name_comp.name;
+                }
+
+                const copy_len = @min(current_name.len, self.rename_buffer.len - 1);
+                std.mem.copyForwards(u8, self.rename_buffer[0..copy_len], current_name[0..copy_len]);
+                self.rename_buffer[copy_len] = 0;
+            }
+        }
+
+        // Context menu for entity operations
+        if (c.ImGui_BeginPopupContextItem()) {
+            if (c.ImGui_MenuItem("Delete Entity")) {
+                // Create a temporary GameObject wrapper to pass to destroyObject
+                // This is safe because destroyObject only uses the entity_id to find and remove the object
+                const zephyr_game_object = @import("zephyr").GameObject;
+                var temp_obj = zephyr_game_object{ .entity_id = entity, .scene = scene };
+                scene.destroyObject(&temp_obj);
+
+                // remove from selection if present
+                const needle = [_]EntityId{entity};
+                const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                if (maybe_idx) |i| {
+                    _ = self.selected_entities.swapRemove(i);
+                }
+            }
+            // Add child entity
+            if (c.ImGui_MenuItem("Add Child Empty Entity")) {
+                const child = scene.spawnEmpty("Child") catch null;
+                if (child) |c_obj| {
+                    const child_id = c_obj.entity_id;
+
+                    if (scene.ecs_world.getMut(Transform, child_id)) |t| {
+                        t.parent = entity;
+                        t.dirty = true;
+                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
+                    }
+                }
+            }
+            // Add child cube
+            if (c.ImGui_MenuItem("Add Child Cube")) {
+                const child = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch null;
+                if (child) |c_obj| {
+                    const child_id = c_obj.entity_id;
+
+                    // Directly set parent on the Transform component to ensure hierarchy is updated
+                    if (scene.ecs_world.getMut(Transform, child_id)) |t| {
+                        t.parent = entity;
+                        // Offset child so it's not inside parent
+                        t.position = Math.Vec3.init(0, 2, 0);
+                        t.dirty = true;
+                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
+                    }
+                }
+            }
+            c.ImGui_EndPopup();
+        }
+
+        // Accept drag-and-drop onto the entity entry (ASSET_PATH payloads)
+        if (c.ImGui_BeginDragDropTarget()) {
+            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+            if (payload != null) {
+                if (payload.*.Data) |data_any| {
+                    const data_ptr: [*]const u8 = @ptrCast(data_any);
+                    const data_size: usize = @intCast(payload.*.DataSize);
+
+                    // Copy the dropped path into a temporary buffer
+                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                    if (path_opt) |path_buf| {
+                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                        path_buf[data_size] = 0;
+                        const path_slice = path_buf[0..data_size];
+
+                        // Determine file type by extension and call Scene helpers accordingly
+                        // Mesh extensions -> update model; Texture extensions -> update texture
+                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
+                            // Update model for the entity (best-effort)
+                            scene.updateModelForEntity(entity, path_slice) catch {};
+                        } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
+                            scene.updateTextureForEntity(entity, path_slice) catch {};
+                        } else if (std.mem.endsWith(u8, path_slice, ".lua") or std.mem.endsWith(u8, path_slice, ".txt") or std.mem.endsWith(u8, path_slice, ".zs")) {
+                            if (std.fs.cwd().openFile(path_slice, .{})) |file| {
+                                defer file.close();
+                                const contents = file.readToEndAlloc(scene.allocator, 64 * 1024) catch null;
+                                if (contents) |cdata| {
+                                    // Register script as an asset (best-effort) so it participates in hot-reload
+                                    const AssetType = zephyr.AssetType;
+                                    const LoadPriority = zephyr.LoadPriority;
+                                    var script_asset_id: ?zephyr.AssetId = null;
+                                    script_asset_id = scene.asset_manager.loadAssetAsync(path_slice, AssetType.script, LoadPriority.high) catch null;
+
+                                    // Replace ScriptComponent on the entity and associate asset if available
+                                    _ = scene.ecs_world.remove(ScriptComponent, entity);
+                                    const slice: []const u8 = cdata;
+                                    if (script_asset_id) |aid| {
+                                        _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initWithAsset(slice, aid, self.script_auto_run, false)) catch {};
+                                    } else {
+                                        _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, self.script_auto_run, false)) catch {};
+                                    }
+
+                                    // If this entity is currently selected, mirror into editor buffer
+                                    var was_selected: bool = false;
+                                    for (self.selected_entities.items) |eid| {
+                                        if (eid == entity) {
+                                            was_selected = true;
+                                            break;
+                                        }
+                                    }
+                                    if (was_selected) {
+                                        const copy_len = @min(cdata.len, self.script_buffer.len - 1);
+                                        std.mem.copyForwards(u8, self.script_buffer[0..copy_len], cdata[0..copy_len]);
+                                        self.script_buffer[copy_len] = 0;
+                                        self.script_buffer_owner = entity;
+                                    }
+                                }
+                            } else |_| {
+                                // openFile failed; ignore
+                            }
+                        } else {
+                            // Unknown extension - try to treat as mesh+texture (best-effort)
+                            scene.updatePropAssets(entity, path_slice, path_slice) catch {};
+                        }
+
+                        std.heap.page_allocator.free(path_buf);
+                    }
+                }
+            }
+        }
+
+        // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
+        if (c.ImGui_IsItemClicked()) {
+            const io = c.ImGui_GetIO();
+            if (io.*.KeyCtrl) {
+                // toggle membership: use std.mem.indexOf for concise lookup
+                const needle = [_]EntityId{entity};
+                const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                if (maybe_idx) |i| {
+                    _ = self.selected_entities.swapRemove(i);
+                } else {
+                    _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                }
+            } else if (io.*.KeyShift) {
+                // add to selection
+                _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+            } else {
+                // single select
+                if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
+                _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+            }
+            // Request that the Inspector steals focus on next render
+            self.request_inspector_focus = true;
+        }
+
+        // Render children if open
+        if (node_open and has_children) {
+            if (children_map.get(entity)) |children| {
+                for (children.items) |child| {
+                    self.drawEntityNode(scene, child, children_map);
+                }
+            }
+            c.ImGui_TreePop();
+        }
+    }
+
     /// Render the entity hierarchy tree
     fn renderHierarchy(self: *SceneHierarchyPanel, scene: *Scene) void {
         const window_flags = c.ImGuiWindowFlags_NoCollapse;
@@ -68,150 +333,65 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Begin("Scene Hierarchy", null, window_flags)) {
             c.ImGui_Text("Scene: %s", scene.name.ptr);
             c.ImGui_Text("Entities: %d", scene.getEntityCount());
-            // Debug: show current selection count and IDs to verify picking
-            c.ImGui_Text("Selected Count: %d", self.selected_entities.items.len);
-            var sel_idx: usize = 0;
-            for (self.selected_entities.items) |eid| {
-                c.ImGui_Text("  [%d] idx=%d (raw=%u)", sel_idx, eid.index(), @intFromEnum(eid));
-                sel_idx += 1;
-            }
             c.ImGui_Separator();
 
-            // Iterate over all game objects
+            // Reset arena and build tree
+            _ = self.hierarchy_arena.reset(.retain_capacity);
+            const allocator = self.hierarchy_arena.allocator();
+
+            var root_nodes = std.ArrayListUnmanaged(EntityId){};
+            var children_map = std.AutoHashMap(EntityId, std.ArrayListUnmanaged(EntityId)).init(allocator);
+
+            // Iterate over all game objects to build hierarchy
             for (scene.iterateObjects()) |*game_obj| {
                 const entity = game_obj.entity_id;
-
-                // Check if this entity is selected (multi-select support)
-                var is_selected: bool = false;
-                for (self.selected_entities.items) |eid| {
-                    if (eid == entity) {
-                        is_selected = true;
-                        break;
-                    }
-                }
-
-                // Build entity label with component info
-                var label_buf: [128]u8 = undefined;
-                const label = self.buildEntityLabel(scene.ecs_world, entity, &label_buf) catch "Entity";
-
-                // Make it selectable
-                const flags = c.ImGuiTreeNodeFlags_Leaf | c.ImGuiTreeNodeFlags_NoTreePushOnOpen;
-                const selected_flag = if (is_selected) c.ImGuiTreeNodeFlags_Selected else 0;
-
-                _ = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags | selected_flag);
-
-                // Accept drag-and-drop onto the entity entry (ASSET_PATH payloads)
-                if (c.ImGui_BeginDragDropTarget()) {
-                    const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
-                    if (payload != null) {
-                        if (payload.*.Data) |data_any| {
-                            const data_ptr: [*]const u8 = @ptrCast(data_any);
-                            const data_size: usize = @intCast(payload.*.DataSize);
-
-                            // Copy the dropped path into a temporary buffer
-                            const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
-                            if (path_opt) |path_buf| {
-                                std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
-                                path_buf[data_size] = 0;
-                                const path_slice = path_buf[0..data_size];
-
-                                // Determine file type by extension and call Scene helpers accordingly
-                                // Mesh extensions -> update model; Texture extensions -> update texture
-                                if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
-                                    // Update model for the entity (best-effort)
-                                    scene.updateModelForEntity(entity, path_slice) catch {};
-                                } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
-                                    scene.updateTextureForEntity(entity, path_slice) catch {};
-                                } else if (std.mem.endsWith(u8, path_slice, ".lua") or std.mem.endsWith(u8, path_slice, ".txt") or std.mem.endsWith(u8, path_slice, ".zs")) {
-                                    if (std.fs.cwd().openFile(path_slice, .{})) |file| {
-                                        defer file.close();
-                                        const contents = file.readToEndAlloc(scene.allocator, 64 * 1024) catch null;
-                                        if (contents) |cdata| {
-                                            // Register script as an asset (best-effort) so it participates in hot-reload
-                                            const AssetType = zephyr.AssetType;
-                                            const LoadPriority = zephyr.LoadPriority;
-                                            var script_asset_id: ?zephyr.AssetId = null;
-                                            script_asset_id = scene.asset_manager.loadAssetAsync(path_slice, AssetType.script, LoadPriority.high) catch null;
-
-                                            // Replace ScriptComponent on the entity and associate asset if available
-                                            _ = scene.ecs_world.remove(ScriptComponent, entity);
-                                            const slice: []const u8 = cdata;
-                                            if (script_asset_id) |aid| {
-                                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initWithAsset(slice, aid, self.script_auto_run, false)) catch {};
-                                            } else {
-                                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, self.script_auto_run, false)) catch {};
-                                            }
-
-                                            // If this entity is currently selected, mirror into editor buffer
-                                            var was_selected: bool = false;
-                                            for (self.selected_entities.items) |eid| {
-                                                if (eid == entity) {
-                                                    was_selected = true;
-                                                    break;
-                                                }
-                                            }
-                                            if (was_selected) {
-                                                const copy_len = @min(cdata.len, self.script_buffer.len - 1);
-                                                std.mem.copyForwards(u8, self.script_buffer[0..copy_len], cdata[0..copy_len]);
-                                                self.script_buffer[copy_len] = 0;
-                                                self.script_buffer_owner = entity;
-                                            }
-                                        }
-                                    } else |_| {
-                                        // openFile failed; ignore
-                                    }
-                                } else {
-                                    // Unknown extension - try to treat as mesh+texture (best-effort)
-                                    scene.updatePropAssets(entity, path_slice, path_slice) catch {};
-                                }
-
-                                std.heap.page_allocator.free(path_buf);
-                            }
+                if (scene.ecs_world.get(Transform, entity)) |transform| {
+                    if (transform.parent) |parent_id| {
+                        // Has parent, add to children map
+                        // We need to ensure the parent exists in the map
+                        const result = children_map.getOrPut(parent_id) catch {
+                            continue;
+                        };
+                        if (!result.found_existing) {
+                            result.value_ptr.* = std.ArrayListUnmanaged(EntityId){};
                         }
-                    }
-                }
-
-                // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
-                if (c.ImGui_IsItemClicked()) {
-                    const io = c.ImGui_GetIO();
-                    if (io.*.KeyCtrl) {
-                        // toggle membership: use std.mem.indexOf for concise lookup
-                        // Ensure we pass an explicit slice to match std.mem.indexOf signature
-                        const needle = [_]EntityId{entity};
-                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
-                        if (maybe_idx) |i| {
-                            _ = self.selected_entities.swapRemove(i);
-                        } else {
-                            _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
-                        }
-                    } else if (io.*.KeyShift) {
-                        // add to selection
-                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                        result.value_ptr.append(allocator, entity) catch {};
                     } else {
-                        // single select
-                        if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
-                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                        // No parent, is root
+                        root_nodes.append(allocator, entity) catch {};
                     }
-                    // Request that the Inspector steals focus on next render so keyboard
-                    // input targets inspector widgets (we call SetWindowFocus from inside
-                    // the Inspector to avoid API differences on the c-binding).
-                    self.request_inspector_focus = true;
+                } else {
+                    // No transform, treat as root
+                    root_nodes.append(allocator, entity) catch {};
                 }
+            }
 
-                // Context menu for entity operations
-                if (c.ImGui_BeginPopupContextItem()) {
-                    if (c.ImGui_MenuItem("Delete Entity")) {
-                        scene.destroyObject(game_obj);
-                        // remove from selection if present
-                        // Find and remove the entity from the selection (if present)
-                        const needle = [_]EntityId{entity};
-                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
-                        if (maybe_idx) |i| {
-                            _ = self.selected_entities.swapRemove(i);
-                        }
-                    }
-                    c.ImGui_EndPopup();
+            // Render roots recursively
+            for (root_nodes.items) |entity| {
+                self.drawEntityNode(scene, entity, &children_map);
+            }
+
+            // Context menu for background (creating new entities)
+            // We use a specific ID for the window context menu to avoid conflict with item context menus
+
+            if (c.ImGui_IsWindowHovered(c.ImGuiHoveredFlags_AllowWhenBlockedByPopup) and !c.ImGui_IsAnyItemHovered() and c.ImGui_IsMouseClicked(1)) {
+                c.ImGui_OpenPopup("WindowContext", 0);
+            }
+
+            if (c.ImGui_BeginPopup("WindowContext", 0)) {
+                if (c.ImGui_MenuItem("Create Root Empty Entity")) {
+                    _ = scene.spawnEmpty("Empty Entity") catch {};
                 }
+                if (c.ImGui_MenuItem("Create Root Cube")) {
+                    _ = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch {};
+                }
+                if (c.ImGui_MenuItem("Create Point Light")) {
+                    _ = scene.spawnLight(Math.Vec3.init(1.0, 1.0, 1.0), 5.0) catch {};
+                }
+                if (c.ImGui_MenuItem("Create Camera")) {
+                    _ = scene.spawnCamera(true, 45.0) catch {};
+                }
+                c.ImGui_EndPopup();
             }
         }
         c.ImGui_End();
@@ -242,37 +422,7 @@ pub const SceneHierarchyPanel = struct {
                 // MeshRenderer component
                 if (scene.ecs_world.get(MeshRenderer, entity)) |mesh_renderer| {
                     if (c.ImGui_CollapsingHeader("Mesh Renderer", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderMeshRendererInspector(mesh_renderer);
-
-                        // Accept drag-and-drop onto the Mesh Renderer inspector area
-                        if (c.ImGui_BeginDragDropTarget()) {
-                            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
-                            if (payload != null) {
-                                if (payload.*.Data) |data_any| {
-                                    const data_ptr: [*]const u8 = @ptrCast(data_any);
-                                    const data_size: usize = @intCast(payload.*.DataSize);
-
-                                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
-                                    if (path_opt) |path_buf| {
-                                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
-                                        path_buf[data_size] = 0;
-                                        const path_slice = path_buf[0..data_size];
-
-                                        // Route based on extension
-                                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
-                                            scene.updateModelForEntity(entity, path_slice) catch {};
-                                        } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
-                                            scene.updateTextureForEntity(entity, path_slice) catch {};
-                                        } else {
-                                            // If unknown, try both model+texture update using same path
-                                            scene.updatePropAssets(entity, path_slice, path_slice) catch {};
-                                        }
-
-                                        std.heap.page_allocator.free(path_buf);
-                                    }
-                                }
-                            }
-                        }
+                        self.renderMeshRendererInspector(scene, entity, mesh_renderer);
                     }
                 }
 
@@ -377,10 +527,7 @@ pub const SceneHierarchyPanel = struct {
                         c.ImGui_Spacing();
                         if (c.ImGui_Button("Apply")) {
                             // Determine current script length (up to NUL)
-                            var new_len: usize = 0;
-                            while (new_len < self.script_buffer.len) : (new_len += 1) {
-                                if (self.script_buffer[new_len] == 0) break;
-                            }
+                            const new_len = std.mem.indexOfScalar(u8, &self.script_buffer, 0) orelse self.script_buffer.len;
 
                             if (new_len > 0) {
                                 // Allocate a persistent buffer from the Scene allocator to store the
@@ -414,10 +561,7 @@ pub const SceneHierarchyPanel = struct {
                         c.ImGui_SameLine();
                         if (c.ImGui_Button("Run Next Update")) {
                             // Determine current buffer length
-                            var run_len: usize = 0;
-                            while (run_len < self.script_buffer.len) : (run_len += 1) {
-                                if (self.script_buffer[run_len] == 0) break;
-                            }
+                            const run_len = std.mem.indexOfScalar(u8, &self.script_buffer, 0) orelse self.script_buffer.len;
                             if (run_len > 0) {
                                 // Make a scene-owned copy of the current editor buffer so the
                                 // ScriptComponent can safely reference it.
@@ -465,6 +609,68 @@ pub const SceneHierarchyPanel = struct {
                             c.ImGui_Text("Script status: %s", status_text);
                         }
                     }
+                }
+
+                c.ImGui_Spacing();
+                c.ImGui_Separator();
+                c.ImGui_Spacing();
+
+                // "Add Component" button centered
+                const avail_width = c.ImGui_GetContentRegionAvail().x;
+                const button_width: f32 = 150.0;
+                c.ImGui_SetCursorPosX((avail_width - button_width) * 0.5);
+
+                if (c.ImGui_Button("Add Component")) {
+                    c.ImGui_OpenPopup("AddComponentPopup", 0);
+                }
+
+                if (c.ImGui_BeginPopup("AddComponentPopup", 0)) {
+                    // MeshRenderer
+                    if (!scene.ecs_world.has(MeshRenderer, entity)) {
+                        if (c.ImGui_MenuItem("Mesh Renderer")) {
+                            _ = scene.ecs_world.emplace(MeshRenderer, entity, .{
+                                .model_asset = null,
+                                .enabled = true,
+                                .layer = 0,
+                                .casts_shadows = true,
+                                .receives_shadows = true,
+                            }) catch {};
+                        }
+                    }
+
+                    // PointLight
+                    if (!scene.ecs_world.has(PointLight, entity)) {
+                        if (c.ImGui_MenuItem("Point Light")) {
+                            _ = scene.ecs_world.emplace(PointLight, entity, .{ .color = Math.Vec3.init(1.0, 1.0, 1.0), .intensity = 1.0, .range = 10.0 }) catch {};
+                        }
+                    }
+
+                    // Camera
+                    if (!scene.ecs_world.has(Camera, entity)) {
+                        if (c.ImGui_MenuItem("Camera")) {
+                            _ = scene.ecs_world.emplace(Camera, entity, Camera.init()) catch {};
+                        }
+                    }
+
+                    // ParticleEmitter
+                    if (!scene.ecs_world.has(ParticleEmitter, entity)) {
+                        if (c.ImGui_MenuItem("Particle Emitter")) {
+                            _ = scene.ecs_world.emplace(ParticleEmitter, entity, ParticleEmitter.init()) catch {};
+                        }
+                    }
+
+                    // ScriptComponent
+                    if (!scene.ecs_world.has(ScriptComponent, entity)) {
+                        if (c.ImGui_MenuItem("Script")) {
+                            const default_script = "-- New Script\nfunction init()\nend\n\nfunction update(dt)\nend\n";
+                            // Allocate script in scene allocator
+                            if (scene.allocator.dupe(u8, default_script)) |script_mem| {
+                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initDefault(script_mem)) catch {};
+                            } else |_| {}
+                        }
+                    }
+
+                    c.ImGui_EndPopup();
                 }
             }
         }
@@ -526,10 +732,16 @@ pub const SceneHierarchyPanel = struct {
             has_any = true;
         }
 
+        // Use Name component if available
+        var name_slice: []const u8 = "Entity";
+        if (world.get(Name, entity)) |name_comp| {
+            name_slice = name_comp.name;
+        }
+
         const label = if (has_any)
-            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d}) [{s}]", .{ entity_u32, entity_index, components.items })
+            try std.fmt.bufPrintZ(buf, "{s} {d} (idx {d}) [{s}]", .{ name_slice, entity_u32, entity_index, components.items })
         else
-            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d})", .{ entity_u32, entity_index });
+            try std.fmt.bufPrintZ(buf, "{s} {d} (idx {d})", .{ name_slice, entity_u32, entity_index });
 
         return label;
     }
@@ -565,21 +777,65 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render MeshRenderer component inspector
-    fn renderMeshRendererInspector(self: *SceneHierarchyPanel, mesh_renderer: *const MeshRenderer) void {
-        _ = self;
-
+    fn renderMeshRendererInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, mesh_renderer: *const MeshRenderer) void {
+        // Model Asset
         if (mesh_renderer.model_asset) |model_id| {
             const model_u64: u64 = @intFromEnum(model_id);
-            c.ImGui_Text("Model ID: %llu", model_u64);
+            if (scene.asset_manager.getAssetPath(model_id)) |path| {
+                c.ImGui_Text("Model: %s", path.ptr);
+            } else {
+                c.ImGui_Text("Model ID: %llu", model_u64);
+            }
         } else {
             c.ImGui_Text("Model: None");
         }
 
-        if (mesh_renderer.texture_asset) |tex_id| {
-            const texture_u64: u64 = @intFromEnum(tex_id);
-            c.ImGui_Text("Texture ID: %llu", texture_u64);
-        } else {
-            c.ImGui_Text("Texture: None");
+        // Accept drag-and-drop onto the Model text
+        if (c.ImGui_BeginDragDropTarget()) {
+            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+            if (payload != null) {
+                if (payload.*.Data) |data_any| {
+                    const data_ptr: [*]const u8 = @ptrCast(data_any);
+                    const data_size: usize = @intCast(payload.*.DataSize);
+
+                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                    if (path_opt) |path_buf| {
+                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                        path_buf[data_size] = 0;
+                        const path_slice = path_buf[0..data_size];
+
+                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
+                            scene.updateModelForEntity(entity, path_slice) catch {};
+                        }
+
+                        std.heap.page_allocator.free(path_buf);
+                    }
+                }
+            }
+            c.ImGui_EndDragDropTarget();
+        }
+
+        // Button to load model manually (useful if drag-and-drop is not available)
+        if (c.ImGui_Button("Load Model...")) {
+            c.ImGui_OpenPopup("LoadModelPopup", 0);
+        }
+
+        if (c.ImGui_BeginPopup("LoadModelPopup", 0)) {
+            c.ImGui_Text("Enter Model Path:");
+            // Use temp buffer for input
+            _ = c.ImGui_InputText("##model_path", &self.temp_buffer[0], self.temp_buffer.len, 0);
+
+            if (c.ImGui_Button("Load")) {
+                // Determine length
+                const len = std.mem.indexOfScalar(u8, &self.temp_buffer, 0) orelse self.temp_buffer.len;
+
+                if (len > 0) {
+                    const path = self.temp_buffer[0..len];
+                    scene.updateModelForEntity(entity, path) catch {};
+                    c.ImGui_CloseCurrentPopup();
+                }
+            }
+            c.ImGui_EndPopup();
         }
 
         const enabled_str: [*:0]const u8 = if (mesh_renderer.enabled) "Yes" else "No";

@@ -399,11 +399,14 @@ pub const Scene = struct {
         if (self.ecs_world.has(MeshRenderer, entity)) {
             const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
             mr.setModel(model_id);
-            mr.setTexture(texture_id);
         } else {
-            const mesh_renderer = MeshRenderer.initWithTexture(model_id, texture_id);
+            const mesh_renderer = MeshRenderer.init(model_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
         }
+
+        // Update AlbedoMaterial with the texture
+        const albedo_mat = ecs.AlbedoMaterial.init(texture_id);
+        try self.ecs_world.emplace(ecs.AlbedoMaterial, entity, albedo_mat);
 
         log(.INFO, "scene", "Updated assets for entity {} -> model:{s} texture:{s}", .{ @intFromEnum(entity), model_path, texture_path });
     }
@@ -512,7 +515,10 @@ pub const Scene = struct {
         if (is_perspective) {
             camera.setPerspective(fov_or_size, 16.0 / 9.0, 0.1, 1000.0);
         } else {
-            camera.setOrthographic(fov_or_size, 16.0 / 9.0, 0.1, 1000.0);
+            const aspect = 16.0 / 9.0;
+            const height = fov_or_size;
+            const width = height * aspect;
+            camera.setOrthographic(-width * 0.5, width * 0.5, -height * 0.5, height * 0.5, 0.1, 1000.0);
         }
         camera.setPrimary(true); // First camera is primary by default
         try self.ecs_world.emplace(Camera, entity, camera);

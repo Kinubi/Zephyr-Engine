@@ -112,25 +112,25 @@ pub const Mat4 = struct {
         } };
     }
     pub fn mul(self: Mat4, other: Mat4) Mat4 {
-        const col01 = simd.buildColumnPair(other.data[0..], 0, 1);
-        const col23 = simd.buildColumnPair(other.data[0..], 2, 3);
-        var result: [16]f32 = undefined;
-        var row: usize = 0;
-        while (row < 4) : (row += 1) {
-            const row_values = [_]f32{
-                self.data[row * 4 + 0],
-                self.data[row * 4 + 1],
-                self.data[row * 4 + 2],
-                self.data[row * 4 + 3],
-            };
-            const dots01 = simd.dot4x2(row_values, col01);
-            const dots23 = simd.dot4x2(row_values, col23);
-            result[row * 4 + 0] = dots01[0];
-            result[row * 4 + 1] = dots01[1];
-            result[row * 4 + 2] = dots23[0];
-            result[row * 4 + 3] = dots23[1];
+        const col0: @Vector(4, f32) = self.data[0..4].*;
+        const col1: @Vector(4, f32) = self.data[4..8].*;
+        const col2: @Vector(4, f32) = self.data[8..12].*;
+        const col3: @Vector(4, f32) = self.data[12..16].*;
+
+        var result: Mat4 = undefined;
+
+        inline for (0..4) |i| {
+            const b_col = other.data[i * 4 .. i * 4 + 4];
+
+            const val0: @Vector(4, f32) = @splat(b_col[0]);
+            const val1: @Vector(4, f32) = @splat(b_col[1]);
+            const val2: @Vector(4, f32) = @splat(b_col[2]);
+            const val3: @Vector(4, f32) = @splat(b_col[3]);
+
+            const res = (col0 * val0) + (col1 * val1) + (col2 * val2) + (col3 * val3);
+            result.data[i * 4 .. i * 4 + 4].* = res;
         }
-        return Mat4{ .data = result };
+        return result;
     }
     pub fn translation(v: Vec3) Mat4 {
         var m = Mat4.identity();

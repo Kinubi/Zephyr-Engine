@@ -10,9 +10,6 @@ pub const MeshRenderer = struct {
     /// Model asset reference (vertex/index buffers)
     model_asset: ?AssetId = null,
 
-    /// Optional texture override (if different from material's texture)
-    texture_asset: ?AssetId = null,
-
     /// Whether this renderer is active (can be toggled for visibility culling)
     enabled: bool = true,
 
@@ -29,19 +26,6 @@ pub const MeshRenderer = struct {
     pub fn init(model: AssetId) MeshRenderer {
         return .{
             .model_asset = model,
-            .texture_asset = null,
-            .enabled = true,
-            .layer = 0,
-            .casts_shadows = true,
-            .receives_shadows = true,
-        };
-    }
-
-    /// Create a MeshRenderer with model and texture override
-    pub fn initWithTexture(model: AssetId, texture: AssetId) MeshRenderer {
-        return .{
-            .model_asset = model,
-            .texture_asset = texture,
             .enabled = true,
             .layer = 0,
             .casts_shadows = true,
@@ -57,15 +41,6 @@ pub const MeshRenderer = struct {
             if (asset_id.isValid()) {
                 if (serializer.getAssetPath(asset_id)) |path| {
                     try writer.objectField("model_asset");
-                    try writer.write(path);
-                }
-            }
-        }
-
-        if (self.texture_asset) |asset_id| {
-            if (asset_id.isValid()) {
-                if (serializer.getAssetPath(asset_id)) |path| {
-                    try writer.objectField("texture_asset");
                     try writer.write(path);
                 }
             }
@@ -98,16 +73,8 @@ pub const MeshRenderer = struct {
             }
         }
 
-        if (value.object.get("texture_asset")) |path_val| {
-            if (path_val == .string) {
-                if (serializer.loadTexture(path_val.string) catch null) |id| {
-                    mr.texture_asset = id;
-                }
-            }
-        }
-
-        if (value.object.get("enabled")) |val| {
-            if (val == .bool) mr.enabled = val.bool;
+        if (value.object.get("enabled")) |enabled_val| {
+            if (enabled_val == .bool) mr.enabled = enabled_val.bool;
         }
 
         if (value.object.get("casts_shadows")) |val| {
@@ -130,11 +97,6 @@ pub const MeshRenderer = struct {
         self.model_asset = model;
     }
 
-    /// Set the texture override
-    pub fn setTexture(self: *MeshRenderer, texture: ?AssetId) void {
-        self.texture_asset = texture;
-    }
-
     /// Set enabled state
     pub fn setEnabled(self: *MeshRenderer, enabled: bool) void {
         self.enabled = enabled;
@@ -148,15 +110,6 @@ pub const MeshRenderer = struct {
     /// Check if this renderer has valid assets to render
     pub fn hasValidAssets(self: *const MeshRenderer) bool {
         return self.enabled and self.model_asset != null;
-    }
-
-    /// Get the effective texture asset (override or from material)
-    pub fn getTextureAsset(self: *const MeshRenderer) ?AssetId {
-        if (self.texture_asset) |tex| {
-            return tex;
-        }
-        // If no override, material system will provide texture
-        return null;
     }
 
     /// ECS update method - no per-frame logic needed for static renderers
@@ -180,7 +133,6 @@ pub const MeshRenderer = struct {
     pub const RenderableEntity = struct {
         model_asset: AssetId,
         material_asset: ?AssetId,
-        texture_asset: ?AssetId,
         world_matrix: [16]f32, // Transform's world matrix
         layer: u8,
         casts_shadows: bool,
@@ -199,7 +151,6 @@ pub const MeshRenderer = struct {
         // Note: world_matrix will be filled by RenderSystem when it queries Transform
         const renderable = RenderableEntity{
             .model_asset = self.model_asset.?,
-            .texture_asset = self.getTextureAsset(),
             .world_matrix = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }, // Identity placeholder
             .layer = self.layer,
             .casts_shadows = self.casts_shadows,
@@ -223,20 +174,25 @@ test "MeshRenderer: init with model" {
     const renderer = MeshRenderer.init(model_id);
 
     try std.testing.expect(renderer.model_asset != null);
-    try std.testing.expect(renderer.texture_asset == null);
     try std.testing.expect(renderer.enabled);
     try std.testing.expectEqual(@as(u8, 0), renderer.layer);
 }
 
-test "MeshRenderer: init with texture override" {
-    const model_id: AssetId = @enumFromInt(1);
-    const texture_id: AssetId = @enumFromInt(3);
+test "MeshRenderer: render extraction" {
+    const renderer = MeshRenderer.init(@enumFromInt(1));
 
-    const renderer = MeshRenderer.initWithTexture(model_id, texture_id);
+    var renderables: std.ArrayList(MeshRenderer.RenderableEntity) = .{};
+    defer renderables.deinit(std.testing.allocator);
 
-    try std.testing.expect(renderer.model_asset != null);
-    try std.testing.expect(renderer.texture_asset != null);
-    try std.testing.expectEqual(texture_id, renderer.texture_asset.?);
+    const context = MeshRenderer.RenderContext{
+        .renderables = &renderables,
+        .allocator = std.testing.allocator,
+    };
+
+    renderer.render(context);
+
+    try std.testing.expectEqual(@as(usize, 1), renderables.items.len);
+    try std.testing.expectEqual(@as(AssetId, @enumFromInt(1)), renderables.items[0].model_asset);
 }
 
 test "MeshRenderer: setters" {
@@ -244,9 +200,6 @@ test "MeshRenderer: setters" {
 
     renderer.setModel(@enumFromInt(10));
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(10)), renderer.model_asset.?);
-
-    renderer.setTexture(@enumFromInt(30));
-    try std.testing.expectEqual(@as(AssetId, @enumFromInt(30)), renderer.texture_asset.?);
 
     renderer.setEnabled(false);
     try std.testing.expect(!renderer.enabled);
@@ -265,31 +218,6 @@ test "MeshRenderer: hasValidAssets checks enabled and model" {
     renderer.setEnabled(true);
     renderer.model_asset = null;
     try std.testing.expect(!renderer.hasValidAssets());
-}
-
-test "MeshRenderer: getTextureAsset returns override or null" {
-    var renderer = MeshRenderer.init(@enumFromInt(1));
-    try std.testing.expect(renderer.getTextureAsset() == null);
-
-    renderer.setTexture(@enumFromInt(30));
-    try std.testing.expectEqual(@as(AssetId, @enumFromInt(30)), renderer.getTextureAsset().?);
-}
-
-test "MeshRenderer: render extraction" {
-    const renderer = MeshRenderer.init(@enumFromInt(1));
-
-    var renderables: std.ArrayList(MeshRenderer.RenderableEntity) = .{};
-    defer renderables.deinit(std.testing.allocator);
-
-    const context = MeshRenderer.RenderContext{
-        .renderables = &renderables,
-        .allocator = std.testing.allocator,
-    };
-
-    renderer.render(context);
-
-    try std.testing.expectEqual(@as(usize, 1), renderables.items.len);
-    try std.testing.expectEqual(@as(AssetId, @enumFromInt(1)), renderables.items[0].model_asset);
 }
 
 test "MeshRenderer: disabled renderer not extracted" {

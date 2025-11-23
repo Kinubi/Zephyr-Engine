@@ -2,7 +2,7 @@
     "name": "cornell_box",
     "entities": [
         {
-            "uuid": "37d87c77-2d9e-43e7-807c-39242917f994",
+            "uuid": "ae33da88-f33e-4ad3-9e77-5b96f3fe5561",
             "components": {
                 "Transform": {
                     "position": {
@@ -48,7 +48,7 @@
             }
         },
         {
-            "uuid": "4a4e3305-fb0d-4fa6-97a0-4881f8e530fe",
+            "uuid": "d4d4a906-3c42-484c-933a-6f1288213add",
             "components": {
                 "Transform": {
                     "position": {
@@ -94,7 +94,7 @@
             }
         },
         {
-            "uuid": "fdaefff1-9e75-4786-920c-3bff88cbe1c6",
+            "uuid": "3708f49d-6929-4ffc-85ea-1a2f1df2e846",
             "components": {
                 "Transform": {
                     "position": {
@@ -140,7 +140,7 @@
             }
         },
         {
-            "uuid": "a37efa67-0452-4a92-9842-6c4e6643f2b0",
+            "uuid": "56f77db1-e08b-4d4e-b84d-792d11a3a7af",
             "components": {
                 "Transform": {
                     "position": {
@@ -186,7 +186,7 @@
             }
         },
         {
-            "uuid": "0572cc38-e7d3-40bc-9538-1e58a03f07b9",
+            "uuid": "44196c3e-2a57-4f78-b663-f45dc7fd0656",
             "components": {
                 "Transform": {
                     "position": {
@@ -223,7 +223,7 @@
             }
         },
         {
-            "uuid": "8bdb0303-5423-4716-bfc9-bb2a716578bc",
+            "uuid": "7d33eb01-dce9-4f50-882a-c4bd96f7bced",
             "components": {
                 "Transform": {
                     "position": {
@@ -294,6 +294,53 @@
                 "RoughnessMaterial": {
                     "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-roughness3.png",
                     "factor": 1
+                }
+            }
+        },
+        {
+            "uuid": "35c29913-e8c3-44fb-a88d-69562b7cb5bc",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 2,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    },
+                    "parent": "44196c3e-2a57-4f78-b663-f45dc7fd0656"
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
                 }
             }
         }

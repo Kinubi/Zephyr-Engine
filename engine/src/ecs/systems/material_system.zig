@@ -719,22 +719,48 @@ pub const MaterialSystem = struct {
         // DON'T clear delta here - it will be cleared AFTER writeDeltasToComponent copies it
         // Clearing here would lose the delta if prepareFromECS is called multiple times per frame
 
-        // Track textures and materials for this set
+        // 1. Collect unique texture IDs to ensure stable sorting
+        var unique_textures = std.AutoHashMap(u64, void).init(self.allocator);
+        defer unique_textures.deinit();
+
+        // Always include dummy texture (ID 0)
+        try unique_textures.put(0, {});
+
+        // Collect all textures from entities
+        for (entities) |entity| {
+            if (world.get(ecs.AlbedoMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+            if (world.get(ecs.RoughnessMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+            if (world.get(ecs.MetallicMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+            if (world.get(ecs.NormalMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+            if (world.get(ecs.EmissiveMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+            if (world.get(ecs.OcclusionMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+        }
+
+        // 2. Sort IDs to create stable mapping (Index I -> SortedID[I])
+        var current_texture_ids = std.ArrayList(u64){};
+        defer current_texture_ids.deinit(self.allocator);
+
+        try current_texture_ids.ensureTotalCapacity(self.allocator, unique_textures.count());
+        var key_iter = unique_textures.keyIterator();
+        while (key_iter.next()) |key| {
+            current_texture_ids.appendAssumeCapacity(key.*);
+        }
+        std.sort.pdq(u64, current_texture_ids.items, {}, std.sort.asc(u64));
+
+        // 3. Build texture map (ID -> Index) for fast lookup
         var texture_map = std.AutoHashMap(u64, u32).init(self.allocator);
         defer texture_map.deinit();
+        try texture_map.ensureTotalCapacity(@intCast(current_texture_ids.items.len));
+
+        for (current_texture_ids.items, 0..) |id, i| {
+            try texture_map.put(id, @intCast(i));
+        }
 
         var gpu_materials = std.ArrayList(GPUMaterial){};
         defer gpu_materials.deinit(self.allocator);
 
         // Pre-allocate with known entity count
-        try gpu_materials.ensureTotalCapacity(self.allocator, entities.len);
-        try texture_map.ensureTotalCapacity(@intCast(entities.len * 3)); // Rough estimate: ~3 textures per entity
-
-        // Reserve index 0 for white dummy texture
-        try texture_map.put(0, 0);
-        var next_texture_idx: u32 = 1;
-
-        // Build materials for entities in this set
+        try gpu_materials.ensureTotalCapacity(self.allocator, entities.len); // Build materials for entities in this set
         for (entities) |entity| {
             // Batch get all material components at once (reduces component lookup overhead)
             const albedo = world.get(ecs.AlbedoMaterial, entity);
@@ -747,28 +773,28 @@ pub const MaterialSystem = struct {
             // Build GPU material with inline initialization (faster than zeroes + assignments)
             const gpu_mat = GPUMaterial{
                 // Albedo
-                .albedo_idx = if (albedo) |alb| try self.getOrAddTexture(&texture_map, &next_texture_idx, alb.texture_id) else 0,
+                .albedo_idx = if (albedo) |alb| (texture_map.get(alb.texture_id.toU64()) orelse 0) else 0,
                 .albedo_tint = if (albedo) |alb| alb.color_tint else [_]f32{ 1, 1, 1, 1 },
 
                 // Roughness
-                .roughness_idx = if (roughness) |rough| try self.getOrAddTexture(&texture_map, &next_texture_idx, rough.texture_id) else 0,
+                .roughness_idx = if (roughness) |rough| (texture_map.get(rough.texture_id.toU64()) orelse 0) else 0,
                 .roughness_factor = if (roughness) |rough| rough.factor else 0.5,
 
                 // Metallic
-                .metallic_idx = if (metallic) |metal| try self.getOrAddTexture(&texture_map, &next_texture_idx, metal.texture_id) else 0,
+                .metallic_idx = if (metallic) |metal| (texture_map.get(metal.texture_id.toU64()) orelse 0) else 0,
                 .metallic_factor = if (metallic) |metal| metal.factor else 0.0,
 
                 // Normal
-                .normal_idx = if (normal) |norm| try self.getOrAddTexture(&texture_map, &next_texture_idx, norm.texture_id) else 0,
+                .normal_idx = if (normal) |norm| (texture_map.get(norm.texture_id.toU64()) orelse 0) else 0,
                 .normal_strength = if (normal) |norm| norm.strength else 1.0,
 
                 // Emissive
-                .emissive_idx = if (emissive) |emiss| try self.getOrAddTexture(&texture_map, &next_texture_idx, emiss.texture_id) else 0,
+                .emissive_idx = if (emissive) |emiss| (texture_map.get(emiss.texture_id.toU64()) orelse 0) else 0,
                 .emissive_color = if (emissive) |emiss| emiss.color else [_]f32{ 0, 0, 0 },
                 .emissive_intensity = if (emissive) |emiss| emiss.intensity else 0.0,
 
                 // Occlusion
-                .occlusion_idx = if (occlusion) |occ| try self.getOrAddTexture(&texture_map, &next_texture_idx, occ.texture_id) else 0,
+                .occlusion_idx = if (occlusion) |occ| (texture_map.get(occ.texture_id.toU64()) orelse 0) else 0,
                 .occlusion_strength = if (occlusion) |occ| occ.strength else 1.0,
             };
 
@@ -797,19 +823,7 @@ pub const MaterialSystem = struct {
             gpu_materials.appendAssumeCapacity(gpu_mat);
         }
 
-        // Check if texture set changed - optimized with early exit
-        var current_texture_ids = std.ArrayList(u64){};
-        defer current_texture_ids.deinit(self.allocator);
-
-        // Pre-allocate with known size
-        try current_texture_ids.ensureTotalCapacity(self.allocator, texture_map.count());
-
-        var tex_iter = texture_map.keyIterator();
-        while (tex_iter.next()) |key_ptr| {
-            current_texture_ids.appendAssumeCapacity(key_ptr.*);
-        }
-        std.sort.pdq(u64, current_texture_ids.items, {}, std.sort.asc(u64));
-
+        // Check if texture set changed
         const textures_changed = blk: {
             // Quick count check
             if (current_texture_ids.items.len != set_data.last_texture_ids.items.len) break :blk true;
@@ -849,7 +863,7 @@ pub const MaterialSystem = struct {
 
         // Build texture descriptor array if changed (NO GPU UPLOAD - just prepare data)
         if (textures_changed) {
-            try self.buildTextureDescriptorArray(set_data, &texture_map, next_texture_idx);
+            try self.buildTextureDescriptorArray(set_data, &texture_map, @intCast(current_texture_ids.items.len));
             set_data.pending_delta.texture_array_dirty = true;
 
             set_data.last_texture_ids.clearRetainingCapacity();
