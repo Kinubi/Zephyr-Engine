@@ -25,7 +25,7 @@ pub const MaterialSet = struct {
     }
 
     /// Serialize MaterialSet component
-    pub fn serialize(self: MaterialSet, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: MaterialSet, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
         

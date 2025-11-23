@@ -36,7 +36,7 @@ pub const AlbedoMaterial = struct {
     }
 
     /// Serialize AlbedoMaterial component
-    pub fn serialize(self: AlbedoMaterial, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: AlbedoMaterial, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.texture_id.isValid()) {
@@ -58,14 +58,16 @@ pub const AlbedoMaterial = struct {
         
         if (value.object.get("texture")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mat.texture_id = id;
                 }
             }
         }
         
         if (value.object.get("color")) |val| {
-            mat.color_tint = try std.json.parseFromValue([4]f32, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue([4]f32, serializer.allocator, val, .{});
+            mat.color_tint = parsed.value;
+            parsed.deinit();
         }
         
         return mat;
@@ -107,7 +109,7 @@ pub const RoughnessMaterial = struct {
     }
 
     /// Serialize RoughnessMaterial component
-    pub fn serialize(self: RoughnessMaterial, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: RoughnessMaterial, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.texture_id.isValid()) {
@@ -129,7 +131,7 @@ pub const RoughnessMaterial = struct {
         
         if (value.object.get("texture")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mat.texture_id = id;
                 }
             }
@@ -178,7 +180,7 @@ pub const MetallicMaterial = struct {
     }
 
     /// Serialize MetallicMaterial component
-    pub fn serialize(self: MetallicMaterial, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: MetallicMaterial, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.texture_id.isValid()) {
@@ -200,7 +202,7 @@ pub const MetallicMaterial = struct {
         
         if (value.object.get("texture")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mat.texture_id = id;
                 }
             }
@@ -241,7 +243,7 @@ pub const NormalMaterial = struct {
     }
 
     /// Serialize NormalMaterial component
-    pub fn serialize(self: NormalMaterial, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: NormalMaterial, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.texture_id.isValid()) {
@@ -263,7 +265,7 @@ pub const NormalMaterial = struct {
         
         if (value.object.get("texture")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mat.texture_id = id;
                 }
             }
@@ -318,7 +320,7 @@ pub const EmissiveMaterial = struct {
     }
 
     /// Serialize EmissiveMaterial component
-    pub fn serialize(self: EmissiveMaterial, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: EmissiveMaterial, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.texture_id.isValid()) {
@@ -343,14 +345,16 @@ pub const EmissiveMaterial = struct {
         
         if (value.object.get("texture")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mat.texture_id = id;
                 }
             }
         }
         
         if (value.object.get("color")) |val| {
-            mat.color = try std.json.parseFromValue([3]f32, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue([3]f32, serializer.allocator, val, .{});
+            mat.color = parsed.value;
+            parsed.deinit();
         }
         
         if (value.object.get("intensity")) |val| {
@@ -379,7 +383,7 @@ pub const OcclusionMaterial = struct {
     }
 
     /// Serialize OcclusionMaterial component
-    pub fn serialize(self: OcclusionMaterial, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: OcclusionMaterial, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.texture_id.isValid()) {
@@ -401,7 +405,7 @@ pub const OcclusionMaterial = struct {
         
         if (value.object.get("texture")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mat.texture_id = id;
                 }
             }

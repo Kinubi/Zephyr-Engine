@@ -5,40 +5,45 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Scene Serialization (Save/Load)",
-          "desc": "Implement JSON serialization for Scene and GameObjects to enable persistent world building. See docs/SCENE_SERIALIZATION_DESIGN.md for details.",
-          "labels": ["Feature", "High Priority"]
+          "name": "Editor: Add Save/Load Menu Items",
+          "desc": "Add 'Save Scene' and 'Load Scene' to the main menu bar in the Editor UI (`editor/src/main.zig` or `editor_app.zig`).\n\nImplementation Details:\n1. Integrate a file dialog library (e.g., `nfd-zig` or `nativefiledialog`) to get absolute paths.\n2. In the `File` menu, call `nfd.saveDialog` / `nfd.openDialog` filtering for `.json`.\n3. On success, call `self.scene.save(path)` or `self.scene.load(path)`.\n4. Handle errors (e.g., file permission, invalid JSON) and show an error popup via `ImGui.openPopup`.",
+          "labels": ["Editor"]
         },
         {
           "name": "Material Editor",
-          "desc": "Implement visual material creation and editing in the Editor. Link to MaterialSystem and MaterialSet architecture.",
+          "desc": "Implement a dedicated Editor window for creating and modifying materials.\n\nImplementation Details:\n1. Create `editor/src/windows/material_editor.zig`.\n2. Subscribe to selection events. When an entity is selected, query its `MaterialSet` and property components (`AlbedoMaterial`, etc.).\n3. Use `ImGui.colorEdit4` for albedo/emissive colors, `ImGui.sliderFloat` for roughness/metallic/normal strength.\n4. Add drag-and-drop targets for textures (accepting Asset IDs).\n5. Apply changes immediately to the ECS components, which `MaterialSystem` picks up next frame.",
           "labels": ["Editor", "High Priority"]
         },
         {
           "name": "Physics Integration",
-          "desc": "Integrate a physics engine (Jolt/PhysX/zphysics). Add RigidBody and BoxCollider components.",
+          "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
           "labels": ["Engine", "High Priority"]
         },
         {
           "name": "Asset Importer",
-          "desc": "Implement drag-and-drop support for importing .obj, .gltf, .png files. Auto-generate .meta files.",
+          "desc": "Implement drag-and-drop support in the Editor for importing external assets.\n\nImplementation Details:\n1. Detect dropped files via `ImGui.getDragDropPayload` or window events.\n2. Copy source files to the project `assets/` directory (organize by type: `assets/models`, `assets/textures`).\n3. Generate a `.meta` file for each asset containing a stable UUID and import settings (e.g., texture compression format, model scale).\n4. Register the new asset with `AssetManager` and reload the asset browser.",
           "labels": ["Editor", "High Priority"]
         },
         {
           "name": "Scripting Integration",
-          "desc": "Wire up the scripting subsystem to ECS. Create ScriptComponent and ScriptSystem.",
+          "desc": "Fully integrate the scripting subsystem with the ECS.\n\nImplementation Details:\n1. Ensure `ScriptComponent` stores a handle to the script asset.\n2. In `ScriptSystem`, maintain a VM state (Lua/WASM).\n3. On `Scene.start`, iterate `ScriptComponent`s and call their `init()` function.\n4. On `Scene.update`, call `update(dt)`.\n5. Expose ECS functions to the script environment (e.g., `getEntity`, `getComponent`, `setTransform`).",
           "labels": ["Engine", "High Priority"]
         },
         {
           "name": "Play Mode",
-          "desc": "Implement Editor state machine (Edit vs Play). Serialize scene to memory on Play, deserialize on Stop.",
+          "desc": "Implement the Editor state machine to toggle between 'Edit' and 'Play' modes.\n\nImplementation Details:\n1. Add `EditorState` enum (`Edit`, `Play`, `Paused`) to `EditorApp`.\n2. On Play: Serialize the current scene to an in-memory buffer using `SceneSerializer`.\n3. Start the game loop logic (physics, scripts, particles).\n4. On Stop: Clear the current scene and deserialize from the in-memory buffer to restore the exact state before gameplay.\n5. Disable Editor gizmos and selection during Play mode.",
           "labels": ["Editor", "High Priority"]
         }
       ]
     },
     {
-      "name": "Scene Serialization (Active Feature)",
+      "name": "Done",
       "cards": [
+        {
+          "name": "Scene Serialization (Save/Load)",
+          "desc": "Implement JSON serialization for Scene and GameObjects to enable persistent world building. See docs/SCENE_SERIALIZATION_DESIGN.md for details.",
+          "labels": ["Feature", "High Priority"]
+        },
         {
           "name": "Create SceneSerializer Struct",
           "desc": "Define serialize(scene, writer) and deserialize(scene, reader).",
@@ -85,16 +90,6 @@
           "labels": ["Implementation"]
         },
         {
-          "name": "Editor: Add Save/Load Menu Items",
-          "desc": "Add to File menu. Open file dialog or save to fixed path.",
-          "labels": ["Editor"]
-        }
-      ]
-    },
-    {
-      "name": "Done",
-      "cards": [
-        {
           "name": "Define Scene File Format (JSON)",
           "desc": "Design JSON schema. Decide on Entity ID handling (runtime vs persistent UUIDs) and Asset ID handling (paths vs UUIDs).",
           "labels": ["Design"]
@@ -116,42 +111,42 @@
       "cards": [
         {
           "name": "Move BLAS ownership to Mesh/Geometry",
-          "desc": "Refactor BLAS ownership from global registry to Mesh/Geometry struct. (rendering/geometry.zig)",
+          "desc": "Refactor BLAS (Bottom-Level Acceleration Structure) ownership.\n\nDetails:\n- Currently, BLAS are stored in a global registry.\n- Move `VkAccelerationStructureKHR` and `VkBuffer` handles into the `Mesh` or `Geometry` struct in `rendering/geometry.zig`.\n- Update `GeometryPass` to bind these directly from the Mesh asset.\n- This improves encapsulation and lifetime management of ray tracing resources.",
           "labels": ["Refactor", "High Priority"]
         },
         {
           "name": "Remove global BLAS registry",
-          "desc": "Remove the global BLAS registry in multithreaded_bvh_builder.zig.",
+          "desc": "Remove the global BLAS registry in `multithreaded_bvh_builder.zig` once ownership is moved to Meshes. This eliminates a global state bottleneck and simplifies the `RenderSystem`.",
           "labels": ["Refactor", "High Priority"]
         },
         {
           "name": "Implement mesh deduplication for instancing",
-          "desc": "Optimize instancing by deduplicating meshes in render_system.zig.",
+          "desc": "Optimize instancing in `render_system.zig`.\n\nDetails:\n- Instead of iterating entities and drawing immediately, bucket them by `MeshId` and `MaterialId`.\n- Build a `std.ArrayList(InstanceData)` for each bucket.\n- Issue one `vkCmdDrawIndexed` per bucket with `instanceCount > 1`.\n- This will significantly reduce draw call overhead.",
           "labels": ["Optimization", "High Priority"]
         },
         {
           "name": "Implement asset streaming system",
-          "desc": "Implement proper asset streaming in asset_manager.zig.",
+          "desc": "Implement proper asset streaming in `asset_manager.zig`.\n\nDetails:\n- Use `std.Thread` to load assets in the background.\n- Implement a `LoadRequestQueue`.\n- Upload to GPU incrementally (staging buffers) to avoid frame stutters.\n- Handle `AssetId` placeholders while loading.",
           "labels": ["Feature", "High Priority"]
         },
         {
           "name": "Archetype-based storage optimization",
-          "desc": "Optimize ECS storage using archetypes (ecs/world.zig).",
+          "desc": "Optimize ECS storage in `ecs/world.zig`.\n\nDetails:\n- Move from `SparseSet` per component to Archetypes (grouping entities by component composition).\n- This improves cache locality for systems iterating over specific component sets (e.g., `Transform` + `MeshRenderer`).",
           "labels": ["Optimization", "Medium Priority"]
         },
         {
           "name": "Comprehensive asset validation",
-          "desc": "Add validation logic to asset_manager.zig.",
+          "desc": "Add validation logic to `asset_manager.zig`.\n\nDetails:\n- Check file integrity (magic numbers, checksums).\n- Validate format versions.\n- Check dependencies (e.g., material textures exist).\n- Log detailed errors for broken assets instead of crashing.",
           "labels": ["Maintenance", "Medium Priority"]
         },
         {
           "name": "Automatic shader variant generation",
-          "desc": "Automate shader variant generation in shader_compiler.zig.",
+          "desc": "Automate shader variant generation in `shader_compiler.zig`.\n\nDetails:\n- Instead of manually defining permutations, generate them based on material usage.\n- E.g., generate variants for: `HAS_NORMAL_MAP`, `HAS_EMISSIVE`, `SKINNED`, `STATIC`.\n- Compile these variants offline or on-demand.",
           "labels": ["Feature", "Medium Priority"]
         },
         {
           "name": "Work-stealing job queue",
-          "desc": "Implement work-stealing for ThreadPool (threading/thread_pool.zig).",
+          "desc": "Implement a work-stealing scheduler for `ThreadPool` in `threading/thread_pool.zig`. This balances load across cores more effectively than a simple shared queue, especially for uneven tasks like BVH building.",
           "labels": ["Optimization", "Medium Priority"]
         }
       ]
@@ -161,32 +156,32 @@
       "cards": [
         {
           "name": "Frustum Culling (CPU)",
-          "desc": "Implement CPU-side frustum culling.",
+          "desc": "Implement CPU-side frustum culling in `RenderSystem`.\n\nDetails:\n- Extract camera frustum planes.\n- Iterate entities.\n- Calculate AABB from `Mesh` bounds + `Transform`.\n- Check AABB vs Frustum.\n- Skip adding to render list if outside.",
           "labels": ["Optimization"]
         },
         {
           "name": "Occlusion Culling (GPU)",
-          "desc": "Implement GPU-side occlusion culling.",
+          "desc": "Implement GPU-side occlusion culling.\n\nDetails:\n- Use Hi-Z buffer generation (downsample depth buffer).\n- Use Compute Shader to check object AABBs against Hi-Z buffer.\n- Generate indirect draw commands for visible objects.",
           "labels": ["Optimization"]
         },
         {
           "name": "Distance-based LOD",
-          "desc": "Implement LOD system based on distance.",
+          "desc": "Implement a Level of Detail (LOD) system.\n\nDetails:\n- Import multiple mesh variants (LOD0, LOD1, LOD2).\n- In `RenderSystem`, calculate distance from camera.\n- Select appropriate mesh variant based on distance thresholds.",
           "labels": ["Optimization"]
         },
         {
           "name": "Shadow Mapping",
-          "desc": "Implement shadow mapping for rasterization path.",
+          "desc": "Implement shadow mapping for the rasterization path.\n\nDetails:\n- Render scene depth from light perspectives into shadow maps (Cascaded Shadow Maps for Directional, Cube Maps for Point).\n- Bind shadow maps in lighting shaders.\n- Perform PCF (Percentage Closer Filtering) for soft shadows.",
           "labels": ["Feature"]
         },
         {
           "name": "Volumetric Light Scattering",
-          "desc": "Implement volumetric lighting.",
+          "desc": "Implement volumetric lighting (God rays).\n\nDetails:\n- Raymarch through shadow maps in a post-process shader.\n- Or use screen-space radial blur from the light source position.",
           "labels": ["Feature"]
         },
         {
           "name": "Post-processing Pipeline",
-          "desc": "Implement Bloom, Tonemapping, FXAA.",
+          "desc": "Implement a post-processing stack.\n\nDetails:\n- Bloom: Threshold -> Downsample -> Blur -> Upsample -> Combine.\n- Tonemapping: Apply ACES or Reinhard curve.\n- FXAA: Fast Approximate Anti-Aliasing pass.",
           "labels": ["Feature"]
         }
       ]
@@ -196,17 +191,17 @@
       "cards": [
         {
           "name": "Undo/Redo System",
-          "desc": "Implement Command pattern for editor actions.",
+          "desc": "Implement the Command pattern for editor actions.\n\nDetails:\n- Create `ICommand` interface with `execute()` and `undo()`.\n- Implement commands: `MoveEntityCommand`, `ChangePropertyCommand`, `DeleteEntityCommand`.\n- Maintain a history stack in `EditorApp`.\n- Map Ctrl+Z/Ctrl+Y to stack operations.",
           "labels": ["Feature"]
         },
         {
           "name": "Selection System",
-          "desc": "Multi-entity selection with outlines.",
+          "desc": "Implement multi-entity selection in the Editor.\n\nDetails:\n- Update `SelectionContext` to hold `ArrayList(EntityId)`.\n- Render selection outlines: Render selected entities to a stencil buffer or separate color attachment, then edge-detect in post-process.",
           "labels": ["Feature"]
         },
         {
           "name": "Editor Camera",
-          "desc": "Separate Editor camera from Game camera.",
+          "desc": "Separate the Editor camera from the Game camera.\n\nDetails:\n- `EditorApp` should own an `EditorCamera` (free-fly).\n- `Scene` owns `GameCamera` components.\n- Toggle viewport rendering source based on Edit/Play state.",
           "labels": ["Feature"]
         }
       ]
@@ -216,17 +211,17 @@
       "cards": [
         {
           "name": "Multi-component Queries",
-          "desc": "Support queries for multiple components (Transform + MeshRenderer + Custom).",
+          "desc": "Support complex ECS queries.\n\nDetails:\n- Implement `World.query(.{Transform, MeshRenderer})`.\n- Return an iterator that skips entities missing any required component.\n- Optimize using bitmasks or archetypes.",
           "labels": ["Feature"]
         },
         {
           "name": "Event System for Components",
-          "desc": "Events for component changes.",
+          "desc": "Implement an event system for components.\n\nDetails:\n- Components can trigger events (e.g., `OnCollision`, `OnDestroy`).\n- Systems can subscribe to these events.\n- Use a message bus or observer pattern within the ECS.",
           "labels": ["Feature"]
         },
         {
           "name": "Prefab System",
-          "desc": "Implement Prefabs for entity templates.",
+          "desc": "Implement Prefabs.\n\nDetails:\n- Define a Prefab asset format (JSON).\n- `PrefabManager` loads and caches prefabs.\n- `Scene.instantiate(prefab_id)` spawns entities and copies components from the prefab template.",
           "labels": ["Feature"]
         }
       ]
@@ -236,17 +231,17 @@
       "cards": [
         {
           "name": "GLTF/GLB Support",
-          "desc": "Add support for GLTF/GLB models.",
+          "desc": "Add native support for loading GLTF/GLB models.\n\nDetails:\n- Use `cgltf` or a Zig library.\n- Parse nodes, meshes, materials, and animations.\n- Convert to engine internal formats (`Mesh`, `MaterialSet`, `Animation`).",
           "labels": ["Feature"]
         },
         {
           "name": "Compressed Texture Support",
-          "desc": "Support BC7, ASTC formats.",
+          "desc": "Support loading and rendering compressed texture formats.\n\nDetails:\n- Support BC7 (high quality) and ASTC (mobile/efficient).\n- Update `TextureManager` to handle block-compressed data upload.\n- Reduces VRAM usage significantly.",
           "labels": ["Feature"]
         },
         {
           "name": "Asset Bundles",
-          "desc": "Implement asset packaging/bundles.",
+          "desc": "Implement asset packaging/bundles.\n\nDetails:\n- Pack multiple assets into single binary files (e.g., `.pak`).\n- Include a header/directory for fast lookup.\n- Reduces OS file handle overhead and improves load times.",
           "labels": ["Feature"]
         }
       ]

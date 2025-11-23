@@ -58,7 +58,7 @@ pub const ScriptComponent = struct {
     }
 
     /// Serialize ScriptComponent
-    pub fn serialize(self: ScriptComponent, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: ScriptComponent, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.asset) |asset_id| {

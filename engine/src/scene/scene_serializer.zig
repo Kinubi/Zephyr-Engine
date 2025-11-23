@@ -1,7 +1,10 @@
 const std = @import("std");
 const ecs = @import("../ecs.zig");
 const Scene = @import("scene.zig").Scene;
-const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
+const AssetManagerMod = @import("../assets/asset_manager.zig");
+const AssetManager = AssetManagerMod.AssetManager;
+const LoadPriority = AssetManagerMod.LoadPriority;
+const AssetType = AssetManagerMod.AssetType;
 const AssetId = @import("../assets/asset_types.zig").AssetId;
 const UuidComponent = @import("../ecs/components/uuid.zig").UuidComponent;
 
@@ -25,7 +28,10 @@ pub const SceneSerializer = struct {
 
     /// Helper to get UUID for an entity ID
     pub fn getEntityUuid(self: *SceneSerializer, entity: ecs.EntityId) ?UuidComponent {
-        return self.scene.ecs_world.get(UuidComponent, entity);
+        if (self.scene.ecs_world.get(UuidComponent, entity)) |ptr| {
+            return ptr.*;
+        }
+        return null;
     }
 
     /// Helper to get Asset Path for an Asset ID
@@ -45,7 +51,7 @@ pub const SceneSerializer = struct {
     }
 
     /// Serialize the entire scene to a JSON writer
-    pub fn serialize(self: *SceneSerializer, writer: anytype) !void {
+    pub fn jsonStringify(self: *SceneSerializer, writer: anytype) !void {
         try writer.beginObject();
         
         try writer.objectField("name");
@@ -60,7 +66,7 @@ pub const SceneSerializer = struct {
                 try writer.beginObject();
                 
                 try writer.objectField("uuid");
-                const uuid_str = try std.fmt.allocPrint(self.allocator, "{}", .{uuid_comp});
+                const uuid_str = try std.fmt.allocPrint(self.allocator, "{f}", .{uuid_comp});
                 defer self.allocator.free(uuid_str);
                 try writer.write(uuid_str);
                 
@@ -98,7 +104,7 @@ pub const SceneSerializer = struct {
     fn serializeComponent(self: *SceneSerializer, comptime T: type, comp_name: []const u8, entity: ecs.EntityId, writer: anytype) !void {
         if (self.scene.ecs_world.get(T, entity)) |component| {
             try writer.objectField(comp_name);
-            try component.serialize(self, writer);
+            try component.jsonSerialize(self, writer);
         }
     }
 
@@ -123,8 +129,8 @@ pub const SceneSerializer = struct {
             
             // Create entity in world
             const entity = try self.scene.ecs_world.createEntity();
-            try self.scene.ecs_world.add(entity, uuid);
-            try self.scene.entities.append(entity);
+            try self.scene.ecs_world.emplace(UuidComponent, entity, uuid);
+            try self.scene.entities.append(self.allocator, entity);
             
             // Map UUID to EntityId for reference resolution
             try self.uuid_map.put(uuid, entity);
@@ -142,29 +148,29 @@ pub const SceneSerializer = struct {
             if (components_val != .object) continue;
             
             // Core components
-            try self.deserializeComponent(ecs.Name, "Name", entity, components_val);
-            try self.deserializeComponent(ecs.Transform, "Transform", entity, components_val);
-            try self.deserializeComponent(ecs.MeshRenderer, "MeshRenderer", entity, components_val);
-            try self.deserializeComponent(ecs.Camera, "Camera", entity, components_val);
-            try self.deserializeComponent(ecs.PointLight, "PointLight", entity, components_val);
-            try self.deserializeComponent(ecs.ScriptComponent, "ScriptComponent", entity, components_val);
-            try self.deserializeComponent(ecs.ParticleEmitter, "ParticleEmitter", entity, components_val);
-            try self.deserializeComponent(ecs.MaterialSet, "MaterialSet", entity, components_val);
+            try self.deserializeComponent(ecs.Name, entity, components_val);
+            try self.deserializeComponent(ecs.Transform, entity, components_val);
+            try self.deserializeComponent(ecs.MeshRenderer, entity, components_val);
+            try self.deserializeComponent(ecs.Camera, entity, components_val);
+            try self.deserializeComponent(ecs.PointLight, entity, components_val);
+            try self.deserializeComponent(ecs.ScriptComponent, entity, components_val);
+            try self.deserializeComponent(ecs.ParticleEmitter, entity, components_val);
+            try self.deserializeComponent(ecs.MaterialSet, entity, components_val);
             
             // Material property components
-            try self.deserializeComponent(ecs.AlbedoMaterial, "AlbedoMaterial", entity, components_val);
-            try self.deserializeComponent(ecs.RoughnessMaterial, "RoughnessMaterial", entity, components_val);
-            try self.deserializeComponent(ecs.MetallicMaterial, "MetallicMaterial", entity, components_val);
-            try self.deserializeComponent(ecs.NormalMaterial, "NormalMaterial", entity, components_val);
-            try self.deserializeComponent(ecs.EmissiveMaterial, "EmissiveMaterial", entity, components_val);
-            try self.deserializeComponent(ecs.OcclusionMaterial, "OcclusionMaterial", entity, components_val);
+            try self.deserializeComponent(ecs.AlbedoMaterial, entity, components_val);
+            try self.deserializeComponent(ecs.RoughnessMaterial, entity, components_val);
+            try self.deserializeComponent(ecs.MetallicMaterial, entity, components_val);
+            try self.deserializeComponent(ecs.NormalMaterial, entity, components_val);
+            try self.deserializeComponent(ecs.EmissiveMaterial, entity, components_val);
+            try self.deserializeComponent(ecs.OcclusionMaterial, entity, components_val);
         }
     }
 
     fn deserializeComponent(self: *SceneSerializer, comptime T: type, entity: ecs.EntityId, components_val: std.json.Value) !void {
         if (components_val.object.get(name(T))) |comp_val| {
             const component = try T.deserialize(self, comp_val);
-            try self.scene.ecs_world.add(entity, component);
+            try self.scene.ecs_world.emplace(T, entity, component);
         }
     }
     
@@ -185,5 +191,11 @@ pub const SceneSerializer = struct {
         if (T == ecs.EmissiveMaterial) return "EmissiveMaterial";
         if (T == ecs.OcclusionMaterial) return "OcclusionMaterial";
         return "Unknown";
+    }
+
+    /// Helper to load a texture asset (async)
+    pub fn loadTexture(self: *SceneSerializer, path: []const u8) !AssetId {
+        // Use critical priority for scene load to ensure they are available ASAP
+        return self.scene.asset_manager.loadAssetAsync(path, .texture, .critical);
     }
 };

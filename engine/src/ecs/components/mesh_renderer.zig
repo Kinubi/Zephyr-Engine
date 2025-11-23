@@ -49,7 +49,7 @@ pub const MeshRenderer = struct {
     }
 
     /// Serialize MeshRenderer component
-    pub fn serialize(self: MeshRenderer, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: MeshRenderer, serializer: anytype, writer: anytype) !void {
         try writer.beginObject();
         
         if (self.model_asset) |asset_id| {

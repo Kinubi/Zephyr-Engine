@@ -140,14 +140,23 @@ pub const Scene = struct {
         var file = try std.fs.cwd().createFile(file_path, .{});
         defer file.close();
 
-        var buffered_writer = std.io.bufferedWriter(file.writer());
-        const writer = buffered_writer.writer();
+        var buffer: [4096]u8 = undefined;
+        var buffered_writer = file.writer(&buffer);
+        var writer_interface = &buffered_writer.interface;
 
         var serializer = SceneSerializer.init(self);
-        var json_writer = std.json.writeStream(writer, .{ .whitespace = .indent_4 });
         
-        try serializer.serialize(&json_writer);
-        try buffered_writer.flush();
+        var stringify = std.json.Stringify{
+             .writer = writer_interface,
+             .options = .{ .whitespace = .indent_4 },
+             .indent_level = 0,
+             .next_punctuation = .the_beginning,
+             .nesting_stack = undefined,
+             .raw_streaming_mode = .none,
+        };
+        
+        try serializer.jsonStringify(&stringify);
+        try writer_interface.flush();
     }
 
     /// Load the scene from a JSON file

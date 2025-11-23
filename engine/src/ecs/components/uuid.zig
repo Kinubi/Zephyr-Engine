@@ -49,14 +49,10 @@ pub const UuidComponent = struct {
     /// Format as string
     pub fn format(
         self: UuidComponent,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
-        _ = options;
         // 8-4-4-4-12 format
-        try std.fmt.format(writer, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        try writer.print("{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
             self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
             self.bytes[4], self.bytes[5],
             self.bytes[6], self.bytes[7],

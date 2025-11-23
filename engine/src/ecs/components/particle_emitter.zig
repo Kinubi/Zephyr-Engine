@@ -43,7 +43,7 @@ pub const ParticleEmitter = struct {
     }
 
     /// Serialize ParticleEmitter component
-    pub fn serialize(self: ParticleEmitter, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: ParticleEmitter, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
         
@@ -84,19 +84,27 @@ pub const ParticleEmitter = struct {
         }
         
         if (value.object.get("velocity_min")) |val| {
-            pe.velocity_min = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            pe.velocity_min = parsed.value;
+            parsed.deinit();
         }
         
         if (value.object.get("velocity_max")) |val| {
-            pe.velocity_max = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            pe.velocity_max = parsed.value;
+            parsed.deinit();
         }
         
         if (value.object.get("color")) |val| {
-            pe.color = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            pe.color = parsed.value;
+            parsed.deinit();
         }
         
         if (value.object.get("spawn_offset")) |val| {
-            pe.spawn_offset = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            pe.spawn_offset = parsed.value;
+            parsed.deinit();
         }
         
         if (value.object.get("active")) |val| {

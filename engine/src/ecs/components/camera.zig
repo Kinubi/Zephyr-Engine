@@ -110,7 +110,7 @@ pub const Camera = struct {
     }
 
     /// Serialize Camera component
-    pub fn serialize(self: Camera, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: Camera, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
         

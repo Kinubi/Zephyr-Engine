@@ -23,7 +23,7 @@ pub const Name = struct {
     }
 
     /// Serialize Name component
-    pub fn serialize(self: Name, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: Name, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
         try writer.objectField("name");

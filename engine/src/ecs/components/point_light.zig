@@ -54,7 +54,7 @@ pub const PointLight = struct {
     }
 
     /// Serialize PointLight component
-    pub fn serialize(self: PointLight, serializer: anytype, writer: anytype) !void {
+    pub fn jsonSerialize(self: PointLight, serializer: anytype, writer: anytype) !void {
         _ = serializer;
         try writer.beginObject();
         
@@ -78,7 +78,9 @@ pub const PointLight = struct {
         var pl = PointLight.init();
         
         if (value.object.get("color")) |val| {
-            pl.color = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            const parsed = try std.json.parseFromValue(Math.Vec3, serializer.allocator, val, .{});
+            pl.color = parsed.value;
+            parsed.deinit();
         }
         if (value.object.get("intensity")) |val| {
             if (val == .float) pl.intensity = @floatCast(val.float);

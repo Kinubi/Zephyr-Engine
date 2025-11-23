@@ -48,6 +48,11 @@ pub const UIRenderer = struct {
     // (we prefer the engine to receive input when the viewport is focused).
     viewport_focused: bool = false,
 
+    // Save/Load Scene state
+    show_save_scene_popup: bool = false,
+    show_load_scene_popup: bool = false,
+    scene_filename_buffer: [256]u8 = std.mem.zeroes([256]u8),
+
     // Scripting console (simple, fixed-size buffer + small ring history)
     show_scripting_console: bool = false,
     // True when the scripting console input text box is the active item this frame
@@ -194,7 +199,7 @@ pub const UIRenderer = struct {
     }
 
     /// Render all UI windows
-    pub fn render(self: *UIRenderer) void {
+    pub fn render(self: *UIRenderer, scene: *Scene) void {
         // Note: Dockspace disabled - requires ImGui docking branch
         // For now, windows will be regular floating windows
 
@@ -274,6 +279,72 @@ pub const UIRenderer = struct {
         c.ImGui_End();
         c.ImGui_PopStyleVar();
         c.ImGui_PopStyleVar();
+
+        // Main Menu Bar
+        if (c.ImGui_BeginMainMenuBar()) {
+            if (c.ImGui_BeginMenu("File")) {
+                if (c.ImGui_MenuItem("Save Scene...")) {
+                    const default_name = "scene.json";
+                    @memcpy(self.scene_filename_buffer[0..default_name.len], default_name);
+                    self.scene_filename_buffer[default_name.len] = 0;
+                    self.show_save_scene_popup = true;
+                }
+                if (c.ImGui_MenuItem("Load Scene...")) {
+                    self.scene_filename_buffer[0] = 0;
+                    self.show_load_scene_popup = true;
+                }
+                c.ImGui_EndMenu();
+            }
+            c.ImGui_EndMainMenuBar();
+        }
+
+        // Save Scene Popup
+        if (self.show_save_scene_popup) {
+            c.ImGui_OpenPopup("Save Scene", 0);
+            self.show_save_scene_popup = false;
+        }
+        if (c.ImGui_BeginPopupModal("Save Scene", null, c.ImGuiWindowFlags_AlwaysAutoResize)) {
+            c.ImGui_Text("Enter filename:");
+            _ = c.ImGui_InputText("##filename", &self.scene_filename_buffer[0], self.scene_filename_buffer.len, 0);
+            
+            if (c.ImGui_Button("Save")) {
+                const len = std.mem.indexOfScalar(u8, &self.scene_filename_buffer, 0) orelse self.scene_filename_buffer.len;
+                const filename = self.scene_filename_buffer[0..len];
+                scene.save(filename) catch |err| {
+                    log(.ERROR, "ui", "Failed to save scene: {}", .{err});
+                };
+                c.ImGui_CloseCurrentPopup();
+            }
+            c.ImGui_SameLine();
+            if (c.ImGui_Button("Cancel")) {
+                c.ImGui_CloseCurrentPopup();
+            }
+            c.ImGui_EndPopup();
+        }
+
+        // Load Scene Popup
+        if (self.show_load_scene_popup) {
+            c.ImGui_OpenPopup("Load Scene", 0);
+            self.show_load_scene_popup = false;
+        }
+        if (c.ImGui_BeginPopupModal("Load Scene", null, c.ImGuiWindowFlags_AlwaysAutoResize)) {
+            c.ImGui_Text("Enter filename:");
+            _ = c.ImGui_InputText("##filename", &self.scene_filename_buffer[0], self.scene_filename_buffer.len, 0);
+            
+            if (c.ImGui_Button("Load")) {
+                const len = std.mem.indexOfScalar(u8, &self.scene_filename_buffer, 0) orelse self.scene_filename_buffer.len;
+                const filename = self.scene_filename_buffer[0..len];
+                scene.load(filename) catch |err| {
+                    log(.ERROR, "ui", "Failed to load scene: {}", .{err});
+                };
+                c.ImGui_CloseCurrentPopup();
+            }
+            c.ImGui_SameLine();
+            if (c.ImGui_Button("Cancel")) {
+                c.ImGui_CloseCurrentPopup();
+            }
+            c.ImGui_EndPopup();
+        }
     }
 
     /// Render UI panels (stats, camera, performance, asset browser)
@@ -936,7 +1007,6 @@ pub const UIRenderer = struct {
                             log(.INFO, "console", "  toggle <cvar>        - Toggle boolean CVar", .{});
                             log(.INFO, "console", "  list [pattern]       - List all CVars (optional filter)", .{});
                             log(.INFO, "console", "  help <cvar>          - Show CVar description", .{});
-                            log(.INFO, "console", "  archive <cvar> <0|1> - Set CVar archive flag", .{});
                             log(.INFO, "console", "", .{});
                             log(.INFO, "console", "Memory Tracking CVars:", .{});
                             log(.INFO, "console", "  r_trackMemory        - Enable GPU memory tracking (requires restart)", .{});
