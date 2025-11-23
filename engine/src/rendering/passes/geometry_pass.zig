@@ -79,6 +79,7 @@ pub const GeometryPass = struct {
         descriptor_manager: *TextureDescriptorManager,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
+        render_system: *RenderSystem,
     ) !*GeometryPass {
         const pass = try allocator.create(GeometryPass);
         pass.* = GeometryPass{
@@ -100,7 +101,7 @@ pub const GeometryPass = struct {
             .descriptor_manager = descriptor_manager,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
-            .render_system = @ptrCast(@alignCast(ecs_world.getUserData("render_system").?)),
+            .render_system = render_system,
         };
 
         log(.INFO, "geometry_pass", "Created geometry_pass", .{});
@@ -394,6 +395,9 @@ pub const GeometryPass = struct {
         log(.INFO, "geometry_pass", "Teardown complete", .{});
     }
 
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
     fn reset(ctx: *RenderPass) void {
         const self: *GeometryPass = @fieldParentPtr("base", ctx);
         self.resource_binder.clear();

@@ -6,6 +6,7 @@ const AssetId = @import("../../assets/asset_types.zig").AssetId;
 /// Material properties are defined via MaterialSystem ECS components
 /// Used by RenderSystem to extract renderable geometry and feed to GenericRenderer
 pub const MeshRenderer = struct {
+    pub const json_name = "MeshRenderer";
     /// Model asset reference (vertex/index buffers)
     model_asset: ?AssetId = null,
 
@@ -91,7 +92,7 @@ pub const MeshRenderer = struct {
         
         if (value.object.get("model_asset")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadModel(path_val.string) catch null) |id| {
                     mr.model_asset = id;
                 }
             }
@@ -99,7 +100,7 @@ pub const MeshRenderer = struct {
         
         if (value.object.get("texture_asset")) |path_val| {
             if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
+                if (serializer.loadTexture(path_val.string) catch null) |id| {
                     mr.texture_asset = id;
                 }
             }

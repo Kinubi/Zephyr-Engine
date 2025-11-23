@@ -3,6 +3,8 @@ const Math = @import("../../utils/math.zig");
 
 /// ParticleEmitter spawns particles at a specific location
 pub const ParticleEmitter = struct {
+    pub const json_name = "ParticleEmitter";
+
     /// Emission rate (particles per second)
     emission_rate: f32 = 10.0,
 

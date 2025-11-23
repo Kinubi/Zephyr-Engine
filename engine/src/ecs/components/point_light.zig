@@ -4,6 +4,8 @@ const Math = @import("../../utils/math.zig");
 /// Point light component for ECS entities
 /// Represents a light source that emits light in all directions from a point
 pub const PointLight = struct {
+    pub const json_name = "PointLight";
+
     /// Light color (RGB)
     color: Math.Vec3 = Math.Vec3.init(1.0, 1.0, 1.0),
 

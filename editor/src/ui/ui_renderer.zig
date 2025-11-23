@@ -198,6 +198,37 @@ pub const UIRenderer = struct {
         }
     }
 
+    fn renderFilePopup(self: *UIRenderer, title: [:0]const u8, action_name: [:0]const u8, callback: anytype, user_data: anytype) void {
+        if (c.ImGui_BeginPopupModal(title, null, c.ImGuiWindowFlags_AlwaysAutoResize)) {
+            c.ImGui_Text("Enter filename:");
+            _ = c.ImGui_InputText("##filename", &self.scene_filename_buffer[0], self.scene_filename_buffer.len, 0);
+
+            if (c.ImGui_Button(action_name)) {
+                const len = std.mem.indexOfScalar(u8, &self.scene_filename_buffer, 0) orelse self.scene_filename_buffer.len;
+                const filename = self.scene_filename_buffer[0..len];
+                callback(filename, user_data);
+                c.ImGui_CloseCurrentPopup();
+            }
+            c.ImGui_SameLine();
+            if (c.ImGui_Button("Cancel")) {
+                c.ImGui_CloseCurrentPopup();
+            }
+            c.ImGui_EndPopup();
+        }
+    }
+
+    fn saveSceneWrapper(filename: []const u8, scene: *Scene) void {
+        scene.save(filename) catch |err| {
+            log(.ERROR, "ui", "Failed to save scene: {}", .{err});
+        };
+    }
+
+    fn loadSceneWrapper(filename: []const u8, scene: *Scene) void {
+        scene.load(filename) catch |err| {
+            log(.ERROR, "ui", "Failed to load scene: {}", .{err});
+        };
+    }
+
     /// Render all UI windows
     pub fn render(self: *UIRenderer, scene: *Scene) void {
         // Note: Dockspace disabled - requires ImGui docking branch
@@ -285,14 +316,12 @@ pub const UIRenderer = struct {
             if (c.ImGui_BeginMenu("File")) {
                 if (c.ImGui_MenuItem("Save Scene...")) {
                     const default_name = "scenes/scene.json";
-                    @memcpy(self.scene_filename_buffer[0..default_name.len], default_name);
-                    self.scene_filename_buffer[default_name.len] = 0;
+                    _ = std.fmt.bufPrintZ(&self.scene_filename_buffer, "{s}", .{default_name}) catch {};
                     self.show_save_scene_popup = true;
                 }
                 if (c.ImGui_MenuItem("Load Scene...")) {
                     const default_name = "scenes/scene.json";
-                    @memcpy(self.scene_filename_buffer[0..default_name.len], default_name);
-                    self.scene_filename_buffer[default_name.len] = 0;
+                    _ = std.fmt.bufPrintZ(&self.scene_filename_buffer, "{s}", .{default_name}) catch {};
                     self.show_load_scene_popup = true;
                 }
                 c.ImGui_EndMenu();
@@ -305,48 +334,14 @@ pub const UIRenderer = struct {
             c.ImGui_OpenPopup("Save Scene", 0);
             self.show_save_scene_popup = false;
         }
-        if (c.ImGui_BeginPopupModal("Save Scene", null, c.ImGuiWindowFlags_AlwaysAutoResize)) {
-            c.ImGui_Text("Enter filename:");
-            _ = c.ImGui_InputText("##filename", &self.scene_filename_buffer[0], self.scene_filename_buffer.len, 0);
-            
-            if (c.ImGui_Button("Save")) {
-                const len = std.mem.indexOfScalar(u8, &self.scene_filename_buffer, 0) orelse self.scene_filename_buffer.len;
-                const filename = self.scene_filename_buffer[0..len];
-                scene.save(filename) catch |err| {
-                    log(.ERROR, "ui", "Failed to save scene: {}", .{err});
-                };
-                c.ImGui_CloseCurrentPopup();
-            }
-            c.ImGui_SameLine();
-            if (c.ImGui_Button("Cancel")) {
-                c.ImGui_CloseCurrentPopup();
-            }
-            c.ImGui_EndPopup();
-        }
+        self.renderFilePopup("Save Scene", "Save", saveSceneWrapper, scene);
 
         // Load Scene Popup
         if (self.show_load_scene_popup) {
             c.ImGui_OpenPopup("Load Scene", 0);
             self.show_load_scene_popup = false;
         }
-        if (c.ImGui_BeginPopupModal("Load Scene", null, c.ImGuiWindowFlags_AlwaysAutoResize)) {
-            c.ImGui_Text("Enter filename:");
-            _ = c.ImGui_InputText("##filename", &self.scene_filename_buffer[0], self.scene_filename_buffer.len, 0);
-            
-            if (c.ImGui_Button("Load")) {
-                const len = std.mem.indexOfScalar(u8, &self.scene_filename_buffer, 0) orelse self.scene_filename_buffer.len;
-                const filename = self.scene_filename_buffer[0..len];
-                scene.load(filename) catch |err| {
-                    log(.ERROR, "ui", "Failed to load scene: {}", .{err});
-                };
-                c.ImGui_CloseCurrentPopup();
-            }
-            c.ImGui_SameLine();
-            if (c.ImGui_Button("Cancel")) {
-                c.ImGui_CloseCurrentPopup();
-            }
-            c.ImGui_EndPopup();
-        }
+        self.renderFilePopup("Load Scene", "Load", loadSceneWrapper, scene);
     }
 
     /// Render UI panels (stats, camera, performance, asset browser)

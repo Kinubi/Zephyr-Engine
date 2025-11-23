@@ -162,7 +162,8 @@ pub const Scene = struct {
         };
 
         // Initialize render graph with empty scene
-        try scene.load(null);
+        // Directly initialize resources instead of calling load(null) to avoid unnecessary clear()
+        try scene.initRenderGraphResources();
 
         return scene;
     }
@@ -177,16 +178,16 @@ pub const Scene = struct {
         var writer_interface = &buffered_writer.interface;
 
         var serializer = SceneSerializer.init(self);
-        
+
         var stringify = std.json.Stringify{
-             .writer = writer_interface,
-             .options = .{ .whitespace = .indent_4 },
-             .indent_level = 0,
-             .next_punctuation = .the_beginning,
-             .nesting_stack = undefined,
-             .raw_streaming_mode = .none,
+            .writer = writer_interface,
+            .options = .{ .whitespace = .indent_4 },
+            .indent_level = 0,
+            .next_punctuation = .the_beginning,
+            .nesting_stack = undefined,
+            .raw_streaming_mode = .none,
         };
-        
+
         try serializer.jsonStringify(&stringify);
         try writer_interface.flush();
     }
@@ -195,6 +196,9 @@ pub const Scene = struct {
     pub fn load(self: *Scene, file_path: ?[]const u8) !void {
         // Clear existing scene first
         self.clear();
+
+        // Restore render_system since clear() removed it
+        try self.ecs_world.setUserData("render_system", @ptrCast(self.render_system));
 
         if (file_path) |path| {
             const file = try std.fs.cwd().openFile(path, .{});
@@ -652,6 +656,9 @@ pub const Scene = struct {
         self.entities.clearRetainingCapacity();
         self.game_objects.clearRetainingCapacity();
 
+        // Remove render_system from ECS user data
+        _ = self.ecs_world.removeUserData("render_system");
+
         log(.INFO, "scene", "Scene unloaded: {s}", .{self.name});
     }
 
@@ -821,6 +828,7 @@ pub const Scene = struct {
             descriptor_manager,
             swapchain.hdr_format,
             try swapchain.depthFormat(),
+            self.render_system,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
             break :blk null;
@@ -981,11 +989,11 @@ pub const Scene = struct {
         self.entities.clearRetainingCapacity();
         self.game_objects.clearRetainingCapacity();
         self.emitter_to_gpu_id.clearRetainingCapacity();
-        
+
         if (self.material_system) |ms| {
-             ms.reset();
+            ms.reset();
         }
-        
+
         if (self.particle_system) |ps| {
             ps.reset();
         }
@@ -993,6 +1001,9 @@ pub const Scene = struct {
         if (self.render_graph) |*graph| {
             graph.reset();
         }
+
+        // Remove render_system from ECS user data
+        _ = self.ecs_world.removeUserData("render_system");
     }
 };
 

@@ -12,6 +12,7 @@ const UuidComponent = @import("uuid.zig").UuidComponent;
 /// Files: transform.zig (change rotation field), game_object.zig (implement get/setRotation)
 /// Branch: maintenance
 pub const Transform = struct {
+    pub const json_name = "Transform";
     /// Local position relative to parent (or world if no parent)
     position: math.Vec3,
 

@@ -7,6 +7,7 @@ const AssetId = @import("../../assets/asset_types.zig").AssetId;
 /// the script source; optionally it can reference an `AssetId` so the editor
 /// and asset manager can track hot-reload and lifecycle.
 pub const ScriptComponent = struct {
+    pub const json_name = "ScriptComponent";
     /// Pointer to NUL-terminated script source or a slice owned elsewhere
     script: []const u8,
     /// Optional asset ID if this script was registered as an asset
@@ -20,6 +21,8 @@ pub const ScriptComponent = struct {
     /// will be set to false by the ScriptingSystem (useful for one-shot
     /// initialization scripts attached to entities).
     run_once: bool,
+    /// If true, the script string is owned by this component and should be freed on deinit
+    owns_memory: bool = false,
 
     pub fn init(script: []const u8, run_on_update: bool, run_once: bool) ScriptComponent {
         return ScriptComponent{
@@ -28,6 +31,7 @@ pub const ScriptComponent = struct {
             .enabled = true,
             .run_on_update = run_on_update,
             .run_once = run_once,
+            .owns_memory = false,
         };
     }
 
@@ -41,6 +45,7 @@ pub const ScriptComponent = struct {
             .enabled = true,
             .run_on_update = run_on_update,
             .run_once = run_once,
+            .owns_memory = false,
         };
     }
 
@@ -54,7 +59,14 @@ pub const ScriptComponent = struct {
             .enabled = true,
             .run_on_update = false,
             .run_once = false,
+            .owns_memory = false,
         };
+    }
+
+    pub fn deinit(self: ScriptComponent, allocator: std.mem.Allocator) void {
+        if (self.owns_memory) {
+            allocator.free(self.script);
+        }
     }
 
     /// Serialize ScriptComponent
@@ -104,6 +116,7 @@ pub const ScriptComponent = struct {
         if (value.object.get("script")) |val| {
             if (val == .string) {
                 script_comp.script = try serializer.allocator.dupe(u8, val.string);
+                script_comp.owns_memory = true;
             }
         }
         

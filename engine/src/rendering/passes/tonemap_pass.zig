@@ -211,6 +211,9 @@ pub const TonemapPass = struct {
         };
     }
 
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
     fn reset(ctx: *RenderPass) void {
         const self: *TonemapPass = @fieldParentPtr("base", ctx);
         self.resource_binder.clear();

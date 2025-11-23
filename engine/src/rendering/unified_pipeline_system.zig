@@ -1026,7 +1026,9 @@ pub const UnifiedPipelineSystem = struct {
                 // Check if this resource belongs to the pipeline being destroyed
                 // We compare names because PipelineId is a struct with a pointer
                 if (std.mem.eql(u8, res_key.pipeline_id.name, key.name)) {
-                    keys_to_remove.append(self.allocator, res_key.*) catch {};
+                    keys_to_remove.append(self.allocator, res_key.*) catch |err| {
+                        log(.ERROR, "unified_pipeline", "Failed to track resource for removal (OOM): {}", .{err});
+                    };
                 }
             }
 

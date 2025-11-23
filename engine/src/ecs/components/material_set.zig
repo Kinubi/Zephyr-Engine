@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const MaterialSet = struct {
+    pub const json_name = "MaterialSet";
     set_name: []const u8 = "opaque", // Name of the material set this entity belongs to
     shader_variant: []const u8 = "pbr_standard",
     material_buffer_index: u32 = 0,
@@ -49,6 +50,7 @@ pub const MaterialSet = struct {
 
     /// Deserialize MaterialSet component
     pub fn deserialize(serializer: anytype, value: std.json.Value) !MaterialSet {
+        _ = serializer;
         var ms = MaterialSet.initOpaque();
         
         if (value.object.get("set_name")) |val| {
@@ -60,8 +62,8 @@ pub const MaterialSet = struct {
                 } else if (std.mem.eql(u8, val.string, "masked")) {
                     ms.set_name = "masked";
                 } else {
-                    // Fallback: duplicate (potential leak if not managed)
-                    ms.set_name = try serializer.allocator.dupe(u8, val.string);
+                    std.log.warn("Unknown material set name: {s}. Defaulting to 'opaque'.", .{val.string});
+                    ms.set_name = "opaque";
                 }
             }
         }
@@ -73,7 +75,8 @@ pub const MaterialSet = struct {
                 } else if (std.mem.eql(u8, val.string, "unlit")) {
                     ms.shader_variant = "unlit";
                 } else {
-                    ms.shader_variant = try serializer.allocator.dupe(u8, val.string);
+                    std.log.warn("Unknown shader variant: {s}. Defaulting to 'pbr_standard'.", .{val.string});
+                    ms.shader_variant = "pbr_standard";
                 }
             }
         }

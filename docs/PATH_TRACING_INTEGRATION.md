@@ -93,9 +93,7 @@ try self.resource_binder.bindAccelerationStructureNamed(
     &self.accel_set.?.tlas,
 );
 ```
-    }
-}
-```
+
 
 #### 3. Shader Integration
 

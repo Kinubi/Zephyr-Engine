@@ -74,22 +74,22 @@ pub const SceneSerializer = struct {
                 try writer.beginObject();
                 
                 // Core components
-                try self.serializeComponent(ecs.Name, "Name", entity, writer);
-                try self.serializeComponent(ecs.Transform, "Transform", entity, writer);
-                try self.serializeComponent(ecs.MeshRenderer, "MeshRenderer", entity, writer);
-                try self.serializeComponent(ecs.Camera, "Camera", entity, writer);
-                try self.serializeComponent(ecs.PointLight, "PointLight", entity, writer);
-                try self.serializeComponent(ecs.ScriptComponent, "ScriptComponent", entity, writer);
-                try self.serializeComponent(ecs.ParticleEmitter, "ParticleEmitter", entity, writer);
-                try self.serializeComponent(ecs.MaterialSet, "MaterialSet", entity, writer);
+                try self.serializeComponent(ecs.Name, entity, writer);
+                try self.serializeComponent(ecs.Transform, entity, writer);
+                try self.serializeComponent(ecs.MeshRenderer, entity, writer);
+                try self.serializeComponent(ecs.Camera, entity, writer);
+                try self.serializeComponent(ecs.PointLight, entity, writer);
+                try self.serializeComponent(ecs.ScriptComponent, entity, writer);
+                try self.serializeComponent(ecs.ParticleEmitter, entity, writer);
+                try self.serializeComponent(ecs.MaterialSet, entity, writer);
                 
                 // Material property components
-                try self.serializeComponent(ecs.AlbedoMaterial, "AlbedoMaterial", entity, writer);
-                try self.serializeComponent(ecs.RoughnessMaterial, "RoughnessMaterial", entity, writer);
-                try self.serializeComponent(ecs.MetallicMaterial, "MetallicMaterial", entity, writer);
-                try self.serializeComponent(ecs.NormalMaterial, "NormalMaterial", entity, writer);
-                try self.serializeComponent(ecs.EmissiveMaterial, "EmissiveMaterial", entity, writer);
-                try self.serializeComponent(ecs.OcclusionMaterial, "OcclusionMaterial", entity, writer);
+                try self.serializeComponent(ecs.AlbedoMaterial, entity, writer);
+                try self.serializeComponent(ecs.RoughnessMaterial, entity, writer);
+                try self.serializeComponent(ecs.MetallicMaterial, entity, writer);
+                try self.serializeComponent(ecs.NormalMaterial, entity, writer);
+                try self.serializeComponent(ecs.EmissiveMaterial, entity, writer);
+                try self.serializeComponent(ecs.OcclusionMaterial, entity, writer);
 
                 try writer.endObject(); // components
                 
@@ -101,9 +101,9 @@ pub const SceneSerializer = struct {
         try writer.endObject(); // scene
     }
 
-    fn serializeComponent(self: *SceneSerializer, comptime T: type, comp_name: []const u8, entity: ecs.EntityId, writer: anytype) !void {
+    fn serializeComponent(self: *SceneSerializer, comptime T: type, entity: ecs.EntityId, writer: anytype) !void {
         if (self.scene.ecs_world.get(T, entity)) |component| {
-            try writer.objectField(comp_name);
+            try writer.objectField(T.json_name);
             try component.jsonSerialize(self, writer);
         }
     }
@@ -168,29 +168,18 @@ pub const SceneSerializer = struct {
     }
 
     fn deserializeComponent(self: *SceneSerializer, comptime T: type, entity: ecs.EntityId, components_val: std.json.Value) !void {
-        if (components_val.object.get(name(T))) |comp_val| {
+        if (components_val.object.get(T.json_name)) |comp_val| {
             const component = try T.deserialize(self, comp_val);
             try self.scene.ecs_world.emplace(T, entity, component);
         }
     }
     
-    // Helper to get component name string (must match serialize)
-    fn name(comptime T: type) []const u8 {
-        if (T == ecs.Name) return "Name";
-        if (T == ecs.Transform) return "Transform";
-        if (T == ecs.MeshRenderer) return "MeshRenderer";
-        if (T == ecs.Camera) return "Camera";
-        if (T == ecs.PointLight) return "PointLight";
-        if (T == ecs.ScriptComponent) return "ScriptComponent";
-        if (T == ecs.ParticleEmitter) return "ParticleEmitter";
-        if (T == ecs.MaterialSet) return "MaterialSet";
-        if (T == ecs.AlbedoMaterial) return "AlbedoMaterial";
-        if (T == ecs.RoughnessMaterial) return "RoughnessMaterial";
-        if (T == ecs.MetallicMaterial) return "MetallicMaterial";
-        if (T == ecs.NormalMaterial) return "NormalMaterial";
-        if (T == ecs.EmissiveMaterial) return "EmissiveMaterial";
-        if (T == ecs.OcclusionMaterial) return "OcclusionMaterial";
-        return "Unknown";
+
+
+    /// Helper to load a model asset (async)
+    pub fn loadModel(self: *SceneSerializer, path: []const u8) !AssetId {
+        // Use critical priority for scene load to ensure they are available ASAP
+        return self.scene.asset_manager.loadAssetAsync(path, .mesh, .critical);
     }
 
     /// Helper to load a texture asset (async)

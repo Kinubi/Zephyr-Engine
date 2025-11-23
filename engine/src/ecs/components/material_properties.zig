@@ -4,6 +4,7 @@ const AssetId = @import("../../assets/asset_types.zig").AssetId;
 /// Albedo (base color) material component
 /// Defines the diffuse color of a surface
 pub const AlbedoMaterial = struct {
+    pub const json_name = "AlbedoMaterial";
     /// Albedo texture asset
     texture_id: AssetId,
 
@@ -77,6 +78,7 @@ pub const AlbedoMaterial = struct {
 /// Roughness material component
 /// Defines how rough/smooth a surface is (0 = smooth mirror, 1 = rough diffuse)
 pub const RoughnessMaterial = struct {
+    pub const json_name = "RoughnessMaterial";
     /// Roughness texture asset (R channel used)
     texture_id: AssetId,
 
@@ -148,6 +150,7 @@ pub const RoughnessMaterial = struct {
 /// Metallic material component
 /// Defines how metallic a surface is (0 = dielectric, 1 = metal)
 pub const MetallicMaterial = struct {
+    pub const json_name = "MetallicMaterial";
     /// Metallic texture asset (R channel used)
     texture_id: AssetId,
 
@@ -219,6 +222,7 @@ pub const MetallicMaterial = struct {
 /// Normal map material component
 /// Defines surface normal perturbation for detail
 pub const NormalMaterial = struct {
+    pub const json_name = "NormalMaterial";
     /// Normal map texture asset (RGB channels in tangent space)
     texture_id: AssetId,
 
@@ -282,6 +286,7 @@ pub const NormalMaterial = struct {
 /// Emissive material component
 /// Defines self-illumination (glow)
 pub const EmissiveMaterial = struct {
+    pub const json_name = "EmissiveMaterial";
     /// Emissive texture asset (RGB channels)
     texture_id: AssetId,
 
@@ -368,6 +373,7 @@ pub const EmissiveMaterial = struct {
 /// Occlusion material component (optional)
 /// Defines ambient occlusion baked into texture
 pub const OcclusionMaterial = struct {
+    pub const json_name = "OcclusionMaterial";
     /// Occlusion texture asset (R channel used)
     texture_id: AssetId,
 

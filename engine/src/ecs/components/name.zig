@@ -3,6 +3,7 @@ const std = @import("std");
 /// Name component for identifying entities
 /// Used for debugging, editor UI, and entity queries by name
 pub const Name = struct {
+    pub const json_name = "Name";
     /// Entity name (owned string)
     name: []const u8,
     

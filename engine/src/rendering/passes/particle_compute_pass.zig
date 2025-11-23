@@ -362,6 +362,9 @@ pub const ParticleComputePass = struct {
         return self.particle_system.getParticleCount();
     }
 
+    /// Reset pass state and release resources
+    /// Called when the render graph is reset (e.g. scene change)
+    /// Clears resource bindings and destroys pipeline to prevent dangling references
     fn reset(ctx: *RenderPass) void {
         const self: *ParticleComputePass = @fieldParentPtr("base", ctx);
         self.resource_binder.clear();

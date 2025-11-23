@@ -2,7 +2,7 @@
     "name": "cornell_box",
     "entities": [
         {
-            "uuid": "8f4b2139-f5a7-4222-98bd-4778895f4bd6",
+            "uuid": "37d87c77-2d9e-43e7-807c-39242917f994",
             "components": {
                 "Transform": {
                     "position": {
@@ -48,7 +48,7 @@
             }
         },
         {
-            "uuid": "b9a7c161-4cb5-4fba-8248-0c81be203744",
+            "uuid": "4a4e3305-fb0d-4fa6-97a0-4881f8e530fe",
             "components": {
                 "Transform": {
                     "position": {
@@ -94,7 +94,7 @@
             }
         },
         {
-            "uuid": "09879dc2-fcab-4fd5-805f-dd88ba5e0e31",
+            "uuid": "fdaefff1-9e75-4786-920c-3bff88cbe1c6",
             "components": {
                 "Transform": {
                     "position": {
@@ -140,7 +140,7 @@
             }
         },
         {
-            "uuid": "1238392a-3918-4344-bd05-bd65e58284d8",
+            "uuid": "a37efa67-0452-4a92-9842-6c4e6643f2b0",
             "components": {
                 "Transform": {
                     "position": {
@@ -186,7 +186,7 @@
             }
         },
         {
-            "uuid": "c5e2a637-e2e0-44a9-bfa1-c85f747cc039",
+            "uuid": "0572cc38-e7d3-40bc-9538-1e58a03f07b9",
             "components": {
                 "Transform": {
                     "position": {
@@ -223,7 +223,7 @@
             }
         },
         {
-            "uuid": "5b308d96-1e7d-45e3-9c74-082f37134bce",
+            "uuid": "8bdb0303-5423-4716-bfc9-bb2a716578bc",
             "components": {
                 "Transform": {
                     "position": {
