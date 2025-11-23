@@ -1656,7 +1656,7 @@ pub fn prepare(world: *World, dt: f32) !void {
     const scene_ptr = world.getUserData("scene") orelse return;
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
-    var self: *RenderSystem = &scene.render_system;
+    var self: *RenderSystem = scene.render_system;
     const asset_manager = scene.asset_manager;
 
     // Get or create the RenderablesSet singleton component
@@ -1816,7 +1816,7 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
     const scene_ptr = world.getUserData("scene") orelse return;
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
-    var self: *RenderSystem = &scene.render_system;
+    var self: *RenderSystem = scene.render_system;
     const asset_manager = scene.asset_manager;
 
     // Snapshot may be null if render thread is not enabled

@@ -79,7 +79,6 @@ pub const GeometryPass = struct {
         descriptor_manager: *TextureDescriptorManager,
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
-        render_system: *RenderSystem,
     ) !*GeometryPass {
         const pass = try allocator.create(GeometryPass);
         pass.* = GeometryPass{
@@ -101,7 +100,7 @@ pub const GeometryPass = struct {
             .descriptor_manager = descriptor_manager,
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
-            .render_system = render_system,
+            .render_system = @ptrCast(@alignCast(ecs_world.getUserData("render_system").?)),
         };
 
         log(.INFO, "geometry_pass", "Created geometry_pass", .{});
@@ -114,6 +113,7 @@ pub const GeometryPass = struct {
         .execute = executeImpl,
         .teardown = teardownImpl,
         .checkValidity = checkValidityImpl,
+        .reset = reset,
     };
 
     fn checkValidityImpl(base: *RenderPass) bool {
@@ -392,6 +392,19 @@ pub const GeometryPass = struct {
         // Pipeline cleanup handled by UnifiedPipelineSystem
         self.allocator.destroy(self);
         log(.INFO, "geometry_pass", "Teardown complete", .{});
+    }
+
+    fn reset(ctx: *RenderPass) void {
+        const self: *GeometryPass = @fieldParentPtr("base", ctx);
+        self.resource_binder.clear();
+        
+        // Destroy the old pipeline to avoid dangling resources
+        if (self.cached_pipeline_handle != .null_handle) {
+            self.pipeline_system.destroyPipeline(self.geometry_pipeline);
+            self.cached_pipeline_handle = .null_handle;
+        }
+        
+        log(.INFO, "geometry_pass", "Reset resources", .{});
     }
 };
 

@@ -1007,6 +1007,47 @@ pub const UnifiedPipelineSystem = struct {
         try self.rebuildPipeline(pipeline_id);
     }
 
+    /// Destroy a pipeline (deferred) to ensure resources are released safely
+    pub fn destroyPipeline(self: *UnifiedPipelineSystem, pipeline_id: PipelineId) void {
+        if (self.pipelines.fetchRemove(pipeline_id)) |entry| {
+            const pipeline = entry.value;
+            const key = entry.key;
+
+            log(.INFO, "unified_pipeline", "Destroying pipeline: {s}", .{key.name});
+
+            // Remove bound resources for this pipeline
+            // We must do this because the keys in bound_resources point to the pipeline name string
+            // which we are about to free.
+            var keys_to_remove = std.ArrayList(ResourceBindingKey){};
+            defer keys_to_remove.deinit(self.allocator);
+
+            var resource_iter = self.bound_resources.keyIterator();
+            while (resource_iter.next()) |res_key| {
+                // Check if this resource belongs to the pipeline being destroyed
+                // We compare names because PipelineId is a struct with a pointer
+                if (std.mem.eql(u8, res_key.pipeline_id.name, key.name)) {
+                    keys_to_remove.append(self.allocator, res_key.*) catch {};
+                }
+            }
+
+            for (keys_to_remove.items) |res_key| {
+                _ = self.bound_resources.remove(res_key);
+            }
+
+            // Defer destruction of the pipeline resources
+            self.deferred_destroys.append(self.allocator, DeferredPipeline{
+                .pipeline = pipeline,
+                .frames_to_wait = MAX_FRAMES_IN_FLIGHT,
+            }) catch |err| {
+                log(.ERROR, "unified_pipeline", "Failed to defer pipeline destruction: {}", .{err});
+                // If we can't defer, we have to leak to avoid crashing the GPU
+            };
+
+            // Free the key name (owned by the map/system)
+            self.allocator.free(key.name);
+        }
+    }
+
     // Private implementation methods
 
     fn registerShaderDependency(self: *UnifiedPipelineSystem, shader_path: ?[]const u8, pipeline_id: PipelineId) !void {

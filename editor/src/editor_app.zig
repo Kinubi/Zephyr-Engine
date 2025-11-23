@@ -202,10 +202,31 @@ pub const App = struct {
         // FileWatcher is now owned by engine - no need to store reference
         log(.INFO, "app", "Core rendering systems initialized via engine", .{});
 
+        // Initialize RenderGraph BEFORE spawning props (so MaterialSystem exists)
+        var window_width: c_int = 0;
+        var window_height: c_int = 0;
+        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
+
+        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
+        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator, self.engine.getBufferManager().?);
+
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, thread_pool, self.engine.getBufferManager().?, "cornell_box");
+        scene = try Scene.init(
+            self.allocator,
+            &new_ecs_world,
+            asset_manager,
+            gc,
+            self.engine.getUnifiedPipelineSystem().?,
+            self.engine.getBufferManager().?,
+            self.engine.getDescriptorManager().?,
+            self.engine.getTextureManager().?,
+            swapchain,
+            thread_pool,
+            global_ubo_set,
+            "cornell_box"
+        );
 
         // Register scene pointer in World so systems can access it
         try new_ecs_world.setUserData("scene", @ptrCast(&scene));
@@ -227,27 +248,6 @@ pub const App = struct {
 
         // Give async texture loading a moment to complete
         std.Thread.sleep(100_000_000); // 100ms
-
-        // Initialize RenderGraph BEFORE spawning props (so MaterialSystem exists)
-        var window_width: c_int = 0;
-        var window_height: c_int = 0;
-        c.glfwGetWindowSize(@ptrCast(window.window.?), &window_width, &window_height);
-
-        global_ubo_set = self.allocator.create(GlobalUboSet) catch unreachable;
-        global_ubo_set.* = try GlobalUboSet.init(gc, self.allocator, self.engine.getBufferManager().?);
-
-        try scene.initRenderGraph(
-            gc,
-            self.engine.getUnifiedPipelineSystem().?,
-            self.engine.getBufferManager().?,
-            self.engine.getDescriptorManager().?,
-            self.engine.getTextureManager().?,
-            swapchain,
-            thread_pool,
-            global_ubo_set,
-            @intCast(window_width),
-            @intCast(window_height),
-        );
 
         log(.INFO, "app", "Scene render graph initialized", .{});
 

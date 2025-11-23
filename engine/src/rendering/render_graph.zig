@@ -154,6 +154,9 @@ pub const RenderPassVTable = struct {
     /// Check if pass has become valid (for recovery after initial setup failure)
     /// Called each frame for passes where setup_succeeded == false
     checkValidity: *const fn (pass: *RenderPass) bool,
+
+    /// Reset pass state (optional)
+    reset: ?*const fn (pass: *RenderPass) void = null,
 };
 
 /// Base interface for render passes
@@ -558,5 +561,15 @@ pub const RenderGraph = struct {
             }
         }
         return null;
+    }
+
+    /// Reset all passes
+    pub fn reset(self: *RenderGraph) void {
+        for (self.passes.items) |pass| {
+            if (pass.vtable.reset) |reset_fn| {
+                reset_fn(pass);
+            }
+        }
+        log(.INFO, "render_graph", "Reset all passes", .{});
     }
 };

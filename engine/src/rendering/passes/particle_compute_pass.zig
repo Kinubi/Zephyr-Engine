@@ -108,6 +108,7 @@ pub const ParticleComputePass = struct {
         .execute = executeImpl,
         .teardown = teardownImpl,
         .checkValidity = checkValidityImpl,
+        .reset = reset,
     };
 
     fn checkValidityImpl(base: *RenderPass) bool {
@@ -359,5 +360,17 @@ pub const ParticleComputePass = struct {
     /// Delegate: Get the current active particle count
     pub fn getParticleCount(self: *ParticleComputePass) u32 {
         return self.particle_system.getParticleCount();
+    }
+
+    fn reset(ctx: *RenderPass) void {
+        const self: *ParticleComputePass = @fieldParentPtr("base", ctx);
+        self.resource_binder.clear();
+        
+        if (self.cached_pipeline_handle != .null_handle) {
+            self.pipeline_system.destroyPipeline(self.compute_pipeline);
+            self.cached_pipeline_handle = .null_handle;
+        }
+        
+        log(.INFO, "particle_compute_pass", "Reset resources", .{});
     }
 };

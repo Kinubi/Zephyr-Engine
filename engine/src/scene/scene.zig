@@ -87,7 +87,7 @@ pub const Scene = struct {
     light_system: ecs.LightSystem,
 
     // Shared render system for both raster and ray tracing passes
-    render_system: ecs.RenderSystem,
+    render_system: *ecs.RenderSystem,
 
     // Scripting system (owned by the Scene)
     scripting_system: ecs.ScriptingSystem,
@@ -104,13 +104,29 @@ pub const Scene = struct {
     // -1 = no change pending, 0 = disable requested, 1 = enable requested
     pending_pt_state: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
 
+    // Engine context references
+    graphics_context: *GraphicsContext,
+    pipeline_system: *UnifiedPipelineSystem,
+    buffer_manager: *BufferManager,
+    descriptor_manager: *TextureDescriptorManager,
+    texture_manager: *TextureManager,
+    swapchain: *Swapchain,
+    global_ubo_set: *GlobalUboSet,
+    thread_pool: *ThreadPool,
+
     /// Initialize a new scene
     pub fn init(
         allocator: std.mem.Allocator,
         ecs_world: *World,
         asset_manager: *AssetManager,
-        thread_pool: *ThreadPool,
+        graphics_context: *GraphicsContext,
+        pipeline_system: *UnifiedPipelineSystem,
         buffer_manager: *BufferManager,
+        descriptor_manager: *TextureDescriptorManager,
+        texture_manager: *TextureManager,
+        swapchain: *Swapchain,
+        thread_pool: *ThreadPool,
+        global_ubo_set: *GlobalUboSet,
         name: []const u8,
     ) !Scene {
         log(.INFO, "scene", "Creating scene: {s}", .{name});
@@ -119,7 +135,11 @@ pub const Scene = struct {
         const seed = @as(u64, @intCast(std.time.timestamp()));
         const prng = std.Random.DefaultPrng.init(seed);
 
-        const scene = Scene{
+        const render_system = try allocator.create(ecs.RenderSystem);
+        render_system.* = try ecs.RenderSystem.init(allocator, thread_pool, buffer_manager);
+        try ecs_world.setUserData("render_system", @ptrCast(render_system));
+
+        var scene = Scene{
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
             .allocator = allocator,
@@ -129,9 +149,21 @@ pub const Scene = struct {
             .emitter_to_gpu_id = std.AutoHashMap(EntityId, u32).init(allocator),
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
-            .render_system = try ecs.RenderSystem.init(allocator, thread_pool, buffer_manager),
+            .render_system = render_system,
             .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
+            .graphics_context = graphics_context,
+            .pipeline_system = pipeline_system,
+            .buffer_manager = buffer_manager,
+            .descriptor_manager = descriptor_manager,
+            .texture_manager = texture_manager,
+            .swapchain = swapchain,
+            .global_ubo_set = global_ubo_set,
+            .thread_pool = thread_pool,
         };
+
+        // Initialize render graph with empty scene
+        try scene.load(null);
+
         return scene;
     }
 
@@ -160,23 +192,31 @@ pub const Scene = struct {
     }
 
     /// Load the scene from a JSON file
-    pub fn load(self: *Scene, file_path: []const u8) !void {
-        const file = try std.fs.cwd().openFile(file_path, .{});
-        defer file.close();
-        
-        const file_size = (try file.stat()).size;
-        const buffer = try self.allocator.alloc(u8, file_size);
-        defer self.allocator.free(buffer);
-        
-        _ = try file.readAll(buffer);
-        
-        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, buffer, .{});
-        defer parsed.deinit();
-        
-        var serializer = SceneSerializer.init(self);
-        defer serializer.deinit();
-        
-        try serializer.deserialize(parsed.value);
+    pub fn load(self: *Scene, file_path: ?[]const u8) !void {
+        // Clear existing scene first
+        self.clear();
+
+        if (file_path) |path| {
+            const file = try std.fs.cwd().openFile(path, .{});
+            defer file.close();
+
+            const file_size = (try file.stat()).size;
+            const buffer = try self.allocator.alloc(u8, file_size);
+            defer self.allocator.free(buffer);
+
+            _ = try file.readAll(buffer);
+
+            var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, buffer, .{});
+            defer parsed.deinit();
+
+            var serializer = SceneSerializer.init(self);
+            defer serializer.deinit();
+
+            try serializer.deserialize(parsed.value);
+        }
+
+        // Initialize Render Graph and Systems
+        try self.initRenderGraphResources();
     }
 
     /// Set the performance monitor for profiling
@@ -709,20 +749,18 @@ pub const Scene = struct {
     }
 
     /// Initialize rendering pipeline for this scene
-    /// Must be called after scene creation to enable rendering
-    pub fn initRenderGraph(
-        self: *Scene,
-        graphics_context: *GraphicsContext,
-        pipeline_system: *UnifiedPipelineSystem,
-        buffer_manager: *BufferManager,
-        descriptor_manager: *TextureDescriptorManager,
-        texture_manager: *TextureManager,
-        swapchain: *Swapchain,
-        thread_pool: *ThreadPool,
-        global_ubo_set: *GlobalUboSet,
-        width: u32,
-        height: u32,
-    ) !void {
+    /// Internal helper called by load()
+    fn initRenderGraphResources(self: *Scene) !void {
+        const graphics_context = self.graphics_context;
+        const pipeline_system = self.pipeline_system;
+        const buffer_manager = self.buffer_manager;
+        const descriptor_manager = self.descriptor_manager;
+        const texture_manager = self.texture_manager;
+        const swapchain = self.swapchain;
+        const thread_pool = self.thread_pool;
+        const global_ubo_set = self.global_ubo_set;
+        const width = swapchain.extent.width;
+        const height = swapchain.extent.height;
 
         // Initialize Material system for this scene
         // MaterialSystem now directly queries ECS components and builds GPU resources
@@ -771,7 +809,6 @@ pub const Scene = struct {
         // Get direct access to material set data for the opaque set
         const opaque_material_set = try self.material_system.?.getOrCreateSet("opaque");
 
-        // OLD: Custom GeometryPass implementation (200+ lines of boilerplate)
         const geometry_pass = GeometryPass.create(
             self.allocator,
             graphics_context,
@@ -784,128 +821,10 @@ pub const Scene = struct {
             descriptor_manager,
             swapchain.hdr_format,
             try swapchain.depthFormat(),
-            &self.render_system,
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
             break :blk null;
         };
-
-        // NEW: BaseRenderPass - zero boilerplate!
-
-        // const RenderSystemType = ecs.RenderSystem;
-
-        // const geometry_pass = blk: {
-        //     // Push constant structure matching geometry shaders
-        //     const GeometryPushConstants = extern struct {
-        //         transform: [16]f32,
-        //         normal_matrix: [16]f32,
-        //         material_index: u32,
-        //     };
-
-        //     // Render data extractor: get opaque objects from RenderSystem
-        //     const getOpaqueGeometry = struct {
-        //         fn extract(render_system: *RenderSystemType, ctx: ?*anyopaque) BaseRenderPass.RenderData {
-        //             _ = ctx;
-        //             const raster_data = render_system.getRasterData() catch {
-        //                 return .{};
-        //             };
-        //             // Pass pointer and length since anyopaque can't be sliced
-        //             return .{
-        //                 .objects = raster_data.objects.ptr,
-        //                 .objects_len = raster_data.objects.len,
-        //             };
-        //         }
-        //     }.extract;
-
-        //     // Push constant generator: convert RenderableObject to push constants
-        //     const generatePushConstants = struct {
-        //         fn generate(object_ptr: *const anyopaque, out_buffer: []u8) void {
-        //             const object: *const render_data_types.RasterizationData.RenderableObject = @ptrCast(@alignCast(object_ptr));
-        //             const push: *GeometryPushConstants = @ptrCast(@alignCast(out_buffer.ptr));
-        //             push.* = .{
-        //                 .transform = object.transform,
-        //                 .normal_matrix = object.transform, // TODO: Compute proper normal matrix
-        //                 .material_index = object.material_index,
-        //             };
-        //         }
-        //     }.generate;
-
-        //     // Create pass with push constant configuration
-        //     const pass = BaseRenderPass.create(
-        //         self.allocator,
-        //         "geometry_pass",
-        //         graphics_context,
-        //         pipeline_system,
-        //         &self.render_system,
-        //         .{
-        //             .color_formats = &[_]vk.Format{swapchain.hdr_format},
-        //             .depth_format = try swapchain.depthFormat(),
-        //             .cull_mode = .{ .back_bit = true },
-        //             .depth_test = true,
-        //             .depth_write = true,
-        //             .blend_enable = false,
-        //             .vertex_input_bindings = vertex_formats.mesh_bindings[0..],
-        //             .vertex_input_attributes = vertex_formats.mesh_attributes[0..],
-        //             .push_constant_size = @sizeOf(GeometryPushConstants),
-        //             .push_constant_stages = .{ .vertex_bit = true, .fragment_bit = true },
-        //         },
-        //     ) catch |err| {
-        //         log(.WARN, "scene", "Failed to create BaseRenderPass GeometryPass: {}. Geometry rendering disabled.", .{err});
-        //         break :blk null;
-        //     };
-
-        //     // Register shaders
-        //     pass.registerShader("assets/shaders/textured.vert") catch |err| {
-        //         log(.WARN, "scene", "Failed to register vertex shader: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-        //     pass.registerShader("assets/shaders/textured.frag") catch |err| {
-        //         log(.WARN, "scene", "Failed to register fragment shader: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-
-        //     // Bind resources (uses named binding from shader reflection)
-        //     pass.bind("GlobalUbo", global_ubo_set.frame_buffers) catch |err| {
-        //         log(.WARN, "scene", "Failed to bind GlobalUbo: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-        //     pass.bind("MaterialBuffer", opaque_bindings.material_buffer) catch |err| {
-        //         log(.WARN, "scene", "Failed to bind MaterialBuffer: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-        //     pass.bind("textures", opaque_bindings.texture_array) catch |err| {
-        //         log(.WARN, "scene", "Failed to bind textures: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-
-        //     // Register render data extractor
-        //     pass.setRenderDataFn(getOpaqueGeometry, null) catch |err| {
-        //         log(.WARN, "scene", "Failed to set render data function: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-
-        //     // Register push constant generator
-        //     pass.setPushConstantFn(generatePushConstants) catch |err| {
-        //         log(.WARN, "scene", "Failed to set push constant function: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-
-        //     // Bake pipeline and bind resources
-        //     pass.bake() catch |err| {
-        //         log(.WARN, "scene", "Failed to bake GeometryPass: {}", .{err});
-        //         pass.destroy();
-        //         break :blk null;
-        //     };
-
-        //     break :blk pass;
-        // };
 
         if (geometry_pass) |pass| {
             try self.render_graph.?.addPass(&pass.base);
@@ -922,7 +841,7 @@ pub const Scene = struct {
             global_ubo_set,
             self.ecs_world,
             self.asset_manager,
-            &self.render_system,
+            self.render_system,
             texture_manager,
             path_tracing_material_set,
             descriptor_manager,
@@ -1048,6 +967,31 @@ pub const Scene = struct {
         // Update all render passes through the render graph (descriptor sets)
         if (self.render_graph) |*graph| {
             try graph.update(&frame_info);
+        }
+    }
+
+    /// Clear the scene (destroy all entities and reset state)
+    pub fn clear(self: *Scene) void {
+        log(.INFO, "scene", "Clearing scene...", .{});
+
+        // Destroy all entities in the ECS world
+        for (self.entities.items) |entity| {
+            self.ecs_world.destroyEntity(entity);
+        }
+        self.entities.clearRetainingCapacity();
+        self.game_objects.clearRetainingCapacity();
+        self.emitter_to_gpu_id.clearRetainingCapacity();
+        
+        if (self.material_system) |ms| {
+             ms.reset();
+        }
+        
+        if (self.particle_system) |ps| {
+            ps.reset();
+        }
+
+        if (self.render_graph) |*graph| {
+            graph.reset();
         }
     }
 };
