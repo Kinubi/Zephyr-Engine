@@ -52,9 +52,9 @@ pub const SceneHierarchyPanel = struct {
         };
         panel.selected_entities = std.ArrayList(EntityId){};
         panel.nodes_to_open = std.ArrayList(EntityId){};
-        // Zero script buffer length sentinel (not strictly required)
-        panel.script_buffer[0] = 1; // Initialize to non-zero to avoid optimization issues? No, 0 is fine.
+        // Zero buffers
         panel.script_buffer[0] = 0;
+        panel.temp_buffer[0] = 0;
         return panel;
     }
 
@@ -527,10 +527,7 @@ pub const SceneHierarchyPanel = struct {
                         c.ImGui_Spacing();
                         if (c.ImGui_Button("Apply")) {
                             // Determine current script length (up to NUL)
-                            var new_len: usize = 0;
-                            while (new_len < self.script_buffer.len) : (new_len += 1) {
-                                if (self.script_buffer[new_len] == 0) break;
-                            }
+                            const new_len = std.mem.indexOfScalar(u8, &self.script_buffer, 0) orelse self.script_buffer.len;
 
                             if (new_len > 0) {
                                 // Allocate a persistent buffer from the Scene allocator to store the
@@ -564,10 +561,7 @@ pub const SceneHierarchyPanel = struct {
                         c.ImGui_SameLine();
                         if (c.ImGui_Button("Run Next Update")) {
                             // Determine current buffer length
-                            var run_len: usize = 0;
-                            while (run_len < self.script_buffer.len) : (run_len += 1) {
-                                if (self.script_buffer[run_len] == 0) break;
-                            }
+                            const run_len = std.mem.indexOfScalar(u8, &self.script_buffer, 0) orelse self.script_buffer.len;
                             if (run_len > 0) {
                                 // Make a scene-owned copy of the current editor buffer so the
                                 // ScriptComponent can safely reference it.
@@ -647,11 +641,7 @@ pub const SceneHierarchyPanel = struct {
                     // PointLight
                     if (!scene.ecs_world.has(PointLight, entity)) {
                         if (c.ImGui_MenuItem("Point Light")) {
-                            _ = scene.ecs_world.emplace(PointLight, entity, .{
-                                .color = Math.Vec3.init(1.0, 1.0, 1.0),
-                                .intensity = 1.0,
-                                .range = 10.0
-                            }) catch {};
+                            _ = scene.ecs_world.emplace(PointLight, entity, .{ .color = Math.Vec3.init(1.0, 1.0, 1.0), .intensity = 1.0, .range = 10.0 }) catch {};
                         }
                     }
 
@@ -834,14 +824,11 @@ pub const SceneHierarchyPanel = struct {
             c.ImGui_Text("Enter Model Path:");
             // Use temp buffer for input
             _ = c.ImGui_InputText("##model_path", &self.temp_buffer[0], self.temp_buffer.len, 0);
-            
+
             if (c.ImGui_Button("Load")) {
                 // Determine length
-                var len: usize = 0;
-                while (len < self.temp_buffer.len) : (len += 1) {
-                    if (self.temp_buffer[len] == 0) break;
-                }
-                
+                const len = std.mem.indexOfScalar(u8, &self.temp_buffer, 0) orelse self.temp_buffer.len;
+
                 if (len > 0) {
                     const path = self.temp_buffer[0..len];
                     scene.updateModelForEntity(entity, path) catch {};

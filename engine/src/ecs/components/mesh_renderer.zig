@@ -198,11 +198,7 @@ test "MeshRenderer: render extraction" {
 test "MeshRenderer: setters" {
     var renderer = MeshRenderer.init(@enumFromInt(1));
 
-    // renderer.setModel(@enumFromInt(10)); // setModel doesn't exist? I should check if it exists.
-    // Assuming direct access or I need to add setModel?
-    // The code used renderer.setModel(@enumFromInt(10));
-    // I'll check if setModel exists.
-    renderer.model_asset = @enumFromInt(10);
+    renderer.setModel(@enumFromInt(10));
     try std.testing.expectEqual(@as(AssetId, @enumFromInt(10)), renderer.model_asset.?);
 
     renderer.setEnabled(false);

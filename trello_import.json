@@ -6,7 +6,7 @@
       "cards": [
         {
           "name": "Material Editor",
-          "desc": "Implement a dedicated Editor window for creating and modifying materials.\n\nImplementation Details:\n1. Create `editor/src/windows/material_editor.zig`.\n2. Subscribe to selection events. When an entity is selected, query its `MaterialSet` and property components (`AlbedoMaterial`, etc.).\n3. Use `ImGui.colorEdit4` for albedo/emissive colors, `ImGui.sliderFloat` for roughness/metallic/normal strength.\n4. Add drag-and-drop targets for textures (accepting Asset IDs).\n5. Apply changes immediately to the ECS components, which `MaterialSystem` picks up next frame.",
+          "desc": "Implement a dedicated Editor window for creating and modifying materials with deep ECS integration.\n\n### Objective\nCreate a robust, user-friendly interface for editing PBR material properties in real-time.\n\n### UI Layout & Features\n1. **Header**:\n   - Material Name (editable text field).\n   - Shader Variant Selector (Dropdown: Opaque, Transparent, Cutout).\n2. **Albedo Section**:\n   - Color Picker (RGBA, supports HDR).\n   - Texture Slot (Drag-and-drop target for texture assets).\n   - Tiling & Offset fields (Vec2).\n3. **Surface Properties**:\n   - **Roughness**: Slider (0.0 - 1.0) + Texture Slot.\n   - **Metallic**: Slider (0.0 - 1.0) + Texture Slot.\n   - **Normal Map**: Texture Slot + Strength Slider.\n   - **Occlusion**: Texture Slot + Strength Slider.\n   - **Emissive**: HDR Color Picker + Texture Slot + Intensity Multiplier.\n4. **Component Management**:\n   - If a material component (e.g., `EmissiveMaterial`) is missing, show an 'Enable Emissive' button.\n   - 'Save Material' button to serialize current settings to a `.mat` JSON file.\n\n### Technical Implementation\n- **File**: Create `editor/src/windows/material_editor.zig`.\n- **Selection Handling**: Subscribe to Editor selection state. On selection, query the entity for `MaterialSet` and all property components (`AlbedoMaterial`, `RoughnessMaterial`, etc.).\n- **Texture Slots**: Implement `drawTextureSlot(label: []const u8, current_id: AssetId)`. Use `ImGui.image` for preview and `ImGui.beginDragDropTarget` to accept `ASSET_PATH` payloads.\n- **ECS Integration**: UI widgets must directly mutate ECS component data. The `MaterialSystem` will automatically detect dirty components and upload new data to the GPU buffers next frame.\n- **Asset Browser Integration**: Ensure dragging a texture from the Asset Browser into a slot correctly resolves the Asset ID.",
           "labels": ["Editor", "High Priority"]
         },
         {
@@ -34,6 +34,11 @@
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Fix Scene Hierarchy Parenting",
+          "desc": "Resolved issues with parent-child relationships not persisting or displaying correctly.\n\n- Fixed `Transform.deserialize` to correctly resolve parent UUIDs to runtime Entity IDs.\n- Updated `SceneSerializer` to use correct UUID formatting.\n- Verified hierarchy visualization in the Scene Hierarchy Panel.",
+          "labels": ["Bug Fix", "Editor"]
+        },
         {
           "name": "Component Inspector Dropdown",
           "desc": "Allow adding components to entities via the Inspector.\n\nRequirements:\n1. Add a dropdown menu 'Add Component' to the Inspector panel.\n2. List available components (MeshRenderer, PointLight, Script, etc.).\n3. On selection, add the component to the selected entity.",

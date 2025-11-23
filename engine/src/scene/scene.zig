@@ -398,7 +398,7 @@ pub const Scene = struct {
         // Update or add MeshRenderer component
         if (self.ecs_world.has(MeshRenderer, entity)) {
             const mr = self.ecs_world.get(MeshRenderer, entity) orelse return error.ComponentNotRegistered;
-            mr.model_asset = model_id;
+            mr.setModel(model_id);
         } else {
             const mesh_renderer = MeshRenderer.init(model_id);
             try self.ecs_world.emplace(MeshRenderer, entity, mesh_renderer);
