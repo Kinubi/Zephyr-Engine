@@ -39,6 +39,10 @@ pub const SceneHierarchyPanel = struct {
     // List of entities to force open in the tree view
     nodes_to_open: std.ArrayList(EntityId) = std.ArrayList(EntityId){},
 
+    // Renaming state
+    renaming_entity: ?EntityId = null,
+    rename_buffer: [256]u8 = undefined,
+
     // Arena for per-frame hierarchy tree construction
     hierarchy_arena: std.heap.ArenaAllocator,
 
@@ -115,11 +119,61 @@ pub const SceneHierarchyPanel = struct {
             }
         }
 
-        const node_open = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags);
+        var node_open: bool = false;
+        if (self.renaming_entity == entity) {
+            // Render tree node with empty label to preserve layout/arrow
+            node_open = c.ImGui_TreeNodeEx("##dummy", flags);
+
+            c.ImGui_SameLine();
+
+            c.ImGui_SetNextItemWidth(c.ImGui_GetContentRegionAvail().x);
+
+            // Focus if just started
+            if (c.ImGui_IsWindowFocused(c.ImGuiFocusedFlags_RootAndChildWindows) and !c.ImGui_IsAnyItemActive() and !c.ImGui_IsMouseClicked(0)) {
+                c.ImGui_SetKeyboardFocusHere();
+            }
+
+            const enter_pressed = c.ImGui_InputText("##rename", &self.rename_buffer, self.rename_buffer.len, c.ImGuiInputTextFlags_EnterReturnsTrue | c.ImGuiInputTextFlags_AutoSelectAll);
+
+            if (enter_pressed or c.ImGui_IsItemDeactivatedAfterEdit()) {
+                // Commit rename
+                const new_len = std.mem.indexOfScalar(u8, &self.rename_buffer, 0) orelse self.rename_buffer.len;
+                const new_name = self.rename_buffer[0..new_len];
+
+                if (new_name.len > 0) {
+                    if (scene.ecs_world.getMut(Name, entity)) |name_comp| {
+                        name_comp.deinit(scene.allocator);
+                        name_comp.name = scene.allocator.dupe(u8, new_name) catch "Entity";
+                    } else {
+                        _ = scene.ecs_world.emplace(Name, entity, Name.init(scene.allocator, new_name) catch Name.initStatic("Entity")) catch {};
+                    }
+                }
+                self.renaming_entity = null;
+            } else if (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape)) {
+                // Cancel
+                self.renaming_entity = null;
+            }
+        } else {
+            node_open = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags);
+
+            // Double click to rename
+            if (c.ImGui_IsItemHovered(c.ImGuiHoveredFlags_None) and c.ImGui_IsMouseDoubleClicked(0)) {
+                self.renaming_entity = entity;
+
+                // Populate buffer
+                var current_name: []const u8 = "Entity";
+                if (scene.ecs_world.get(Name, entity)) |name_comp| {
+                    current_name = name_comp.name;
+                }
+
+                const copy_len = @min(current_name.len, self.rename_buffer.len - 1);
+                std.mem.copyForwards(u8, self.rename_buffer[0..copy_len], current_name[0..copy_len]);
+                self.rename_buffer[copy_len] = 0;
+            }
+        }
 
         // Context menu for entity operations
         if (c.ImGui_BeginPopupContextItem()) {
-            std.debug.print("DEBUG: Entity Context Menu Opened for {d}\n", .{@intFromEnum(entity)});
             if (c.ImGui_MenuItem("Delete Entity")) {
                 // Create a temporary GameObject wrapper to pass to destroyObject
                 // This is safe because destroyObject only uses the entity_id to find and remove the object
@@ -136,43 +190,31 @@ pub const SceneHierarchyPanel = struct {
             }
             // Add child entity
             if (c.ImGui_MenuItem("Add Child Empty Entity")) {
-                std.debug.print("DEBUG: Clicked Add Child Empty Entity\n", .{});
                 const child = scene.spawnEmpty("Child") catch null;
                 if (child) |c_obj| {
                     const child_id = c_obj.entity_id;
-                    std.debug.print("DEBUG: Spawned entity {d}\n", .{@intFromEnum(child_id)});
 
                     if (scene.ecs_world.getMut(Transform, child_id)) |t| {
                         t.parent = entity;
                         t.dirty = true;
-                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(child_id), @intFromEnum(entity)});
                         self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
-                    } else {
-                        std.debug.print("DEBUG: Failed to get Transform for {d}\n", .{@intFromEnum(child_id)});
                     }
-                } else {
-                    std.debug.print("DEBUG: Failed to spawn child entity\n", .{});
                 }
             }
             // Add child cube
             if (c.ImGui_MenuItem("Add Child Cube")) {
-                std.debug.print("DEBUG: Clicked Add Child Cube\n", .{});
                 const child = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch null;
                 if (child) |c_obj| {
                     const child_id = c_obj.entity_id;
-                    std.debug.print("DEBUG: Spawned entity {d}\n", .{@intFromEnum(child_id)});
 
                     // Directly set parent on the Transform component to ensure hierarchy is updated
                     if (scene.ecs_world.getMut(Transform, child_id)) |t| {
                         t.parent = entity;
+                        // Offset child so it's not inside parent
+                        t.position = Math.Vec3.init(0, 2, 0);
                         t.dirty = true;
-                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(child_id), @intFromEnum(entity)});
                         self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
-                    } else {
-                        std.debug.print("DEBUG: Failed to get Transform for {d}\n", .{@intFromEnum(child_id)});
                     }
-                } else {
-                    std.debug.print("DEBUG: Failed to spawn child entity\n", .{});
                 }
             }
             c.ImGui_EndPopup();
@@ -291,13 +333,6 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Begin("Scene Hierarchy", null, window_flags)) {
             c.ImGui_Text("Scene: %s", scene.name.ptr);
             c.ImGui_Text("Entities: %d", scene.getEntityCount());
-            // Debug: show current selection count and IDs to verify picking
-            c.ImGui_Text("Selected Count: %d", self.selected_entities.items.len);
-            var sel_idx: usize = 0;
-            for (self.selected_entities.items) |eid| {
-                c.ImGui_Text("  [%d] idx=%d (raw=%u)", sel_idx, eid.index(), @intFromEnum(eid));
-                sel_idx += 1;
-            }
             c.ImGui_Separator();
 
             // Reset arena and build tree
@@ -338,18 +373,16 @@ pub const SceneHierarchyPanel = struct {
 
             // Context menu for background (creating new entities)
             // We use a specific ID for the window context menu to avoid conflict with item context menus
-            
+
             if (c.ImGui_IsWindowHovered(c.ImGuiHoveredFlags_AllowWhenBlockedByPopup) and !c.ImGui_IsAnyItemHovered() and c.ImGui_IsMouseClicked(1)) {
                 c.ImGui_OpenPopup("WindowContext", 0);
             }
 
             if (c.ImGui_BeginPopup("WindowContext", 0)) {
-                std.debug.print("DEBUG: Window Context Menu Opened\n", .{});
                 if (c.ImGui_MenuItem("Create Root Empty Entity")) {
                     _ = scene.spawnEmpty("Empty Entity") catch {};
                 }
                 if (c.ImGui_MenuItem("Create Root Cube")) {
-                    std.debug.print("DEBUG: Clicked Create Root Cube\n", .{});
                     _ = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch {};
                 }
                 if (c.ImGui_MenuItem("Create Point Light")) {
@@ -673,10 +706,16 @@ pub const SceneHierarchyPanel = struct {
             has_any = true;
         }
 
+        // Use Name component if available
+        var name_slice: []const u8 = "Entity";
+        if (world.get(Name, entity)) |name_comp| {
+            name_slice = name_comp.name;
+        }
+
         const label = if (has_any)
-            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d}) [{s}]", .{ entity_u32, entity_index, components.items })
+            try std.fmt.bufPrintZ(buf, "{s} {d} (idx {d}) [{s}]", .{ name_slice, entity_u32, entity_index, components.items })
         else
-            try std.fmt.bufPrintZ(buf, "Entity {d} (idx {d})", .{ entity_u32, entity_index });
+            try std.fmt.bufPrintZ(buf, "{s} {d} (idx {d})", .{ name_slice, entity_u32, entity_index });
 
         return label;
     }

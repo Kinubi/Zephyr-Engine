@@ -41,7 +41,7 @@ pub fn update(world: *World, dt: f32) !void {
             if (world.get(Transform, parent_id)) |parent_transform| {
                 const local_matrix = transform.getLocalMatrix();
                 transform.world_matrix = parent_transform.world_matrix.mul(local_matrix);
-                transform.dirty = false;
+                // Note: Don't clear dirty flag - RenderSystem clears it after cache rebuild
             }
         }
     }
