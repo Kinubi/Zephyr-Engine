@@ -219,6 +219,8 @@
 - [x] **Entity Selection** - Perspective ray picking with AABB filtering and closest-hit refinement (Oct 30, 2025)
 - [x] **Selection Outline** - Add visual feedback for selected entities  (Oct 31, 2025)
 - [x] **Gizmos** - Create transform gizmos for manipulation (Oct 31, 2025)
+- [ ] **Scene Hierarchy Context Menu** - Right-click to add entities (parented to scene or selected entity)
+- [ ] **Component Inspector Dropdown** - Add components to entities via inspector dropdown
 - [ ] **Asset Importer** - Drag-and-drop asset import
 - [ ] **Scene Serialization** - Save/load scenes to disk
 - [ ] **Lighting Tools** - Visual light placement and editing

@@ -35,10 +35,20 @@ pub const SceneHierarchyPanel = struct {
     // When true, applying the script will set it to run every frame
     script_auto_run: bool = false,
 
+    // List of entities to force open in the tree view
+    nodes_to_open: std.ArrayList(EntityId) = std.ArrayList(EntityId){},
+
+    // Arena for per-frame hierarchy tree construction
+    hierarchy_arena: std.heap.ArenaAllocator,
+
     pub fn init() SceneHierarchyPanel {
-        var panel = SceneHierarchyPanel{};
+        var panel = SceneHierarchyPanel{
+            .hierarchy_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+        };
         panel.selected_entities = std.ArrayList(EntityId){};
+        panel.nodes_to_open = std.ArrayList(EntityId){};
         // Zero script buffer length sentinel (not strictly required)
+        panel.script_buffer[0] = 1; // Initialize to non-zero to avoid optimization issues? No, 0 is fine.
         panel.script_buffer[0] = 0;
         return panel;
     }
@@ -48,6 +58,8 @@ pub const SceneHierarchyPanel = struct {
         // even if the list is empty) so we don't leak if capacity was
         // allocated earlier.
         self.selected_entities.deinit(std.heap.page_allocator);
+        self.nodes_to_open.deinit(std.heap.page_allocator);
+        self.hierarchy_arena.deinit();
     }
 
     /// Render the hierarchy panel and inspector
@@ -58,6 +70,200 @@ pub const SceneHierarchyPanel = struct {
 
         if (self.show_inspector and self.selected_entities.items.len > 0) {
             self.renderInspector(scene);
+        }
+    }
+
+    /// Recursively draw entity node and its children
+    fn drawEntityNode(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, children_map: *std.AutoHashMap(EntityId, std.ArrayListUnmanaged(EntityId))) void {
+        var id_buf: [32]u8 = undefined;
+        const id_str = std.fmt.bufPrintZ(&id_buf, "{}", .{@intFromEnum(entity)}) catch "0";
+        c.ImGui_PushID(id_str.ptr);
+        defer c.ImGui_PopID();
+
+        // Check if this entity is selected (multi-select support)
+        var is_selected: bool = false;
+        for (self.selected_entities.items) |eid| {
+            if (eid == entity) {
+                is_selected = true;
+                break;
+            }
+        }
+
+        // Build entity label with component info
+        var label_buf: [128]u8 = undefined;
+        const label = self.buildEntityLabel(scene.ecs_world, entity, &label_buf) catch "Entity";
+
+        // Determine flags
+        var flags = c.ImGuiTreeNodeFlags_OpenOnArrow | c.ImGuiTreeNodeFlags_OpenOnDoubleClick | c.ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (is_selected) flags |= c.ImGuiTreeNodeFlags_Selected;
+
+        const has_children = children_map.contains(entity);
+        if (!has_children) {
+            flags |= c.ImGuiTreeNodeFlags_Leaf | c.ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        }
+
+        // Check if we need to force open this node
+        var open_idx: usize = 0;
+        while (open_idx < self.nodes_to_open.items.len) {
+            if (self.nodes_to_open.items[open_idx] == entity) {
+                c.ImGui_SetNextItemOpen(true, c.ImGuiCond_Always);
+                _ = self.nodes_to_open.swapRemove(open_idx);
+                // Don't increment open_idx, as we swapped
+            } else {
+                open_idx += 1;
+            }
+        }
+
+        const node_open = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags);
+
+        // Accept drag-and-drop onto the entity entry (ASSET_PATH payloads)
+        if (c.ImGui_BeginDragDropTarget()) {
+            const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
+            if (payload != null) {
+                if (payload.*.Data) |data_any| {
+                    const data_ptr: [*]const u8 = @ptrCast(data_any);
+                    const data_size: usize = @intCast(payload.*.DataSize);
+
+                    // Copy the dropped path into a temporary buffer
+                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
+                    if (path_opt) |path_buf| {
+                        std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
+                        path_buf[data_size] = 0;
+                        const path_slice = path_buf[0..data_size];
+
+                        // Determine file type by extension and call Scene helpers accordingly
+                        // Mesh extensions -> update model; Texture extensions -> update texture
+                        if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
+                            // Update model for the entity (best-effort)
+                            scene.updateModelForEntity(entity, path_slice) catch {};
+                        } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
+                            scene.updateTextureForEntity(entity, path_slice) catch {};
+                        } else if (std.mem.endsWith(u8, path_slice, ".lua") or std.mem.endsWith(u8, path_slice, ".txt") or std.mem.endsWith(u8, path_slice, ".zs")) {
+                            if (std.fs.cwd().openFile(path_slice, .{})) |file| {
+                                defer file.close();
+                                const contents = file.readToEndAlloc(scene.allocator, 64 * 1024) catch null;
+                                if (contents) |cdata| {
+                                    // Register script as an asset (best-effort) so it participates in hot-reload
+                                    const AssetType = zephyr.AssetType;
+                                    const LoadPriority = zephyr.LoadPriority;
+                                    var script_asset_id: ?zephyr.AssetId = null;
+                                    script_asset_id = scene.asset_manager.loadAssetAsync(path_slice, AssetType.script, LoadPriority.high) catch null;
+
+                                    // Replace ScriptComponent on the entity and associate asset if available
+                                    _ = scene.ecs_world.remove(ScriptComponent, entity);
+                                    const slice: []const u8 = cdata;
+                                    if (script_asset_id) |aid| {
+                                        _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initWithAsset(slice, aid, self.script_auto_run, false)) catch {};
+                                    } else {
+                                        _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, self.script_auto_run, false)) catch {};
+                                    }
+
+                                    // If this entity is currently selected, mirror into editor buffer
+                                    var was_selected: bool = false;
+                                    for (self.selected_entities.items) |eid| {
+                                        if (eid == entity) {
+                                            was_selected = true;
+                                            break;
+                                        }
+                                    }
+                                    if (was_selected) {
+                                        const copy_len = @min(cdata.len, self.script_buffer.len - 1);
+                                        std.mem.copyForwards(u8, self.script_buffer[0..copy_len], cdata[0..copy_len]);
+                                        self.script_buffer[copy_len] = 0;
+                                        self.script_buffer_owner = entity;
+                                    }
+                                }
+                            } else |_| {
+                                // openFile failed; ignore
+                            }
+                        } else {
+                            // Unknown extension - try to treat as mesh+texture (best-effort)
+                            scene.updatePropAssets(entity, path_slice, path_slice) catch {};
+                        }
+
+                        std.heap.page_allocator.free(path_buf);
+                    }
+                }
+            }
+        }
+
+        // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
+        if (c.ImGui_IsItemClicked()) {
+            const io = c.ImGui_GetIO();
+            if (io.*.KeyCtrl) {
+                // toggle membership: use std.mem.indexOf for concise lookup
+                const needle = [_]EntityId{entity};
+                const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                if (maybe_idx) |i| {
+                    _ = self.selected_entities.swapRemove(i);
+                } else {
+                    _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                }
+            } else if (io.*.KeyShift) {
+                // add to selection
+                _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+            } else {
+                // single select
+                if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
+                _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+            }
+            // Request that the Inspector steals focus on next render
+            self.request_inspector_focus = true;
+        }
+
+        // Context menu for entity operations
+        if (c.ImGui_BeginPopupContextItem()) {
+            if (c.ImGui_MenuItem("Delete Entity")) {
+                // Create a temporary GameObject wrapper to pass to destroyObject
+                // This is safe because destroyObject only uses the entity_id to find and remove the object
+                const zephyr_game_object = @import("zephyr").GameObject;
+                var temp_obj = zephyr_game_object{ .entity_id = entity, .scene = scene };
+                scene.destroyObject(&temp_obj);
+
+                // remove from selection if present
+                const needle = [_]EntityId{entity};
+                const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
+                if (maybe_idx) |i| {
+                    _ = self.selected_entities.swapRemove(i);
+                }
+            }
+            // Add child entity
+            if (c.ImGui_MenuItem("Create Empty Entity")) {
+                const child = scene.spawnEmpty("Child") catch null;
+                if (child) |c_obj| {
+                    // Directly set parent on the Transform component to ensure hierarchy is updated
+                    if (scene.ecs_world.get(Transform, c_obj.entity_id)) |t| {
+                        t.parent = entity;
+                        t.dirty = true;
+                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(c_obj.entity_id), @intFromEnum(entity)});
+                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
+                    }
+                }
+            }
+            // Add child cube
+            if (c.ImGui_MenuItem("Create Cube")) {
+                const child = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch null;
+                if (child) |c_obj| {
+                    // Directly set parent on the Transform component to ensure hierarchy is updated
+                    if (scene.ecs_world.get(Transform, c_obj.entity_id)) |t| {
+                        t.parent = entity;
+                        t.dirty = true;
+                        std.debug.print("DEBUG: Set parent of {d} to {d}\n", .{@intFromEnum(c_obj.entity_id), @intFromEnum(entity)});
+                        self.nodes_to_open.append(std.heap.page_allocator, entity) catch {};
+                    }
+                }
+            }
+            c.ImGui_EndPopup();
+        }
+
+        // Render children if open
+        if (node_open and has_children) {
+            if (children_map.get(entity)) |children| {
+                for (children.items) |child| {
+                    self.drawEntityNode(scene, child, children_map);
+                }
+            }
+            c.ImGui_TreePop();
         }
     }
 
@@ -77,141 +283,59 @@ pub const SceneHierarchyPanel = struct {
             }
             c.ImGui_Separator();
 
-            // Iterate over all game objects
+            // Reset arena and build tree
+            _ = self.hierarchy_arena.reset(.retain_capacity);
+            const allocator = self.hierarchy_arena.allocator();
+
+            var root_nodes = std.ArrayListUnmanaged(EntityId){};
+            var children_map = std.AutoHashMap(EntityId, std.ArrayListUnmanaged(EntityId)).init(allocator);
+
+            // Iterate over all game objects to build hierarchy
             for (scene.iterateObjects()) |*game_obj| {
                 const entity = game_obj.entity_id;
-
-                // Check if this entity is selected (multi-select support)
-                var is_selected: bool = false;
-                for (self.selected_entities.items) |eid| {
-                    if (eid == entity) {
-                        is_selected = true;
-                        break;
-                    }
-                }
-
-                // Build entity label with component info
-                var label_buf: [128]u8 = undefined;
-                const label = self.buildEntityLabel(scene.ecs_world, entity, &label_buf) catch "Entity";
-
-                // Make it selectable
-                const flags = c.ImGuiTreeNodeFlags_Leaf | c.ImGuiTreeNodeFlags_NoTreePushOnOpen;
-                const selected_flag = if (is_selected) c.ImGuiTreeNodeFlags_Selected else 0;
-
-                _ = c.ImGui_TreeNodeEx(@ptrCast(label.ptr), flags | selected_flag);
-
-                // Accept drag-and-drop onto the entity entry (ASSET_PATH payloads)
-                if (c.ImGui_BeginDragDropTarget()) {
-                    const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
-                    if (payload != null) {
-                        if (payload.*.Data) |data_any| {
-                            const data_ptr: [*]const u8 = @ptrCast(data_any);
-                            const data_size: usize = @intCast(payload.*.DataSize);
-
-                            // Copy the dropped path into a temporary buffer
-                            const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
-                            if (path_opt) |path_buf| {
-                                std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
-                                path_buf[data_size] = 0;
-                                const path_slice = path_buf[0..data_size];
-
-                                // Determine file type by extension and call Scene helpers accordingly
-                                // Mesh extensions -> update model; Texture extensions -> update texture
-                                if (std.mem.endsWith(u8, path_slice, ".obj") or std.mem.endsWith(u8, path_slice, ".gltf") or std.mem.endsWith(u8, path_slice, ".glb")) {
-                                    // Update model for the entity (best-effort)
-                                    scene.updateModelForEntity(entity, path_slice) catch {};
-                                } else if (std.mem.endsWith(u8, path_slice, ".png") or std.mem.endsWith(u8, path_slice, ".jpg") or std.mem.endsWith(u8, path_slice, ".jpeg")) {
-                                    scene.updateTextureForEntity(entity, path_slice) catch {};
-                                } else if (std.mem.endsWith(u8, path_slice, ".lua") or std.mem.endsWith(u8, path_slice, ".txt") or std.mem.endsWith(u8, path_slice, ".zs")) {
-                                    if (std.fs.cwd().openFile(path_slice, .{})) |file| {
-                                        defer file.close();
-                                        const contents = file.readToEndAlloc(scene.allocator, 64 * 1024) catch null;
-                                        if (contents) |cdata| {
-                                            // Register script as an asset (best-effort) so it participates in hot-reload
-                                            const AssetType = zephyr.AssetType;
-                                            const LoadPriority = zephyr.LoadPriority;
-                                            var script_asset_id: ?zephyr.AssetId = null;
-                                            script_asset_id = scene.asset_manager.loadAssetAsync(path_slice, AssetType.script, LoadPriority.high) catch null;
-
-                                            // Replace ScriptComponent on the entity and associate asset if available
-                                            _ = scene.ecs_world.remove(ScriptComponent, entity);
-                                            const slice: []const u8 = cdata;
-                                            if (script_asset_id) |aid| {
-                                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initWithAsset(slice, aid, self.script_auto_run, false)) catch {};
-                                            } else {
-                                                _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.init(slice, self.script_auto_run, false)) catch {};
-                                            }
-
-                                            // If this entity is currently selected, mirror into editor buffer
-                                            var was_selected: bool = false;
-                                            for (self.selected_entities.items) |eid| {
-                                                if (eid == entity) {
-                                                    was_selected = true;
-                                                    break;
-                                                }
-                                            }
-                                            if (was_selected) {
-                                                const copy_len = @min(cdata.len, self.script_buffer.len - 1);
-                                                std.mem.copyForwards(u8, self.script_buffer[0..copy_len], cdata[0..copy_len]);
-                                                self.script_buffer[copy_len] = 0;
-                                                self.script_buffer_owner = entity;
-                                            }
-                                        }
-                                    } else |_| {
-                                        // openFile failed; ignore
-                                    }
-                                } else {
-                                    // Unknown extension - try to treat as mesh+texture (best-effort)
-                                    scene.updatePropAssets(entity, path_slice, path_slice) catch {};
-                                }
-
-                                std.heap.page_allocator.free(path_buf);
-                            }
+                if (scene.ecs_world.get(Transform, entity)) |transform| {
+                    if (transform.parent) |parent_id| {
+                        // Has parent, add to children map
+                        // We need to ensure the parent exists in the map
+                        const result = children_map.getOrPut(parent_id) catch {
+                            continue;
+                        };
+                        if (!result.found_existing) {
+                            result.value_ptr.* = std.ArrayListUnmanaged(EntityId){};
                         }
-                    }
-                }
-
-                // Handle selection with modifiers: Ctrl=toggle, Shift=add, none=single
-                if (c.ImGui_IsItemClicked()) {
-                    const io = c.ImGui_GetIO();
-                    if (io.*.KeyCtrl) {
-                        // toggle membership: use std.mem.indexOf for concise lookup
-                        // Ensure we pass an explicit slice to match std.mem.indexOf signature
-                        const needle = [_]EntityId{entity};
-                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
-                        if (maybe_idx) |i| {
-                            _ = self.selected_entities.swapRemove(i);
-                        } else {
-                            _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
-                        }
-                    } else if (io.*.KeyShift) {
-                        // add to selection
-                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                        result.value_ptr.append(allocator, entity) catch {};
                     } else {
-                        // single select
-                        if (self.selected_entities.items.len > 0) self.selected_entities.clearRetainingCapacity();
-                        _ = self.selected_entities.append(std.heap.page_allocator, entity) catch {};
+                        // No parent, is root
+                        root_nodes.append(allocator, entity) catch {};
                     }
-                    // Request that the Inspector steals focus on next render so keyboard
-                    // input targets inspector widgets (we call SetWindowFocus from inside
-                    // the Inspector to avoid API differences on the c-binding).
-                    self.request_inspector_focus = true;
+                } else {
+                    // No transform, treat as root
+                    root_nodes.append(allocator, entity) catch {};
                 }
+            }
 
-                // Context menu for entity operations
-                if (c.ImGui_BeginPopupContextItem()) {
-                    if (c.ImGui_MenuItem("Delete Entity")) {
-                        scene.destroyObject(game_obj);
-                        // remove from selection if present
-                        // Find and remove the entity from the selection (if present)
-                        const needle = [_]EntityId{entity};
-                        const maybe_idx = std.mem.indexOf(EntityId, self.selected_entities.items[0..self.selected_entities.items.len], needle[0..1]);
-                        if (maybe_idx) |i| {
-                            _ = self.selected_entities.swapRemove(i);
-                        }
-                    }
-                    c.ImGui_EndPopup();
+            // Render roots recursively
+            for (root_nodes.items) |entity| {
+                self.drawEntityNode(scene, entity, &children_map);
+            }
+
+            // Context menu for background (creating new entities)
+            // We use a specific ID for the window context menu to avoid conflict with item context menus
+
+            if (c.ImGui_BeginPopupContextWindow()) {
+                if (c.ImGui_MenuItem("Create Empty Entity")) {
+                    _ = scene.spawnEmpty("Empty Entity") catch {};
                 }
+                if (c.ImGui_MenuItem("Create Cube")) {
+                    _ = scene.spawnProp("assets/models/cube.obj", .{ .albedo_texture_path = "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png" }) catch {};
+                }
+                if (c.ImGui_MenuItem("Create Point Light")) {
+                    _ = scene.spawnLight(Math.Vec3.init(1.0, 1.0, 1.0), 5.0) catch {};
+                }
+                if (c.ImGui_MenuItem("Create Camera")) {
+                    _ = scene.spawnCamera(true, 45.0) catch {};
+                }
+                c.ImGui_EndPopup();
             }
         }
         c.ImGui_End();

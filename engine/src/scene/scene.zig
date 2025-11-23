@@ -512,7 +512,10 @@ pub const Scene = struct {
         if (is_perspective) {
             camera.setPerspective(fov_or_size, 16.0 / 9.0, 0.1, 1000.0);
         } else {
-            camera.setOrthographic(fov_or_size, 16.0 / 9.0, 0.1, 1000.0);
+            const aspect = 16.0 / 9.0;
+            const height = fov_or_size;
+            const width = height * aspect;
+            camera.setOrthographic(-width * 0.5, width * 0.5, -height * 0.5, height * 0.5, 0.1, 1000.0);
         }
         camera.setPrimary(true); // First camera is primary by default
         try self.ecs_world.emplace(Camera, entity, camera);
