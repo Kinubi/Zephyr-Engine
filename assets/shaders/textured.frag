@@ -58,14 +58,18 @@ void main() {
     // Use materialIndex from vertex shader (per-instance data from SSBO)
     Material mat = materials[materialIndex];
     
+    // Convert tint from sRGB to Linear before using it for lighting calculations
+    // This ensures it matches the linear space of the sampled textures
+    vec3 tintLinear = pow(mat.albedo_tint.rgb, vec3(2.2));
+
     // Sample albedo texture and apply tint
     vec3 albedo;
     if (mat.albedo_idx == 0) {
         // No texture - use tint as albedo color
-        albedo = mat.albedo_tint.rgb;
+        albedo = tintLinear;
     } else {
         // Sample texture and multiply with tint
-        albedo = texture(textures[mat.albedo_idx], uv).rgb * mat.albedo_tint.rgb;
+        albedo = texture(textures[mat.albedo_idx], uv).rgb * tintLinear;
     }
 
     // Sample roughness texture or use factor

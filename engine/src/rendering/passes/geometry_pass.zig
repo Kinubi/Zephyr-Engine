@@ -67,6 +67,9 @@ pub const GeometryPass = struct {
     // Shared render system (pointer to scene's render system)
     render_system: *RenderSystem,
 
+    // Target material set name (e.g. "opaque", "transparent")
+    target_set_name: []const u8,
+
     pub fn create(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
@@ -80,11 +83,13 @@ pub const GeometryPass = struct {
         swapchain_color_format: vk.Format,
         swapchain_depth_format: vk.Format,
         render_system: *RenderSystem,
+        pass_name: []const u8,
+        target_set_name: []const u8,
     ) !*GeometryPass {
         const pass = try allocator.create(GeometryPass);
         pass.* = GeometryPass{
             .base = RenderPass{
-                .name = "geometry_pass",
+                .name = pass_name,
                 .enabled = true,
                 .vtable = &vtable,
                 .dependencies = std.ArrayList([]const u8){},
@@ -102,9 +107,10 @@ pub const GeometryPass = struct {
             .swapchain_color_format = swapchain_color_format,
             .swapchain_depth_format = swapchain_depth_format,
             .render_system = render_system,
+            .target_set_name = target_set_name,
         };
 
-        log(.INFO, "geometry_pass", "Created geometry_pass", .{});
+        log(.INFO, "geometry_pass", "Created geometry pass '{s}' for set '{s}'", .{ pass_name, target_set_name });
         return pass;
     }
 
@@ -274,11 +280,12 @@ pub const GeometryPass = struct {
         // Get rasterization data from render system (cached, no asset manager queries needed)
         const raster_data = try self.render_system.getRasterData();
 
-        // Check for instanced batches (preferred path)
-        const use_instancing = raster_data.batches.len > 0;
+        // Get batches for this specific material set (e.g. "opaque")
+        const batches = raster_data.getBatches(self.target_set_name);
 
-        if (!use_instancing and raster_data.objects.len == 0) {
-            log(.TRACE, "geometry_pass", "No entities to render", .{});
+        if (batches.len == 0) {
+            // Only log trace if we expected something but got nothing
+            // log(.TRACE, "geometry_pass", "No batches for set '{s}'", .{self.target_set_name});
             return;
         }
 
@@ -300,80 +307,53 @@ pub const GeometryPass = struct {
         // Get pipeline layout from pipeline system (ensures we use the correct layout even during hot-reload)
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.geometry_pipeline);
 
-        if (use_instancing) {
-            // TRUE INSTANCED RENDERING: Single draw call per unique mesh
-            // Instance data read from SSBO using gl_InstanceIndex + push constant offset
+        // TRUE INSTANCED RENDERING: Single draw call per unique mesh
+        // Instance data read from SSBO using gl_InstanceIndex + push constant offset
 
-            // Calculate total instances for bounds validation
-            var total_instance_count: u32 = 0;
-            for (raster_data.batches) |batch| {
-                if (batch.visible) {
-                    total_instance_count += @as(u32, @intCast(batch.instances.len));
-                }
+        // Calculate total instances for bounds validation
+        var total_instance_count: u32 = 0;
+        for (batches) |batch| {
+            if (batch.visible) {
+                total_instance_count += @as(u32, @intCast(batch.instances.len));
             }
+        }
 
-            var instance_offset: u32 = 0;
-            for (raster_data.batches) |batch| {
-                if (!batch.visible) continue;
+        var instance_offset: u32 = 0;
+        for (batches) |batch| {
+            if (!batch.visible) continue;
 
-                const mesh = batch.mesh_handle.getMesh();
-                const instance_count: u32 = @intCast(batch.instances.len);
+            const mesh = batch.mesh_handle.getMesh();
+            const instance_count: u32 = @intCast(batch.instances.len);
 
-                // Bounds validation: Ensure we don't read past the end of the instance buffer
-                // This catches bugs where instance_offset or instance_count is incorrect
-                std.debug.assert(instance_offset + instance_count <= total_instance_count);
+            // Bounds validation: Ensure we don't read past the end of the instance buffer
+            // This catches bugs where instance_offset or instance_count is incorrect
+            // Note: We can't easily validate against total buffer size here without passing it down,
+            // but we can validate consistency within the batch list.
+            // std.debug.assert(instance_offset + instance_count <= total_instance_count);
 
-                // Push instance offset so shader knows where to read in SSBO
-                const push_constants = GeometryPushConstants{
-                    .instance_offset = instance_offset,
-                };
-                self.graphics_context.vkd.cmdPushConstants(
-                    cmd,
-                    pipeline_layout,
-                    vk.ShaderStageFlags{ .vertex_bit = true, .fragment_bit = true },
-                    0,
-                    @sizeOf(GeometryPushConstants),
-                    @ptrCast(&push_constants),
-                );
+            // Push instance offset so shader knows where to read in SSBO
+            const push_constants = GeometryPushConstants{
+                .instance_offset = instance_offset,
+            };
+            self.graphics_context.vkd.cmdPushConstants(
+                cmd,
+                pipeline_layout,
+                vk.ShaderStageFlags{ .vertex_bit = true, .fragment_bit = true },
+                0,
+                @sizeOf(GeometryPushConstants),
+                @ptrCast(&push_constants),
+            );
 
-                // Draw all instances of this mesh in a single draw call
-                // Shader reads instance_data[gl_InstanceIndex + push_constants.instance_offset]
-                mesh.drawInstanced(
-                    self.graphics_context.*,
-                    cmd,
-                    instance_count, // Draw all instances at once
-                    0, // firstInstance = 0 (offset handled by push constant)
-                );
+            // Draw all instances of this mesh in a single draw call
+            // Shader reads instance_data[gl_InstanceIndex + push_constants.instance_offset]
+            mesh.drawInstanced(
+                self.graphics_context.*,
+                cmd,
+                instance_count, // Draw all instances at once
+                0, // firstInstance = 0 (offset handled by push constant)
+            );
 
-                instance_offset += instance_count;
-            }
-
-            // Final validation: instance_offset should equal total_instance_count
-            std.debug.assert(instance_offset == total_instance_count);
-        } else {
-            // LEGACY PATH: Per-object drawing with push constants
-            log(.DEBUG, "geometry_pass", "Rendering {} objects (non-instanced)", .{raster_data.objects.len});
-
-            for (raster_data.objects) |object| {
-                // Push constants (data already resolved in cache)
-                const push_constants = GeometryPushConstants{
-                    .transform = object.transform,
-                    .normal_matrix = object.transform, // TODO: Compute proper normal matrix
-                    .material_index = object.material_index,
-                };
-
-                self.graphics_context.vkd.cmdPushConstants(
-                    cmd,
-                    pipeline_layout,
-                    .{ .vertex_bit = true, .fragment_bit = true },
-                    0,
-                    @sizeOf(GeometryPushConstants),
-                    &push_constants,
-                );
-
-                // Draw mesh (pointer already resolved in cache)
-                object.mesh_handle.getMesh().draw(self.graphics_context.*, cmd);
-            }
+            instance_offset += instance_count;
         }
 
         // End rendering

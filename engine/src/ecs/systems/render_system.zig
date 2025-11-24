@@ -173,10 +173,13 @@ pub const RenderSystem = struct {
             if (data.*) |cache| {
                 self.allocator.free(cache.objects);
                 // Clean up instanced batches
-                for (cache.batches) |batch| {
-                    self.allocator.free(batch.instances);
+                for (cache.batch_lists) |list| {
+                    for (list.batches) |batch| {
+                        self.allocator.free(batch.instances);
+                    }
+                    self.allocator.free(list.batches);
                 }
-                self.allocator.free(cache.batches);
+                self.allocator.free(cache.batch_lists);
             }
         }
         for (&self.cached_raytracing_data) |*data| {
@@ -214,6 +217,7 @@ pub const RenderSystem = struct {
     pub const RenderableEntity = struct {
         model_asset: AssetTypeId,
         material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
+        material_set_name: []const u8 = "opaque", // Name of the material set
         world_matrix: math.Mat4x4,
         layer: u8,
         casts_shadows: bool,
@@ -312,11 +316,13 @@ pub const RenderSystem = struct {
             // Get material buffer index from MaterialSet component
             const material_set = world.get(components.MaterialSet, entry.entity);
             const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+            const set_name = if (material_set) |ms| ms.set_name else "opaque";
 
             // Create renderable entry
             try renderables.append(self.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_buffer_index = material_buffer_index,
+                .material_set_name = set_name,
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
                 .casts_shadows = renderer.casts_shadows,
@@ -361,11 +367,13 @@ pub const RenderSystem = struct {
             // Get material buffer index from MaterialSet component
             const material_set = ctx.world.get(components.MaterialSet, entity);
             const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+            const set_name = if (material_set) |ms| ms.set_name else "opaque";
 
             // Create renderable entry directly into worker-local buffer
             out.append(ctx.system.allocator, RenderableEntity{
                 .model_asset = renderer.model_asset.?,
                 .material_buffer_index = material_buffer_index,
+                .material_set_name = set_name,
                 .world_matrix = world_matrix,
                 .layer = renderer.layer,
                 .casts_shadows = renderer.casts_shadows,
@@ -495,10 +503,13 @@ pub const RenderSystem = struct {
         if (self.cached_raster_data[write_idx]) |data| {
             self.allocator.free(data.objects);
             // Clean up instanced batches
-            for (data.batches) |batch| {
-                self.allocator.free(batch.instances);
+            for (data.batch_lists) |list| {
+                for (list.batches) |batch| {
+                    self.allocator.free(batch.instances);
+                }
+                self.allocator.free(list.batches);
             }
-            self.allocator.free(data.batches);
+            self.allocator.free(data.batch_lists);
         }
         if (self.cached_raytracing_data[write_idx]) |*data| {
             self.allocator.free(data.instances);
@@ -1052,9 +1063,15 @@ pub const RenderSystem = struct {
         const materials = try self.allocator.alloc(RasterizationData.MaterialData, 0);
         errdefer self.allocator.free(materials);
 
-        // NEW: Build instanced batches
-        var batch_builder = BatchBuilder.init(self.allocator);
-        defer batch_builder.deinit();
+        // NEW: Build instanced batches partitioned by material set
+        var builders = std.StringHashMap(BatchBuilder).init(self.allocator);
+        defer {
+            var iter = builders.valueIterator();
+            while (iter.next()) |builder| {
+                builder.deinit();
+            }
+            builders.deinit();
+        }
 
         var mesh_idx: usize = 0;
         for (entities) |entity_data| {
@@ -1066,6 +1083,16 @@ pub const RenderSystem = struct {
                 material_index = idx;
             }
 
+            // Get set name (default to "opaque" if empty/null)
+            const set_name = if (entity_data.material_set_name.len > 0) entity_data.material_set_name else "opaque";
+
+            // Get or create builder for this set
+            const builder_entry = try builders.getOrPut(set_name);
+            if (!builder_entry.found_existing) {
+                builder_entry.value_ptr.* = BatchBuilder.init(self.allocator);
+            }
+            const builder = builder_entry.value_ptr;
+
             for (model.meshes.items) |model_mesh| {
                 raster_objects[mesh_idx] = .{
                     .transform = entity_data.transform.data,
@@ -1074,8 +1101,8 @@ pub const RenderSystem = struct {
                     .visible = true,
                 };
 
-                // Register this object with the batch builder
-                try batch_builder.addObject(model_mesh.geometry.mesh, mesh_idx, entity_data.entity_id);
+                // Register this object with the batch builder for its set
+                try builder.addObject(model_mesh.geometry.mesh, mesh_idx, entity_data.entity_id);
 
                 geometries[mesh_idx] = .{
                     .mesh_ptr = model_mesh.geometry.mesh,
@@ -1095,8 +1122,21 @@ pub const RenderSystem = struct {
             }
         }
 
-        // Build instanced batches from deduplicated data
-        const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
+        // Build final batch lists
+        const batch_lists = try self.allocator.alloc(render_data_types.RasterizationData.BatchList, builders.count());
+        var list_idx: usize = 0;
+        var iter = builders.iterator();
+        while (iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            var builder = entry.value_ptr;
+            const batches = try builder.buildBatches(raster_objects, self.allocator);
+            
+            batch_lists[list_idx] = .{
+                .set_name = set_name,
+                .batches = batches,
+            };
+            list_idx += 1;
+        }
 
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
@@ -1104,7 +1144,7 @@ pub const RenderSystem = struct {
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
-            .batches = batches, // NEW: Add instanced batches
+            .batch_lists = batch_lists,
         };
 
         self.cached_raytracing_data[write_idx] = .{
@@ -1207,22 +1247,53 @@ pub const RenderSystem = struct {
             std.Thread.yield() catch {};
         }
 
-        // Build instanced batches from deduplicated data
-        var batch_builder = BatchBuilder.init(self.allocator);
-        defer batch_builder.deinit();
+        // Build instanced batches partitioned by material set
+        var builders = std.StringHashMap(BatchBuilder).init(self.allocator);
+        defer {
+            var iter = builders.valueIterator();
+            while (iter.next()) |builder| {
+                builder.deinit();
+            }
+            builders.deinit();
+        }
 
         // Need to rebuild entity_id mapping since workers don't track it
         // Iterate through entities in same order as workers did
         var obj_idx: usize = 0;
         for (entities) |entity_data| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
+            
+            // Get set name (default to "opaque" if empty/null)
+            const set_name = if (entity_data.material_set_name.len > 0) entity_data.material_set_name else "opaque";
+
+            // Get or create builder for this set
+            const builder_entry = try builders.getOrPut(set_name);
+            if (!builder_entry.found_existing) {
+                builder_entry.value_ptr.* = BatchBuilder.init(self.allocator);
+            }
+            const builder = builder_entry.value_ptr;
+
             for (model.meshes.items) |model_mesh| {
-                try batch_builder.addObject(model_mesh.geometry.mesh, obj_idx, entity_data.entity_id);
+                try builder.addObject(model_mesh.geometry.mesh, obj_idx, entity_data.entity_id);
                 obj_idx += 1;
             }
         }
 
-        const batches = try batch_builder.buildBatches(raster_objects, self.allocator);
+        // Build final batch lists
+        const batch_lists = try self.allocator.alloc(render_data_types.RasterizationData.BatchList, builders.count());
+        var list_idx: usize = 0;
+        var iter = builders.iterator();
+        while (iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            var builder = entry.value_ptr;
+            const batches = try builder.buildBatches(raster_objects, self.allocator);
+            
+            batch_lists[list_idx] = .{
+                .set_name = set_name,
+                .batches = batches,
+            };
+            list_idx += 1;
+        }
 
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
@@ -1230,7 +1301,7 @@ pub const RenderSystem = struct {
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
-            .batches = batches, // NEW: Add instanced batches
+            .batch_lists = batch_lists,
         };
 
         self.cached_raytracing_data[write_idx] = .{
@@ -1581,27 +1652,29 @@ pub const RenderSystem = struct {
         const active_idx = self.active_cache_index.load(.acquire);
         if (self.cached_raster_data[active_idx]) |cached| {
             const objects_copy = try self.allocator.alloc(RasterizationData.RenderableObject, cached.objects.len);
-            for (cached.objects, 0..) |obj, i| {
-                objects_copy[i] = obj;
-            }
+            @memcpy(objects_copy, cached.objects);
 
-            const batches_copy = try self.allocator.alloc(RasterizationData.InstancedBatch, cached.batches.len);
-            for (cached.batches, 0..) |batch, i| {
-                batches_copy[i] = batch;
+            const batch_lists_copy = try self.allocator.alloc(RasterizationData.BatchList, cached.batch_lists.len);
+            for (cached.batch_lists, 0..) |list, i| {
+                const batches_copy = try self.allocator.alloc(RasterizationData.InstancedBatch, list.batches.len);
+                @memcpy(batches_copy, list.batches);
+                
+                batch_lists_copy[i] = .{
+                    .set_name = list.set_name,
+                    .batches = batches_copy,
+                };
             }
 
             return RasterizationData{
                 .objects = objects_copy,
-                .batches = batches_copy,
+                .batch_lists = batch_lists_copy,
             };
         }
 
         // If no cache exists, return empty data
-        const empty_objects = try self.allocator.alloc(RasterizationData.RenderableObject, 0);
-        const empty_batches = try self.allocator.alloc(RasterizationData.InstancedBatch, 0);
         return RasterizationData{
-            .objects = empty_objects,
-            .batches = empty_batches,
+            .objects = &[_]RasterizationData.RenderableObject{},
+            .batch_lists = &[_]RasterizationData.BatchList{},
         };
     }
 
@@ -1767,12 +1840,14 @@ pub fn prepare(world: *World, dt: f32) !void {
             // Get material buffer index from MaterialSet component
             const material_set = world.get(components.MaterialSet, entry.entity);
             const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+            const material_set_name = if (material_set) |ms| ms.set_name else "opaque";
 
             extracted_renderables.appendAssumeCapacity(.{
                 .entity_id = entry.entity,
                 .transform = world_matrix,
                 .model_asset = renderer.model_asset.?,
                 .material_buffer_index = material_buffer_index,
+                .material_set_name = material_set_name,
                 .layer = renderer.layer,
                 .casts_shadows = renderer.casts_shadows,
                 .receives_shadows = renderer.receives_shadows,

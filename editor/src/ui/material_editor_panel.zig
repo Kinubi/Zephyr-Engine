@@ -50,7 +50,7 @@ pub const MaterialEditorPanel = struct {
             if (c.ImGui_CollapsingHeader("Material Set", c.ImGuiTreeNodeFlags_DefaultOpen)) {
                 c.ImGui_Text("Set Name: %s", mat_set.set_name.ptr);
                 c.ImGui_Text("Shader Variant: %s", mat_set.shader_variant.ptr);
-                
+
                 var casts_shadows = mat_set.casts_shadows;
                 if (c.ImGui_Checkbox("Casts Shadows", &casts_shadows)) {
                     mat_set.casts_shadows = casts_shadows;
@@ -77,7 +77,7 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Albedo Material")) {
-                _ = scene.ecs_world.emplace(AlbedoMaterial, entity, AlbedoMaterial.initColor(.{1, 1, 1, 1})) catch {};
+                _ = scene.ecs_world.emplace(AlbedoMaterial, entity, AlbedoMaterial.initColor(.{ 1, 1, 1, 1 })) catch {};
             }
         }
 
@@ -158,7 +158,7 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Emissive Material")) {
-                _ = scene.ecs_world.emplace(EmissiveMaterial, entity, EmissiveMaterial.initColor(.{0, 0, 0}, 1.0)) catch {};
+                _ = scene.ecs_world.emplace(EmissiveMaterial, entity, EmissiveMaterial.initColor(.{ 0, 0, 0 }, 1.0)) catch {};
             }
         }
 
@@ -198,10 +198,10 @@ pub const MaterialEditorPanel = struct {
         if (c.ImGui_BeginDragDropTarget()) {
             const payload = c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0);
             if (payload != null) {
-                 if (payload.*.Data) |data_any| {
+                if (payload.*.Data) |data_any| {
                     const data_ptr: [*]const u8 = @ptrCast(data_any);
                     const data_size: usize = @intCast(payload.*.DataSize);
-                    
+
                     const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
                     if (path_opt) |path_buf| {
                         std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
@@ -209,7 +209,7 @@ pub const MaterialEditorPanel = struct {
                         const path_slice = path_buf[0..data_size];
 
                         const asset_id = scene.asset_manager.loadAssetAsync(path_slice, zephyr.AssetType.texture, zephyr.LoadPriority.high) catch null;
-                        
+
                         if (asset_id) |aid| {
                             texture_id.* = aid;
                             changed = true;
@@ -224,4 +224,3 @@ pub const MaterialEditorPanel = struct {
         return changed;
     }
 };
-

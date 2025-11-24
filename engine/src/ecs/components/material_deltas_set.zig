@@ -9,6 +9,11 @@ pub const GPUMaterial = extern struct {
     normal_idx: u32,
     emissive_idx: u32,
     occlusion_idx: u32,
+    
+    // Padding to align albedo_tint (vec4) to 16 bytes
+    // Current offset: 24 bytes (6 * 4)
+    // Target offset: 32 bytes
+    padding: [2]u32 = .{ 0, 0 },
 
     albedo_tint: [4]f32,
     roughness_factor: f32,

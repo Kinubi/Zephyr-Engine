@@ -815,18 +815,24 @@ pub const UnifiedPipelineSystem = struct {
         const pipeline_ptr = self.pipelines.getPtr(pipeline_id) orelse return error.PipelineNotFound;
 
         const current_count: u32 = self.getBindingDescriptorCount(pipeline_ptr, set, binding) orelse 0;
-        var existing_override: u32 = current_count;
-
+        
+        // Check if we already have an override that satisfies the requirement
+        var stored_override: u32 = 0;
         if (self.binding_overrides.get(pipeline_id.hash)) |override_map| {
-            if (override_map.get(BindingKey{ .set = set, .binding = binding })) |override_value| {
-                existing_override = @max(existing_override, override_value);
+            if (override_map.get(BindingKey{ .set = set, .binding = binding })) |val| {
+                stored_override = val;
             }
         }
 
-        const current_capacity = if (existing_override > 0) existing_override else current_count;
-        const target = math.clamp(@max(required_u32, 1), 1, MAX_DESCRIPTOR_BINDING_COUNT);
+        // The effective target is the max of what we need now and what was previously requested
+        const effective_target = @max(required_u32, stored_override);
 
-        if (target == current_capacity) return;
+        // If the current pipeline already satisfies the effective target, we are done
+        if (current_count >= effective_target) return;
+
+        log(.INFO, "unified_pipeline", "Resizing descriptor binding: {s} set={} binding={} current={} required={} (override={})", .{
+            pipeline_id.name, set, binding, current_count, required_u32, stored_override
+        });
 
         const overrides_entry = try self.binding_overrides.getOrPut(pipeline_id.hash);
         if (!overrides_entry.found_existing) {
@@ -836,7 +842,7 @@ pub const UnifiedPipelineSystem = struct {
         const map_ptr = overrides_entry.value_ptr;
         const binding_key = BindingKey{ .set = set, .binding = binding };
         const override_entry = try map_ptr.getOrPut(binding_key);
-        override_entry.value_ptr.* = target;
+        override_entry.value_ptr.* = effective_target;
 
         try self.rebuildPipeline(pipeline_id);
         self.markPipelineResourcesDirty(pipeline_id);
@@ -861,11 +867,21 @@ pub const UnifiedPipelineSystem = struct {
                 if (layout_info.sets.items[key.set].len == 0) continue;
 
                 const bindings_slice = @constCast(layout_info.sets.items[key.set]);
+                var found = false;
                 for (bindings_slice) |*binding_info| {
                     if (binding_info.binding == key.binding) {
+                        log(.INFO, "unified_pipeline", "Applying override for {s} set={} binding={}: count {} -> {}", .{
+                            pipeline_id.name, key.set, key.binding, binding_info.descriptor_count, desired_count
+                        });
                         binding_info.descriptor_count = desired_count;
+                        found = true;
                         break;
                     }
+                }
+                if (!found) {
+                    log(.WARN, "unified_pipeline", "Failed to apply override for {s} set={} binding={}: binding not found in layout", .{
+                        pipeline_id.name, key.set, key.binding
+                    });
                 }
             }
         }
