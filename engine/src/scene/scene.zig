@@ -90,7 +90,8 @@ pub const Scene = struct {
     render_system: *ecs.RenderSystem,
 
     // Scripting system (owned by the Scene)
-    scripting_system: ecs.ScriptingSystem,
+    scripting_system: *ecs.ScriptingSystem,
+    physics_system: ?*ecs.PhysicsSystem = null,
 
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
@@ -139,6 +140,9 @@ pub const Scene = struct {
         render_system.* = try ecs.RenderSystem.init(allocator, thread_pool, buffer_manager);
         try ecs_world.setUserData("render_system", @ptrCast(render_system));
 
+        const scripting_system = try allocator.create(ecs.ScriptingSystem);
+        scripting_system.* = try ecs.ScriptingSystem.init(allocator, thread_pool, 4);
+
         var scene = Scene{
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
@@ -150,7 +154,8 @@ pub const Scene = struct {
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
             .render_system = render_system,
-            .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
+            .scripting_system = scripting_system,
+            .physics_system = try ecs.PhysicsSystem.init(allocator),
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
             .buffer_manager = buffer_manager,
@@ -212,6 +217,12 @@ pub const Scene = struct {
             ms.deinit();
             self.allocator.destroy(ms);
             self.material_system = null;
+        }
+        if (self.physics_system) |ps| {
+            ps.deinit();
+            // PhysicsSystem.deinit() destroys the struct itself since it was created with allocator.create
+            // Wait, let me check PhysicsSystem.deinit implementation.
+            self.physics_system = null;
         }
 
         // Initialize Render Graph and Systems
@@ -706,11 +717,13 @@ pub const Scene = struct {
             graph.deinit();
             self.allocator.destroy(graph);
         }
+        log(.INFO, "scene", "Deinitializing scene: {s}", .{self.name});
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
         self.emitter_to_gpu_id.deinit();
         // Deinit scripting system
         self.scripting_system.deinit();
+        self.allocator.destroy(self.scripting_system);
 
         // Deinit rendering domain systems
         // NOTE: TextureSystem now owned by Engine
@@ -719,6 +732,14 @@ pub const Scene = struct {
         }
         if (self.particle_system) |ps| {
             ps.deinit();
+        }
+
+        if (self.physics_system) |ps| {
+            log(.INFO, "scene", "Deinitializing physics system...", .{});
+            ps.deinit();
+            log(.INFO, "scene", "Physics system deinitialized", .{});
+        } else {
+            log(.WARN, "scene", "Physics system is null in deinit!", .{});
         }
 
         self.light_system.deinit();
@@ -830,6 +851,12 @@ pub const Scene = struct {
         );
 
         log(.INFO, "scene", "Initialized particle system (ECS-driven)", .{});
+
+        // Initialize Physics System if not already (e.g. after load/clear)
+        if (self.physics_system == null) {
+            self.physics_system = try ecs.PhysicsSystem.init(self.allocator);
+            log(.INFO, "scene", "Initialized physics system (Jolt)", .{});
+        }
 
         // Create render graph
         self.render_graph = try self.allocator.create(RenderGraph);

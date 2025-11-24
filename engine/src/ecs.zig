@@ -20,6 +20,13 @@ pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").Parti
 pub const Name = @import("ecs/components/name.zig").Name;
 pub const UuidComponent = @import("ecs/components/uuid.zig").UuidComponent;
 
+// Physics Components
+pub const RigidBody = @import("ecs/components/physics_components.zig").RigidBody;
+pub const BoxCollider = @import("ecs/components/physics_components.zig").BoxCollider;
+pub const SphereCollider = @import("ecs/components/physics_components.zig").SphereCollider;
+pub const CapsuleCollider = @import("ecs/components/physics_components.zig").CapsuleCollider;
+pub const MeshCollider = @import("ecs/components/physics_components.zig").MeshCollider;
+
 // Material Components
 pub const MaterialSet = @import("ecs/components/material_set.zig").MaterialSet;
 pub const RenderablesSet = @import("ecs/components/renderables_set.zig").RenderablesSet;
@@ -45,12 +52,15 @@ pub const ParticleSystem = @import("ecs/systems/particle_system.zig").ParticleSy
 pub const ParticleBuffers = @import("ecs/systems/particle_system.zig").ParticleBuffers;
 pub const ParticleGPUResources = @import("ecs/systems/particle_system.zig").ParticleGPUResources;
 pub const ScriptingSystem = @import("ecs/systems/scripting_system.zig").ScriptingSystem;
+pub const PhysicsSystem = @import("ecs/systems/physics_system.zig").PhysicsSystem;
 
 // System functions for parallel execution
 pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").update;
-pub const updateLightSystem = @import("ecs/systems/light_system.zig").update;
+pub const prepareLightSystem = @import("ecs/systems/light_system.zig").prepare;
 pub const updateParticleEmittersSystem = @import("ecs/systems/particle_system.zig").update;
-pub const updateScriptingSystem = @import("ecs/systems/scripting_system.zig").update;
+pub const prepareScriptingSystem = @import("ecs/systems/scripting_system.zig").prepare;
+pub const preparePhysicsSystem = @import("ecs/systems/physics_system.zig").prepare;
+pub const updatePhysicsSystem = @import("ecs/systems/physics_system.zig").update;
 pub const prepareRenderSystem = @import("ecs/systems/render_system.zig").prepare;
 pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
 pub const prepareMaterialSystem = @import("ecs/systems/material_system.zig").prepare;
@@ -65,6 +75,10 @@ pub const ComponentAccess = @import("ecs/system_scheduler.zig").ComponentAccess;
 // Workflow demonstrations
 test {
     _ = @import("ecs/workflow_demo.zig");
+}
+
+test {
+    _ = @import("ecs/query_test.zig");
 }
 
 test {

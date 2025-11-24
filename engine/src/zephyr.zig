@@ -15,7 +15,7 @@ pub const Layer = @import("core/layer.zig").Layer;
 pub const LayerStack = @import("core/layer_stack.zig").LayerStack;
 pub const Event = @import("core/event.zig").Event;
 pub const EventType = @import("core/event.zig").EventType;
-pub const EventCategory = @import("core/event.zig").EventCategory;
+// pub const EventCategory = @import("core/event.zig").EventCategory;
 pub const EventBus = @import("core/event_bus.zig").EventBus;
 pub const Window = @import("core/window.zig").Window;
 pub const WindowProps = @import("core/window.zig").WindowProps;
@@ -39,10 +39,10 @@ pub const Descriptors = @import("core/descriptors.zig");
 pub const Camera = @import("rendering/camera.zig").Camera;
 pub const CameraController = @import("input/camera_controller.zig").CameraController;
 pub const FrameInfo = @import("rendering/frameinfo.zig").FrameInfo;
-pub const GlobalUbo = FrameInfo.GlobalUbo;
+// pub const GlobalUbo = FrameInfo.GlobalUbo;
 pub const GlobalUboSet = @import("rendering/ubo_set.zig").GlobalUboSet;
 pub const PerformanceMonitor = @import("rendering/performance_monitor.zig").PerformanceMonitor;
-pub const PerformanceStats = @import("rendering/performance_monitor.zig").PerformanceStats;
+// pub const PerformanceStats = @import("rendering/performance_monitor.zig").PerformanceStats;
 pub const RenderGraph = @import("rendering/render_graph.zig");
 pub const UnifiedPipelineSystem = @import("rendering/unified_pipeline_system.zig").UnifiedPipelineSystem;
 pub const PipelineId = @import("rendering/unified_pipeline_system.zig").PipelineId;
@@ -119,3 +119,7 @@ pub const cvar = @import("core/cvar.zig");
 /// Maximum number of frames that can be in-flight simultaneously
 /// This affects command buffer allocation and synchronization
 pub const MAX_FRAMES_IN_FLIGHT = @import("core/swapchain.zig").MAX_FRAMES_IN_FLIGHT;
+
+test {
+    _ = @import("ecs.zig");
+}

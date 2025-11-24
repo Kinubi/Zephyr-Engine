@@ -37,9 +37,8 @@ pub const SystemDef = struct {
 pub const SystemStage = struct {
     name: []const u8,
     systems: std.ArrayList(SystemDef),
-    completion: std.atomic.Value(usize),
-    // Last-worker completion semaphore: posted exactly once when all jobs finish
-    done_sem: std.Thread.Semaphore,
+    prepare_completion: std.atomic.Value(u32),
+    update_completion: std.atomic.Value(u32),
     allocator: std.mem.Allocator,
     // Reusable storage to avoid per-frame allocations for work items
     items_cache: std.ArrayList(WorkItem),
@@ -48,8 +47,8 @@ pub const SystemStage = struct {
         return .{
             .name = name,
             .systems = std.ArrayList(SystemDef){},
-            .completion = std.atomic.Value(usize).init(0),
-            .done_sem = .{},
+            .prepare_completion = std.atomic.Value(u32).init(0),
+            .update_completion = std.atomic.Value(u32).init(0),
             .allocator = allocator,
             .items_cache = std.ArrayList(WorkItem){},
         };
@@ -88,7 +87,7 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.completion.store(prepare_count, .release);
+        self.prepare_completion.store(@intCast(prepare_count), .release);
 
         // Build a stage-scoped immutable context and dispatch one job per system
         var stage_ctx = StageContext{
@@ -96,8 +95,7 @@ pub const SystemStage = struct {
             .dt = dt,
             .frame_info = null, // No frame info for prepare phase
             .systems = self.systems.items,
-            .completion = &self.completion,
-            .done_sem = &self.done_sem,
+            .completion = &self.prepare_completion,
             .phase = .prepare,
         };
 
@@ -117,10 +115,17 @@ pub const SystemStage = struct {
                 });
             }
         }
+        log(.INFO, "system_scheduler", "Dispatching {} prepare jobs for stage '{s}'", .{ prepare_count, self.name });
         try pool.submitBatch(self.items_cache.items);
 
         // Wait for completion
-        self.done_sem.wait();
+        log(.INFO, "system_scheduler", "Waiting for prepare completion...", .{});
+        var curr = self.prepare_completion.load(.acquire);
+        while (curr > 0) {
+            std.Thread.Futex.wait(&self.prepare_completion, curr);
+            curr = self.prepare_completion.load(.acquire);
+        }
+        log(.INFO, "system_scheduler", "Prepare completion finished", .{});
     }
 
     /// Execute all systems' update phase in this stage in parallel (render thread)
@@ -146,7 +151,7 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.completion.store(update_count, .release);
+        self.update_completion.store(@intCast(update_count), .release);
 
         // Build a stage-scoped immutable context and dispatch one job per system
         const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
@@ -155,8 +160,7 @@ pub const SystemStage = struct {
             .dt = dt,
             .frame_info = frame_info,
             .systems = self.systems.items,
-            .completion = &self.completion,
-            .done_sem = &self.done_sem,
+            .completion = &self.update_completion,
             .phase = .update,
         };
 
@@ -176,10 +180,17 @@ pub const SystemStage = struct {
                 });
             }
         }
+        log(.INFO, "system_scheduler", "Dispatching {} update jobs for stage '{s}'", .{ update_count, self.name });
         try pool.submitBatch(self.items_cache.items);
 
         // Wait for completion
-        self.done_sem.wait();
+        log(.INFO, "system_scheduler", "Waiting for update completion...", .{});
+        var curr = self.update_completion.load(.acquire);
+        while (curr > 0) {
+            std.Thread.Futex.wait(&self.update_completion, curr);
+            curr = self.update_completion.load(.acquire);
+        }
+        log(.INFO, "system_scheduler", "Update completion finished", .{});
     }
 };
 
@@ -189,21 +200,28 @@ const StageContext = struct {
     dt: f32,
     frame_info: ?*FrameInfo, // Only set for update phase
     systems: []const SystemDef,
-    completion: *std.atomic.Value(usize),
-    done_sem: *std.Thread.Semaphore,
+    completion: *std.atomic.Value(u32),
     phase: enum { prepare, update },
 };
 
 /// Worker function for parallel system execution
-fn systemWorker(context: *anyopaque, work_item: @import("../threading/thread_pool.zig").WorkItem) void {
+fn systemWorker(context: *anyopaque, work_item: WorkItem) void {
     const ctx = @as(*StageContext, @ptrCast(@alignCast(context)));
     const job_index: usize = @intCast(work_item.data.ecs_update.job_index);
-    defer {
-        const prev = ctx.completion.fetchSub(1, .release);
-        if (prev == 1) ctx.done_sem.post();
-    }
-
     const sys = ctx.systems[job_index];
+    // Capture completion pointer locally to avoid Use-After-Free if main thread returns early
+    const completion_ptr = ctx.completion;
+
+    log(.INFO, "system_scheduler", "Worker starting system '{s}' (phase: {})", .{ sys.name, ctx.phase });
+
+    defer {
+        log(.INFO, "system_scheduler", "Worker finished system '{s}'", .{sys.name});
+        const prev = completion_ptr.fetchSub(1, .release);
+        if (prev == 1) {
+            log(.INFO, "system_scheduler", "Worker waking main thread", .{});
+            std.Thread.Futex.wake(completion_ptr, 1);
+        }
+    }
 
     // Execute the appropriate phase function
     switch (ctx.phase) {

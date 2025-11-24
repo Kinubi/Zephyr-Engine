@@ -60,7 +60,7 @@ pub const SceneLayer = struct {
 
                 stage1.addSystem(.{
                     .name = "LightAnimationSystem",
-                    .prepare_fn = ecs.updateLightSystem,
+                    .prepare_fn = ecs.prepareLightSystem,
                     .access = .{
                         .reads = &[_][]const u8{"PointLight"},
                         .writes = &[_][]const u8{"Transform"},
@@ -71,7 +71,7 @@ pub const SceneLayer = struct {
 
                 stage1.addSystem(.{
                     .name = "ScriptingSystem",
-                    .prepare_fn = ecs.updateScriptingSystem,
+                    .prepare_fn = ecs.prepareScriptingSystem,
                     .access = .{
                         .reads = &[_][]const u8{},
                         .writes = &[_][]const u8{"ScriptComponent"},
@@ -81,16 +81,33 @@ pub const SceneLayer = struct {
                 };
 
                 stage1.addSystem(.{
-                    .name = "MaterialSystem",
-                    .prepare_fn = ecs.prepareMaterialSystem,
-                    .update_fn = ecs.updateMaterialSystem,
+                    .name = "PhysicsSystem",
+                    .prepare_fn = ecs.preparePhysicsSystem,
+                    .update_fn = ecs.updatePhysicsSystem,
                     .access = .{
-                        .reads = &[_][]const u8{ "MaterialSet", "MeshRenderer" },
-                        .writes = &[_][]const u8{},
+                        .reads = &[_][]const u8{ "RigidBody", "BoxCollider", "SphereCollider", "CapsuleCollider", "MeshCollider" },
+                        .writes = &[_][]const u8{ "Transform", "RigidBody" },
                     },
                 }) catch |err| {
-                    log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
+                    log(.WARN, "scene_layer", "Failed to add physics system: {}", .{err});
                 };
+
+                // Stage 1.5: Material System (Isolated to avoid contention/crashes)
+                if (sched.addStage("MaterialUpdate")) |stage_mat| {
+                    stage_mat.addSystem(.{
+                        .name = "MaterialSystem",
+                        .prepare_fn = ecs.prepareMaterialSystem,
+                        .update_fn = ecs.updateMaterialSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{ "MaterialSet", "MeshRenderer" },
+                            .writes = &[_][]const u8{},
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
+                    };
+                } else |err| {
+                    log(.WARN, "scene_layer", "Failed to add stage 1.5: {}", .{err});
+                }
 
                 // Stage 2: Systems that depend on Stage 1
                 if (sched.addStage("DependentSystems")) |stage2| {

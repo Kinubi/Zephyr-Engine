@@ -54,6 +54,15 @@ pub fn build(b: *std.Build) !void {
     const zstbi = b.dependency("zstbi", .{});
     engine_mod.addImport("zstbi", zstbi.module("root"));
 
+    const zphysics = b.dependency("zphysics", .{
+        .target = target,
+        .optimize = optimize,
+        .use_double_precision = false,
+        .enable_cross_platform_determinism = true,
+    });
+    engine_mod.addImport("zphysics", zphysics.module("root"));
+    engine_mod.linkLibrary(zphysics.artifact("joltc"));
+
     // ========== EDITOR EXECUTABLE ==========
     const editor_mod = b.createModule(.{
         .root_source_file = b.path("editor/src/main.zig"),
@@ -74,6 +83,7 @@ pub fn build(b: *std.Build) !void {
 
     // Add vulkan module to editor (needed for editor-specific code)
     editor.root_module.addImport("vulkan", vulkan_zig);
+    editor.root_module.addImport("zphysics", zphysics.module("root"));
 
     // Link system libraries needed by engine
     editor.linkSystemLibrary("glfw");
@@ -95,6 +105,7 @@ pub fn build(b: *std.Build) !void {
         .renderer = cimgui.Renderer.Vulkan,
     });
     editor.linkLibrary(cimgui_dep.artifact("cimgui"));
+    // editor.linkLibrary(zphysics.artifact("zphysics"));
 
     // Install editor
     b.installArtifact(editor);
@@ -121,6 +132,14 @@ pub fn build(b: *std.Build) !void {
         .root_module = editor_test_mod,
     });
     editor_tests.root_module.addImport("zephyr", engine_mod);
+    editor_tests.root_module.addImport("zphysics", zphysics.module("root"));
+    editor_tests.linkSystemLibrary("glfw");
+    editor_tests.linkSystemLibrary("x11");
+    editor_tests.linkSystemLibrary("lua");
+    editor_tests.linkSystemLibrary("shaderc");
+    editor_tests.linkSystemLibrary("pthread");
+    editor_tests.linkLibC();
+    addSpirvCross(b, editor_tests);
 
     const run_editor_tests = b.addRunArtifact(editor_tests);
     const test_step = b.step("test", "Run unit tests");

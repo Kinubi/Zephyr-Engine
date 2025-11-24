@@ -213,20 +213,7 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene = try Scene.init(
-            self.allocator,
-            &new_ecs_world,
-            asset_manager,
-            gc,
-            self.engine.getUnifiedPipelineSystem().?,
-            self.engine.getBufferManager().?,
-            self.engine.getDescriptorManager().?,
-            self.engine.getTextureManager().?,
-            swapchain,
-            thread_pool,
-            global_ubo_set,
-            "cornell_box"
-        );
+        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, gc, self.engine.getUnifiedPipelineSystem().?, self.engine.getBufferManager().?, self.engine.getDescriptorManager().?, self.engine.getTextureManager().?, swapchain, thread_pool, global_ubo_set, "cornell_box");
 
         // Register scene pointer in World so systems can access it
         try new_ecs_world.setUserData("scene", @ptrCast(&scene));
@@ -476,28 +463,37 @@ pub const App = struct {
         } else {
             // SINGLE-THREADED MODE: Main thread does everything
             // Begin frame through engine
+            log(.INFO, "app", "Frame start", .{});
             const frame_info = try self.engine.beginFrame();
+            log(.INFO, "app", "Frame acquired", .{});
 
             // Update engine systems
             try self.engine.update(frame_info);
+            log(.INFO, "app", "Engine updated", .{});
 
             // Render frame
             try self.engine.render(frame_info);
+            log(.INFO, "app", "Engine rendered", .{});
 
             // End frame
             try self.engine.endFrame(frame_info);
+            log(.INFO, "app", "Frame ended", .{});
         }
 
         return self.engine.isRunning();
     }
 
     pub fn deinit(self: *App) void {
+        log(.INFO, "app", "App deinit start", .{});
         _ = self.engine.getGraphicsContext().vkd.deviceWaitIdle(self.engine.getGraphicsContext().dev) catch {}; // Ensure all GPU work is finished
+        log(.INFO, "app", "Device idle", .{});
         self.engine.getSwapchain().waitForAllFences() catch unreachable;
+        log(.INFO, "app", "Fences waited", .{});
 
         // Clean up UI
         ui_renderer.deinit();
         imgui_context.deinit();
+        log(.INFO, "app", "UI deinitialized", .{});
 
         // Clean up scheduled assets list
         scheduled_assets.deinit(self.allocator);
@@ -506,6 +502,7 @@ pub const App = struct {
 
         // Clean up Scene v2
         if (scene_enabled) {
+            log(.INFO, "app", "Deinitializing scene...", .{});
             scene.deinit();
             log(.INFO, "app", "Scene v2 cleaned up", .{});
         }
