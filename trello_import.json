@@ -2,7 +2,7 @@
   "name": "Zephyr Engine Development",
   "lists": [
     {
-      "name": "🚨 High Priority / Next Up",
+      "name": "Done",
       "cards": [
         {
           "name": "Material Editor",
@@ -10,7 +10,7 @@
           "labels": ["Editor", "High Priority"]
         },
         {
-          "name": "Physics Integration",
+          "name": "Fix Scene Hierarchy Parenting",
           "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
           "labels": ["Engine", "High Priority"]
         },
