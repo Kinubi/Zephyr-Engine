@@ -1235,7 +1235,7 @@ pub const ResourceBinder = struct {
                     if (managed_buffer.generation == 0) continue;
 
                     // Bind with arena_offset if this is an arena-allocated buffer
-                    const offset = managed_buffer.arena_offset;
+                    const offset = managed_buffer.arena_offset orelse 0;
 
                     switch (location.binding_type) {
                         .storage_buffer => {

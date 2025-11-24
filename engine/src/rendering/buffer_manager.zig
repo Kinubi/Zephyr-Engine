@@ -40,7 +40,7 @@ pub const ManagedBuffer = struct {
     binding_info: ?BindingInfo = null,
 
     // Arena allocation support (for per-frame dynamic buffers)
-    arena_offset: usize = 0, // Offset within arena buffer (0 = not arena-allocated)
+    arena_offset: ?usize = null, // Offset within arena buffer (null = not arena-allocated)
     pending_bind_mask: std.atomic.Value(u8) = std.atomic.Value(u8).init(0), // Frame binding mask (like AS)
 
     // Debug tracking

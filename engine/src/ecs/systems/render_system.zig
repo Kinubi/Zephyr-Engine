@@ -113,7 +113,7 @@ pub const RenderSystem = struct {
                 .created_frame = 0,
                 .generation = 1,
                 .binding_info = null,
-                .arena_offset = 0,
+                .arena_offset = null,
                 .pending_bind_mask = std.atomic.Value(u8).init((@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1),
             };
 
@@ -130,7 +130,7 @@ pub const RenderSystem = struct {
             buf.markUpdated();
 
             // Upload dummy data to this frame's buffer
-            try buf.buffer.map(dummy_size, buf.arena_offset);
+            try buf.buffer.map(dummy_size, buf.arena_offset orelse 0);
             const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
             const bytes = std.mem.asBytes(&dummy_instance);
             @memcpy(data_ptr[0..bytes.len], bytes);
@@ -157,8 +157,8 @@ pub const RenderSystem = struct {
                 const frame = @as(u32, @intCast(frame_idx));
                 const buf = buf_ptr;
 
-                // If arena-allocated (arena_offset != 0), free from arena first
-                if (buf.arena_offset != 0) {
+                // If arena-allocated (arena_offset != null), free from arena first
+                if (buf.arena_offset != null) {
                     bm.freeFromFrameArena(frame, buf);
                     // Free the heap-allocated ManagedBuffer and its name
                     self.allocator.free(buf.name);
@@ -645,7 +645,7 @@ pub const RenderSystem = struct {
 
             // Write instance data to all frame buffers
             for (&self.instance_buffers) |buf| {
-                try buf.buffer.map(buffer_size, buf.arena_offset);
+                try buf.buffer.map(buffer_size, buf.arena_offset orelse 0);
                 const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
                 @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
                 buf.buffer.unmap();
@@ -702,7 +702,7 @@ pub const RenderSystem = struct {
                 for (&self.instance_buffers) |buf| {
                     for (changed_indices.items) |idx| {
                         const instance_data = current_instances.items[idx];
-                        const offset = buf.arena_offset + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
+                        const offset = (buf.arena_offset orelse 0) + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
 
                         try buf.buffer.map(@sizeOf(render_data_types.RasterizationData.InstanceData), offset);
                         const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
@@ -797,7 +797,7 @@ pub const RenderSystem = struct {
         for (&self.instance_buffers) |buf| {
             for (instance_delta.changed_indices, 0..) |idx, i| {
                 const instance_data = instance_delta.changed_data[i];
-                const offset = buf.arena_offset + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
+                const offset = (buf.arena_offset orelse 0) + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
 
                 try buf.buffer.map(@sizeOf(render_data_types.RasterizationData.InstanceData), offset);
                 const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);

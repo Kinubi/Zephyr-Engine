@@ -214,7 +214,7 @@ pub const MaterialSetData = struct {
                 .created_frame = 0,
                 .generation = 1,
                 .binding_info = null,
-                .arena_offset = 0,
+                .arena_offset = null,
                 .pending_bind_mask = std.atomic.Value(u8).init((@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1),
             };
 
@@ -301,7 +301,7 @@ pub const MaterialSetData = struct {
             const frame = @as(u32, @intCast(frame_idx));
             const buf = buf_ptr;
 
-            if (buf.arena_offset != 0) {
+            if (buf.arena_offset != null) {
                 // Arena-allocated: only free tracking and heap-allocated struct
                 // Don't call destroyBuffer - the arena owns the Vulkan buffer
                 buffer_manager.freeFromFrameArena(frame, buf);
@@ -328,6 +328,10 @@ pub const MaterialSystem = struct {
     // GPU resources per material set name (e.g., "opaque", "transparent", "character")
     material_sets: std.StringHashMap(MaterialSetData),
 
+    // Global material set (aggregates all sets for path tracing)
+    global_set: MaterialSetData,
+    global_set_offsets: std.StringHashMap(u32),
+
     pub fn init(
         allocator: std.mem.Allocator,
         buffer_manager: *BufferManager,
@@ -335,12 +339,18 @@ pub const MaterialSystem = struct {
         asset_manager: *AssetManager,
     ) !*MaterialSystem {
         const self = try allocator.create(MaterialSystem);
+        
+        // Initialize global set
+        const global_set = try MaterialSetData.init(allocator, buffer_manager);
+
         self.* = .{
             .allocator = allocator,
             .buffer_manager = buffer_manager,
             .descriptor_manager = descriptor_manager,
             .asset_manager = asset_manager,
             .material_sets = std.StringHashMap(MaterialSetData).init(allocator),
+            .global_set = global_set,
+            .global_set_offsets = std.StringHashMap(u32).init(allocator),
         };
 
         log(.INFO, "material_system", "MaterialSystem initialized (multi-set ECS)", .{});
@@ -354,6 +364,10 @@ pub const MaterialSystem = struct {
             set_data.deinit(self.buffer_manager);
         }
         self.material_sets.deinit();
+
+        // Clean up global set
+        self.global_set.deinit(self.buffer_manager);
+        self.global_set_offsets.deinit();
 
         self.allocator.destroy(self);
         log(.INFO, "material_system", "MaterialSystem deinitialized", .{});
@@ -445,6 +459,9 @@ pub const MaterialSystem = struct {
 
             try self.prepareMaterialSet(world, set_name, entities);
         }
+
+        // Update global set (aggregates all sets)
+        try self.updateGlobalSet();
 
         // Write deltas to MaterialDeltasSet component (ALWAYS, like RenderSystem)
         const singleton_entity = try world.getOrCreateSingletonEntity();
@@ -692,7 +709,7 @@ pub const MaterialSystem = struct {
                     }
 
                     // Map the entire range once
-                    const range_start = buf.arena_offset + (min_idx * @sizeOf(GPUMaterial));
+                    const range_start = (buf.arena_offset orelse 0) + (min_idx * @sizeOf(GPUMaterial));
                     const range_size = ((max_idx - min_idx + 1) * @sizeOf(GPUMaterial));
 
                     try buf.buffer.map(range_size, range_start);
@@ -1285,10 +1302,109 @@ pub const MaterialSystem = struct {
         self.material_sets.clearRetainingCapacity();
         log(.INFO, "material_system", "MaterialSystem reset", .{});
     }
+
+    /// Update the global material set (aggregates all sets)
+    fn updateGlobalSet(self: *MaterialSystem) !void {
+        // 1. Sort set names for deterministic order
+        var set_names = std.ArrayList([]const u8){};
+        defer set_names.deinit(self.allocator);
+
+        var key_iter = self.material_sets.keyIterator();
+        while (key_iter.next()) |key| {
+            try set_names.append(self.allocator, key.*);
+        }
+        std.mem.sort([]const u8, set_names.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+
+        // 2. Calculate offsets and total size
+        var current_mat_offset: u32 = 0;
+        self.global_set_offsets.clearRetainingCapacity();
+
+        // Union all texture maps
+        var global_texture_map = std.AutoHashMap(u64, u32).init(self.allocator);
+        defer global_texture_map.deinit();
+        try global_texture_map.put(0, 0); // Default texture at index 0
+
+        var global_unique_textures = std.AutoHashMap(u64, void).init(self.allocator);
+        defer global_unique_textures.deinit();
+        try global_unique_textures.put(0, {});
+
+        // First pass: Collect all textures
+        for (set_names.items) |set_name| {
+            const set_data = self.material_sets.getPtr(set_name).?;
+            for (set_data.last_texture_ids.items) |tex_id| {
+                try global_unique_textures.put(tex_id, {});
+            }
+        }
+
+        // Sort global textures
+        var global_texture_ids = std.ArrayList(u64){};
+        defer global_texture_ids.deinit(self.allocator);
+        var tex_iter = global_unique_textures.keyIterator();
+        while (tex_iter.next()) |key| {
+            try global_texture_ids.append(self.allocator, key.*);
+        }
+        std.mem.sort(u64, global_texture_ids.items, {}, std.sort.asc(u64));
+
+        // Build global texture map
+        for (global_texture_ids.items, 0..) |tex_id, i| {
+            try global_texture_map.put(tex_id, @intCast(i));
+        }
+
+        // 3. Build global material buffer and update components
+        var global_materials = std.ArrayList(GPUMaterial){};
+        defer global_materials.deinit(self.allocator);
+
+        for (set_names.items) |set_name| {
+            const set_data = self.material_sets.getPtr(set_name).?;
+            const offset = current_mat_offset;
+            try self.global_set_offsets.put(set_name, offset);
+
+            // Append materials, patching texture indices
+            for (set_data.next_materials.items) |mat| {
+                var new_mat = mat;
+                // Map local texture index -> texture ID -> global texture index
+                if (mat.albedo_idx < set_data.last_texture_ids.items.len) {
+                    const tex_id = set_data.last_texture_ids.items[mat.albedo_idx];
+                    new_mat.albedo_idx = global_texture_map.get(tex_id) orelse 0;
+                }
+                if (mat.roughness_idx < set_data.last_texture_ids.items.len) {
+                    const tex_id = set_data.last_texture_ids.items[mat.roughness_idx];
+                    new_mat.roughness_idx = global_texture_map.get(tex_id) orelse 0;
+                }
+                if (mat.metallic_idx < set_data.last_texture_ids.items.len) {
+                    const tex_id = set_data.last_texture_ids.items[mat.metallic_idx];
+                    new_mat.metallic_idx = global_texture_map.get(tex_id) orelse 0;
+                }
+                if (mat.normal_idx < set_data.last_texture_ids.items.len) {
+                    const tex_id = set_data.last_texture_ids.items[mat.normal_idx];
+                    new_mat.normal_idx = global_texture_map.get(tex_id) orelse 0;
+                }
+                if (mat.emissive_idx < set_data.last_texture_ids.items.len) {
+                    const tex_id = set_data.last_texture_ids.items[mat.emissive_idx];
+                    new_mat.emissive_idx = global_texture_map.get(tex_id) orelse 0;
+                }
+                if (mat.occlusion_idx < set_data.last_texture_ids.items.len) {
+                    const tex_id = set_data.last_texture_ids.items[mat.occlusion_idx];
+                    new_mat.occlusion_idx = global_texture_map.get(tex_id) orelse 0;
+                }
+                try global_materials.append(self.allocator, new_mat);
+            }
+            current_mat_offset += @intCast(set_data.next_materials.items.len);
+        }
+
+        // 4. Update global set data
+        self.global_set.next_materials.clearRetainingCapacity();
+        try self.global_set.next_materials.appendSlice(self.allocator, global_materials.items);
+
+        self.global_set.last_texture_ids.clearRetainingCapacity();
+        try self.global_set.last_texture_ids.appendSlice(self.allocator, global_texture_ids.items);
+    }
 };
 
-/// MAIN THREAD: Prepare phase - ECS queries, compute indices, write to components
-/// SystemScheduler compatibility wrapper
 pub fn prepare(world: *World, dt: f32) !void {
     _ = dt;
 
@@ -1304,8 +1420,6 @@ pub fn prepare(world: *World, dt: f32) !void {
     }
 }
 
-/// RENDER THREAD: Update phase - GPU buffer uploads (uses snapshot data)
-/// SystemScheduler compatibility wrapper
 pub fn update(world: *World, frame_info: *FrameInfo) !void {
     // Get the snapshot from frame_info
     const snapshot = frame_info.snapshot orelse return;
