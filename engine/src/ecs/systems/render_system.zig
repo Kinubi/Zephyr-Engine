@@ -35,6 +35,7 @@ pub const RenderSystem = struct {
 
     // Change tracking
     last_renderable_count: usize = 0,
+    last_total_entity_count: usize = 0, // Total entities with MeshRenderer (including disabled)
     last_geometry_count: usize = 0,
 
     // Descriptor update flags
@@ -1082,7 +1083,7 @@ pub const RenderSystem = struct {
         }
 
         var mesh_idx: usize = 0;
-        for (entities) |entity_data| {
+        for (entities, 0..) |entity_data, i| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
 
             // Use material_buffer_index from MaterialSet component
@@ -1107,6 +1108,7 @@ pub const RenderSystem = struct {
                     .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
                     .material_index = material_index,
                     .visible = true,
+                    .entity_index = @intCast(i),
                 };
 
                 // Register this object with the batch builder for its set
@@ -1498,7 +1500,8 @@ pub const RenderSystem = struct {
         var mesh_offset: usize = 0;
 
         // Process this chunk of renderables
-        for (ctx.renderables[ctx.start_idx..ctx.end_idx]) |renderable| {
+        for (ctx.renderables[ctx.start_idx..ctx.end_idx], 0..) |renderable, i| {
+            const entity_idx = ctx.start_idx + i;
             const model = ctx.asset_manager.getModel(renderable.model_asset) orelse continue;
 
             // Use material_buffer_index from MaterialSet component
@@ -1515,6 +1518,7 @@ pub const RenderSystem = struct {
                     .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
                     .material_index = material_index,
                     .visible = true,
+                    .entity_index = @intCast(entity_idx),
                 };
 
                 ctx.geometries[output_idx] = .{
@@ -1720,6 +1724,143 @@ pub const RenderSystem = struct {
             .materials = &[_]RasterizationData.MaterialData{},
         };
     }
+
+    /// Fast path: Update caches when only transforms changed
+    /// Avoids full rebuild of object lists and asset lookups
+    fn updateCachesForTransformsOnly(
+        self: *RenderSystem,
+        snapshot: *const GameStateSnapshot,
+    ) !void {
+        const start_time = std.time.nanoTimestamp();
+
+        const active_idx = self.active_cache_index.load(.acquire);
+        const write_idx = 1 - active_idx;
+
+        // We need the active data to copy from
+        const active_raster = self.cached_raster_data[active_idx] orelse return error.CacheMissing;
+        const active_rt = self.cached_raytracing_data[active_idx] orelse return error.CacheMissing;
+
+        // Clean up old data in the write buffer
+        if (self.cached_raster_data[write_idx]) |data| {
+            self.allocator.free(data.objects);
+            for (data.batch_lists) |list| {
+                for (list.batches) |batch| {
+                    self.allocator.free(batch.instances);
+                }
+                self.allocator.free(list.batches);
+            }
+            self.allocator.free(data.batch_lists);
+        }
+        if (self.cached_raytracing_data[write_idx]) |*data| {
+            self.allocator.free(data.instances);
+            self.allocator.free(data.geometries);
+            self.allocator.free(data.materials);
+        }
+
+        // 1. Copy Raster Objects
+        const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, active_raster.objects.len);
+        @memcpy(raster_objects, active_raster.objects);
+
+        // 2. Update Transforms in Raster Objects
+        const entities = snapshot.entities[0..snapshot.entity_count];
+        for (raster_objects) |*obj| {
+            // Use entity_index to look up new transform directly
+            if (obj.entity_index < entities.len) {
+                obj.transform = entities[obj.entity_index].transform.data;
+            }
+        }
+
+        // 3. Rebuild Batches (using updated objects)
+        // We still use BatchBuilder because it handles grouping and instance data creation
+        // But we avoid asset lookups and object creation
+        var builders = std.StringHashMap(BatchBuilder).init(self.allocator);
+        defer {
+            var iter = builders.valueIterator();
+            while (iter.next()) |builder| {
+                builder.deinit();
+            }
+            builders.deinit();
+        }
+
+        // Re-add objects to builders
+        for (raster_objects, 0..) |*obj, i| {
+            const entity_data = entities[obj.entity_index];
+            const set_name = if (entity_data.material_set_name.len > 0) entity_data.material_set_name else "opaque";
+
+            const builder_entry = try builders.getOrPut(set_name);
+            if (!builder_entry.found_existing) {
+                builder_entry.value_ptr.* = BatchBuilder.init(self.allocator);
+            }
+            // addObject only stores indices, doesn't copy data
+            try builder_entry.value_ptr.addObject(obj.mesh_handle.mesh_ptr, i, entity_data.entity_id);
+        }
+
+        // Build final batch lists
+        const batch_lists = try self.allocator.alloc(render_data_types.RasterizationData.BatchList, builders.count());
+        var list_idx: usize = 0;
+        var iter = builders.iterator();
+        while (iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            var builder = entry.value_ptr;
+            const batches = try builder.buildBatches(raster_objects, self.allocator);
+
+            batch_lists[list_idx] = .{
+                .set_name = set_name,
+                .batches = batches,
+            };
+            list_idx += 1;
+        }
+
+        // 4. Copy and Update Raytracing Data
+        const geometries = try self.allocator.alloc(RaytracingData.RTGeometry, active_rt.geometries.len);
+        @memcpy(geometries, active_rt.geometries);
+
+        const materials = try self.allocator.alloc(RasterizationData.MaterialData, active_rt.materials.len);
+        @memcpy(materials, active_rt.materials);
+
+        const instances = try self.allocator.alloc(RaytracingData.RTInstance, active_rt.instances.len);
+        // Update transforms in instances (parallel to raster_objects)
+        for (instances, 0..) |*inst, i| {
+            const obj = raster_objects[i];
+            inst.* = active_rt.instances[i]; // Copy old data (mask, IDs)
+            
+            const mat = math.Mat4x4{ .data = obj.transform };
+            inst.transform = mat.to_3x4();
+        }
+
+        // Increment cache generation
+        self.cache_generation +%= 1;
+
+        // Store caches in WRITE buffer
+        self.cached_raster_data[write_idx] = RasterizationData{
+            .objects = raster_objects,
+            .batch_lists = batch_lists,
+        };
+        self.cached_raytracing_data[write_idx] = RaytracingData{
+            .instances = instances,
+            .geometries = geometries,
+            .materials = materials,
+        };
+
+        // Atomically flip
+        self.active_cache_index.store(write_idx, .release);
+
+        const total_time_ns = std.time.nanoTimestamp() - start_time;
+        const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
+        
+        // Frame budget enforcement (stricter for fast path)
+        const budget_ms: f64 = 1.0;
+        if (total_time_ms > budget_ms) {
+            log(.WARN, "render_system", "Fast path budget exceeded! Total: {d:.2}ms Budget: {d:.2}ms", .{ total_time_ms, budget_ms });
+        }
+
+        // Apply instance deltas to GPU
+        if (snapshot.instance_delta) |delta| {
+            if (delta.changed_indices.len > 0) {
+                try self.applyInstanceDeltasFromSnapshot(delta);
+            }
+        }
+    }
 };
 
 /// MAIN THREAD: Prepare phase - change detection and dirty flag management
@@ -1766,7 +1907,7 @@ pub fn prepare(world: *World, dt: f32) !void {
     }
 
     // 2) Quick check: Entity count changed (cheap) - NOT transform-only
-    if (!changes_detected and current_count != self.last_renderable_count) {
+    if (!changes_detected and current_count != self.last_total_entity_count) {
         changes_detected = true;
         is_transform_only = false;
         reason = "count_changed";
@@ -1826,68 +1967,94 @@ pub fn prepare(world: *World, dt: f32) !void {
 
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
-        // Pre-allocate with expected capacity to avoid reallocations
-        // Use scratch allocator for temporary extraction list
-        var extracted_renderables = std.ArrayList(components.ExtractedRenderable){};
-        try extracted_renderables.ensureTotalCapacity(self.scratch_arena.allocator(), current_count);
-        defer extracted_renderables.deinit(self.scratch_arena.allocator());
+        // OPTIMIZATION: If only transforms changed, update in place
+        // We assume the entity list order is stable because count didn't change and no structural changes detected
+        if (is_transform_only and renderables_set.renderables.len > 0) {
+             var iter = mesh_view.iterator();
+             var i: usize = 0;
+             while (iter.next()) |entry| {
+                 const renderer = entry.component;
+                 if (!renderer.enabled or !renderer.hasValidAssets()) continue;
 
-        // Single-pass extraction: clear dirty flags and extract in one loop
-        var iter = mesh_view.iterator();
-        while (iter.next()) |entry| {
-            const renderer = entry.component;
+                 if (i >= renderables_set.renderables.len) break;
 
-            // Early exit conditions
-            if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+                 // Clear dirty flag and update transform
+                 if (world.get(Transform, entry.entity)) |transform| {
+                     transform.dirty = false;
+                     renderables_set.renderables[i].transform = transform.world_matrix;
+                 }
+                 i += 1;
+             }
+             
+             renderables_set.markDirty(true);
+             
+             // Calculate instance deltas using existing renderables
+             try self.calculateInstanceDeltas(world, renderables_set.renderables, asset_manager);
+        } else {
+            // Pre-allocate with expected capacity to avoid reallocations
+            // Use scratch allocator for temporary extraction list
+            var extracted_renderables = std.ArrayList(components.ExtractedRenderable){};
+            try extracted_renderables.ensureTotalCapacity(self.scratch_arena.allocator(), current_count);
+            defer extracted_renderables.deinit(self.scratch_arena.allocator());
 
-            // Clear transform dirty flag inline during extraction
-            if (world.get(Transform, entry.entity)) |transform| {
-                transform.dirty = false;
+            // Single-pass extraction: clear dirty flags and extract in one loop
+            var iter = mesh_view.iterator();
+            while (iter.next()) |entry| {
+                const renderer = entry.component;
+
+                // Early exit conditions
+                if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+
+                // Clear transform dirty flag inline during extraction
+                if (world.get(Transform, entry.entity)) |transform| {
+                    transform.dirty = false;
+                }
+
+                // Get transform (default to identity if missing)
+                const transform = world.get(Transform, entry.entity);
+                const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
+
+                // Get material buffer index from MaterialSet component
+                const material_set = world.get(components.MaterialSet, entry.entity);
+                const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
+                const material_set_name = if (material_set) |ms| ms.set_name else "opaque";
+
+                extracted_renderables.appendAssumeCapacity(.{
+                    .entity_id = entry.entity,
+                    .transform = world_matrix,
+                    .model_asset = renderer.model_asset.?,
+                    .material_buffer_index = material_buffer_index,
+                    .material_set_name = material_set_name,
+                    .layer = renderer.layer,
+                    .casts_shadows = renderer.casts_shadows,
+                    .receives_shadows = renderer.receives_shadows,
+                });
             }
 
-            // Get transform (default to identity if missing)
-            const transform = world.get(Transform, entry.entity);
-            const world_matrix = if (transform) |t| t.world_matrix else math.Mat4x4.identity();
-
-            // Get material buffer index from MaterialSet component
-            const material_set = world.get(components.MaterialSet, entry.entity);
-            const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
-            const material_set_name = if (material_set) |ms| ms.set_name else "opaque";
-
-            extracted_renderables.appendAssumeCapacity(.{
-                .entity_id = entry.entity,
-                .transform = world_matrix,
-                .model_asset = renderer.model_asset.?,
-                .material_buffer_index = material_buffer_index,
-                .material_set_name = material_set_name,
-                .layer = renderer.layer,
-                .casts_shadows = renderer.casts_shadows,
-                .receives_shadows = renderer.receives_shadows,
-            });
-        }
-
-        // Count geometries for tracking
-        const current_renderable_count = extracted_renderables.items.len;
-        var current_geometry_count: usize = 0;
-        for (extracted_renderables.items) |renderable| {
-            if (asset_manager.getModel(renderable.model_asset)) |model| {
-                current_geometry_count += model.meshes.items.len;
+            // Count geometries for tracking
+            const current_renderable_count = extracted_renderables.items.len;
+            var current_geometry_count: usize = 0;
+            for (extracted_renderables.items) |renderable| {
+                if (asset_manager.getModel(renderable.model_asset)) |model| {
+                    current_geometry_count += model.meshes.items.len;
+                }
             }
-        }
 
-        // Update tracking state
-        self.last_renderable_count = current_renderable_count;
-        self.last_geometry_count = current_geometry_count;
+            // Update tracking state
+            self.last_renderable_count = current_renderable_count;
+            self.last_total_entity_count = current_count;
+            self.last_geometry_count = current_geometry_count;
 
-        // Store extracted renderables in RenderablesSet component
-        const renderables_copy = try self.allocator.dupe(components.ExtractedRenderable, extracted_renderables.items);
-        renderables_set.setRenderables(self.allocator, renderables_copy);
+            // Store extracted renderables in RenderablesSet component
+            const renderables_copy = try self.allocator.dupe(components.ExtractedRenderable, extracted_renderables.items);
+            renderables_set.setRenderables(self.allocator, renderables_copy);
 
-        renderables_set.markDirty(is_transform_only);
+            renderables_set.markDirty(is_transform_only);
 
-        // ALWAYS calculate instance deltas for snapshot (full delta on first frame/realloc, granular otherwise)
-        if (extracted_renderables.items.len > 0) {
-            try self.calculateInstanceDeltas(world, extracted_renderables.items, asset_manager);
+            // ALWAYS calculate instance deltas for snapshot (full delta on first frame/realloc, granular otherwise)
+            if (extracted_renderables.items.len > 0) {
+                try self.calculateInstanceDeltas(world, extracted_renderables.items, asset_manager);
+            }
         }
     }
 }
@@ -1917,7 +2084,12 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
             log(.INFO, "render_system", "First frame detected - forcing cache rebuild ({} entities)", .{snapshot.entity_count});
         }
 
-        try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
+        // OPTIMIZATION: If only transforms changed, skip full cache rebuild
+        if (snapshot.render_changes.transform_only_change and !is_first_frame) {
+            try self.updateCachesForTransformsOnly(snapshot);
+        } else {
+            try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
+        }
 
         // Update transform_only_change flag from snapshot for raytracing system to read
         self.transform_only_change = snapshot.render_changes.transform_only_change;

@@ -52,6 +52,7 @@ pub const RasterizationData = struct {
         mesh_handle: MeshHandle,
         material_index: u32,
         visible: bool = true,
+        entity_index: u32 = 0, // Index into snapshot entities array (for fast updates)
     };
 
     pub const MaterialData = struct {
