@@ -96,13 +96,16 @@ void main(
 
         float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
    
+        // Convert tint from sRGB to Linear
+        float3 tintLinear = pow(mat.albedo_tint.rgb, 2.2);
+
         // Sample albedo texture if present, otherwise use tint
         float3 albedo;
         if (mat.albedo_idx == 0) {
-            albedo = mat.albedo_tint.rgb;
+            albedo = tintLinear;
         } else {
             Texture2D albedoTex = texture_buffer[mat.albedo_idx];
-            albedo = albedoTex.SampleLevel(sampler0, uv, 0).rgb * mat.albedo_tint.rgb;
+            albedo = albedoTex.SampleLevel(sampler0, uv, 0).rgb * tintLinear;
         }
         
         // Sample emissive texture if present

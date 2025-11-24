@@ -7,6 +7,7 @@ const c = @import("backend/imgui_c.zig").c;
 const PerformanceMonitor = zephyr.PerformanceMonitor;
 const SceneHierarchyPanel = @import("scene_hierarchy_panel.zig").SceneHierarchyPanel;
 const AssetBrowserPanel = @import("asset_browser_panel.zig").AssetBrowserPanel;
+const MaterialEditorPanel = @import("material_editor_panel.zig").MaterialEditorPanel;
 const ViewportPicker = @import("viewport_picker.zig");
 const Gizmo = @import("gizmo.zig").Gizmo;
 const UIMath = @import("backend/ui_math.zig");
@@ -36,6 +37,9 @@ pub const UIRenderer = struct {
 
     // Asset browser panel
     asset_browser_panel: AssetBrowserPanel,
+
+    // Material editor panel
+    material_editor_panel: MaterialEditorPanel,
 
     // Cached draw list for the viewport window (used for overlays)
     viewport_draw_list: ?*c.ImDrawList = null,
@@ -88,6 +92,7 @@ pub const UIRenderer = struct {
             .allocator = allocator,
             .hierarchy_panel = SceneHierarchyPanel.init(),
             .asset_browser_panel = AssetBrowserPanel.init(allocator),
+            .material_editor_panel = MaterialEditorPanel.init(),
         };
 
         // Zero fixed-size console buffers
@@ -326,6 +331,27 @@ pub const UIRenderer = struct {
                 }
                 c.ImGui_EndMenu();
             }
+            if (c.ImGui_BeginMenu("Window")) {
+                if (c.ImGui_MenuItem("Material Editor")) {
+                    self.material_editor_panel.show_window = !self.material_editor_panel.show_window;
+                }
+                if (c.ImGui_MenuItem("Asset Browser")) {
+                    self.show_asset_browser = !self.show_asset_browser;
+                }
+                if (c.ImGui_MenuItem("Stats")) {
+                    self.show_stats_window = !self.show_stats_window;
+                }
+                if (c.ImGui_MenuItem("Performance Graphs")) {
+                    self.show_performance_graphs = !self.show_performance_graphs;
+                }
+                if (c.ImGui_MenuItem("Camera Settings")) {
+                    self.show_camera_window = !self.show_camera_window;
+                }
+                if (c.ImGui_MenuItem("Scripting Console")) {
+                    self.show_scripting_console = !self.show_scripting_console;
+                }
+                c.ImGui_EndMenu();
+            }
             c.ImGui_EndMainMenuBar();
         }
 
@@ -363,6 +389,15 @@ pub const UIRenderer = struct {
 
         if (self.show_asset_browser) {
             self.asset_browser_panel.render();
+        }
+
+        // Material Editor Panel
+        if (stats.scene) |scene| {
+            var selected_entity: ?zephyr.ecs.EntityId = null;
+            if (self.hierarchy_panel.selected_entities.items.len > 0) {
+                selected_entity = self.hierarchy_panel.selected_entities.items[0];
+            }
+            self.material_editor_panel.render(scene, selected_entity);
         }
 
         // Scripting console is a panel and should be rendered with other panels

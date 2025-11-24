@@ -52,6 +52,7 @@ pub const RasterizationData = struct {
         mesh_handle: MeshHandle,
         material_index: u32,
         visible: bool = true,
+        entity_index: u32 = 0, // Index into snapshot entities array (for fast updates)
     };
 
     pub const MaterialData = struct {
@@ -62,18 +63,29 @@ pub const RasterizationData = struct {
         texture_index: u32 = 0,
     };
 
+    pub const BatchList = struct {
+        set_name: []const u8,
+        batches: []const InstancedBatch,
+    };
+
     // Legacy: per-object array (deprecated, use batches instead)
     objects: []const RenderableObject,
 
     // Instanced rendering data (preferred)
-    batches: []const InstancedBatch = &[_]InstancedBatch{},
+    // Partitioned by material set (e.g. "opaque", "transparent")
+    batch_lists: []const BatchList = &[_]BatchList{},
 
     pub fn getVisibleObjects(self: *const RasterizationData) []const RenderableObject {
         return self.objects;
     }
 
-    pub fn getInstancedBatches(self: *const RasterizationData) []const InstancedBatch {
-        return self.batches;
+    pub fn getBatches(self: *const RasterizationData, set_name: []const u8) []const InstancedBatch {
+        for (self.batch_lists) |list| {
+            if (std.mem.eql(u8, list.set_name, set_name)) {
+                return list.batches;
+            }
+        }
+        return &[_]InstancedBatch{};
     }
 };
 

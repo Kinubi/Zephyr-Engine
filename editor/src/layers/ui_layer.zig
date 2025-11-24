@@ -172,7 +172,7 @@ pub const UILayer = struct {
         const perf_stats = if (self.performance_monitor) |pm| pm.getStats() else null;
 
         // Check path tracing status
-        const pt_enabled = if (self.scene.render_graph) |*graph| blk: {
+        const pt_enabled = if (self.scene.render_graph) |graph| blk: {
             break :blk if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
         } else false;
 

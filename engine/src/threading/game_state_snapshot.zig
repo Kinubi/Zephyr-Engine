@@ -68,6 +68,7 @@ pub const GameStateSnapshot = struct {
         transform: Math.Mat4x4, // World transform matrix
         model_asset: AssetId,
         material_buffer_index: ?u32, // Index into MaterialSystem's per-set material buffer
+        material_set_name: []const u8, // Name of the material set (e.g. "opaque")
         layer: u8,
         casts_shadows: bool,
         receives_shadows: bool,
@@ -200,6 +201,7 @@ pub fn captureSnapshot(
             .transform = extracted.transform,
             .model_asset = extracted.model_asset,
             .material_buffer_index = extracted.material_buffer_index,
+            .material_set_name = extracted.material_set_name,
             .layer = extracted.layer,
             .casts_shadows = extracted.casts_shadows,
             .receives_shadows = extracted.receives_shadows,

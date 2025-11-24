@@ -63,6 +63,7 @@ pub const PerformanceMonitor = struct {
 
         pub fn getGpuTimeMs(self: PassTiming, timestamp_period: f32) f32 {
             if (self.gpu_start_ticks == 0 and self.gpu_end_ticks == 0) return 0.0;
+            if (self.gpu_end_ticks < self.gpu_start_ticks) return 0.0; // Handle wrap-around or invalid timestamps
             const duration_ticks = self.gpu_end_ticks - self.gpu_start_ticks;
             const duration_ns = @as(f32, @floatFromInt(duration_ticks)) * timestamp_period;
             return duration_ns / 1_000_000.0;
@@ -388,8 +389,12 @@ pub const PerformanceMonitor = struct {
             return;
         }
 
-        const frame_gpu_ticks = timestamps[frame_end_idx] - timestamps[frame_start_idx];
-        frame.frame_gpu_time_ns = @as(u64, @intFromFloat(@as(f32, @floatFromInt(frame_gpu_ticks)) * self.timestamp_period));
+        if (timestamps[frame_end_idx] < timestamps[frame_start_idx]) {
+            frame.frame_gpu_time_ns = 0;
+        } else {
+            const frame_gpu_ticks = timestamps[frame_end_idx] - timestamps[frame_start_idx];
+            frame.frame_gpu_time_ns = @as(u64, @intFromFloat(@as(f32, @floatFromInt(frame_gpu_ticks)) * self.timestamp_period));
+        }
 
         const gpu_time_ms = frame.getFrameGpuTimeMs();
         self.avg_gpu_time_ms = self.avg_gpu_time_ms * 0.95 + gpu_time_ms * 0.05;

@@ -10,6 +10,7 @@ pub const ExtractedRenderable = struct {
     transform: Math.Mat4x4,
     model_asset: AssetId,
     material_buffer_index: ?u32,
+    material_set_name: []const u8, // Name of the material set (e.g. "opaque")
     layer: u8,
     casts_shadows: bool,
     receives_shadows: bool,

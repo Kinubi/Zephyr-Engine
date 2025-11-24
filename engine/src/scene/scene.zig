@@ -69,7 +69,7 @@ pub const Scene = struct {
     game_objects: std.ArrayList(GameObject),
 
     // Rendering pipeline for this scene
-    render_graph: ?RenderGraph = null,
+    render_graph: ?*RenderGraph = null,
 
     // Emitter tracking: map ECS entity ID to GPU emitter ID
     emitter_to_gpu_id: std.AutoHashMap(EntityId, u32),
@@ -198,8 +198,9 @@ pub const Scene = struct {
         self.clear();
 
         // Clean up old render graph resources before creating new ones
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             graph.deinit();
+            self.allocator.destroy(graph);
             self.render_graph = null;
         }
         if (self.particle_system) |ps| {
@@ -701,8 +702,9 @@ pub const Scene = struct {
     /// Cleanup scene resources
     pub fn deinit(self: *Scene) void {
         self.unload();
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             graph.deinit();
+            self.allocator.destroy(graph);
         }
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
@@ -745,7 +747,7 @@ pub const Scene = struct {
         const new_enabled = pending_state == 1;
 
         // Update render graph pass states (SAFE: on render thread)
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             // Get current state to check if it actually needs to change
             const currently_enabled = if (graph.getPass("path_tracing_pass")) |pass| pass.enabled else false;
 
@@ -830,7 +832,8 @@ pub const Scene = struct {
         log(.INFO, "scene", "Initialized particle system (ECS-driven)", .{});
 
         // Create render graph
-        self.render_graph = RenderGraph.init(self.allocator, graphics_context);
+        self.render_graph = try self.allocator.create(RenderGraph);
+        self.render_graph.?.* = RenderGraph.init(self.allocator, graphics_context);
 
         // Create and add ParticleComputePass FIRST (runs on compute queue)
         const particle_compute_pass = ParticleComputePass.create(
@@ -865,6 +868,8 @@ pub const Scene = struct {
             swapchain.hdr_format,
             try swapchain.depthFormat(),
             self.render_system,
+            "geometry_pass",
+            "opaque",
         ) catch |err| blk: {
             log(.WARN, "scene", "Failed to create GeometryPass: {}. Geometry rendering disabled.", .{err});
             break :blk null;
@@ -970,7 +975,7 @@ pub const Scene = struct {
 
     /// Render the scene using the RenderGraph
     pub fn render(self: *Scene, frame_info: FrameInfo) !void {
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             // Execute all passes (compute and graphics)
             // Performance monitoring is handled by the RenderGraph
             try graph.execute(frame_info);
@@ -988,7 +993,7 @@ pub const Scene = struct {
         // Cache view-projection matrix for particle world-to-screen projection
         self.cached_view_proj = global_ubo.projection.mul(global_ubo.view);
 
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             // Create minimal frame_info for prepareExecute (no Vulkan resources needed yet)
             const prep_frame_info = FrameInfo{
                 .command_buffer = vk.CommandBuffer.null_handle,
@@ -1009,7 +1014,7 @@ pub const Scene = struct {
         _ = global_ubo;
 
         // Update all render passes through the render graph (descriptor sets)
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             try graph.update(&frame_info);
         }
     }
@@ -1034,7 +1039,7 @@ pub const Scene = struct {
             ps.reset();
         }
 
-        if (self.render_graph) |*graph| {
+        if (self.render_graph) |graph| {
             graph.reset();
         }
 
