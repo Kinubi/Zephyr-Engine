@@ -58,7 +58,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Material Set")) {
-                _ = scene.ecs_world.emplace(MaterialSet, entity, MaterialSet.initOpaque()) catch {};
+                scene.ecs_world.emplace(MaterialSet, entity, MaterialSet.initOpaque()) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add MaterialSet: {}", .{err});
+                };
             }
         }
 
@@ -77,7 +79,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Albedo Material")) {
-                _ = scene.ecs_world.emplace(AlbedoMaterial, entity, AlbedoMaterial.initColor(.{ 1, 1, 1, 1 })) catch {};
+                scene.ecs_world.emplace(AlbedoMaterial, entity, AlbedoMaterial.initColor(.{ 1, 1, 1, 1 })) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add AlbedoMaterial: {}", .{err});
+                };
             }
         }
 
@@ -96,7 +100,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Normal Material")) {
-                _ = scene.ecs_world.emplace(NormalMaterial, entity, NormalMaterial.initWithStrength(AssetId.invalid, 1.0)) catch {};
+                scene.ecs_world.emplace(NormalMaterial, entity, NormalMaterial.initWithStrength(AssetId.invalid, 1.0)) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add NormalMaterial: {}", .{err});
+                };
             }
         }
 
@@ -115,7 +121,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Roughness Material")) {
-                _ = scene.ecs_world.emplace(RoughnessMaterial, entity, RoughnessMaterial.initConstant(0.5)) catch {};
+                scene.ecs_world.emplace(RoughnessMaterial, entity, RoughnessMaterial.initConstant(0.5)) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add RoughnessMaterial: {}", .{err});
+                };
             }
         }
 
@@ -134,7 +142,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Metallic Material")) {
-                _ = scene.ecs_world.emplace(MetallicMaterial, entity, MetallicMaterial.initConstant(0.0)) catch {};
+                scene.ecs_world.emplace(MetallicMaterial, entity, MetallicMaterial.initConstant(0.0)) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add MetallicMaterial: {}", .{err});
+                };
             }
         }
 
@@ -158,7 +168,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Emissive Material")) {
-                _ = scene.ecs_world.emplace(EmissiveMaterial, entity, EmissiveMaterial.initColor(.{ 0, 0, 0 }, 1.0)) catch {};
+                scene.ecs_world.emplace(EmissiveMaterial, entity, EmissiveMaterial.initColor(.{ 0, 0, 0 }, 1.0)) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add EmissiveMaterial: {}", .{err});
+                };
             }
         }
 
@@ -177,7 +189,9 @@ pub const MaterialEditorPanel = struct {
             }
         } else {
             if (c.ImGui_Button("Add Occlusion Material")) {
-                _ = scene.ecs_world.emplace(OcclusionMaterial, entity, OcclusionMaterial.init(AssetId.invalid)) catch {};
+                scene.ecs_world.emplace(OcclusionMaterial, entity, OcclusionMaterial.init(AssetId.invalid)) catch |err| {
+                    zephyr.log(.ERROR, "MaterialEditor", "Failed to add OcclusionMaterial: {}", .{err});
+                };
             }
         }
     }
@@ -202,20 +216,22 @@ pub const MaterialEditorPanel = struct {
                     const data_ptr: [*]const u8 = @ptrCast(data_any);
                     const data_size: usize = @intCast(payload.*.DataSize);
 
-                    const path_opt = std.heap.page_allocator.alloc(u8, data_size + 1) catch null;
-                    if (path_opt) |path_buf| {
+                    // Use a fixed-size buffer on the stack to avoid heap allocation
+                    var path_buf: [2048]u8 = undefined;
+
+                    if (data_size > path_buf.len) {
+                        zephyr.log(.ERROR, "MaterialEditor", "Dropped asset path too long: {} bytes (max {})", .{ data_size, path_buf.len });
+                    } else {
                         std.mem.copyForwards(u8, path_buf[0..data_size], data_ptr[0..data_size]);
-                        path_buf[data_size] = 0;
                         const path_slice = path_buf[0..data_size];
 
-                        const asset_id = scene.asset_manager.loadAssetAsync(path_slice, zephyr.AssetType.texture, zephyr.LoadPriority.high) catch null;
+                        const asset_id = scene.asset_manager.loadAssetAsync(path_slice, zephyr.AssetType.texture, zephyr.LoadPriority.high) catch |err| {
+                            zephyr.log(.ERROR, "MaterialEditor", "Failed to load texture asset: {}", .{err});
+                            return false;
+                        };
 
-                        if (asset_id) |aid| {
-                            texture_id.* = aid;
-                            changed = true;
-                        }
-
-                        std.heap.page_allocator.free(path_buf);
+                        texture_id.* = asset_id;
+                        changed = true;
                     }
                 }
             }
