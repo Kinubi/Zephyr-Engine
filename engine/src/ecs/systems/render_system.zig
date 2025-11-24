@@ -62,6 +62,9 @@ pub const RenderSystem = struct {
     // Track last instance data for delta detection
     last_instance_data: std.ArrayList(render_data_types.RasterizationData.InstanceData),
 
+    // Scratch arena for temporary allocations in calculateInstanceDeltas
+    scratch_arena: std.heap.ArenaAllocator,
+
     pub fn init(allocator: std.mem.Allocator, thread_pool: ?*ThreadPool, buffer_manager: *BufferManager) !RenderSystem {
         // Register with thread pool if provided
         if (thread_pool) |tp| {
@@ -140,10 +143,13 @@ pub const RenderSystem = struct {
             .instance_buffers = instance_buffers,
             .instance_capacity = 1, // Start with 1 dummy instance
             .last_instance_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){},
+            .scratch_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
     pub fn deinit(self: *RenderSystem) void {
+        self.scratch_arena.deinit();
+
         // Free per-frame instance buffers
         if (self.buffer_manager) |bm| {
             for (&self.instance_buffers, 0..) |buf_ptr, frame_idx| {
@@ -733,10 +739,10 @@ pub const RenderSystem = struct {
         const needs_realloc = required_capacity > self.instance_capacity;
 
         if (needs_realloc) {
-            log(.INFO, "render_system", "Reallocating instance buffers from snapshot delta ({} -> {} instances)", .{
-                self.instance_capacity,
-                required_capacity,
-            });
+            // log(.INFO, "render_system", "Reallocating instance buffers from snapshot delta ({} -> {} instances)", .{
+            //     self.instance_capacity,
+            //     required_capacity,
+            // });
 
             const buffer_size = required_capacity * @sizeOf(render_data_types.RasterizationData.InstanceData);
 
@@ -782,7 +788,7 @@ pub const RenderSystem = struct {
             }
 
             self.instance_capacity = required_capacity;
-            log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{required_capacity});
+            // log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{required_capacity});
         }
 
         // Apply delta updates (works for both full deltas and granular deltas)
@@ -809,6 +815,8 @@ pub const RenderSystem = struct {
         renderables: []const components.ExtractedRenderable,
         asset_manager: *AssetManager,
     ) !void {
+        // Use scratch allocator for all temporary structures
+        const scratch = self.scratch_arena.allocator();
 
         // Build current instance data in BATCH ORDER (grouped by mesh, sorted by mesh_ptr)
         // This matches how buildBatches() organizes instances
@@ -819,11 +827,11 @@ pub const RenderSystem = struct {
             data: render_data_types.RasterizationData.InstanceData,
         };
 
-        var mesh_to_instances = std.AutoHashMap(usize, std.ArrayList(InstanceWithEntity)).init(self.allocator);
+        var mesh_to_instances = std.AutoHashMap(usize, std.ArrayList(InstanceWithEntity)).init(scratch);
         defer {
             var iter = mesh_to_instances.valueIterator();
             while (iter.next()) |list| {
-                list.deinit(self.allocator);
+                list.deinit(scratch);
             }
             mesh_to_instances.deinit();
         }
@@ -844,7 +852,7 @@ pub const RenderSystem = struct {
                     result.value_ptr.* = std.ArrayList(InstanceWithEntity){};
                 }
 
-                try result.value_ptr.append(self.allocator, .{
+                try result.value_ptr.append(scratch, .{
                     .entity_id = renderable.entity_id,
                     .data = .{
                         .transform = renderable.transform.data,
@@ -856,17 +864,17 @@ pub const RenderSystem = struct {
 
         // Sort mesh keys to ensure deterministic iteration order
         var mesh_keys = std.ArrayList(usize){};
-        defer mesh_keys.deinit(self.allocator);
+        defer mesh_keys.deinit(scratch);
 
         var key_iter = mesh_to_instances.keyIterator();
         while (key_iter.next()) |key| {
-            try mesh_keys.append(self.allocator, key.*);
+            try mesh_keys.append(scratch, key.*);
         }
         std.mem.sort(usize, mesh_keys.items, {}, std.sort.asc(usize));
 
         // Flatten to array in sorted order (sorting instances within each mesh by entity_id)
         var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
-        defer current_instances.deinit(self.allocator);
+        defer current_instances.deinit(scratch);
 
         for (mesh_keys.items) |mesh_key| {
             const instances_list = mesh_to_instances.getPtr(mesh_key).?;
@@ -879,20 +887,20 @@ pub const RenderSystem = struct {
 
             // Append just the instance data
             for (instances_list.items) |inst_with_entity| {
-                try current_instances.append(self.allocator, inst_with_entity.data);
+                try current_instances.append(scratch, inst_with_entity.data);
             }
         }
 
         var changed_indices = std.ArrayList(u32){};
-        defer changed_indices.deinit(self.allocator);
+        defer changed_indices.deinit(scratch);
 
         var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
-        defer changed_data.deinit(self.allocator);
+        defer changed_data.deinit(scratch);
 
         // Generate delta for all instances (simpler approach - always send everything)
         for (current_instances.items, 0..) |instance, i| {
-            try changed_indices.append(self.allocator, @intCast(i));
-            try changed_data.append(self.allocator, instance);
+            try changed_indices.append(scratch, @intCast(i));
+            try changed_data.append(scratch, instance);
         }
 
         // Always store deltas in InstanceDeltasSet component (even if empty)
@@ -1130,7 +1138,7 @@ pub const RenderSystem = struct {
             const set_name = entry.key_ptr.*;
             var builder = entry.value_ptr;
             const batches = try builder.buildBatches(raster_objects, self.allocator);
-            
+
             batch_lists[list_idx] = .{
                 .set_name = set_name,
                 .batches = batches,
@@ -1262,7 +1270,7 @@ pub const RenderSystem = struct {
         var obj_idx: usize = 0;
         for (entities) |entity_data| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
-            
+
             // Get set name (default to "opaque" if empty/null)
             const set_name = if (entity_data.material_set_name.len > 0) entity_data.material_set_name else "opaque";
 
@@ -1287,7 +1295,7 @@ pub const RenderSystem = struct {
             const set_name = entry.key_ptr.*;
             var builder = entry.value_ptr;
             const batches = try builder.buildBatches(raster_objects, self.allocator);
-            
+
             batch_lists[list_idx] = .{
                 .set_name = set_name,
                 .batches = batches,
@@ -1658,7 +1666,7 @@ pub const RenderSystem = struct {
             for (cached.batch_lists, 0..) |list, i| {
                 const batches_copy = try self.allocator.alloc(RasterizationData.InstancedBatch, list.batches.len);
                 @memcpy(batches_copy, list.batches);
-                
+
                 batch_lists_copy[i] = .{
                     .set_name = list.set_name,
                     .batches = batches_copy,
@@ -1746,6 +1754,9 @@ pub fn prepare(world: *World, dt: f32) !void {
     var is_transform_only = false;
     var reason: []const u8 = "";
 
+    // Reset scratch arena for this frame's temporary allocations
+    _ = self.scratch_arena.reset(.retain_capacity);
+
     // 1) Quick check: Cache missing (first frame) - NOT transform-only
     const active_idx = self.active_cache_index.load(.acquire);
     if (self.cached_raster_data[active_idx] == null) {
@@ -1816,9 +1827,10 @@ pub fn prepare(world: *World, dt: f32) !void {
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
         // Pre-allocate with expected capacity to avoid reallocations
+        // Use scratch allocator for temporary extraction list
         var extracted_renderables = std.ArrayList(components.ExtractedRenderable){};
-        try extracted_renderables.ensureTotalCapacity(self.allocator, current_count);
-        defer extracted_renderables.deinit(self.allocator);
+        try extracted_renderables.ensureTotalCapacity(self.scratch_arena.allocator(), current_count);
+        defer extracted_renderables.deinit(self.scratch_arena.allocator());
 
         // Single-pass extraction: clear dirty flags and extract in one loop
         var iter = mesh_view.iterator();

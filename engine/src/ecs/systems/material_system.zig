@@ -165,6 +165,12 @@ pub const MaterialSetData = struct {
     // Per-frame ephemeral deltas (render thread) - latest delta supersedes old ones
     pending_deltas: [MAX_FRAMES_IN_FLIGHT]MaterialSetDelta,
 
+    // Scratch buffers for prepareMaterialSet (reuse memory to avoid allocations)
+    scratch_unique_textures: std.AutoHashMap(u64, void),
+    scratch_current_texture_ids: std.ArrayList(u64),
+    scratch_texture_map: std.AutoHashMap(u64, u32),
+    scratch_gpu_materials: std.ArrayList(GPUMaterial),
+
     pub fn init(allocator: std.mem.Allocator, buffer_manager: *BufferManager) !MaterialSetData {
         // Create dummy per-frame buffers (1 material each) from frame arenas
         // This ensures binding is always valid even before any materials are added
@@ -262,12 +268,22 @@ pub const MaterialSetData = struct {
             .next_materials = std.ArrayList(GPUMaterial){}, // Staging area
             .pending_delta = MaterialSetDelta.init(allocator),
             .pending_deltas = [_]MaterialSetDelta{MaterialSetDelta.init(allocator)} ** MAX_FRAMES_IN_FLIGHT,
+            .scratch_unique_textures = std.AutoHashMap(u64, void).init(allocator),
+            .scratch_current_texture_ids = std.ArrayList(u64){},
+            .scratch_texture_map = std.AutoHashMap(u64, u32).init(allocator),
+            .scratch_gpu_materials = std.ArrayList(GPUMaterial){},
         };
     }
 
     pub fn deinit(self: *MaterialSetData, buffer_manager: *BufferManager) void {
         // Texture descriptors are managed by TextureDescriptorManager's frame arenas
         // No manual cleanup needed here - arenas are reset each frame
+
+        // Clean up scratch buffers
+        self.scratch_unique_textures.deinit();
+        self.scratch_current_texture_ids.deinit(self.allocator);
+        self.scratch_texture_map.deinit();
+        self.scratch_gpu_materials.deinit(self.allocator);
 
         // Clean up tracking
         self.last_texture_ids.deinit(self.allocator);
@@ -570,6 +586,7 @@ pub const MaterialSystem = struct {
                 //
                 // For now, it's effectively: texture_arrays[i] uses only arena_offsets[i].
                 //
+                
                 for (&set_data.texture_arrays, 0..) |*tex_array, frame_idx| {
                     const frame = @as(u32, @intCast(frame_idx));
 
@@ -596,11 +613,6 @@ pub const MaterialSystem = struct {
                     // Mark this frame's array as updated (increments generation, sets mask to 0b111)
                     tex_array.markUpdated();
                 }
-
-                log(.INFO, "material_system", "Updated all texture arrays for set '{s}' ({} textures)", .{
-                    snap.set_name,
-                    snap.texture_count,
-                });
             }
 
             // Apply material buffer updates from delta
@@ -616,12 +628,6 @@ pub const MaterialSystem = struct {
 
                 // Check if we need to reallocate
                 if (required_capacity > set_data.current_capacity) {
-                    log(.INFO, "material_system", "Reallocating material buffers for set '{s}' from {} to {} materials", .{
-                        snap.set_name,
-                        set_data.current_capacity,
-                        required_capacity,
-                    });
-
                     const new_size = required_capacity * @sizeOf(GPUMaterial);
 
                     // Reallocate each frame's buffer from arena
@@ -720,8 +726,9 @@ pub const MaterialSystem = struct {
         // Clearing here would lose the delta if prepareFromECS is called multiple times per frame
 
         // 1. Collect unique texture IDs to ensure stable sorting
-        var unique_textures = std.AutoHashMap(u64, void).init(self.allocator);
-        defer unique_textures.deinit();
+        // Use scratch buffer to avoid reallocation
+        set_data.scratch_unique_textures.clearRetainingCapacity();
+        var unique_textures = &set_data.scratch_unique_textures;
 
         // Always include dummy texture (ID 0)
         try unique_textures.put(0, {});
@@ -737,8 +744,9 @@ pub const MaterialSystem = struct {
         }
 
         // 2. Sort IDs to create stable mapping (Index I -> SortedID[I])
-        var current_texture_ids = std.ArrayList(u64){};
-        defer current_texture_ids.deinit(self.allocator);
+        // Use scratch buffer to avoid reallocation
+        set_data.scratch_current_texture_ids.clearRetainingCapacity();
+        var current_texture_ids = &set_data.scratch_current_texture_ids;
 
         try current_texture_ids.ensureTotalCapacity(self.allocator, unique_textures.count());
         var key_iter = unique_textures.keyIterator();
@@ -748,16 +756,23 @@ pub const MaterialSystem = struct {
         std.sort.pdq(u64, current_texture_ids.items, {}, std.sort.asc(u64));
 
         // 3. Build texture map (ID -> Index) for fast lookup
-        var texture_map = std.AutoHashMap(u64, u32).init(self.allocator);
-        defer texture_map.deinit();
+        // Use scratch buffer to avoid reallocation
+        set_data.scratch_texture_map.clearRetainingCapacity();
+        var texture_map = &set_data.scratch_texture_map;
         try texture_map.ensureTotalCapacity(@intCast(current_texture_ids.items.len));
 
         for (current_texture_ids.items, 0..) |id, i| {
             try texture_map.put(id, @intCast(i));
         }
 
-        var gpu_materials = std.ArrayList(GPUMaterial){};
-        defer gpu_materials.deinit(self.allocator);
+        // Use scratch buffer to avoid reallocation
+        set_data.scratch_gpu_materials.clearRetainingCapacity();
+        var gpu_materials = &set_data.scratch_gpu_materials;
+
+        // Check if we need to reallocate (heuristic based on current capacity)
+        // If we exceed capacity, we must force a full update because the new buffer
+        // will not contain the old data (applySnapshotDeltas only writes changed items)
+        const needs_realloc = entities.len > set_data.current_capacity;
 
         // Pre-allocate with known entity count
         try gpu_materials.ensureTotalCapacity(self.allocator, entities.len); // Build materials for entities in this set
@@ -804,23 +819,29 @@ pub const MaterialSystem = struct {
             material_set.material_buffer_index = mat_index;
 
             // Fast change detection using entity ID as key (handles entity order changes)
-            if (set_data.last_materials.get(entity)) |last_mat| {
+            var changed = false;
+
+            if (needs_realloc) {
+                // Force update if reallocating to ensure data is copied to new buffer
+                changed = true;
+            } else if (set_data.last_materials.get(entity)) |last_mat| {
                 if (!std.mem.eql(u8, std.mem.asBytes(&gpu_mat), std.mem.asBytes(&last_mat))) {
-                    // Material changed - add to delta
-                    try set_data.pending_delta.changed_materials.append(self.allocator, .{
-                        .index = mat_index,
-                        .data = gpu_mat,
-                    });
+                    changed = true;
                 }
             } else {
-                // New entity or first frame - add to delta
+                // New entity or first frame
+                changed = true;
+            }
+
+            if (changed) {
+                // Material changed - add to delta
                 try set_data.pending_delta.changed_materials.append(self.allocator, .{
                     .index = mat_index,
                     .data = gpu_mat,
                 });
             }
 
-            gpu_materials.appendAssumeCapacity(gpu_mat);
+            try gpu_materials.append(self.allocator, gpu_mat);
         }
 
         // Check if texture set changed
@@ -863,7 +884,7 @@ pub const MaterialSystem = struct {
 
         // Build texture descriptor array if changed (NO GPU UPLOAD - just prepare data)
         if (textures_changed) {
-            try self.buildTextureDescriptorArray(set_data, &texture_map, @intCast(current_texture_ids.items.len));
+            try self.buildTextureDescriptorArray(set_data, texture_map, @intCast(current_texture_ids.items.len));
             set_data.pending_delta.texture_array_dirty = true;
 
             set_data.last_texture_ids.clearRetainingCapacity();
@@ -1134,15 +1155,16 @@ pub const MaterialSystem = struct {
 
     /// Upload material buffer to GPU
     fn uploadMaterialBuffer(self: *MaterialSystem, set_data: *MaterialSetData, set_name: []const u8, materials: []const GPUMaterial) !void {
+        _ = set_name;
         const size = materials.len * @sizeOf(GPUMaterial);
 
         // Only resize if we need MORE space (never shrink to avoid excessive resizes)
         if (set_data.material_buffer.size < size) {
-            log(.INFO, "material_system", "Resizing material buffer for set '{s}' from {} to {} bytes", .{
-                set_name,
-                set_data.material_buffer.size,
-                size,
-            });
+            // log(.INFO, "material_system", "Resizing material buffer for set '{s}' from {} to {} bytes", .{
+            //     set_name,
+            //     set_data.material_buffer.size,
+            //     size,
+            // });
 
             // Resize the buffer (keeps pointer stable, increments generation for rebinding)
             try self.buffer_manager.resizeBuffer(

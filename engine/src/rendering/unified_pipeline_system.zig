@@ -815,7 +815,7 @@ pub const UnifiedPipelineSystem = struct {
         const pipeline_ptr = self.pipelines.getPtr(pipeline_id) orelse return error.PipelineNotFound;
 
         const current_count: u32 = self.getBindingDescriptorCount(pipeline_ptr, set, binding) orelse 0;
-        
+
         // Check if we already have an override that satisfies the requirement
         var stored_override: u32 = 0;
         if (self.binding_overrides.get(pipeline_id.hash)) |override_map| {
@@ -830,9 +830,7 @@ pub const UnifiedPipelineSystem = struct {
         // If the current pipeline already satisfies the effective target, we are done
         if (current_count >= effective_target) return;
 
-        log(.INFO, "unified_pipeline", "Resizing descriptor binding: {s} set={} binding={} current={} required={} (override={})", .{
-            pipeline_id.name, set, binding, current_count, required_u32, stored_override
-        });
+        log(.INFO, "unified_pipeline", "Resizing descriptor binding: {s} set={} binding={} current={} required={} (override={})", .{ pipeline_id.name, set, binding, current_count, required_u32, stored_override });
 
         const overrides_entry = try self.binding_overrides.getOrPut(pipeline_id.hash);
         if (!overrides_entry.found_existing) {
@@ -870,18 +868,14 @@ pub const UnifiedPipelineSystem = struct {
                 var found = false;
                 for (bindings_slice) |*binding_info| {
                     if (binding_info.binding == key.binding) {
-                        log(.INFO, "unified_pipeline", "Applying override for {s} set={} binding={}: count {} -> {}", .{
-                            pipeline_id.name, key.set, key.binding, binding_info.descriptor_count, desired_count
-                        });
+                        log(.INFO, "unified_pipeline", "Applying override for {s} set={} binding={}: count {} -> {}", .{ pipeline_id.name, key.set, key.binding, binding_info.descriptor_count, desired_count });
                         binding_info.descriptor_count = desired_count;
                         found = true;
                         break;
                     }
                 }
                 if (!found) {
-                    log(.WARN, "unified_pipeline", "Failed to apply override for {s} set={} binding={}: binding not found in layout", .{
-                        pipeline_id.name, key.set, key.binding
-                    });
+                    log(.WARN, "unified_pipeline", "Failed to apply override for {s} set={} binding={}: binding not found in layout", .{ pipeline_id.name, key.set, key.binding });
                 }
             }
         }

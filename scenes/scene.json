@@ -2,7 +2,7 @@
     "name": "cornell_box",
     "entities": [
         {
-            "uuid": "ae33da88-f33e-4ad3-9e77-5b96f3fe5561",
+            "uuid": "8711bd61-ca02-4781-b8e8-9e3c122d6119",
             "components": {
                 "Transform": {
                     "position": {
@@ -48,7 +48,7 @@
             }
         },
         {
-            "uuid": "d4d4a906-3c42-484c-933a-6f1288213add",
+            "uuid": "9298d827-3705-455e-931a-8a2ea201c130",
             "components": {
                 "Transform": {
                     "position": {
@@ -94,7 +94,7 @@
             }
         },
         {
-            "uuid": "3708f49d-6929-4ffc-85ea-1a2f1df2e846",
+            "uuid": "14822776-e117-4f9b-9e4a-50d7f7c57ab0",
             "components": {
                 "Transform": {
                     "position": {
@@ -140,7 +140,7 @@
             }
         },
         {
-            "uuid": "56f77db1-e08b-4d4e-b84d-792d11a3a7af",
+            "uuid": "b1c429b7-b851-4714-8ce6-85763677eed9",
             "components": {
                 "Transform": {
                     "position": {
@@ -186,7 +186,7 @@
             }
         },
         {
-            "uuid": "44196c3e-2a57-4f78-b663-f45dc7fd0656",
+            "uuid": "fc0886a2-9fbe-41ea-b163-03ba59c7a157",
             "components": {
                 "Transform": {
                     "position": {
@@ -223,7 +223,7 @@
             }
         },
         {
-            "uuid": "7d33eb01-dce9-4f50-882a-c4bd96f7bced",
+            "uuid": "8bc21308-3030-4009-97a5-6cd6e862793e",
             "components": {
                 "Transform": {
                     "position": {
@@ -298,7 +298,7 @@
             }
         },
         {
-            "uuid": "35c29913-e8c3-44fb-a88d-69562b7cb5bc",
+            "uuid": "a23ab836-0489-4107-8099-1b81d64ccec7",
             "components": {
                 "Transform": {
                     "position": {
@@ -317,7 +317,7 @@
                         "y": 1,
                         "z": 1
                     },
-                    "parent": "44196c3e-2a57-4f78-b663-f45dc7fd0656"
+                    "parent": "14822776-e117-4f9b-9e4a-50d7f7c57ab0"
                 },
                 "MeshRenderer": {
                     "model_asset": "assets/models/cube.obj",
@@ -335,6 +335,83 @@
                 },
                 "AlbedoMaterial": {
                     "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-albedo.png",
+                    "color": [
+                        1,
+                        1,
+                        1,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "cd01af43-3e41-42d4-968e-8c929d739d65",
+            "components": {
+                "Transform": {
+                    "position": {
+                        "x": 14.34052848815918,
+                        "y": -0.5,
+                        "z": 0.5
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 0.5,
+                        "y": 0.5,
+                        "z": 0.5
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/flat_vase.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "ScriptComponent": {
+                    "script": "translate_entity(0.01, 0.0, 0.0)",
+                    "enabled": true,
+                    "run_on_update": true,
+                    "run_once": false
+                },
+                "ParticleEmitter": {
+                    "emission_rate": 50,
+                    "particle_lifetime": 2.5,
+                    "velocity_min": {
+                        "x": -1.5,
+                        "y": 5,
+                        "z": -1.5
+                    },
+                    "velocity_max": {
+                        "x": 1.5,
+                        "y": 8,
+                        "z": 1.5
+                    },
+                    "color": {
+                        "x": 1,
+                        "y": 0.800000011920929,
+                        "z": 0.30000001192092896
+                    },
+                    "spawn_offset": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "active": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/granitesmooth1-albedo.png",
                     "color": [
                         1,
                         1,
