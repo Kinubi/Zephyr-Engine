@@ -790,6 +790,35 @@ pub const RenderSystem = struct {
 
             self.instance_capacity = required_capacity;
             // log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{required_capacity});
+
+            // If we reallocated, we must upload ALL instances, not just the deltas.
+            // The deltas only contain changed instances, but the new buffer is empty.
+            // We use the cached raster data which contains the full state.
+            const active_idx = self.active_cache_index.load(.acquire);
+            if (self.cached_raster_data[active_idx]) |raster_data| {
+                var upload_buffer = std.ArrayList(u8){};
+                defer upload_buffer.deinit(self.allocator);
+                try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+
+                // Iterate batch lists and batches to collect all instances
+                for (raster_data.batch_lists) |list| {
+                    for (list.batches) |batch| {
+                        const batch_bytes = std.mem.sliceAsBytes(batch.instances);
+                        try upload_buffer.appendSlice(self.allocator, batch_bytes);
+                    }
+                }
+
+                // Write instance data to all frame buffers
+                for (&self.instance_buffers) |buf| {
+                    try buf.buffer.map(buffer_size, buf.arena_offset orelse 0);
+                    const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                    @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
+                    buf.buffer.unmap();
+                }
+                
+                // Return early as we have updated everything
+                return;
+            }
         }
 
         // Apply delta updates (works for both full deltas and granular deltas)
@@ -898,10 +927,26 @@ pub const RenderSystem = struct {
         var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
         defer changed_data.deinit(scratch);
 
-        // Generate delta for all instances (simpler approach - always send everything)
-        for (current_instances.items, 0..) |instance, i| {
-            try changed_indices.append(scratch, @intCast(i));
-            try changed_data.append(scratch, instance);
+        // Generate delta for all instances
+        // Optimization: Only send changed instances to reduce bandwidth
+        const min_len = @min(current_instances.items.len, self.last_instance_data.items.len);
+
+        for (0..min_len) |i| {
+            const current = current_instances.items[i];
+            const last = self.last_instance_data.items[i];
+
+            if (!std.meta.eql(current, last)) {
+                try changed_indices.append(scratch, @intCast(i));
+                try changed_data.append(scratch, current);
+            }
+        }
+
+        // Handle new instances (appended to the end)
+        if (current_instances.items.len > min_len) {
+            for (min_len..current_instances.items.len) |i| {
+                try changed_indices.append(scratch, @intCast(i));
+                try changed_data.append(scratch, current_instances.items[i]);
+            }
         }
 
         // Always store deltas in InstanceDeltasSet component (even if empty)
@@ -1823,7 +1868,7 @@ pub const RenderSystem = struct {
         for (instances, 0..) |*inst, i| {
             const obj = raster_objects[i];
             inst.* = active_rt.instances[i]; // Copy old data (mask, IDs)
-            
+
             const mat = math.Mat4x4{ .data = obj.transform };
             inst.transform = mat.to_3x4();
         }
@@ -1847,7 +1892,7 @@ pub const RenderSystem = struct {
 
         const total_time_ns = std.time.nanoTimestamp() - start_time;
         const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
-        
+
         // Frame budget enforcement (stricter for fast path)
         const budget_ms: f64 = 1.0;
         if (total_time_ms > budget_ms) {
@@ -1913,17 +1958,19 @@ pub fn prepare(world: *World, dt: f32) !void {
         reason = "count_changed";
     }
 
-    // 3) EXPENSIVE check: Mesh pointers changed (iterate entities + asset lookups) - NOT transform-only
+    // 3) Combined check: Mesh pointers changed OR Transform dirty
     // Check this BEFORE transforms so geometry changes take priority over transform-only changes
     if (!changes_detected) {
         if (self.cached_raster_data[active_idx]) |cached| {
             var iter = mesh_view.iterator();
             var mesh_idx: usize = 0;
+            var transform_dirty_detected = false;
 
             outer: while (iter.next()) |entry| {
                 const renderer = entry.component;
                 if (!renderer.enabled or !renderer.hasValidAssets()) continue;
 
+                // Check mesh pointers (Geometry change)
                 if (asset_manager.getModel(renderer.model_asset.?)) |model| {
                     for (model.meshes.items) |model_mesh| {
                         // Check if we've exceeded cached mesh count or mesh ptr changed
@@ -1938,58 +1985,60 @@ pub fn prepare(world: *World, dt: f32) !void {
                         mesh_idx += 1;
                     }
                 }
+
+                // Check transform dirty (Transform change)
+                // Only check if we haven't already detected a geometry change
+                if (!transform_dirty_detected) {
+                    if (world.get(Transform, entry.entity)) |transform| {
+                        if (transform.dirty) {
+                            transform_dirty_detected = true;
+                        }
+                    }
+                }
             }
 
             // Also check if we have fewer meshes than before
-            if (!changes_detected and mesh_idx != cached.objects.len) {
-                changes_detected = true;
-                is_transform_only = false;
-                reason = "mesh_count_changed";
-            }
-        }
-    }
-
-    // 4) Medium check: Transform dirty flags (iterate entities, check flags) - IS transform-only
-    // This runs LAST so it only triggers if no geometry changes were detected
-    if (!changes_detected) {
-        var iter = mesh_view.iterator();
-        while (iter.next()) |entry| {
-            if (world.get(Transform, entry.entity)) |transform| {
-                if (transform.dirty) {
+            if (!changes_detected) {
+                if (mesh_idx != cached.objects.len) {
+                    changes_detected = true;
+                    is_transform_only = false;
+                    reason = "mesh_count_changed";
+                } else if (transform_dirty_detected) {
                     changes_detected = true;
                     is_transform_only = true;
                     reason = "transform_dirty";
-                    break;
                 }
             }
         }
     }
+
+    // 4) Removed separate transform check loop (merged into step 3)
 
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
         // OPTIMIZATION: If only transforms changed, update in place
         // We assume the entity list order is stable because count didn't change and no structural changes detected
         if (is_transform_only and renderables_set.renderables.len > 0) {
-             var iter = mesh_view.iterator();
-             var i: usize = 0;
-             while (iter.next()) |entry| {
-                 const renderer = entry.component;
-                 if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+            var iter = mesh_view.iterator();
+            var i: usize = 0;
+            while (iter.next()) |entry| {
+                const renderer = entry.component;
+                if (!renderer.enabled or !renderer.hasValidAssets()) continue;
 
-                 if (i >= renderables_set.renderables.len) break;
+                if (i >= renderables_set.renderables.len) break;
 
-                 // Clear dirty flag and update transform
-                 if (world.get(Transform, entry.entity)) |transform| {
-                     transform.dirty = false;
-                     renderables_set.renderables[i].transform = transform.world_matrix;
-                 }
-                 i += 1;
-             }
-             
-             renderables_set.markDirty(true);
-             
-             // Calculate instance deltas using existing renderables
-             try self.calculateInstanceDeltas(world, renderables_set.renderables, asset_manager);
+                // Clear dirty flag and update transform
+                if (world.get(Transform, entry.entity)) |transform| {
+                    transform.dirty = false;
+                    renderables_set.renderables[i].transform = transform.world_matrix;
+                }
+                i += 1;
+            }
+
+            renderables_set.markDirty(true);
+
+            // Calculate instance deltas using existing renderables
+            try self.calculateInstanceDeltas(world, renderables_set.renderables, asset_manager);
         } else {
             // Pre-allocate with expected capacity to avoid reallocations
             // Use scratch allocator for temporary extraction list

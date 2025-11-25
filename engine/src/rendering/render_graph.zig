@@ -92,12 +92,9 @@ pub const ResourceRegistry = struct {
 
     /// Get resource by ID
     pub fn getResource(self: *ResourceRegistry, id: ResourceId) ?*Resource {
-        for (self.resources.items) |*resource| {
-            if (resource.id.toInt() == id.toInt()) {
-                return resource;
-            }
-        }
-        return null;
+        const raw_id = id.toInt();
+        if (raw_id == 0 or raw_id > self.resources.items.len) return null;
+        return &self.resources.items[raw_id - 1];
     }
 
     /// Get resource by name

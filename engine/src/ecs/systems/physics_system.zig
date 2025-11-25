@@ -219,9 +219,8 @@ pub const PhysicsSystem = struct {
 
         // 1. Sync ECS Transforms -> Physics Bodies (Kinematic/Static) & Create Bodies
 
-        // Track seen entities to detect removals
-        var seen_entities = std.AutoHashMap(EntityId, void).init(self.allocator);
-        defer seen_entities.deinit();
+        // Optimization: Don't build seen_entities hash map.
+        // Instead, we'll check validity of active bodies in the cleanup phase.
 
         var query = try world.query(struct {
             entity: EntityId,
@@ -235,7 +234,7 @@ pub const PhysicsSystem = struct {
         defer query.deinit();
 
         while (query.next()) |data| {
-            try seen_entities.put(data.entity, {});
+            // try seen_entities.put(data.entity, {}); // Removed
 
             if (data.body.body_id == .invalid) {
                 // Create Shape
@@ -298,6 +297,7 @@ pub const PhysicsSystem = struct {
                     .object_layer = object_layer,
                     .shape = shape,
                     .friction = data.body.friction,
+
                     .restitution = data.body.restitution,
                     .linear_damping = data.body.linear_damping,
                     .angular_damping = data.body.angular_damping,
@@ -354,10 +354,28 @@ pub const PhysicsSystem = struct {
         var to_remove = std.ArrayList(EntityId){};
         defer to_remove.deinit(self.allocator);
 
+        // Optimization: Get views once to avoid hash map lookups in the loop
+        var rb_view_opt = world.view(RigidBody) catch null;
+        var box_view_opt = world.view(BoxCollider) catch null;
+        var sphere_view_opt = world.view(SphereCollider) catch null;
+        var capsule_view_opt = world.view(CapsuleCollider) catch null;
+        var mesh_view_opt = world.view(MeshCollider) catch null;
+
         var it = self.active_bodies.iterator();
         while (it.next()) |entry| {
-            if (!seen_entities.contains(entry.key_ptr.*)) {
-                try to_remove.append(self.allocator, entry.key_ptr.*);
+            const entity_id = entry.key_ptr.*;
+
+            // Check if entity still exists and has RigidBody
+            const has_body = if (rb_view_opt) |*v| (if (v.storage.getConst(entity_id)) |rb| rb.body_id != .invalid else false) else false;
+
+            // Check for colliders (must have at least one)
+            const has_collider = (if (box_view_opt) |*v| v.storage.has(entity_id) else false) or
+                (if (sphere_view_opt) |*v| v.storage.has(entity_id) else false) or
+                (if (capsule_view_opt) |*v| v.storage.has(entity_id) else false) or
+                (if (mesh_view_opt) |*v| v.storage.has(entity_id) else false);
+
+            if (!has_body or !has_collider) {
+                try to_remove.append(self.allocator, entity_id);
             }
         }
 

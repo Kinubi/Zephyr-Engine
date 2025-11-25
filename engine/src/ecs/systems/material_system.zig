@@ -328,6 +328,9 @@ pub const MaterialSystem = struct {
     // GPU resources per material set name (e.g., "opaque", "transparent", "character")
     material_sets: std.StringHashMap(MaterialSetData),
 
+    // Reusable map for grouping entities in prepareFromECS
+    sets_map: std.StringHashMap(std.ArrayList(ecs.EntityId)),
+
     // Global material set (aggregates all sets for path tracing)
     global_set: MaterialSetData,
     global_set_offsets: std.StringHashMap(u32),
@@ -349,6 +352,7 @@ pub const MaterialSystem = struct {
             .descriptor_manager = descriptor_manager,
             .asset_manager = asset_manager,
             .material_sets = std.StringHashMap(MaterialSetData).init(allocator),
+            .sets_map = std.StringHashMap(std.ArrayList(ecs.EntityId)).init(allocator),
             .global_set = global_set,
             .global_set_offsets = std.StringHashMap(u32).init(allocator),
         };
@@ -358,6 +362,13 @@ pub const MaterialSystem = struct {
     }
 
     pub fn deinit(self: *MaterialSystem) void {
+        // Clean up sets_map
+        var map_iter = self.sets_map.valueIterator();
+        while (map_iter.next()) |list| {
+            list.deinit(self.allocator);
+        }
+        self.sets_map.deinit();
+
         // Clean up all material sets
         var iter = self.material_sets.valueIterator();
         while (iter.next()) |set_data| {
@@ -420,14 +431,10 @@ pub const MaterialSystem = struct {
     pub fn prepareFromECS(self: *MaterialSystem, world: *World) !void {
         const MaterialSet = ecs.MaterialSet;
 
-        // Group entities by material set name
-        var sets_map = std.StringHashMap(std.ArrayList(ecs.EntityId)).init(self.allocator);
-        defer {
-            var iter = sets_map.valueIterator();
-            while (iter.next()) |list| {
-                list.deinit(self.allocator);
-            }
-            sets_map.deinit();
+        // Reset reusable map
+        var map_iter = self.sets_map.valueIterator();
+        while (map_iter.next()) |list| {
+            list.clearRetainingCapacity();
         }
 
         // Query all entities with MaterialSet
@@ -442,7 +449,7 @@ pub const MaterialSystem = struct {
             const entity = entry.entity;
             const material_set = world.get(ecs.MaterialSet, entity) orelse continue;
 
-            const gop = try sets_map.getOrPut(material_set.set_name);
+            const gop = try self.sets_map.getOrPut(material_set.set_name);
             if (!gop.found_existing) {
                 // Pre-allocate with estimated size to reduce reallocations
                 gop.value_ptr.* = std.ArrayList(ecs.EntityId){};
@@ -452,10 +459,13 @@ pub const MaterialSystem = struct {
         }
 
         // Process each material set (ECS queries, compute indices, build deltas)
-        var sets_iter = sets_map.iterator();
+        var sets_iter = self.sets_map.iterator();
         while (sets_iter.next()) |entry| {
             const set_name = entry.key_ptr.*;
             const entities = entry.value_ptr.items;
+
+            // Skip empty sets
+            if (entities.len == 0) continue;
 
             try self.prepareMaterialSet(world, set_name, entities);
         }

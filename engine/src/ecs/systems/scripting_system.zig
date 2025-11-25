@@ -221,45 +221,57 @@ pub fn prepare(world: *World, dt: f32) !void {
     }
 
     // Execute any ScriptComponent that requests per-frame execution
-    var view = try world.view(ScriptComponent);
-    var enqueued_count: usize = 0;
-    const total_scripts = view.len();
+    // Only run per-frame scripts if the scene is in Play mode
+    if (scene.state == .Play) {
+        var view = try world.view(ScriptComponent);
+        var enqueued_count: usize = 0;
+        const total_scripts = view.len();
 
-    if (total_scripts <= 2) {
-        // Threshold changed from `< 2` to `<= 2`: With 2 or fewer scripts, execution is synchronous.
-        // This is based on profiling: for small numbers of per-frame scripts (2 or fewer), the overhead
-        // of parallelization outweighs the benefits, so synchronous execution is preferred.
-        var iter = view.iterator();
-        while (iter.next()) |entry| {
-            const sc = entry.component;
-            if (!sc.enabled) continue;
-            if (!sc.run_on_update) continue;
+        if (total_scripts <= 2) {
+            // Threshold changed from `< 2` to `<= 2`: With 2 or fewer scripts, execution is synchronous.
+            // This is based on profiling: for small numbers of per-frame scripts (2 or fewer), the overhead
+            // of parallelization outweighs the benefits, so synchronous execution is preferred.
+            var iter = view.iterator();
+            while (iter.next()) |entry| {
+                const sc = entry.component;
+                if (!sc.enabled) continue;
+                if (!sc.run_on_update) continue;
 
-            if (sys.runner.state_pool) |sp| {
-                const leased = sp.acquire();
-                const owner_u32 = @intFromEnum(entry.entity);
-                if (lua.executeLuaBuffer(sys.runner.allocator, leased, sc.script, owner_u32, @ptrCast(scene))) |res| {
-                    if (res.message.len > 0) sys.runner.allocator.free(res.message);
-                } else |err| {
-                    log(.WARN, "scripting", "synchronous script execution failed: {}", .{err});
+                if (sys.runner.state_pool) |sp| {
+                    const leased = sp.acquire();
+                    const owner_u32 = @intFromEnum(entry.entity);
+                    if (lua.executeLuaBuffer(sys.runner.allocator, leased, sc.script, owner_u32, @ptrCast(scene))) |res| {
+                        if (res.message.len > 0) sys.runner.allocator.free(res.message);
+                    } else |err| {
+                        log(.WARN, "scripting", "synchronous script execution failed: {}", .{err});
+                    }
+                    sp.release(leased);
+                } else {
+                    log(.WARN, "scripting", "no lua state pool available to run per-frame script synchronously", .{});
                 }
-                sp.release(leased);
-            } else {
-                log(.WARN, "scripting", "no lua state pool available to run per-frame script synchronously", .{});
             }
-        }
-    } else {
-        var iter = view.iterator();
-        while (iter.next()) |entry| {
-            const sc = entry.component;
-            if (!sc.enabled) continue;
-            if (!sc.run_on_update) continue;
+        } else {
+            var iter = view.iterator();
+            while (iter.next()) |entry| {
+                const sc = entry.component;
+                if (!sc.enabled) continue;
 
-            // Enqueue per-frame ScriptComponent scripts as async jobs so they run
-            // on the thread pool / state_pool instead of synchronously on the
-            // system thread. This uses ScriptRunner.enqueueScript via runScript.
-            _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch {};
-            enqueued_count += 1;
+                if (sc.run_once) {
+                    // Run one-shot script (async to avoid blocking main thread)
+                    _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch {};
+                    // Disable run_once flag so it doesn't run again
+                    sc.run_once = false;
+                    continue;
+                }
+
+                if (!sc.run_on_update) continue;
+
+                // Enqueue per-frame ScriptComponent scripts as async jobs so they run
+                // on the thread pool / state_pool instead of synchronously on the
+                // system thread. This uses ScriptRunner.enqueueScript via runScript.
+                _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch {};
+                enqueued_count += 1;
+            }
         }
     }
 }

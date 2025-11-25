@@ -7,6 +7,9 @@ const LogLevel = @import("../utils/log.zig").LogLevel;
 const AssetLoader = @import("../assets/asset_loader.zig").AssetLoader;
 const AssetManager = @import("../assets/asset_manager.zig").AssetManager;
 
+/// Thread-local pointer to the current worker info (if running on a worker thread)
+threadlocal var tls_worker_info: ?*WorkerInfo = null;
+
 /// Work item types for different subsystems
 pub const WorkItemType = enum {
     asset_loading,
@@ -165,6 +168,14 @@ pub const WorkQueue = struct {
             self.count -= 1;
             return item;
         }
+
+        fn pop_tail(self: *Ring) ?WorkItem {
+            if (self.count == 0) return null;
+            self.tail = (self.tail + self.capacity() - 1) % self.capacity();
+            const item = self.buf[self.tail];
+            self.count -= 1;
+            return item;
+        }
     };
 
     // One ring per priority level
@@ -175,19 +186,17 @@ pub const WorkQueue = struct {
 
     mutex: std.Thread.Mutex = .{},
     total_items: std.atomic.Value(u32),
-    work_available: std.Thread.Semaphore = .{},
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !WorkQueue {
         // Default initial capacity per ring
-        const cap: usize = 1024;
+        const cap: usize = 256; // Reduced default capacity since we have per-worker queues
         return .{
             .critical_ring = try Ring.init(allocator, cap),
             .high_ring = try Ring.init(allocator, cap),
             .normal_ring = try Ring.init(allocator, cap),
             .low_ring = try Ring.init(allocator, cap),
             .total_items = std.atomic.Value(u32).init(0),
-            .work_available = .{},
             .allocator = allocator,
         };
     }
@@ -214,8 +223,6 @@ pub const WorkQueue = struct {
 
         try self.pickRing(item.priority).push(self.allocator, item);
         _ = self.total_items.fetchAdd(1, .monotonic);
-        // Signal one waiting worker
-        self.work_available.post();
     }
 
     /// Push a batch of items while holding the lock once; returns number pushed
@@ -229,18 +236,10 @@ pub const WorkQueue = struct {
             pushed += 1;
         }
         _ = self.total_items.fetchAdd(pushed, .monotonic);
-        // Post once per item (Semaphore has no multi-post API)
-        var i: u32 = 0;
-        while (i < pushed) : (i += 1) self.work_available.post();
         return pushed;
     }
 
-    /// Blocking wait for any work to be available
-    pub fn wait(self: *WorkQueue) void {
-        self.work_available.wait();
-    }
-
-    /// Non-blocking pop in priority order; returns null if empty
+    /// Non-blocking pop in priority order (FIFO - for stealing); returns null if empty
     pub fn pop(self: *WorkQueue) ?WorkItem {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -259,6 +258,32 @@ pub const WorkQueue = struct {
             return it;
         }
         if (self.low_ring.pop()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
+        }
+        return null;
+    }
+
+    /// Non-blocking pop from tail (LIFO - for owner); returns null if empty
+    pub fn pop_tail(self: *WorkQueue) ?WorkItem {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Try critical first, then high, normal, low
+        // Note: Even for LIFO, we respect priority order
+        if (self.critical_ring.pop_tail()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
+        }
+        if (self.high_ring.pop_tail()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
+        }
+        if (self.normal_ring.pop_tail()) |it| {
+            _ = self.total_items.fetchSub(1, .monotonic);
+            return it;
+        }
+        if (self.low_ring.pop_tail()) |it| {
             _ = self.total_items.fetchSub(1, .monotonic);
             return it;
         }
@@ -290,14 +315,22 @@ pub const WorkerInfo = struct {
     work_items_completed: std.atomic.Value(u32),
     worker_id: u32,
     pool: *ThreadPool,
+    local_queue: *WorkQueue, // Per-worker queue for work stealing
+    random_state: std.Random.DefaultPrng, // Per-worker random state for work stealing
 
     pub fn init(worker_id: u32, pool: *ThreadPool) WorkerInfo {
+        // Initialize random state with a mix of time and worker ID to ensure unique seeds
+        var seed = @as(u64, @intCast(std.time.nanoTimestamp()));
+        seed +%= @as(u64, worker_id) *% 0x9e3779b97f4a7c15; // Mix in worker ID using Golden Ratio constant
+
         return .{
             .state = std.atomic.Value(WorkerState).init(.sleeping),
             .last_work_time = std.atomic.Value(i64).init(std.time.milliTimestamp()), // Initialize to current time
             .work_items_completed = std.atomic.Value(u32).init(0),
             .worker_id = worker_id,
             .pool = pool,
+            .local_queue = undefined, // Initialized in ThreadPool.init
+            .random_state = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -376,7 +409,8 @@ pub const ThreadPool = struct {
 
     // Worker management
     workers: []WorkerInfo,
-    work_queue: *WorkQueue,
+    work_queue: *WorkQueue, // Global queue for overflow/external work
+    work_available: std.Thread.Semaphore = .{}, // Global semaphore for all work
 
     // Pool state
     running: bool,
@@ -434,6 +468,10 @@ pub const ThreadPool = struct {
         // Initialize all worker slots (but don't start threads yet)
         for (workers, 0..) |*worker, i| {
             worker.* = WorkerInfo.init(@intCast(i), undefined); // Will set pool pointer after struct creation
+            // Create local queue
+            const local_q = try allocator.create(WorkQueue);
+            local_q.* = try WorkQueue.init(allocator);
+            worker.local_queue = local_q;
         }
 
         const work_queue = try allocator.create(WorkQueue);
@@ -445,6 +483,7 @@ pub const ThreadPool = struct {
             .current_worker_count = std.atomic.Value(u32).init(0),
             .workers = workers,
             .work_queue = work_queue,
+            .work_available = .{},
             .running = false,
             .shutting_down = std.atomic.Value(bool).init(false),
             .registered_subsystems = std.HashMap(WorkItemType, SubsystemConfig, std.hash_map.AutoContext(WorkItemType), 80).init(allocator),
@@ -459,6 +498,12 @@ pub const ThreadPool = struct {
 
     pub fn deinit(self: *ThreadPool) void {
         self.shutdown();
+
+        // Free local queues
+        for (self.workers) |*worker| {
+            worker.local_queue.deinit();
+            self.allocator.destroy(worker.local_queue);
+        }
 
         self.work_queue.deinit();
         self.allocator.destroy(self.work_queue); // Free the work_queue pointer
@@ -542,9 +587,20 @@ pub const ThreadPool = struct {
             return error.ThreadPoolNotRunning;
         }
 
-        try self.work_queue.push(work_item);
-        self.stats.current_queue_size.store(self.work_queue.size(), .release);
-        // Scaling is handled elsewhere; no busy waits here.
+        // Use TLS to find if we are on a worker thread for this pool
+        var pushed_locally = false;
+        if (tls_worker_info) |worker| {
+            if (worker.pool == self) {
+                try worker.local_queue.push(work_item);
+                pushed_locally = true;
+            }
+        }
+
+        if (!pushed_locally) {
+            try self.work_queue.push(work_item);
+        }
+
+        self.work_available.post();
     }
 
     /// Submit a batch of work items to the pool
@@ -552,8 +608,23 @@ pub const ThreadPool = struct {
         if (!self.running) {
             return error.ThreadPoolNotRunning;
         }
-        _ = try self.work_queue.pushBatch(items);
-        self.stats.current_queue_size.store(self.work_queue.size(), .release);
+
+        var pushed_locally = false;
+        if (tls_worker_info) |worker| {
+            if (worker.pool == self) {
+                _ = try worker.local_queue.pushBatch(items);
+                pushed_locally = true;
+            }
+        }
+
+        if (!pushed_locally) {
+            _ = try self.work_queue.pushBatch(items);
+        }
+
+        var i: usize = 0;
+        while (i < items.len) : (i += 1) {
+            self.work_available.post();
+        }
     }
 
     /// Check if a subsystem can accept another worker
@@ -567,22 +638,55 @@ pub const ThreadPool = struct {
         return active_workers < config.max_workers;
     }
 
-    /// Get work from the queue (called by worker threads). Non-blocking.
-    pub fn getWork(self: *ThreadPool) ?WorkItem {
-        return self.work_queue.pop();
+    /// Get work from queues (Local -> Global -> Steal)
+    pub fn getWork(self: *ThreadPool, worker_info: *WorkerInfo) ?WorkItem {
+        // 1. Try local queue (LIFO for cache locality)
+        if (worker_info.local_queue.pop_tail()) |item| {
+            return item;
+        }
+
+        // 2. Try global queue (FIFO)
+        if (self.work_queue.pop()) |item| {
+            return item;
+        }
+
+        // 3. Try to steal from other workers (FIFO)
+        // Start from a random index to reduce contention
+        // We use a per-worker PRNG for speed and correctness
+        const seed = worker_info.random_state.random().int(u32);
+        const worker_count = self.current_worker_count.load(.acquire);
+        if (worker_count <= 1) return null;
+
+        const start_idx = seed % worker_count;
+        var i: u32 = 0;
+        while (i < worker_count) : (i += 1) {
+            const idx = (start_idx + i) % worker_count;
+            if (idx == worker_info.worker_id) continue;
+
+            const victim = &self.workers[idx];
+            // Only steal if victim is active
+            if (victim.isActive()) {
+                if (victim.local_queue.pop()) |item| {
+                    return item;
+                }
+            }
+        }
+
+        return null;
     }
 
     /// Worker thread main loop
     fn workerThreadMain(worker_info: *WorkerInfo) void {
         const pool = worker_info.pool;
+        tls_worker_info = worker_info; // Set TLS
         worker_info.state.store(.idle, .release);
 
         while (pool.running) {
             // Block until work is available
-            pool.work_queue.wait();
+            pool.work_available.wait();
 
             // Try to get work
-            if (pool.getWork()) |work_item| {
+            if (pool.getWork(worker_info)) |work_item| {
                 worker_info.state.store(.working, .release);
 
                 if (pool.track_active_per_subsystem) {
@@ -631,6 +735,10 @@ pub const ThreadPool = struct {
         if (pool.thread_exit_hook) |hook| {
             hook.callback(hook.context);
         }
+
+        // Clear TLS to avoid stale pointers
+        tls_worker_info = null;
+
         // log(.DEBUG, "enhanced_thread_pool", "Worker {} shutting down", .{worker_info.worker_id});
     }
 
@@ -677,7 +785,8 @@ pub const ThreadPool = struct {
 
         self.last_scale_check.store(now, .release);
 
-        const queue_size = self.work_queue.size();
+        const queue_size = self.calculateTotalQueueSize();
+        self.stats.current_queue_size.store(queue_size, .release);
         const current_workers = self.current_worker_count.load(.acquire);
 
         // If we have work but no workers, we need to spawn at least one worker
@@ -755,6 +864,18 @@ pub const ThreadPool = struct {
         return total;
     }
 
+    /// Calculate total items in all queues (global + local)
+    fn calculateTotalQueueSize(self: *ThreadPool) u32 {
+        var total: u32 = self.work_queue.size();
+        const count = self.current_worker_count.load(.acquire);
+        // Iterate active workers
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            total += self.workers[i].local_queue.size();
+        }
+        return total;
+    }
+
     /// Gracefully shutdown the thread pool
     pub fn shutdown(self: *ThreadPool) void {
         if (!self.running) return;
@@ -766,7 +887,7 @@ pub const ThreadPool = struct {
         const current_count = self.current_worker_count.load(.acquire);
         var i_post: u32 = 0;
         while (i_post < current_count) : (i_post += 1) {
-            self.work_queue.work_available.post();
+            self.work_available.post();
         }
         // Wait for all active workers to finish
         for (0..current_count) |i| {
@@ -781,7 +902,7 @@ pub const ThreadPool = struct {
 
     /// Get current pool statistics
     pub fn getStatistics(self: *ThreadPool) PoolStatistics {
-        self.stats.current_queue_size.store(self.work_queue.size(), .release);
+        self.stats.current_queue_size.store(self.calculateTotalQueueSize(), .release);
         return self.stats;
     }
 
