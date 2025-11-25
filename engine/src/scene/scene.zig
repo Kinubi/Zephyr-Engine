@@ -111,8 +111,10 @@ pub const Scene = struct {
     // -1 = no change pending, 0 = disable requested, 1 = enable requested
     pending_pt_state: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
 
-    // Mutex to synchronize updates with scene modifications (clearing/loading)
-    update_mutex: std.Thread.Mutex = .{},
+    // Read-write lock to synchronize updates with scene modifications (clearing/loading)
+    // Main thread holds exclusive lock during load/clear
+    // Render thread holds shared lock during update/render
+    state_lock: std.Thread.RwLock = .{},
 
     // Engine context references
     graphics_context: *GraphicsContext,
@@ -208,8 +210,8 @@ pub const Scene = struct {
 
     /// Load the scene from a JSON file
     pub fn load(self: *Scene, file_path: ?[]const u8) !void {
-        self.update_mutex.lock();
-        defer self.update_mutex.unlock();
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
 
         // Clear existing scene first
         self.clearInternal();
@@ -232,8 +234,8 @@ pub const Scene = struct {
         }
         if (self.physics_system) |ps| {
             ps.deinit();
-            // PhysicsSystem.deinit() destroys the struct itself since it was created with allocator.create
-            // Wait, let me check PhysicsSystem.deinit implementation.
+            // No need to call allocator.destroy(ps) here:
+            // PhysicsSystem.deinit() already destroys the struct itself (calls allocator.destroy(self)).
             self.physics_system = null;
         }
 
@@ -1014,6 +1016,9 @@ pub const Scene = struct {
 
     /// Render the scene using the RenderGraph
     pub fn render(self: *Scene, frame_info: FrameInfo) !void {
+        self.state_lock.lockShared();
+        defer self.state_lock.unlockShared();
+
         if (self.render_graph) |graph| {
             // Execute all passes (compute and graphics)
             // Performance monitoring is handled by the RenderGraph
@@ -1026,6 +1031,9 @@ pub const Scene = struct {
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
     /// Call this on the MAIN THREAD before capturing snapshot
     pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo) !void {
+        self.state_lock.lockShared();
+        defer self.state_lock.unlockShared();
+
         // Apply any pending path tracing toggles FIRST (CPU-side state change)
         // This prepares the render graph state for frame N+1 while render thread renders frame N
 
@@ -1050,8 +1058,8 @@ pub const Scene = struct {
     /// Update scene state (Vulkan descriptor updates)
     /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
-        self.update_mutex.lock();
-        defer self.update_mutex.unlock();
+        self.state_lock.lockShared();
+        defer self.state_lock.unlockShared();
 
         _ = global_ubo;
 
@@ -1063,8 +1071,8 @@ pub const Scene = struct {
 
     /// Clear the scene (destroy all entities and reset state)
     pub fn clear(self: *Scene) void {
-        self.update_mutex.lock();
-        defer self.update_mutex.unlock();
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
         self.clearInternal();
     }
 

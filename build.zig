@@ -105,7 +105,6 @@ pub fn build(b: *std.Build) !void {
         .renderer = cimgui.Renderer.Vulkan,
     });
     editor.linkLibrary(cimgui_dep.artifact("cimgui"));
-    // editor.linkLibrary(zphysics.artifact("zphysics"));
 
     // Install editor
     b.installArtifact(editor);

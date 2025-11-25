@@ -213,7 +213,20 @@ pub const App = struct {
         // ==================== Scene v2: Cornell Box with Two Vases ====================
         log(.INFO, "app", "Creating Scene v2: Cornell Box with two vases...", .{});
 
-        scene = try Scene.init(self.allocator, &new_ecs_world, asset_manager, gc, self.engine.getUnifiedPipelineSystem().?, self.engine.getBufferManager().?, self.engine.getDescriptorManager().?, self.engine.getTextureManager().?, swapchain, thread_pool, global_ubo_set, "cornell_box");
+        scene = try Scene.init(
+            self.allocator,
+            &new_ecs_world,
+            asset_manager,
+            gc,
+            self.engine.getUnifiedPipelineSystem().?,
+            self.engine.getBufferManager().?,
+            self.engine.getDescriptorManager().?,
+            self.engine.getTextureManager().?,
+            swapchain,
+            thread_pool,
+            global_ubo_set,
+            "cornell_box",
+        );
 
         // Register scene pointer in World so systems can access it
         try new_ecs_world.setUserData("scene", @ptrCast(&scene));
@@ -259,6 +272,7 @@ pub const App = struct {
         });
         try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
+        // The ceiling is dynamic so it can fall if the box is shaken
         try scene.ecs_world.emplace(new_ecs.RigidBody, ceiling.entity_id, .{ .body_type = .Dynamic });
         try scene.ecs_world.emplace(new_ecs.BoxCollider, ceiling.entity_id, .{ .half_extents = .{ box_size * 0.5, 0.05, box_size * 0.5 } });
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
@@ -482,21 +496,17 @@ pub const App = struct {
         } else {
             // SINGLE-THREADED MODE: Main thread does everything
             // Begin frame through engine
-            log(.INFO, "app", "Frame start", .{});
+
             const frame_info = try self.engine.beginFrame();
-            log(.INFO, "app", "Frame acquired", .{});
 
             // Update engine systems
             try self.engine.update(frame_info);
-            log(.INFO, "app", "Engine updated", .{});
 
             // Render frame
             try self.engine.render(frame_info);
-            log(.INFO, "app", "Engine rendered", .{});
 
             // End frame
             try self.engine.endFrame(frame_info);
-            log(.INFO, "app", "Frame ended", .{});
         }
 
         return self.engine.isRunning();

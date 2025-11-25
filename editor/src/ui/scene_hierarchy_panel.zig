@@ -100,7 +100,7 @@ pub const SceneHierarchyPanel = struct {
 
                         // Use the deprecated writer() method to get a GenericWriter
                         var generic_writer = buffer.writer(scene.allocator);
-                        
+
                         // Adapt to new Writer API to satisfy std.json.Stringify
                         var adapter_buffer: [0]u8 = undefined;
                         var adapter = generic_writer.adaptToNewApi(&adapter_buffer);
@@ -515,74 +515,34 @@ pub const SceneHierarchyPanel = struct {
                 c.ImGui_Separator();
 
                 // Transform component
-                if (scene.ecs_world.get(Transform, entity)) |transform| {
-                    if (c.ImGui_CollapsingHeader("Transform", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderTransformInspector(scene.ecs_world, entity, transform);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, Transform, "Transform", renderTransformInspector);
 
                 // MeshRenderer component
-                if (scene.ecs_world.get(MeshRenderer, entity)) |mesh_renderer| {
-                    if (c.ImGui_CollapsingHeader("Mesh Renderer", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderMeshRendererInspector(scene, entity, mesh_renderer);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, MeshRenderer, "Mesh Renderer", renderMeshRendererInspector);
 
                 // Camera component
-                if (scene.ecs_world.get(Camera, entity)) |camera| {
-                    if (c.ImGui_CollapsingHeader("Camera", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderCameraInspector(camera);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, Camera, "Camera", renderCameraInspector);
 
                 // PointLight component
-                if (scene.ecs_world.get(PointLight, entity)) |light| {
-                    if (c.ImGui_CollapsingHeader("Point Light", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderPointLightInspector(scene.ecs_world, entity, light);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, PointLight, "Point Light", renderPointLightInspector);
 
                 // ParticleEmitter component
-                if (scene.ecs_world.get(ParticleEmitter, entity)) |emitter| {
-                    if (c.ImGui_CollapsingHeader("Particle Emitter", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderParticleEmitterInspector(scene.ecs_world, entity, emitter);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, ParticleEmitter, "Particle Emitter", renderParticleEmitterInspector);
 
                 // Physics: RigidBody
-                if (scene.ecs_world.get(RigidBody, entity)) |rb| {
-                    if (c.ImGui_CollapsingHeader("Rigid Body", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderRigidBodyInspector(scene.ecs_world, entity, rb);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, RigidBody, "Rigid Body", renderRigidBodyInspector);
 
                 // Physics: BoxCollider
-                if (scene.ecs_world.get(BoxCollider, entity)) |box| {
-                    if (c.ImGui_CollapsingHeader("Box Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderBoxColliderInspector(scene.ecs_world, entity, box);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, BoxCollider, "Box Collider", renderBoxColliderInspector);
 
                 // Physics: SphereCollider
-                if (scene.ecs_world.get(SphereCollider, entity)) |sphere| {
-                    if (c.ImGui_CollapsingHeader("Sphere Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderSphereColliderInspector(scene.ecs_world, entity, sphere);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, SphereCollider, "Sphere Collider", renderSphereColliderInspector);
 
                 // Physics: CapsuleCollider
-                if (scene.ecs_world.get(CapsuleCollider, entity)) |capsule| {
-                    if (c.ImGui_CollapsingHeader("Capsule Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderCapsuleColliderInspector(scene.ecs_world, entity, capsule);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, CapsuleCollider, "Capsule Collider", renderCapsuleColliderInspector);
 
                 // Physics: MeshCollider
-                if (scene.ecs_world.get(MeshCollider, entity)) |mesh| {
-                    if (c.ImGui_CollapsingHeader("Mesh Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
-                        self.renderMeshColliderInspector(scene.ecs_world, entity, mesh);
-                    }
-                }
+                self.renderComponentInspector(scene, entity, MeshCollider, "Mesh Collider", renderMeshColliderInspector);
 
                 // Script component inspector/editor
                 if (scene.ecs_world.get(ScriptComponent, entity)) |sc| {
@@ -810,40 +770,11 @@ pub const SceneHierarchyPanel = struct {
                     c.ImGui_Separator();
                     c.ImGui_Text("Physics");
 
-                    // RigidBody
-                    if (!scene.ecs_world.has(RigidBody, entity)) {
-                        if (c.ImGui_MenuItem("Rigid Body")) {
-                            _ = scene.ecs_world.emplace(RigidBody, entity, .{}) catch {};
-                        }
-                    }
-
-                    // BoxCollider
-                    if (!scene.ecs_world.has(BoxCollider, entity)) {
-                        if (c.ImGui_MenuItem("Box Collider")) {
-                            _ = scene.ecs_world.emplace(BoxCollider, entity, .{}) catch {};
-                        }
-                    }
-
-                    // SphereCollider
-                    if (!scene.ecs_world.has(SphereCollider, entity)) {
-                        if (c.ImGui_MenuItem("Sphere Collider")) {
-                            _ = scene.ecs_world.emplace(SphereCollider, entity, .{}) catch {};
-                        }
-                    }
-
-                    // CapsuleCollider
-                    if (!scene.ecs_world.has(CapsuleCollider, entity)) {
-                        if (c.ImGui_MenuItem("Capsule Collider")) {
-                            _ = scene.ecs_world.emplace(CapsuleCollider, entity, .{}) catch {};
-                        }
-                    }
-
-                    // MeshCollider
-                    if (!scene.ecs_world.has(MeshCollider, entity)) {
-                        if (c.ImGui_MenuItem("Mesh Collider")) {
-                            _ = scene.ecs_world.emplace(MeshCollider, entity, .{}) catch {};
-                        }
-                    }
+                    self.addComponentMenuItem(scene.ecs_world, entity, RigidBody, "Rigid Body");
+                    self.addComponentMenuItem(scene.ecs_world, entity, BoxCollider, "Box Collider");
+                    self.addComponentMenuItem(scene.ecs_world, entity, SphereCollider, "Sphere Collider");
+                    self.addComponentMenuItem(scene.ecs_world, entity, CapsuleCollider, "Capsule Collider");
+                    self.addComponentMenuItem(scene.ecs_world, entity, MeshCollider, "Mesh Collider");
 
                     c.ImGui_EndPopup();
                 }
@@ -922,9 +853,9 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render Transform component inspector with editable fields
-    fn renderTransformInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, transform: *Transform) void {
+    fn renderTransformInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, transform: *Transform) void {
         _ = self;
-        _ = world;
+        _ = scene;
         _ = entity;
 
         // Position
@@ -952,7 +883,7 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render MeshRenderer component inspector
-    fn renderMeshRendererInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, mesh_renderer: *const MeshRenderer) void {
+    fn renderMeshRendererInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, mesh_renderer: *MeshRenderer) void {
         // Model Asset
         if (mesh_renderer.model_asset) |model_id| {
             const model_u64: u64 = @intFromEnum(model_id);
@@ -1018,8 +949,10 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render Camera component inspector
-    fn renderCameraInspector(self: *SceneHierarchyPanel, camera: *const Camera) void {
+    fn renderCameraInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, camera: *Camera) void {
         _ = self;
+        _ = scene;
+        _ = entity;
 
         const proj_type: [*:0]const u8 = switch (camera.projection_type) {
             .perspective => "Perspective",
@@ -1039,9 +972,9 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render PointLight component inspector with editable fields
-    fn renderPointLightInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, light: *PointLight) void {
+    fn renderPointLightInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, light: *PointLight) void {
         _ = self;
-        _ = world;
+        _ = scene;
         _ = entity;
 
         // Color picker
@@ -1058,9 +991,9 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render ParticleEmitter component inspector with editable fields
-    fn renderParticleEmitterInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, emitter: *ParticleEmitter) void {
+    fn renderParticleEmitterInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, emitter: *ParticleEmitter) void {
         _ = self;
-        _ = world;
+        _ = scene;
         _ = entity;
 
         // Active toggle
@@ -1093,123 +1026,185 @@ pub const SceneHierarchyPanel = struct {
     }
 
     /// Render RigidBody component inspector
-    fn renderRigidBodyInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, rb: *RigidBody) void {
+    fn renderRigidBodyInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, rb: *RigidBody) void {
         _ = self;
-        _ = world;
+        _ = scene;
         _ = entity;
+
+        var committed = false;
 
         // Body Type
         const type_names = "Static\x00Kinematic\x00Dynamic\x00";
         var current_type: i32 = @intFromEnum(rb.body_type);
         if (c.ImGui_Combo("Body Type", &current_type, type_names)) {
             rb.body_type = @enumFromInt(current_type);
+            committed = true;
         }
 
         // Mass
-        var mass = rb.mass;
-        if (c.ImGui_DragFloat("Mass", &mass)) {
-            rb.mass = mass;
+        if (c.ImGui_DragFloat("Mass", &rb.mass)) {
+            rb.mass = @max(0.001, rb.mass);
+        }
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
         // Friction
-        var friction = rb.friction;
-        if (c.ImGui_SliderFloat("Friction", &friction, 0.0, 1.0)) {
-            rb.friction = friction;
+        _ = c.ImGui_SliderFloat("Friction", &rb.friction, 0.0, 1.0);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
         // Restitution
-        var restitution = rb.restitution;
-        if (c.ImGui_SliderFloat("Restitution", &restitution, 0.0, 1.0)) {
-            rb.restitution = restitution;
+        _ = c.ImGui_SliderFloat("Restitution", &rb.restitution, 0.0, 1.0);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
         // Damping
-        var linear_damping = rb.linear_damping;
-        if (c.ImGui_SliderFloat("Linear Damping", &linear_damping, 0.0, 1.0)) {
-            rb.linear_damping = linear_damping;
+        _ = c.ImGui_SliderFloat("Linear Damping", &rb.linear_damping, 0.0, 1.0);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
-        var angular_damping = rb.angular_damping;
-        if (c.ImGui_SliderFloat("Angular Damping", &angular_damping, 0.0, 1.0)) {
-            rb.angular_damping = angular_damping;
+        _ = c.ImGui_SliderFloat("Angular Damping", &rb.angular_damping, 0.0, 1.0);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
         // Is Sensor
-        var is_sensor = rb.is_sensor;
-        if (c.ImGui_Checkbox("Is Sensor", &is_sensor)) {
-            rb.is_sensor = is_sensor;
+        if (c.ImGui_Checkbox("Is Sensor", &rb.is_sensor)) {
+            committed = true;
+        }
+
+        if (committed) {
+            rb.body_id = .invalid;
         }
 
         c.ImGui_Text("Body ID: %u", @intFromEnum(rb.body_id));
     }
 
     /// Render BoxCollider component inspector
-    fn renderBoxColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, box: *BoxCollider) void {
+    fn renderBoxColliderInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, box: *BoxCollider) void {
         _ = self;
-        _ = world;
-        _ = entity;
 
-        var half_extents = [3]f32{ box.half_extents[0], box.half_extents[1], box.half_extents[2] };
-        if (c.ImGui_DragFloat3("Half Extents", &half_extents)) {
-            box.half_extents = half_extents;
+        var committed = false;
+        if (c.ImGui_DragFloat3("Half Extents", &box.half_extents)) {
+            box.half_extents[0] = @max(0.001, box.half_extents[0]);
+            box.half_extents[1] = @max(0.001, box.half_extents[1]);
+            box.half_extents[2] = @max(0.001, box.half_extents[2]);
+        }
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
-        var offset = [3]f32{ box.offset[0], box.offset[1], box.offset[2] };
-        if (c.ImGui_DragFloat3("Offset", &offset)) {
-            box.offset = offset;
+        _ = c.ImGui_DragFloat3("Offset", &box.offset);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
+        }
+
+        if (committed) {
+            if (scene.ecs_world.get(RigidBody, entity)) |rb| {
+                rb.body_id = .invalid;
+            }
         }
     }
 
     /// Render SphereCollider component inspector
-    fn renderSphereColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, sphere: *SphereCollider) void {
+    fn renderSphereColliderInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, sphere: *SphereCollider) void {
         _ = self;
-        _ = world;
-        _ = entity;
 
-        var radius = sphere.radius;
-        if (c.ImGui_DragFloat("Radius", &radius)) {
-            sphere.radius = radius;
+        var committed = false;
+        if (c.ImGui_DragFloat("Radius", &sphere.radius)) {
+            sphere.radius = @max(0.001, sphere.radius);
+        }
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
-        var offset = [3]f32{ sphere.offset[0], sphere.offset[1], sphere.offset[2] };
-        if (c.ImGui_DragFloat3("Offset", &offset)) {
-            sphere.offset = offset;
+        _ = c.ImGui_DragFloat3("Offset", &sphere.offset);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
+        }
+
+        if (committed) {
+            if (scene.ecs_world.get(RigidBody, entity)) |rb| {
+                rb.body_id = .invalid;
+            }
         }
     }
 
     /// Render CapsuleCollider component inspector
-    fn renderCapsuleColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, capsule: *CapsuleCollider) void {
+    fn renderCapsuleColliderInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, capsule: *CapsuleCollider) void {
         _ = self;
-        _ = world;
-        _ = entity;
 
-        var radius = capsule.radius;
-        if (c.ImGui_DragFloat("Radius", &radius)) {
-            capsule.radius = radius;
+        var committed = false;
+        if (c.ImGui_DragFloat("Radius", &capsule.radius)) {
+            capsule.radius = @max(0.001, capsule.radius);
+        }
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
-        var height = capsule.height;
-        if (c.ImGui_DragFloat("Height", &height)) {
-            capsule.height = height;
+        if (c.ImGui_DragFloat("Height", &capsule.height)) {
+            capsule.height = @max(0.001, capsule.height);
+        }
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
         }
 
-        var offset = [3]f32{ capsule.offset[0], capsule.offset[1], capsule.offset[2] };
-        if (c.ImGui_DragFloat3("Offset", &offset)) {
-            capsule.offset = offset;
+        _ = c.ImGui_DragFloat3("Offset", &capsule.offset);
+        if (c.ImGui_IsItemDeactivatedAfterEdit()) {
+            committed = true;
+        }
+
+        if (committed) {
+            if (scene.ecs_world.get(RigidBody, entity)) |rb| {
+                rb.body_id = .invalid;
+            }
         }
     }
 
     /// Render MeshCollider component inspector
-    fn renderMeshColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, mesh: *MeshCollider) void {
+    fn renderMeshColliderInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, mesh: *MeshCollider) void {
         _ = self;
-        _ = world;
-        _ = entity;
 
-        var convex = mesh.convex;
-        if (c.ImGui_Checkbox("Convex", &convex)) {
-            mesh.convex = convex;
+        var committed = false;
+        if (c.ImGui_Checkbox("Convex", &mesh.convex)) {
+            committed = true;
         }
 
         c.ImGui_Text("Mesh Asset ID: %llu", @as(u64, @intFromEnum(mesh.mesh_asset_id)));
+
+        if (committed) {
+            if (scene.ecs_world.get(RigidBody, entity)) |rb| {
+                rb.body_id = .invalid;
+            }
+        }
+    }
+
+    /// Generic function to render a component inspector
+    fn renderComponentInspector(
+        self: *SceneHierarchyPanel,
+        scene: *Scene,
+        entity: EntityId,
+        comptime T: type,
+        name: [:0]const u8,
+        render_fn: fn (*SceneHierarchyPanel, *Scene, EntityId, *T) void,
+    ) void {
+        if (scene.ecs_world.get(T, entity)) |comp| {
+            if (c.ImGui_CollapsingHeader(name, c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                render_fn(self, scene, entity, comp);
+            }
+        }
+    }
+
+    fn addComponentMenuItem(self: *SceneHierarchyPanel, world: *World, entity: EntityId, comptime T: type, name: [:0]const u8) void {
+        _ = self;
+        if (!world.has(T, entity)) {
+            if (c.ImGui_MenuItem(name)) {
+                _ = world.emplace(T, entity, .{}) catch {};
+            }
+        }
     }
 };

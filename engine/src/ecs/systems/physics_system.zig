@@ -11,27 +11,27 @@ const MeshCollider = @import("../components/physics_components.zig").MeshCollide
 const Scene = @import("../../scene/scene.zig").Scene;
 const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
+const EntityId = @import("../entity_registry.zig").EntityId;
 
 pub const PhysicsSystem = struct {
     allocator: std.mem.Allocator,
-    gpa: std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }),
     physics_system: *zphysics.PhysicsSystem,
     broad_phase_layer_interface: zphysics.BroadPhaseLayerInterface,
     object_vs_broad_phase_layer_filter: zphysics.ObjectVsBroadPhaseLayerFilter,
     object_layer_pair_filter: zphysics.ObjectLayerPairFilter,
+    active_bodies: std.AutoHashMap(EntityId, zphysics.BodyId),
 
     pub fn init(allocator: std.mem.Allocator) !*PhysicsSystem {
         const self = try allocator.create(PhysicsSystem);
         self.allocator = allocator;
-        self.gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
-        const physics_allocator = self.gpa.allocator();
 
-        try zphysics.init(physics_allocator, .{});
+        try zphysics.init(self.allocator, .{});
 
         // Setup layers
         self.broad_phase_layer_interface = zphysics.BroadPhaseLayerInterface.init(BroadPhaseLayerInterfaceImpl);
         self.object_vs_broad_phase_layer_filter = zphysics.ObjectVsBroadPhaseLayerFilter.init(ObjectVsBroadPhaseLayerFilterImpl);
         self.object_layer_pair_filter = zphysics.ObjectLayerPairFilter.init(ObjectLayerPairFilterImpl);
+        self.active_bodies = std.AutoHashMap(EntityId, zphysics.BodyId).init(allocator);
 
         // Initialize Physics System
         self.physics_system = try zphysics.PhysicsSystem.create(
@@ -54,23 +54,16 @@ pub const PhysicsSystem = struct {
     }
 
     pub fn deinit(self: *PhysicsSystem) void {
-        log(.INFO, "physics_system", "PhysicsSystem deinit start", .{});
-
-        log(.INFO, "physics_system", "Destroying Jolt PhysicsSystem...", .{});
+        self.active_bodies.deinit();
         self.physics_system.destroy();
-        log(.INFO, "physics_system", "Jolt PhysicsSystem destroyed", .{});
 
-        log(.INFO, "physics_system", "Deinitializing zphysics...", .{});
         zphysics.deinit();
-        log(.INFO, "physics_system", "zphysics deinitialized", .{});
-
-        _ = self.gpa.deinit();
         self.allocator.destroy(self);
-        log(.INFO, "physics_system", "PhysicsSystem deinitialized", .{});
     }
 
     pub fn reset(self: *PhysicsSystem) void {
-        log(.INFO, "physics_system", "Resetting PhysicsSystem...", .{});
+        self.active_bodies.clearRetainingCapacity();
+
         // Destroy and recreate the physics system to clear all state
         self.physics_system.destroy();
         self.physics_system = zphysics.PhysicsSystem.create(
@@ -95,41 +88,57 @@ pub const PhysicsSystem = struct {
         const body_interface = self.physics_system.getBodyInterfaceMut();
 
         // 1. Sync ECS Transforms -> Physics Bodies (Kinematic/Static) & Create Bodies
-        // log(.INFO, "physics_system", "Querying entities...", .{});
+
+        // Track seen entities to detect removals
+        var seen_entities = std.AutoHashMap(EntityId, void).init(self.allocator);
+        defer seen_entities.deinit();
+
         var query = try world.query(struct {
+            entity: EntityId,
             transform: *Transform,
             body: *RigidBody,
             box: ?*BoxCollider,
             sphere: ?*SphereCollider,
+            capsule: ?*CapsuleCollider,
+            mesh: ?*MeshCollider,
         });
         defer query.deinit();
-        // log(.INFO, "physics_system", "Query created", .{});
 
-        while (query.next()) |entity| {
-            // log(.INFO, "physics_system", "Processing entity...", .{});
-            if (entity.body.body_id == .invalid) {
+        while (query.next()) |data| {
+            try seen_entities.put(data.entity, {});
+
+            if (data.body.body_id == .invalid) {
                 // Create Shape
                 var shape_settings: *zphysics.ShapeSettings = undefined;
 
-                if (entity.box) |box| {
+                if (data.box) |box| {
                     const box_settings = try zphysics.BoxShapeSettings.create(.{ box.half_extents[0], box.half_extents[1], box.half_extents[2] });
                     shape_settings = @ptrCast(box_settings);
-                } else if (entity.sphere) |sphere| {
+                } else if (data.sphere) |sphere| {
                     const sphere_settings = try zphysics.SphereShapeSettings.create(sphere.radius);
                     shape_settings = @ptrCast(sphere_settings);
+                } else if (data.capsule) |capsule| {
+                    const capsule_settings = try zphysics.CapsuleShapeSettings.create(capsule.height * 0.5, capsule.radius);
+                    shape_settings = @ptrCast(capsule_settings);
+                } else if (data.mesh) |mesh| {
+                    // TODO: Implement mesh collider creation. This will likely involve
+                    // loading mesh data from the asset manager.
+                    _ = mesh;
+                    log(.WARN, "physics_system", "MeshCollider not yet implemented", .{});
+                    continue;
                 } else {
                     continue; // No collider
                 }
                 defer shape_settings.release();
 
                 // Create Body Settings
-                const motion_type: zphysics.MotionType = switch (entity.body.body_type) {
+                const motion_type: zphysics.MotionType = switch (data.body.body_type) {
                     .Static => .static,
                     .Kinematic => .kinematic,
                     .Dynamic => .dynamic,
                 };
 
-                const object_layer: zphysics.ObjectLayer = if (entity.body.body_type == .Static)
+                const object_layer: zphysics.ObjectLayer = if (data.body.body_type == .Static)
                     @intFromEnum(Layers.NonMoving)
                 else
                     @intFromEnum(Layers.Moving);
@@ -138,8 +147,8 @@ pub const PhysicsSystem = struct {
                 defer shape.release();
 
                 const body_settings = zphysics.BodyCreationSettings{
-                    .position = .{ entity.transform.position.x, entity.transform.position.y, entity.transform.position.z, 1.0 },
-                    .rotation = .{ entity.transform.rotation.x, entity.transform.rotation.y, entity.transform.rotation.z, entity.transform.rotation.w },
+                    .position = .{ data.transform.position.x, data.transform.position.y, data.transform.position.z, 1.0 },
+                    .rotation = .{ data.transform.rotation.x, data.transform.rotation.y, data.transform.rotation.z, data.transform.rotation.w },
                     .motion_type = motion_type,
                     .object_layer = object_layer,
                     .shape = shape,
@@ -147,20 +156,26 @@ pub const PhysicsSystem = struct {
 
                 // Create Body
                 const body_id = try body_interface.createAndAddBody(body_settings, .activate);
-                entity.body.body_id = body_id;
+                data.body.body_id = body_id;
+                try self.active_bodies.put(data.entity, body_id);
             } else {
+                // Ensure tracked
+                if (!self.active_bodies.contains(data.entity)) {
+                    try self.active_bodies.put(data.entity, data.body.body_id);
+                }
+
                 // Sync Kinematic
-                if (entity.body.body_type == .Kinematic) {
-                    body_interface.setPosition(entity.body.body_id, .{ entity.transform.position.x, entity.transform.position.y, entity.transform.position.z }, .activate);
-                    body_interface.setRotation(entity.body.body_id, .{ entity.transform.rotation.x, entity.transform.rotation.y, entity.transform.rotation.z, entity.transform.rotation.w }, .activate);
-                } else if (entity.body.body_type == .Dynamic and entity.transform.dirty) {
+                if (data.body.body_type == .Kinematic) {
+                    body_interface.setPosition(data.body.body_id, .{ data.transform.position.x, data.transform.position.y, data.transform.position.z }, .activate);
+                    body_interface.setRotation(data.body.body_id, .{ data.transform.rotation.x, data.transform.rotation.y, data.transform.rotation.z, data.transform.rotation.w }, .activate);
+                } else if (data.body.body_type == .Dynamic and data.transform.dirty) {
                     // Sync Dynamic if Transform changed externally (e.g. Editor Gizmo)
                     // Check if the transform is significantly different from physics state to avoid feedback loop
-                    const phys_pos = body_interface.getPosition(entity.body.body_id);
-                    const phys_rot = body_interface.getRotation(entity.body.body_id);
+                    const phys_pos = body_interface.getPosition(data.body.body_id);
+                    const phys_rot = body_interface.getRotation(data.body.body_id);
 
-                    const t_pos = entity.transform.position;
-                    const t_rot = entity.transform.rotation;
+                    const t_pos = data.transform.position;
+                    const t_rot = data.transform.rotation;
 
                     const dist_sq = (t_pos.x - phys_pos[0]) * (t_pos.x - phys_pos[0]) +
                         (t_pos.y - phys_pos[1]) * (t_pos.y - phys_pos[1]) +
@@ -173,13 +188,32 @@ pub const PhysicsSystem = struct {
                     // Thresholds: 1mm squared = 0.000001, Rotation cos(angle) ~ 0.9999
                     if (dist_sq > 0.000001 or abs_dot < 0.9999) {
                         // Teleport body to new transform
-                        body_interface.setPosition(entity.body.body_id, .{ t_pos.x, t_pos.y, t_pos.z }, .activate);
-                        body_interface.setRotation(entity.body.body_id, .{ t_rot.x, t_rot.y, t_rot.z, t_rot.w }, .activate);
+                        body_interface.setPosition(data.body.body_id, .{ t_pos.x, t_pos.y, t_pos.z }, .activate);
+                        body_interface.setRotation(data.body.body_id, .{ t_rot.x, t_rot.y, t_rot.z, t_rot.w }, .activate);
 
                         // Reset velocities to stop movement (optional, but usually desired when dragging)
-                        body_interface.setLinearAndAngularVelocity(entity.body.body_id, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+                        body_interface.setLinearAndAngularVelocity(data.body.body_id, .{ 0, 0, 0 }, .{ 0, 0, 0 });
                     }
                 }
+            }
+        }
+
+        // Cleanup orphans
+        var to_remove = std.ArrayList(EntityId){};
+        defer to_remove.deinit(self.allocator);
+
+        var it = self.active_bodies.iterator();
+        while (it.next()) |entry| {
+            if (!seen_entities.contains(entry.key_ptr.*)) {
+                try to_remove.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+
+        for (to_remove.items) |entity_id| {
+            if (self.active_bodies.get(entity_id)) |body_id| {
+                body_interface.removeBody(body_id);
+                body_interface.destroyBody(body_id);
+                _ = self.active_bodies.remove(entity_id);
             }
         }
 

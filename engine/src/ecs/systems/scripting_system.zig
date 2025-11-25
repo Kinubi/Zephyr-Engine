@@ -226,9 +226,9 @@ pub fn prepare(world: *World, dt: f32) !void {
     const total_scripts = view.len();
 
     if (total_scripts <= 2) {
-        // For small numbers of per-frame scripts it's cheaper/simpler to run
-        // them synchronously on the current thread to avoid thread pool
-        // overhead and potential latency.
+        // Threshold changed from `< 2` to `<= 2`: With 2 or fewer scripts, execution is synchronous.
+        // This is based on profiling: for small numbers of per-frame scripts (2 or fewer), the overhead
+        // of parallelization outweighs the benefits, so synchronous execution is preferred.
         var iter = view.iterator();
         while (iter.next()) |entry| {
             const sc = entry.component;

@@ -46,10 +46,7 @@ test "QueryIterator basic usage" {
         pos: *Position,
         vel: *Velocity,
     });
-    // No defer query.deinit() needed as it doesn't allocate?
-    // Wait, QueryIterator might allocate if it stores something?
-    // Let's check QueryIterator.init.
-    // It doesn't allocate. It just stores pointers.
+    defer query.deinit();
 
     var count: usize = 0;
     while (query.next()) |item| {
@@ -84,6 +81,7 @@ test "QueryIterator optional components" {
         pos: *Position,
         vel: ?*Velocity,
     });
+    defer query.deinit();
 
     var count: usize = 0;
     while (query.next()) |item| {

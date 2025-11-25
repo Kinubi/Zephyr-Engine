@@ -34,6 +34,7 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
 
         // Helper to determine if field is optional
         fn IsOptional(comptime PtrType: type) bool {
+            if (PtrType == EntityId) return false;
             return @typeInfo(PtrType) == .optional;
         }
 
@@ -41,18 +42,40 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
         const StorageTuple = blk: {
             var types: [Fields.len]type = undefined;
             for (Fields, 0..) |field, i| {
-                const CompT = ComponentType(field.type);
-                types[i] = *DenseSet(CompT);
+                if (field.type == EntityId) {
+                    types[i] = void;
+                } else {
+                    const CompT = ComponentType(field.type);
+                    types[i] = *DenseSet(CompT);
+                }
             }
             break :blk std.meta.Tuple(&types);
         };
 
         pub fn init(world: *World) !Self {
+            // Ensure at least one required component exists to drive iteration
+            comptime {
+                var has_required = false;
+                for (Fields) |field| {
+                    if (field.type != EntityId and !IsOptional(field.type)) {
+                        has_required = true;
+                    }
+                }
+                if (!has_required) {
+                    @compileError("Query must have at least one required component (not optional, not EntityId) to drive iteration.");
+                }
+            }
+
             var storages: StorageTuple = undefined;
             var min_count: usize = std.math.maxInt(usize);
             var main_idx: usize = 0;
 
             inline for (Fields, 0..) |field, i| {
+                if (field.type == EntityId) {
+                    storages[i] = {};
+                    continue;
+                }
+
                 const CompT = ComponentType(field.type);
                 const type_name = @typeName(CompT);
 
@@ -91,21 +114,6 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 }
             }
 
-            // If all fields are optional, we need to pick one.
-            // But usually queries have at least one required component.
-            // If all are optional, we should probably iterate over all entities in the world?
-            // That's expensive. Let's assume at least one required for now or just pick the first one.
-            // If min_count is still maxInt, it means all were optional.
-            if (min_count == std.math.maxInt(usize)) {
-                // Pick the first one (even if optional)
-                if (Fields.len > 0) {
-                    main_idx = 0;
-                    // We need to check len of the first one
-                    // But we can't access storages[0] generically easily at runtime without inline loop or switch.
-                    // Actually we can using inline for loop to find the one matching main_idx.
-                }
-            }
-
             return .{
                 .world = world,
                 .storages = storages,
@@ -135,12 +143,14 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 var valid_index = false;
 
                 // 1. Get candidate entity from main storage
-                inline for (Fields, 0..) |_, i| {
-                    if (i == self.main_storage_index) {
-                        const storage = self.storages[i];
-                        if (self.current_index < storage.entities.items.len) {
-                            entity = storage.entities.items[self.current_index];
-                            valid_index = true;
+                inline for (Fields, 0..) |field, i| {
+                    if (field.type != EntityId) {
+                        if (i == self.main_storage_index) {
+                            const storage = self.storages[i];
+                            if (self.current_index < storage.entities.items.len) {
+                                entity = storage.entities.items[self.current_index];
+                                valid_index = true;
+                            }
                         }
                     }
                 }
@@ -151,6 +161,7 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 // 2. Check if entity exists in all other REQUIRED storages
                 var all_present = true;
                 inline for (Fields, 0..) |field, i| {
+                    if (field.type == EntityId) continue;
                     if (i != self.main_storage_index and !IsOptional(field.type)) {
                         const storage = self.storages[i];
                         if (!storage.has(entity)) {
@@ -166,24 +177,28 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 var result: QueryStruct = undefined;
 
                 inline for (Fields, 0..) |field, i| {
-                    const storage = self.storages[i];
-                    switch (@typeInfo(field.type)) {
-                        .optional => {
-                            // Optional: try get
-                            if (storage.getMut(entity)) |ptr| {
-                                @field(result, field.name) = ptr;
-                            } else {
-                                @field(result, field.name) = null;
-                            }
-                        },
-                        else => {
-                            // Required: must exist (we checked)
-                            if (storage.getMut(entity)) |ptr| {
-                                @field(result, field.name) = ptr;
-                            } else {
-                                unreachable;
-                            }
-                        },
+                    if (field.type == EntityId) {
+                        @field(result, field.name) = entity;
+                    } else {
+                        const storage = self.storages[i];
+                        switch (@typeInfo(field.type)) {
+                            .optional => {
+                                // Optional: try get
+                                if (storage.getMut(entity)) |ptr| {
+                                    @field(result, field.name) = ptr;
+                                } else {
+                                    @field(result, field.name) = null;
+                                }
+                            },
+                            else => {
+                                // Required: must exist (we checked)
+                                if (storage.getMut(entity)) |ptr| {
+                                    @field(result, field.name) = ptr;
+                                } else {
+                                    unreachable;
+                                }
+                            },
+                        }
                     }
                 }
 

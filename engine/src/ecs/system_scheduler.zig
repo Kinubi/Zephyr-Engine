@@ -182,7 +182,7 @@ pub const SystemStage = struct {
                 });
             }
         }
-        // log(.INFO, "system_scheduler", "Dispatching {} update jobs for stage '{s}'", .{ update_count, self.name });
+
         try pool.submitBatch(self.update_items_cache.items);
 
         // Wait for completion
