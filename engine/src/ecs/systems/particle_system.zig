@@ -488,7 +488,19 @@ pub fn update(world: *World, dt: f32) !void {
         if (!transform.dirty) continue;
 
         // Get GPU emitter ID
-        const gpu_id = scene.emitter_to_gpu_id.get(entity) orelse continue;
+        // Optimization: Use cached ID in component if available
+        var gpu_id: u32 = 0;
+        if (emitter.gpu_id) |id| {
+            gpu_id = id;
+        } else {
+            // Fallback to hash map lookup and cache it
+            if (scene.emitter_to_gpu_id.get(entity)) |id| {
+                gpu_id = id;
+                emitter.gpu_id = id;
+            } else {
+                continue;
+            }
+        }
 
         // Update GPU emitter via ParticleSystem
         if (scene.particle_system) |ps| {

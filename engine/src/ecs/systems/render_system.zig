@@ -1913,17 +1913,19 @@ pub fn prepare(world: *World, dt: f32) !void {
         reason = "count_changed";
     }
 
-    // 3) EXPENSIVE check: Mesh pointers changed (iterate entities + asset lookups) - NOT transform-only
+    // 3) Combined check: Mesh pointers changed OR Transform dirty
     // Check this BEFORE transforms so geometry changes take priority over transform-only changes
     if (!changes_detected) {
         if (self.cached_raster_data[active_idx]) |cached| {
             var iter = mesh_view.iterator();
             var mesh_idx: usize = 0;
+            var transform_dirty_detected = false;
 
             outer: while (iter.next()) |entry| {
                 const renderer = entry.component;
                 if (!renderer.enabled or !renderer.hasValidAssets()) continue;
 
+                // Check mesh pointers (Geometry change)
                 if (asset_manager.getModel(renderer.model_asset.?)) |model| {
                     for (model.meshes.items) |model_mesh| {
                         // Check if we've exceeded cached mesh count or mesh ptr changed
@@ -1938,32 +1940,35 @@ pub fn prepare(world: *World, dt: f32) !void {
                         mesh_idx += 1;
                     }
                 }
+
+                // Check transform dirty (Transform change)
+                // Only check if we haven't already detected a geometry change
+                if (!transform_dirty_detected) {
+                    if (world.get(Transform, entry.entity)) |transform| {
+                        if (transform.dirty) {
+                            transform_dirty_detected = true;
+                        }
+                    }
+                }
             }
 
             // Also check if we have fewer meshes than before
-            if (!changes_detected and mesh_idx != cached.objects.len) {
-                changes_detected = true;
-                is_transform_only = false;
-                reason = "mesh_count_changed";
-            }
-        }
-    }
-
-    // 4) Medium check: Transform dirty flags (iterate entities, check flags) - IS transform-only
-    // This runs LAST so it only triggers if no geometry changes were detected
-    if (!changes_detected) {
-        var iter = mesh_view.iterator();
-        while (iter.next()) |entry| {
-            if (world.get(Transform, entry.entity)) |transform| {
-                if (transform.dirty) {
+            if (!changes_detected) {
+                if (mesh_idx != cached.objects.len) {
+                    changes_detected = true;
+                    is_transform_only = false;
+                    reason = "mesh_count_changed";
+                } else if (transform_dirty_detected) {
                     changes_detected = true;
                     is_transform_only = true;
                     reason = "transform_dirty";
-                    break;
                 }
             }
         }
     }
+
+    // 4) Removed separate transform check loop (merged into step 3)
+
 
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
