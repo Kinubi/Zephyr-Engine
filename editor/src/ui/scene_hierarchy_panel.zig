@@ -83,6 +83,103 @@ pub const SceneHierarchyPanel = struct {
         }
     }
 
+    pub fn renderToolbar(self: *SceneHierarchyPanel, scene: *Scene) void {
+        _ = self;
+        if (c.ImGui_Begin("Toolbar", null, 0)) {
+            const state = scene.state;
+
+            if (state == .Play) {
+                if (c.ImGui_Button("Pause")) {
+                    scene.state = .Pause;
+                }
+            } else {
+                if (c.ImGui_Button("Play")) {
+                    if (state == .Edit) {
+                        // Serialize scene to snapshot
+                        var buffer = std.ArrayList(u8){};
+
+                        // Use the deprecated writer() method to get a GenericWriter
+                        var generic_writer = buffer.writer(scene.allocator);
+                        
+                        // Adapt to new Writer API to satisfy std.json.Stringify
+                        var adapter_buffer: [0]u8 = undefined;
+                        var adapter = generic_writer.adaptToNewApi(&adapter_buffer);
+                        const writer = &adapter.new_interface;
+
+                        var serializer = zephyr.SceneSerializer.init(scene);
+                        defer serializer.deinit();
+
+                        var stringify = std.json.Stringify{
+                            .writer = writer,
+                            .options = .{ .whitespace = .indent_2 },
+                            .indent_level = 0,
+                            .next_punctuation = .the_beginning,
+                            .nesting_stack = undefined,
+                            .raw_streaming_mode = .none,
+                        };
+
+                        var success = true;
+                        serializer.jsonStringify(&stringify) catch |err| {
+                            std.log.err("Failed to serialize scene: {}", .{err});
+                            success = false;
+                        };
+
+                        if (success) {
+                            if (scene.play_mode_snapshot) |*snap| {
+                                snap.deinit(scene.allocator);
+                            }
+                            scene.play_mode_snapshot = buffer;
+                        } else {
+                            buffer.deinit(scene.allocator);
+                        }
+                    }
+                    scene.state = .Play;
+                }
+            }
+
+            c.ImGui_SameLine();
+            if (c.ImGui_Button("Stop")) {
+                if (state != .Edit) {
+                    scene.state = .Edit;
+
+                    if (scene.play_mode_snapshot) |*snap| {
+                        // Reset scene using load(null) to ensure clean state and re-initialized render graph
+                        scene.load(null) catch |err| {
+                            std.log.err("Failed to reset scene: {}", .{err});
+                        };
+
+                        // Deserialize
+                        var serializer = zephyr.SceneSerializer.init(scene);
+                        defer serializer.deinit();
+
+                        var parsed = std.json.parseFromSlice(std.json.Value, scene.allocator, snap.items, .{}) catch |err| {
+                            std.log.err("Failed to parse snapshot: {}", .{err});
+                            return;
+                        };
+                        defer parsed.deinit();
+
+                        serializer.deserialize(parsed.value) catch |err| {
+                            std.log.err("Failed to deserialize snapshot: {}", .{err});
+                        };
+
+                        // Clean up snapshot
+                        snap.deinit(scene.allocator);
+                        scene.play_mode_snapshot = null;
+                    }
+                }
+            }
+
+            c.ImGui_SameLine();
+            const state_str: [:0]const u8 = switch (state) {
+                .Edit => "Edit",
+                .Play => "Play",
+                .Pause => "Pause",
+            };
+            c.ImGui_Text("State: %s", state_str.ptr);
+        }
+        c.ImGui_End();
+    }
+
     /// Recursively draw entity node and its children
     fn drawEntityNode(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, children_map: *std.AutoHashMap(EntityId, std.ArrayListUnmanaged(EntityId))) void {
         var id_buf: [32]u8 = undefined;
@@ -1042,7 +1139,7 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Checkbox("Is Sensor", &is_sensor)) {
             rb.is_sensor = is_sensor;
         }
-        
+
         c.ImGui_Text("Body ID: %u", @intFromEnum(rb.body_id));
     }
 
@@ -1112,7 +1209,7 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_Checkbox("Convex", &convex)) {
             mesh.convex = convex;
         }
-        
-        c.ImGui_Text("Mesh Asset ID: %u", mesh.mesh_asset_id);
+
+        c.ImGui_Text("Mesh Asset ID: %llu", @as(u64, @intFromEnum(mesh.mesh_asset_id)));
     }
 };

@@ -218,16 +218,19 @@ pub const SceneLayer = struct {
         // Store GlobalUbo pointer in World so systems can access it
         try self.ecs_world.setUserData("global_ubo", @ptrCast(&self.prepared_ubo[prep_idx]));
 
+        // Determine simulation delta time based on scene state
+        const sim_dt = if (self.scene.state == .Play) dt else 0.0;
+
         // Update ECS systems (CPU work, no Vulkan)
         // Use parallel scheduler if available, otherwise fallback to sequential
         if (self.system_scheduler) |*scheduler| {
 
             // Parallel execution of all registered systems
             // Systems can now extract data to GlobalUbo via userdata
-            try scheduler.executePrepare(self.ecs_world, dt);
+            try scheduler.executePrepare(self.ecs_world, sim_dt);
         } else {
             // Fallback: Sequential execution
-            try ecs.updateTransformSystem(self.ecs_world, dt);
+            try ecs.updateTransformSystem(self.ecs_world, sim_dt);
         }
 
         // Prepare scene (ECS queries, particle spawning, light updates - no Vulkan)

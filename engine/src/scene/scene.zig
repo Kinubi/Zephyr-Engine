@@ -62,6 +62,12 @@ pub const Scene = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
 
+    // Scene state
+    state: SceneState = .Edit,
+
+    // Snapshot of the scene state before entering Play mode
+    play_mode_snapshot: ?std.ArrayList(u8) = null,
+
     // Track entities spawned in this scene for cleanup
     entities: std.ArrayList(EntityId),
 
@@ -104,6 +110,9 @@ pub const Scene = struct {
     // Thread-safe path tracing state (set by main thread, applied by render thread)
     // -1 = no change pending, 0 = disable requested, 1 = enable requested
     pending_pt_state: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
+
+    // Mutex to synchronize updates with scene modifications (clearing/loading)
+    update_mutex: std.Thread.Mutex = .{},
 
     // Engine context references
     graphics_context: *GraphicsContext,
@@ -199,8 +208,11 @@ pub const Scene = struct {
 
     /// Load the scene from a JSON file
     pub fn load(self: *Scene, file_path: ?[]const u8) !void {
+        self.update_mutex.lock();
+        defer self.update_mutex.unlock();
+
         // Clear existing scene first
-        self.clear();
+        self.clearInternal();
 
         // Clean up old render graph resources before creating new ones
         if (self.render_graph) |graph| {
@@ -1038,6 +1050,9 @@ pub const Scene = struct {
     /// Update scene state (Vulkan descriptor updates)
     /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
+        self.update_mutex.lock();
+        defer self.update_mutex.unlock();
+
         _ = global_ubo;
 
         // Update all render passes through the render graph (descriptor sets)
@@ -1048,6 +1063,12 @@ pub const Scene = struct {
 
     /// Clear the scene (destroy all entities and reset state)
     pub fn clear(self: *Scene) void {
+        self.update_mutex.lock();
+        defer self.update_mutex.unlock();
+        self.clearInternal();
+    }
+
+    fn clearInternal(self: *Scene) void {
         log(.INFO, "scene", "Clearing scene...", .{});
 
         // Destroy all entities in the ECS world
@@ -1066,6 +1087,10 @@ pub const Scene = struct {
             ps.reset();
         }
 
+        if (self.physics_system) |ps| {
+            ps.reset();
+        }
+
         if (self.render_graph) |graph| {
             graph.reset();
         }
@@ -1073,6 +1098,12 @@ pub const Scene = struct {
         // Remove render_system from ECS user data
         _ = self.ecs_world.removeUserData("render_system");
     }
+};
+
+pub const SceneState = enum {
+    Edit,
+    Play,
+    Pause,
 };
 
 // ==================== Tests ====================

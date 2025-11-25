@@ -6,3 +6,4 @@ zig-out/bin/ZephyrEditor
 
 # Pipeline cache directory
 /cache/
+imgui.ini

@@ -74,6 +74,7 @@ pub const Transform = @import("ecs/components/transform.zig").Transform;
 
 // ========== Scene ==========
 pub const Scene = @import("scene/scene.zig").Scene;
+pub const SceneSerializer = @import("scene/scene_serializer.zig").SceneSerializer;
 pub const GameObject = @import("scene/game_object.zig").GameObject;
 
 // ========== Assets ==========

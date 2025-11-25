@@ -84,6 +84,13 @@ pub const SceneSerializer = struct {
                 try self.serializeComponent(ecs.ParticleEmitter, entity, writer);
                 try self.serializeComponent(ecs.MaterialSet, entity, writer);
 
+                // Physics components
+                try self.serializeComponent(ecs.RigidBody, entity, writer);
+                try self.serializeComponent(ecs.BoxCollider, entity, writer);
+                try self.serializeComponent(ecs.SphereCollider, entity, writer);
+                try self.serializeComponent(ecs.CapsuleCollider, entity, writer);
+                try self.serializeComponent(ecs.MeshCollider, entity, writer);
+
                 // Material property components
                 try self.serializeComponent(ecs.AlbedoMaterial, entity, writer);
                 try self.serializeComponent(ecs.RoughnessMaterial, entity, writer);
@@ -161,6 +168,13 @@ pub const SceneSerializer = struct {
             try self.deserializeComponent(ecs.ScriptComponent, entity, components_val);
             try self.deserializeComponent(ecs.ParticleEmitter, entity, components_val);
             try self.deserializeComponent(ecs.MaterialSet, entity, components_val);
+
+            // Physics components
+            try self.deserializeComponent(ecs.RigidBody, entity, components_val);
+            try self.deserializeComponent(ecs.BoxCollider, entity, components_val);
+            try self.deserializeComponent(ecs.SphereCollider, entity, components_val);
+            try self.deserializeComponent(ecs.CapsuleCollider, entity, components_val);
+            try self.deserializeComponent(ecs.MeshCollider, entity, components_val);
 
             // Material property components
             try self.deserializeComponent(ecs.AlbedoMaterial, entity, components_val);

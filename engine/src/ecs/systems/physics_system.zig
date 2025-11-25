@@ -68,6 +68,28 @@ pub const PhysicsSystem = struct {
         self.allocator.destroy(self);
         log(.INFO, "physics_system", "PhysicsSystem deinitialized", .{});
     }
+
+    pub fn reset(self: *PhysicsSystem) void {
+        log(.INFO, "physics_system", "Resetting PhysicsSystem...", .{});
+        // Destroy and recreate the physics system to clear all state
+        self.physics_system.destroy();
+        self.physics_system = zphysics.PhysicsSystem.create(
+            &self.broad_phase_layer_interface,
+            &self.object_vs_broad_phase_layer_filter,
+            &self.object_layer_pair_filter,
+            .{
+                .max_bodies = 1024,
+                .num_body_mutexes = 0,
+                .max_body_pairs = 1024,
+                .max_contact_constraints = 1024,
+            },
+        ) catch |err| {
+            log(.ERR, "physics_system", "Failed to recreate physics system during reset: {}", .{err});
+            @panic("Failed to reset physics system");
+        };
+        self.physics_system.setGravity(.{ 0.0, 9.81, 0.0 });
+    }
+
     pub fn prepare(self: *PhysicsSystem, world: *World, dt: f32) !void {
         // log(.INFO, "physics_system", "PhysicsSystem prepare start", .{});
         const body_interface = self.physics_system.getBodyInterfaceMut();
@@ -153,7 +175,7 @@ pub const PhysicsSystem = struct {
                         // Teleport body to new transform
                         body_interface.setPosition(entity.body.body_id, .{ t_pos.x, t_pos.y, t_pos.z }, .activate);
                         body_interface.setRotation(entity.body.body_id, .{ t_rot.x, t_rot.y, t_rot.z, t_rot.w }, .activate);
-                        
+
                         // Reset velocities to stop movement (optional, but usually desired when dragging)
                         body_interface.setLinearAndAngularVelocity(entity.body.body_id, .{ 0, 0, 0 }, .{ 0, 0, 0 });
                     }
