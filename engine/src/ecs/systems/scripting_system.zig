@@ -78,7 +78,7 @@ pub const ScriptingSystem = struct {
 /// Static wrapper for use with SystemScheduler
 /// Looks up the scene-owned ScriptingSystem instance from World.userdata
 /// (key: "scripting_system") and invokes its instance update method.
-pub fn update(world: *World, dt: f32) !void {
+pub fn prepare(world: *World, dt: f32) !void {
     _ = dt;
     // Scheduler wrapper: perform the per-frame scripting work directly (no call to
     // `update`) so the scheduler executes the system's logic inline. This mirrors
@@ -87,7 +87,7 @@ pub fn update(world: *World, dt: f32) !void {
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
     // Use a local alias to the Scene-owned ScriptingSystem instance
-    var sys: *ScriptingSystem = &scene.scripting_system;
+    var sys: *ScriptingSystem = scene.scripting_system;
 
     // Process any pending CVar change events first so their Actions will be
     // available to be handled in the same frame. We allocate action messages
@@ -225,10 +225,10 @@ pub fn update(world: *World, dt: f32) !void {
     var enqueued_count: usize = 0;
     const total_scripts = view.len();
 
-    if (total_scripts < 2) {
-        // For small numbers of per-frame scripts it's cheaper/simpler to run
-        // them synchronously on the current thread to avoid thread pool
-        // overhead and potential latency.
+    if (total_scripts <= 2) {
+        // Threshold changed from `< 2` to `<= 2`: With 2 or fewer scripts, execution is synchronous.
+        // This is based on profiling: for small numbers of per-frame scripts (2 or fewer), the overhead
+        // of parallelization outweighs the benefits, so synchronous execution is preferred.
         var iter = view.iterator();
         while (iter.next()) |entry| {
             const sc = entry.component;

@@ -202,6 +202,9 @@ pub const UILayer = struct {
             want_mouse_after = i.*.WantCaptureMouse;
         }
 
+        // Render toolbar (always visible)
+        self.ui_renderer.hierarchy_panel.renderToolbar(self.scene);
+
         // Render UI panels (conditionally hidden with F1) - CPU recording only
         if (self.show_ui_panels) {
             self.ui_renderer.renderPanels(stats);

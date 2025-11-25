@@ -62,6 +62,12 @@ pub const Scene = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
 
+    // Scene state
+    state: SceneState = .Edit,
+
+    // Snapshot of the scene state before entering Play mode
+    play_mode_snapshot: ?std.ArrayList(u8) = null,
+
     // Track entities spawned in this scene for cleanup
     entities: std.ArrayList(EntityId),
 
@@ -90,7 +96,8 @@ pub const Scene = struct {
     render_system: *ecs.RenderSystem,
 
     // Scripting system (owned by the Scene)
-    scripting_system: ecs.ScriptingSystem,
+    scripting_system: *ecs.ScriptingSystem,
+    physics_system: ?*ecs.PhysicsSystem = null,
 
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
@@ -103,6 +110,11 @@ pub const Scene = struct {
     // Thread-safe path tracing state (set by main thread, applied by render thread)
     // -1 = no change pending, 0 = disable requested, 1 = enable requested
     pending_pt_state: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
+
+    // Read-write lock to synchronize updates with scene modifications (clearing/loading)
+    // Main thread holds exclusive lock during load/clear
+    // Render thread holds shared lock during update/render
+    state_lock: std.Thread.RwLock = .{},
 
     // Engine context references
     graphics_context: *GraphicsContext,
@@ -139,6 +151,9 @@ pub const Scene = struct {
         render_system.* = try ecs.RenderSystem.init(allocator, thread_pool, buffer_manager);
         try ecs_world.setUserData("render_system", @ptrCast(render_system));
 
+        const scripting_system = try allocator.create(ecs.ScriptingSystem);
+        scripting_system.* = try ecs.ScriptingSystem.init(allocator, thread_pool, 4);
+
         var scene = Scene{
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
@@ -150,7 +165,8 @@ pub const Scene = struct {
             .random = prng,
             .light_system = ecs.LightSystem.init(allocator),
             .render_system = render_system,
-            .scripting_system = try ecs.ScriptingSystem.init(allocator, thread_pool, 4),
+            .scripting_system = scripting_system,
+            .physics_system = try ecs.PhysicsSystem.init(allocator),
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
             .buffer_manager = buffer_manager,
@@ -194,8 +210,11 @@ pub const Scene = struct {
 
     /// Load the scene from a JSON file
     pub fn load(self: *Scene, file_path: ?[]const u8) !void {
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+
         // Clear existing scene first
-        self.clear();
+        self.clearInternal();
 
         // Clean up old render graph resources before creating new ones
         if (self.render_graph) |graph| {
@@ -212,6 +231,12 @@ pub const Scene = struct {
             ms.deinit();
             self.allocator.destroy(ms);
             self.material_system = null;
+        }
+        if (self.physics_system) |ps| {
+            ps.deinit();
+            // No need to call allocator.destroy(ps) here:
+            // PhysicsSystem.deinit() already destroys the struct itself (calls allocator.destroy(self)).
+            self.physics_system = null;
         }
 
         // Initialize Render Graph and Systems
@@ -706,11 +731,13 @@ pub const Scene = struct {
             graph.deinit();
             self.allocator.destroy(graph);
         }
+        log(.INFO, "scene", "Deinitializing scene: {s}", .{self.name});
         self.entities.deinit(self.allocator);
         self.game_objects.deinit(self.allocator);
         self.emitter_to_gpu_id.deinit();
         // Deinit scripting system
         self.scripting_system.deinit();
+        self.allocator.destroy(self.scripting_system);
 
         // Deinit rendering domain systems
         // NOTE: TextureSystem now owned by Engine
@@ -719,6 +746,14 @@ pub const Scene = struct {
         }
         if (self.particle_system) |ps| {
             ps.deinit();
+        }
+
+        if (self.physics_system) |ps| {
+            log(.INFO, "scene", "Deinitializing physics system...", .{});
+            ps.deinit();
+            log(.INFO, "scene", "Physics system deinitialized", .{});
+        } else {
+            log(.WARN, "scene", "Physics system is null in deinit!", .{});
         }
 
         self.light_system.deinit();
@@ -830,6 +865,12 @@ pub const Scene = struct {
         );
 
         log(.INFO, "scene", "Initialized particle system (ECS-driven)", .{});
+
+        // Initialize Physics System if not already (e.g. after load/clear)
+        if (self.physics_system == null) {
+            self.physics_system = try ecs.PhysicsSystem.init(self.allocator);
+            log(.INFO, "scene", "Initialized physics system (Jolt)", .{});
+        }
 
         // Create render graph
         self.render_graph = try self.allocator.create(RenderGraph);
@@ -975,6 +1016,9 @@ pub const Scene = struct {
 
     /// Render the scene using the RenderGraph
     pub fn render(self: *Scene, frame_info: FrameInfo) !void {
+        self.state_lock.lockShared();
+        defer self.state_lock.unlockShared();
+
         if (self.render_graph) |graph| {
             // Execute all passes (compute and graphics)
             // Performance monitoring is handled by the RenderGraph
@@ -987,6 +1031,9 @@ pub const Scene = struct {
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
     /// Call this on the MAIN THREAD before capturing snapshot
     pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo) !void {
+        self.state_lock.lockShared();
+        defer self.state_lock.unlockShared();
+
         // Apply any pending path tracing toggles FIRST (CPU-side state change)
         // This prepares the render graph state for frame N+1 while render thread renders frame N
 
@@ -1011,6 +1058,9 @@ pub const Scene = struct {
     /// Update scene state (Vulkan descriptor updates)
     /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
+        self.state_lock.lockShared();
+        defer self.state_lock.unlockShared();
+
         _ = global_ubo;
 
         // Update all render passes through the render graph (descriptor sets)
@@ -1021,6 +1071,12 @@ pub const Scene = struct {
 
     /// Clear the scene (destroy all entities and reset state)
     pub fn clear(self: *Scene) void {
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+        self.clearInternal();
+    }
+
+    fn clearInternal(self: *Scene) void {
         log(.INFO, "scene", "Clearing scene...", .{});
 
         // Destroy all entities in the ECS world
@@ -1039,6 +1095,10 @@ pub const Scene = struct {
             ps.reset();
         }
 
+        if (self.physics_system) |ps| {
+            ps.reset();
+        }
+
         if (self.render_graph) |graph| {
             graph.reset();
         }
@@ -1046,6 +1106,12 @@ pub const Scene = struct {
         // Remove render_system from ECS user data
         _ = self.ecs_world.removeUserData("render_system");
     }
+};
+
+pub const SceneState = enum {
+    Edit,
+    Play,
+    Pause,
 };
 
 // ==================== Tests ====================

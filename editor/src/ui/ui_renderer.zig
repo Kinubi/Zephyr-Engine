@@ -1081,7 +1081,7 @@ pub const UIRenderer = struct {
                     if (!handled) {
                         // Fallback to executing as Lua
                         if (stats.scene) |scene_ptr| {
-                            const sys = &scene_ptr.scripting_system;
+                            const sys = scene_ptr.scripting_system;
                             if (sys.runner.state_pool) |sp| {
                                 const ls = sp.acquire();
                                 defer sp.release(ls);

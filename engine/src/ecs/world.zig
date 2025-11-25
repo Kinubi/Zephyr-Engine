@@ -229,6 +229,10 @@ pub const World = struct {
         return View(T){ .storage = storage, .allocator = self.allocator, .thread_pool = self.thread_pool };
     }
 
+    pub fn query(self: *World, comptime QueryStruct: type) !@import("query.zig").QueryIterator(QueryStruct) {
+        return @import("query.zig").QueryIterator(QueryStruct).init(self);
+    }
+
     pub fn update(self: *World, comptime T: type, dt: f32) !void {
         comptime {
             if (!@hasDecl(T, "update")) {

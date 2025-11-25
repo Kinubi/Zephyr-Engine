@@ -130,7 +130,7 @@ pub const LightSystem = struct {
     }
 };
 
-pub fn update(world: *World, dt: f32) !void {
+pub fn prepare(world: *World, dt: f32) !void {
     // Static time accumulator (persists across calls)
     const State = struct {
         var time_elapsed: f32 = 0.0;

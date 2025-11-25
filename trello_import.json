@@ -5,9 +5,9 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Physics Integration",
-          "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
-          "labels": ["Engine", "High Priority"]
+          "name": "Performance Pass",
+          "desc": "Profile and optimize engine subsystems.\n\nObjectives:\n1. Integrate Tracy Profiler for detailed frame analysis.\n2. Optimize ECS query iteration and component storage.\n3. Analyze and reduce memory allocations in hot paths (e.g., render loop, physics sync).\n4. Review and optimize Render Graph execution and synchronization.",
+          "labels": ["Engine", "Optimization", "High Priority"]
         },
         {
           "name": "Asset Importer",
@@ -29,6 +29,21 @@
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Physics Integration",
+          "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
+          "labels": ["Engine", "High Priority"]
+        },
+        {
+          "name": "Physics System Cleanup & Stability",
+          "desc": "Implemented orphan detection to clean up Jolt physics bodies when entities are destroyed or components are removed. Updated ECS Query system to support EntityId retrieval and added compile-time validation for queries.",
+          "labels": ["Engine", "Physics", "Bug Fix"]
+        },
+        {
+          "name": "Refactor Add Component UI",
+          "desc": "Refactored `addComponentMenuItem` to be a shared helper, reducing code duplication between Inspector and Scene Hierarchy context menus.",
+          "labels": ["Editor", "Refactor"]
+        },
         {
           "name": "Material & Render System Stability Fixes",
           "desc": "Resolved Vulkan validation errors during cleanup (double frees on arena buffers). Fixed `updateGlobalSet` in MaterialSystem to correctly aggregate material sets for ray tracing. Implemented robust instance buffer reallocation in RenderSystem.",

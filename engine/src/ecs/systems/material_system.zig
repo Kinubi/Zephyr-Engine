@@ -339,7 +339,7 @@ pub const MaterialSystem = struct {
         asset_manager: *AssetManager,
     ) !*MaterialSystem {
         const self = try allocator.create(MaterialSystem);
-        
+
         // Initialize global set
         const global_set = try MaterialSetData.init(allocator, buffer_manager);
 
@@ -607,7 +607,7 @@ pub const MaterialSystem = struct {
                 //
                 // For now, it's effectively: texture_arrays[i] uses only arena_offsets[i].
                 //
-                
+
                 for (&set_data.texture_arrays, 0..) |*tex_array, frame_idx| {
                     const frame = @as(u32, @intCast(frame_idx));
 
@@ -831,11 +831,11 @@ pub const MaterialSystem = struct {
 
         if (!optimistic_success) {
             // Fallback to Full Path (Collect -> Sort -> Build Map -> Build Materials)
-            
+
             // Clear partial results from failed optimistic run
             set_data.pending_delta.clear();
             set_data.scratch_gpu_materials.clearRetainingCapacity();
-            
+
             // 1. Collect unique texture IDs
             set_data.scratch_unique_textures.clearRetainingCapacity();
             var unique_textures = &set_data.scratch_unique_textures;
@@ -926,7 +926,7 @@ pub const MaterialSystem = struct {
         // Common post-processing
         const gpu_materials = &set_data.scratch_gpu_materials;
         const texture_map = &set_data.scratch_texture_map;
-        
+
         // Determine current texture IDs for change detection
         var current_texture_ids_slice: []const u64 = undefined;
         if (optimistic_success) {

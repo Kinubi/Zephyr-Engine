@@ -37,27 +37,30 @@ pub const SystemDef = struct {
 pub const SystemStage = struct {
     name: []const u8,
     systems: std.ArrayList(SystemDef),
-    completion: std.atomic.Value(usize),
-    // Last-worker completion semaphore: posted exactly once when all jobs finish
-    done_sem: std.Thread.Semaphore,
+    prepare_completion: std.atomic.Value(u32),
+    update_completion: std.atomic.Value(u32),
     allocator: std.mem.Allocator,
     // Reusable storage to avoid per-frame allocations for work items
-    items_cache: std.ArrayList(WorkItem),
+    // Split into separate caches for prepare and update to allow concurrent execution
+    prepare_items_cache: std.ArrayList(WorkItem),
+    update_items_cache: std.ArrayList(WorkItem),
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) SystemStage {
         return .{
             .name = name,
             .systems = std.ArrayList(SystemDef){},
-            .completion = std.atomic.Value(usize).init(0),
-            .done_sem = .{},
+            .prepare_completion = std.atomic.Value(u32).init(0),
+            .update_completion = std.atomic.Value(u32).init(0),
             .allocator = allocator,
-            .items_cache = std.ArrayList(WorkItem){},
+            .prepare_items_cache = std.ArrayList(WorkItem){},
+            .update_items_cache = std.ArrayList(WorkItem){},
         };
     }
 
     pub fn deinit(self: *SystemStage) void {
         self.systems.deinit(self.allocator);
-        self.items_cache.deinit(self.allocator);
+        self.prepare_items_cache.deinit(self.allocator);
+        self.update_items_cache.deinit(self.allocator);
     }
 
     /// Add a system to this stage
@@ -76,7 +79,7 @@ pub const SystemStage = struct {
         if (prepare_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (prepare_count < 2 or thread_pool == null) {
+        if (prepare_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.prepare_fn) |prepare_fn| {
                     try prepare_fn(world, dt);
@@ -88,7 +91,7 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.completion.store(prepare_count, .release);
+        self.prepare_completion.store(@intCast(prepare_count), .release);
 
         // Build a stage-scoped immutable context and dispatch one job per system
         var stage_ctx = StageContext{
@@ -96,18 +99,17 @@ pub const SystemStage = struct {
             .dt = dt,
             .frame_info = null, // No frame info for prepare phase
             .systems = self.systems.items,
-            .completion = &self.completion,
-            .done_sem = &self.done_sem,
+            .completion = &self.prepare_completion,
             .phase = .prepare,
         };
 
         // Prepare/reuse batch of work items
-        try self.items_cache.ensureTotalCapacity(self.allocator, prepare_count);
-        self.items_cache.clearRetainingCapacity();
+        try self.prepare_items_cache.ensureTotalCapacity(self.allocator, prepare_count);
+        self.prepare_items_cache.clearRetainingCapacity();
 
         for (self.systems.items, 0..) |system, i| {
             if (system.prepare_fn != null) {
-                self.items_cache.appendAssumeCapacity(.{
+                self.prepare_items_cache.appendAssumeCapacity(.{
                     .id = work_id_counter.fetchAdd(1, .monotonic),
                     .item_type = .ecs_update,
                     .priority = .high,
@@ -117,10 +119,15 @@ pub const SystemStage = struct {
                 });
             }
         }
-        try pool.submitBatch(self.items_cache.items);
+        // log(.INFO, "system_scheduler", "Dispatching {} prepare jobs for stage '{s}'", .{ prepare_count, self.name });
+        try pool.submitBatch(self.prepare_items_cache.items);
 
         // Wait for completion
-        self.done_sem.wait();
+        var curr = self.prepare_completion.load(.acquire);
+        while (curr > 0) {
+            std.Thread.Futex.wait(&self.prepare_completion, curr);
+            curr = self.prepare_completion.load(.acquire);
+        }
     }
 
     /// Execute all systems' update phase in this stage in parallel (render thread)
@@ -134,7 +141,7 @@ pub const SystemStage = struct {
         if (update_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (update_count < 2 or thread_pool == null) {
+        if (update_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.update_fn) |update_fn| {
                     try update_fn(world, frame_info);
@@ -146,7 +153,7 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.completion.store(update_count, .release);
+        self.update_completion.store(@intCast(update_count), .release);
 
         // Build a stage-scoped immutable context and dispatch one job per system
         const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
@@ -155,18 +162,17 @@ pub const SystemStage = struct {
             .dt = dt,
             .frame_info = frame_info,
             .systems = self.systems.items,
-            .completion = &self.completion,
-            .done_sem = &self.done_sem,
+            .completion = &self.update_completion,
             .phase = .update,
         };
 
         // Prepare/reuse batch of work items
-        try self.items_cache.ensureTotalCapacity(self.allocator, update_count);
-        self.items_cache.clearRetainingCapacity();
+        try self.update_items_cache.ensureTotalCapacity(self.allocator, update_count);
+        self.update_items_cache.clearRetainingCapacity();
 
         for (self.systems.items, 0..) |system, i| {
             if (system.update_fn != null) {
-                self.items_cache.appendAssumeCapacity(.{
+                self.update_items_cache.appendAssumeCapacity(.{
                     .id = work_id_counter.fetchAdd(1, .monotonic),
                     .item_type = .ecs_update,
                     .priority = .high,
@@ -176,10 +182,15 @@ pub const SystemStage = struct {
                 });
             }
         }
-        try pool.submitBatch(self.items_cache.items);
+
+        try pool.submitBatch(self.update_items_cache.items);
 
         // Wait for completion
-        self.done_sem.wait();
+        var curr = self.update_completion.load(.acquire);
+        while (curr > 0) {
+            std.Thread.Futex.wait(&self.update_completion, curr);
+            curr = self.update_completion.load(.acquire);
+        }
     }
 };
 
@@ -189,21 +200,25 @@ const StageContext = struct {
     dt: f32,
     frame_info: ?*FrameInfo, // Only set for update phase
     systems: []const SystemDef,
-    completion: *std.atomic.Value(usize),
-    done_sem: *std.Thread.Semaphore,
+    completion: *std.atomic.Value(u32),
     phase: enum { prepare, update },
 };
 
 /// Worker function for parallel system execution
-fn systemWorker(context: *anyopaque, work_item: @import("../threading/thread_pool.zig").WorkItem) void {
+fn systemWorker(context: *anyopaque, work_item: WorkItem) void {
     const ctx = @as(*StageContext, @ptrCast(@alignCast(context)));
     const job_index: usize = @intCast(work_item.data.ecs_update.job_index);
-    defer {
-        const prev = ctx.completion.fetchSub(1, .release);
-        if (prev == 1) ctx.done_sem.post();
-    }
-
     const sys = ctx.systems[job_index];
+    // Capture completion pointer locally to avoid Use-After-Free if main thread returns early
+    const completion_ptr = ctx.completion;
+
+    defer {
+        _ = completion_ptr.fetchSub(1, .release);
+        // Always wake the main thread to ensure it sees the progress
+        // This prevents "lost wake" scenarios where the value changes but the main thread
+        // is sleeping on the old value and doesn't get woken.
+        std.Thread.Futex.wake(completion_ptr, 1);
+    }
 
     // Execute the appropriate phase function
     switch (ctx.phase) {

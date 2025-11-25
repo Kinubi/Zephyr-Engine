@@ -646,6 +646,11 @@ pub const Engine = struct {
         try self.ecs_world.?.registerComponent(ecs.ScriptComponent);
         try self.ecs_world.?.registerComponent(ecs.UuidComponent);
         try self.ecs_world.?.registerComponent(ecs.Name);
+        try self.ecs_world.?.registerComponent(ecs.RigidBody);
+        try self.ecs_world.?.registerComponent(ecs.BoxCollider);
+        try self.ecs_world.?.registerComponent(ecs.SphereCollider);
+        try self.ecs_world.?.registerComponent(ecs.CapsuleCollider);
+        try self.ecs_world.?.registerComponent(ecs.MeshCollider);
 
         // Register material components
         try self.ecs_world.?.registerComponent(ecs.MaterialSet);

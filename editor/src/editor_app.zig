@@ -225,7 +225,7 @@ pub const App = struct {
             swapchain,
             thread_pool,
             global_ubo_set,
-            "cornell_box"
+            "cornell_box",
         );
 
         // Register scene pointer in World so systems can access it
@@ -262,6 +262,8 @@ pub const App = struct {
         });
         try floor.setPosition(Math.Vec3.init(0, -half_size + 3, box_offset_z - 3));
         try floor.setScale(Math.Vec3.init(box_size, 0.1, box_size));
+        try scene.ecs_world.emplace(new_ecs.RigidBody, floor.entity_id, .{ .body_type = .Static });
+        try scene.ecs_world.emplace(new_ecs.BoxCollider, floor.entity_id, .{ .half_extents = .{ box_size * 0.5, 0.05, box_size * 0.5 } });
         log(.INFO, "app", "Scene v2: Added floor", .{});
 
         // Ceiling (white)
@@ -270,6 +272,9 @@ pub const App = struct {
         });
         try ceiling.setPosition(Math.Vec3.init(0, half_size - 3, 0));
         try ceiling.setScale(Math.Vec3.init(box_size, 0.1, box_size));
+        // The ceiling is dynamic so it can fall if the box is shaken
+        try scene.ecs_world.emplace(new_ecs.RigidBody, ceiling.entity_id, .{ .body_type = .Dynamic });
+        try scene.ecs_world.emplace(new_ecs.BoxCollider, ceiling.entity_id, .{ .half_extents = .{ box_size * 0.5, 0.05, box_size * 0.5 } });
         log(.INFO, "app", "Scene v2: Added ceiling", .{});
 
         // Back wall (white)
@@ -278,6 +283,8 @@ pub const App = struct {
         });
         try back_wall.setPosition(Math.Vec3.init(0, 0, half_size + 1));
         try back_wall.setScale(Math.Vec3.init(box_size, box_size, 0.1));
+        try scene.ecs_world.emplace(new_ecs.RigidBody, back_wall.entity_id, .{ .body_type = .Static });
+        try scene.ecs_world.emplace(new_ecs.BoxCollider, back_wall.entity_id, .{ .half_extents = .{ box_size * 0.5, box_size * 0.5, 0.05 } });
         log(.INFO, "app", "Scene v2: Added back wall", .{});
 
         // Left wall (red) - using error.png for red color
@@ -286,12 +293,16 @@ pub const App = struct {
         });
         try left_wall.setPosition(Math.Vec3.init(-half_size - 1, 0, 0));
         try left_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
+        try scene.ecs_world.emplace(new_ecs.RigidBody, left_wall.entity_id, .{ .body_type = .Static });
+        try scene.ecs_world.emplace(new_ecs.BoxCollider, left_wall.entity_id, .{ .half_extents = .{ 0.05, box_size * 0.5, box_size * 0.5 } });
         log(.INFO, "app", "Scene v2: Added left wall (red)", .{});
 
         // Right wall (green) - using default.png for green-ish color
         const right_wall = try scene.spawnProp("assets/models/cube.obj", .{});
         try right_wall.setPosition(Math.Vec3.init(half_size + 1, 0, 0));
         try right_wall.setScale(Math.Vec3.init(0.1, box_size, box_size));
+        try scene.ecs_world.emplace(new_ecs.RigidBody, right_wall.entity_id, .{ .body_type = .Static });
+        try scene.ecs_world.emplace(new_ecs.BoxCollider, right_wall.entity_id, .{ .half_extents = .{ 0.05, box_size * 0.5, box_size * 0.5 } });
         log(.INFO, "app", "Scene v2: Added right wall (green)", .{});
 
         // Second vase (right side) - flat vase with PBR material
@@ -302,6 +313,15 @@ pub const App = struct {
         });
         try vase2.setPosition(Math.Vec3.init(1.2, -half_size + 0.05, 0.5));
         try vase2.setScale(Math.Vec3.init(0.8, 0.8, 0.8));
+
+        // Add Physics Components
+        try scene.ecs_world.emplace(new_ecs.RigidBody, vase2.entity_id, .{
+            .body_type = .Dynamic,
+            .mass = 2.0,
+        });
+        try scene.ecs_world.emplace(new_ecs.BoxCollider, vase2.entity_id, .{
+            .half_extents = .{ 0.5, 0.5, 0.5 },
+        });
         // Attach a small script that moves the vase gradually each frame
 
         log(.INFO, "app", "Scene v2: Added vase 2 (flat)", .{});
@@ -476,6 +496,7 @@ pub const App = struct {
         } else {
             // SINGLE-THREADED MODE: Main thread does everything
             // Begin frame through engine
+
             const frame_info = try self.engine.beginFrame();
 
             // Update engine systems
@@ -492,12 +513,16 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        log(.INFO, "app", "App deinit start", .{});
         _ = self.engine.getGraphicsContext().vkd.deviceWaitIdle(self.engine.getGraphicsContext().dev) catch {}; // Ensure all GPU work is finished
+        log(.INFO, "app", "Device idle", .{});
         self.engine.getSwapchain().waitForAllFences() catch unreachable;
+        log(.INFO, "app", "Fences waited", .{});
 
         // Clean up UI
         ui_renderer.deinit();
         imgui_context.deinit();
+        log(.INFO, "app", "UI deinitialized", .{});
 
         // Clean up scheduled assets list
         scheduled_assets.deinit(self.allocator);
@@ -506,6 +531,7 @@ pub const App = struct {
 
         // Clean up Scene v2
         if (scene_enabled) {
+            log(.INFO, "app", "Deinitializing scene...", .{});
             scene.deinit();
             log(.INFO, "app", "Scene v2 cleaned up", .{});
         }
