@@ -13,6 +13,112 @@ const log = @import("../../utils/log.zig").log;
 const Math = @import("../../utils/math.zig");
 const EntityId = @import("../entity_registry.zig").EntityId;
 
+pub const CollisionType = enum { Begin, Persist, End };
+
+pub const CollisionEvent = struct {
+    entity_a: EntityId,
+    entity_b: EntityId,
+    type: CollisionType,
+};
+
+const ContactListenerImpl = struct {
+    listener: zphysics.ContactListener,
+    physics_system: *PhysicsSystem,
+
+    pub fn init(physics_system: *PhysicsSystem) ContactListenerImpl {
+        return .{
+            .listener = zphysics.ContactListener.init(ContactListenerImpl),
+            .physics_system = physics_system,
+        };
+    }
+
+    pub fn onContactValidate(
+        _: *zphysics.ContactListener,
+        _: *const zphysics.Body,
+        _: *const zphysics.Body,
+        _: *const [3]zphysics.Real,
+        _: *const zphysics.CollideShapeResult,
+    ) callconv(.c) zphysics.ValidateResult {
+        return .accept_all_contacts;
+    }
+
+    pub fn onContactAdded(
+        self: *zphysics.ContactListener,
+        body1: *const zphysics.Body,
+        body2: *const zphysics.Body,
+        _: *const zphysics.ContactManifold,
+        _: *zphysics.ContactSettings,
+    ) callconv(.c) void {
+        const this: *ContactListenerImpl = @fieldParentPtr("listener", self);
+        this.handleContact(body1, body2, .Begin);
+    }
+
+    pub fn onContactPersisted(
+        self: *zphysics.ContactListener,
+        body1: *const zphysics.Body,
+        body2: *const zphysics.Body,
+        _: *const zphysics.ContactManifold,
+        _: *zphysics.ContactSettings,
+    ) callconv(.c) void {
+        const this: *ContactListenerImpl = @fieldParentPtr("listener", self);
+        this.handleContact(body1, body2, .Persist);
+    }
+
+    pub fn onContactRemoved(
+        self: *zphysics.ContactListener,
+        sub_shape_pair: *const zphysics.SubShapeIdPair,
+    ) callconv(.c) void {
+        const this: *ContactListenerImpl = @fieldParentPtr("listener", self);
+        // Use NoLock interface to avoid deadlocks during callbacks
+        const lock_interface = this.physics_system.physics_system.getBodyLockInterfaceNoLock();
+
+        var ud1: u64 = 0;
+        var ud2: u64 = 0;
+
+        {
+            var lock = zphysics.BodyLockRead{};
+            lock.lock(lock_interface, sub_shape_pair.first.body_id);
+            defer lock.unlock();
+            if (lock.body) |body| {
+                ud1 = body.getUserData();
+            }
+        }
+        {
+            var lock = zphysics.BodyLockRead{};
+            lock.lock(lock_interface, sub_shape_pair.second.body_id);
+            defer lock.unlock();
+            if (lock.body) |body| {
+                ud2 = body.getUserData();
+            }
+        }
+
+        if (ud1 != 0 and ud2 != 0) {
+            const e1: EntityId = @enumFromInt(@as(u32, @truncate(ud1)));
+            const e2: EntityId = @enumFromInt(@as(u32, @truncate(ud2)));
+            this.pushEvent(e1, e2, .End);
+        }
+    }
+
+    fn handleContact(self: *ContactListenerImpl, body1: *const zphysics.Body, body2: *const zphysics.Body, type_: CollisionType) void {
+        const ud1 = body1.getUserData();
+        const ud2 = body2.getUserData();
+        if (ud1 != 0 and ud2 != 0) {
+            const e1: EntityId = @enumFromInt(@as(u32, @truncate(ud1)));
+            const e2: EntityId = @enumFromInt(@as(u32, @truncate(ud2)));
+            self.pushEvent(e1, e2, type_);
+        }
+    }
+
+    fn pushEvent(self: *ContactListenerImpl, e1: EntityId, e2: EntityId, type_: CollisionType) void {
+        self.physics_system.event_mutex.lock();
+        defer self.physics_system.event_mutex.unlock();
+        // Avoid allocation during callback to prevent potential deadlocks with Jolt's allocator usage
+        if (self.physics_system.collision_events.items.len < self.physics_system.collision_events.capacity) {
+            self.physics_system.collision_events.appendAssumeCapacity(.{ .entity_a = e1, .entity_b = e2, .type = type_ });
+        }
+    }
+};
+
 pub const PhysicsSystem = struct {
     allocator: std.mem.Allocator,
     physics_system: *zphysics.PhysicsSystem,
@@ -20,6 +126,10 @@ pub const PhysicsSystem = struct {
     object_vs_broad_phase_layer_filter: zphysics.ObjectVsBroadPhaseLayerFilter,
     object_layer_pair_filter: zphysics.ObjectLayerPairFilter,
     active_bodies: std.AutoHashMap(EntityId, zphysics.BodyId),
+
+    contact_listener: ContactListenerImpl,
+    collision_events: std.ArrayListUnmanaged(CollisionEvent),
+    event_mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) !*PhysicsSystem {
         const self = try allocator.create(PhysicsSystem);
@@ -32,6 +142,11 @@ pub const PhysicsSystem = struct {
         self.object_vs_broad_phase_layer_filter = zphysics.ObjectVsBroadPhaseLayerFilter.init(ObjectVsBroadPhaseLayerFilterImpl);
         self.object_layer_pair_filter = zphysics.ObjectLayerPairFilter.init(ObjectLayerPairFilterImpl);
         self.active_bodies = std.AutoHashMap(EntityId, zphysics.BodyId).init(allocator);
+
+        self.collision_events = std.ArrayListUnmanaged(CollisionEvent){};
+        try self.collision_events.ensureTotalCapacity(allocator, 4096);
+        self.event_mutex = std.Thread.Mutex{};
+        self.contact_listener = ContactListenerImpl.init(self);
 
         // Initialize Physics System
         self.physics_system = try zphysics.PhysicsSystem.create(
@@ -46,6 +161,8 @@ pub const PhysicsSystem = struct {
             },
         );
 
+        self.physics_system.setContactListener(&self.contact_listener.listener);
+
         // Set gravity to point down (+Y) because Vulkan uses -Y up
         self.physics_system.setGravity(.{ 0.0, 9.81, 0.0 });
 
@@ -55,6 +172,7 @@ pub const PhysicsSystem = struct {
 
     pub fn deinit(self: *PhysicsSystem) void {
         self.active_bodies.deinit();
+        self.collision_events.deinit(self.allocator);
         self.physics_system.destroy();
 
         zphysics.deinit();
@@ -63,6 +181,10 @@ pub const PhysicsSystem = struct {
 
     pub fn reset(self: *PhysicsSystem) void {
         self.active_bodies.clearRetainingCapacity();
+        
+        self.event_mutex.lock();
+        self.collision_events.clearRetainingCapacity();
+        self.event_mutex.unlock();
 
         // Destroy and recreate the physics system to clear all state
         self.physics_system.destroy();
@@ -80,10 +202,19 @@ pub const PhysicsSystem = struct {
             log(.ERR, "physics_system", "Failed to recreate physics system during reset: {}", .{err});
             @panic("Failed to reset physics system");
         };
+        self.physics_system.setContactListener(&self.contact_listener.listener);
         self.physics_system.setGravity(.{ 0.0, 9.81, 0.0 });
+        
+        // Ensure capacity again just in case
+        self.collision_events.ensureTotalCapacity(self.allocator, 4096) catch {};
     }
 
     pub fn prepare(self: *PhysicsSystem, world: *World, dt: f32) !void {
+        // Clear events from previous frame
+        self.event_mutex.lock();
+        self.collision_events.clearRetainingCapacity();
+        self.event_mutex.unlock();
+
         // log(.INFO, "physics_system", "PhysicsSystem prepare start", .{});
         const body_interface = self.physics_system.getBodyInterfaceMut();
 
@@ -172,6 +303,7 @@ pub const PhysicsSystem = struct {
                     .linear_damping = data.body.linear_damping,
                     .angular_damping = data.body.angular_damping,
                     .is_sensor = data.body.is_sensor,
+                    .user_data = @intFromEnum(data.entity),
                 };
 
                 // Create Body

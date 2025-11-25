@@ -5,11 +5,6 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Physics Integration",
-          "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
-          "labels": ["Engine", "High Priority"]
-        },
-        {
           "name": "Asset Importer",
           "desc": "Implement drag-and-drop support in the Editor for importing external assets.\n\nImplementation Details:\n1. Detect dropped files via `ImGui.getDragDropPayload` or window events.\n2. Copy source files to the project `assets/` directory (organize by type: `assets/models`, `assets/textures`).\n3. Generate a `.meta` file for each asset containing a stable UUID and import settings (e.g., texture compression format, model scale).\n4. Register the new asset with `AssetManager` and reload the asset browser.",
           "labels": ["Editor", "High Priority"]
@@ -29,6 +24,11 @@
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Physics Integration",
+          "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
+          "labels": ["Engine", "High Priority"]
+        },
         {
           "name": "Physics System Cleanup & Stability",
           "desc": "Implemented orphan detection to clean up Jolt physics bodies when entities are destroyed or components are removed. Updated ECS Query system to support EntityId retrieval and added compile-time validation for queries.",
