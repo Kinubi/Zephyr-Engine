@@ -48,6 +48,10 @@ pub const SceneHierarchyPanel = struct {
     renaming_entity: ?EntityId = null,
     rename_buffer: [256]u8 = undefined,
 
+    // Error popup state
+    show_restore_error: bool = false,
+    restore_error_message: [256]u8 = undefined,
+
     // Arena for per-frame hierarchy tree construction
     hierarchy_arena: std.heap.ArenaAllocator,
 
@@ -84,7 +88,6 @@ pub const SceneHierarchyPanel = struct {
     }
 
     pub fn renderToolbar(self: *SceneHierarchyPanel, scene: *Scene) void {
-        _ = self;
         if (c.ImGui_Begin("Toolbar", null, 0)) {
             const state = scene.state;
 
@@ -161,12 +164,18 @@ pub const SceneHierarchyPanel = struct {
                                     // Success
                                 } else |err| {
                                     std.log.err("Failed to deserialize snapshot: {}", .{err});
+                                    _ = std.fmt.bufPrint(&self.restore_error_message, "Failed to deserialize snapshot: {}", .{err}) catch {};
+                                    c.ImGui_OpenPopup("Scene Restore Error", 0);
                                 }
                             } else |err| {
                                 std.log.err("Failed to parse snapshot: {}", .{err});
+                                _ = std.fmt.bufPrint(&self.restore_error_message, "Failed to parse snapshot: {}", .{err}) catch {};
+                                c.ImGui_OpenPopup("Scene Restore Error", 0);
                             }
                         } else |err| {
                             std.log.err("Failed to reset scene: {}", .{err});
+                            _ = std.fmt.bufPrint(&self.restore_error_message, "Failed to reset scene: {}", .{err}) catch {};
+                            c.ImGui_OpenPopup("Scene Restore Error", 0);
                         }
                     }
                 }
@@ -179,6 +188,16 @@ pub const SceneHierarchyPanel = struct {
                 .Pause => "Pause",
             };
             c.ImGui_Text("State: %s", state_str.ptr);
+
+            // Error Popup
+            if (c.ImGui_BeginPopupModal("Scene Restore Error", null, c.ImGuiWindowFlags_AlwaysAutoResize)) {
+                c.ImGui_Text("Failed to restore scene from snapshot!");
+                c.ImGui_Text("%s", &self.restore_error_message);
+                if (c.ImGui_Button("OK")) {
+                    c.ImGui_CloseCurrentPopup();
+                }
+                c.ImGui_EndPopup();
+            }
         }
         c.ImGui_End();
     }

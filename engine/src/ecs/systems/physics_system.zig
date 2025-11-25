@@ -176,12 +176,11 @@ pub const PhysicsSystem = struct {
         self.physics_system.destroy();
 
         zphysics.deinit();
-        self.allocator.destroy(self);
     }
 
     pub fn reset(self: *PhysicsSystem) void {
         self.active_bodies.clearRetainingCapacity();
-        
+
         self.event_mutex.lock();
         self.collision_events.clearRetainingCapacity();
         self.event_mutex.unlock();
@@ -204,7 +203,7 @@ pub const PhysicsSystem = struct {
         };
         self.physics_system.setContactListener(&self.contact_listener.listener);
         self.physics_system.setGravity(.{ 0.0, 9.81, 0.0 });
-        
+
         // Ensure capacity again just in case
         self.collision_events.ensureTotalCapacity(self.allocator, 4096) catch {};
     }

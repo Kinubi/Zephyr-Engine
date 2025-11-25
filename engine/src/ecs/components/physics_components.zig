@@ -223,6 +223,7 @@ pub const MeshCollider = struct {
                     mc.mesh_asset_id = id;
                 } else |err| {
                     std.log.err("Failed to load mesh asset for MeshCollider: {}", .{err});
+                    return err;
                 }
             }
         }
