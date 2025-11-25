@@ -354,18 +354,25 @@ pub const PhysicsSystem = struct {
         var to_remove = std.ArrayList(EntityId){};
         defer to_remove.deinit(self.allocator);
 
+        // Optimization: Get views once to avoid hash map lookups in the loop
+        var rb_view_opt = world.view(RigidBody) catch null;
+        var box_view_opt = world.view(BoxCollider) catch null;
+        var sphere_view_opt = world.view(SphereCollider) catch null;
+        var capsule_view_opt = world.view(CapsuleCollider) catch null;
+        var mesh_view_opt = world.view(MeshCollider) catch null;
+
         var it = self.active_bodies.iterator();
         while (it.next()) |entry| {
             const entity_id = entry.key_ptr.*;
 
             // Check if entity still exists and has RigidBody
-            const has_body = if (world.get(RigidBody, entity_id)) |rb| rb.body_id != .invalid else false;
+            const has_body = if (rb_view_opt) |*v| (if (v.storage.getConst(entity_id)) |rb| rb.body_id != .invalid else false) else false;
 
             // Check for colliders (must have at least one)
-            const has_collider = (world.get(BoxCollider, entity_id) != null) or
-                (world.get(SphereCollider, entity_id) != null) or
-                (world.get(CapsuleCollider, entity_id) != null) or
-                (world.get(MeshCollider, entity_id) != null);
+            const has_collider = (if (box_view_opt) |*v| v.storage.has(entity_id) else false) or
+                (if (sphere_view_opt) |*v| v.storage.has(entity_id) else false) or
+                (if (capsule_view_opt) |*v| v.storage.has(entity_id) else false) or
+                (if (mesh_view_opt) |*v| v.storage.has(entity_id) else false);
 
             if (!has_body or !has_collider) {
                 try to_remove.append(self.allocator, entity_id);

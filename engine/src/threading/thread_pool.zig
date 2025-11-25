@@ -316,8 +316,13 @@ pub const WorkerInfo = struct {
     worker_id: u32,
     pool: *ThreadPool,
     local_queue: *WorkQueue, // Per-worker queue for work stealing
+    random_state: std.Random.DefaultPrng, // Per-worker random state for work stealing
 
     pub fn init(worker_id: u32, pool: *ThreadPool) WorkerInfo {
+        // Initialize random state with a mix of time and worker ID to ensure unique seeds
+        var seed = @as(u64, @intCast(std.time.nanoTimestamp()));
+        seed +%= @as(u64, worker_id) *% 0x9e3779b97f4a7c15; // Mix in worker ID using Golden Ratio constant
+
         return .{
             .state = std.atomic.Value(WorkerState).init(.sleeping),
             .last_work_time = std.atomic.Value(i64).init(std.time.milliTimestamp()), // Initialize to current time
@@ -325,6 +330,7 @@ pub const WorkerInfo = struct {
             .worker_id = worker_id,
             .pool = pool,
             .local_queue = undefined, // Initialized in ThreadPool.init
+            .random_state = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -594,7 +600,6 @@ pub const ThreadPool = struct {
             try self.work_queue.push(work_item);
         }
 
-        _ = self.stats.current_queue_size.fetchAdd(1, .monotonic);
         self.work_available.post();
     }
 
@@ -616,8 +621,6 @@ pub const ThreadPool = struct {
             _ = try self.work_queue.pushBatch(items);
         }
 
-        _ = self.stats.current_queue_size.fetchAdd(@intCast(items.len), .monotonic);
-        
         var i: usize = 0;
         while (i < items.len) : (i += 1) {
             self.work_available.post();
@@ -639,20 +642,18 @@ pub const ThreadPool = struct {
     pub fn getWork(self: *ThreadPool, worker_info: *WorkerInfo) ?WorkItem {
         // 1. Try local queue (LIFO for cache locality)
         if (worker_info.local_queue.pop_tail()) |item| {
-            _ = self.stats.current_queue_size.fetchSub(1, .monotonic);
             return item;
         }
 
         // 2. Try global queue (FIFO)
         if (self.work_queue.pop()) |item| {
-            _ = self.stats.current_queue_size.fetchSub(1, .monotonic);
             return item;
         }
 
         // 3. Try to steal from other workers (FIFO)
         // Start from a random index to reduce contention
-        // We use a simple linear congruential generator for speed
-        const seed = @as(u32, @truncate(@as(u64, @intCast(std.time.nanoTimestamp()))));
+        // We use a per-worker PRNG for speed and correctness
+        const seed = worker_info.random_state.random().int(u32);
         const worker_count = self.current_worker_count.load(.acquire);
         if (worker_count <= 1) return null;
 
@@ -666,7 +667,6 @@ pub const ThreadPool = struct {
             // Only steal if victim is active
             if (victim.isActive()) {
                 if (victim.local_queue.pop()) |item| {
-                    _ = self.stats.current_queue_size.fetchSub(1, .monotonic);
                     return item;
                 }
             }
@@ -735,6 +735,10 @@ pub const ThreadPool = struct {
         if (pool.thread_exit_hook) |hook| {
             hook.callback(hook.context);
         }
+
+        // Clear TLS to avoid stale pointers
+        tls_worker_info = null;
+
         // log(.DEBUG, "enhanced_thread_pool", "Worker {} shutting down", .{worker_info.worker_id});
     }
 
@@ -781,7 +785,8 @@ pub const ThreadPool = struct {
 
         self.last_scale_check.store(now, .release);
 
-        const queue_size = self.stats.current_queue_size.load(.acquire);
+        const queue_size = self.calculateTotalQueueSize();
+        self.stats.current_queue_size.store(queue_size, .release);
         const current_workers = self.current_worker_count.load(.acquire);
 
         // If we have work but no workers, we need to spawn at least one worker
@@ -859,6 +864,18 @@ pub const ThreadPool = struct {
         return total;
     }
 
+    /// Calculate total items in all queues (global + local)
+    fn calculateTotalQueueSize(self: *ThreadPool) u32 {
+        var total: u32 = self.work_queue.size();
+        const count = self.current_worker_count.load(.acquire);
+        // Iterate active workers
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            total += self.workers[i].local_queue.size();
+        }
+        return total;
+    }
+
     /// Gracefully shutdown the thread pool
     pub fn shutdown(self: *ThreadPool) void {
         if (!self.running) return;
@@ -885,7 +902,7 @@ pub const ThreadPool = struct {
 
     /// Get current pool statistics
     pub fn getStatistics(self: *ThreadPool) PoolStatistics {
-        self.stats.current_queue_size.store(self.work_queue.size(), .release);
+        self.stats.current_queue_size.store(self.calculateTotalQueueSize(), .release);
         return self.stats;
     }
 
