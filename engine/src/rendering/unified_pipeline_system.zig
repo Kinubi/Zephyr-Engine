@@ -1616,31 +1616,19 @@ pub const UnifiedPipelineSystem = struct {
             return error.PipelineNotFound;
         };
 
-        // Group updates by descriptor set
-        var updates_by_set = std.HashMap(u32, std.ArrayList(DescriptorUpdate), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(self.allocator);
-        defer {
-            var iter = updates_by_set.valueIterator();
-            while (iter.next()) |list| {
-                list.deinit(self.allocator);
-            }
-            updates_by_set.deinit();
-        }
-
-        // Group updates by set number
+        // Track which sets need updating (max 8 sets is standard Vulkan limit)
+        var sets_to_update = std.bit_set.IntegerBitSet(8).initEmpty();
         for (updates) |update| {
-            var result = try updates_by_set.getOrPut(update.set);
-            if (!result.found_existing) {
-                result.value_ptr.* = std.ArrayList(DescriptorUpdate){};
+            if (update.set < 8) {
+                sets_to_update.set(update.set);
+            } else {
+                log(.WARN, "unified_pipeline", "Descriptor set index {} exceeds limit of 8", .{update.set});
             }
-            try result.value_ptr.append(self.allocator, update);
         }
 
-        // Apply updates to each descriptor set
-        var set_iter = updates_by_set.iterator();
-        while (set_iter.next()) |entry| {
-            const set_index = entry.key_ptr.*;
-            const set_updates = entry.value_ptr.*;
-
+        // Iterate over active sets
+        var it = sets_to_update.iterator(.{});
+        while (it.next()) |set_index| {
             if (set_index >= pipeline_ptr.descriptor_sets.items.len) {
                 log(.ERROR, "unified_pipeline", "Descriptor set index {} out of range for pipeline {s} (has {} sets)", .{ set_index, pipeline_id.name, pipeline_ptr.descriptor_sets.items.len });
                 continue;
@@ -1659,48 +1647,50 @@ pub const UnifiedPipelineSystem = struct {
             var writer = DescriptorWriter.init(self.graphics_context, layout, pool, self.allocator);
             defer writer.deinit();
 
-            // Apply each update to the writer
-            for (set_updates.items) |update| {
-                switch (update.resource) {
-                    .buffer => |buffer| {
-                        const buffer_info = vk.DescriptorBufferInfo{
-                            .buffer = buffer.buffer,
-                            .offset = buffer.offset,
-                            .range = buffer.range,
-                        };
-                        _ = writer.writeBuffer(update.binding, @constCast(&buffer_info));
-                    },
-                    .image => |image| {
-                        const image_info = vk.DescriptorImageInfo{
-                            .sampler = image.sampler,
-                            .image_view = image.image_view,
-                            .image_layout = image.layout,
-                        };
-                        _ = writer.writeImage(update.binding, @constCast(&image_info));
-                    },
-                    .image_array => |image_infos| {
-                        for (image_infos, 0..) |info, idx| {
-                            if (info.sampler == vk.Sampler.null_handle) {
-                                log(
-                                    .WARN,
-                                    "unified_pipeline",
-                                    "Descriptor image array binding {} index {} has null sampler",
-                                    .{ update.binding, idx },
-                                );
+            // Apply updates for this set
+            for (updates) |update| {
+                if (update.set == set_index) {
+                    switch (update.resource) {
+                        .buffer => |buffer| {
+                            const buffer_info = vk.DescriptorBufferInfo{
+                                .buffer = buffer.buffer,
+                                .offset = buffer.offset,
+                                .range = buffer.range,
+                            };
+                            _ = writer.writeBuffer(update.binding, @constCast(&buffer_info));
+                        },
+                        .image => |image| {
+                            const image_info = vk.DescriptorImageInfo{
+                                .sampler = image.sampler,
+                                .image_view = image.image_view,
+                                .image_layout = image.layout,
+                            };
+                            _ = writer.writeImage(update.binding, @constCast(&image_info));
+                        },
+                        .image_array => |image_infos| {
+                            for (image_infos, 0..) |info, idx| {
+                                if (info.sampler == vk.Sampler.null_handle) {
+                                    log(
+                                        .WARN,
+                                        "unified_pipeline",
+                                        "Descriptor image array binding {} index {} has null sampler",
+                                        .{ update.binding, idx },
+                                    );
+                                }
                             }
-                        }
-                        _ = writer.writeImages(update.binding, image_infos);
-                    },
-                    .buffer_array => |buffer_infos| {
-                        _ = writer.writeBuffers(update.binding, buffer_infos);
-                    },
-                    .acceleration_structure => |accel_struct| {
-                        const accel_info = vk.WriteDescriptorSetAccelerationStructureKHR{
-                            .acceleration_structure_count = 1,
-                            .p_acceleration_structures = @ptrCast(&accel_struct),
-                        };
-                        _ = writer.writeAccelerationStructure(update.binding, @constCast(&accel_info));
-                    },
+                            _ = writer.writeImages(update.binding, image_infos);
+                        },
+                        .buffer_array => |buffer_infos| {
+                            _ = writer.writeBuffers(update.binding, buffer_infos);
+                        },
+                        .acceleration_structure => |accel_struct| {
+                            const accel_info = vk.WriteDescriptorSetAccelerationStructureKHR{
+                                .acceleration_structure_count = 1,
+                                .p_acceleration_structures = @ptrCast(&accel_struct),
+                            };
+                            _ = writer.writeAccelerationStructure(update.binding, @constCast(&accel_info));
+                        },
+                    }
                 }
             }
 
