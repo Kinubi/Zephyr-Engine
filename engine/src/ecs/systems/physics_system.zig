@@ -10,6 +10,7 @@ const CapsuleCollider = @import("../components/physics_components.zig").CapsuleC
 const MeshCollider = @import("../components/physics_components.zig").MeshCollider;
 const Scene = @import("../../scene/scene.zig").Scene;
 const log = @import("../../utils/log.zig").log;
+const Math = @import("../../utils/math.zig");
 
 pub const PhysicsSystem = struct {
     allocator: std.mem.Allocator,
@@ -44,6 +45,9 @@ pub const PhysicsSystem = struct {
                 .max_contact_constraints = 1024,
             },
         );
+
+        // Set gravity to point down (+Y) because Vulkan uses -Y up
+        self.physics_system.setGravity(.{ 0.0, 9.81, 0.0 });
 
         log(.INFO, "physics_system", "PhysicsSystem initialized", .{});
         return self;
@@ -127,6 +131,32 @@ pub const PhysicsSystem = struct {
                 if (entity.body.body_type == .Kinematic) {
                     body_interface.setPosition(entity.body.body_id, .{ entity.transform.position.x, entity.transform.position.y, entity.transform.position.z }, .activate);
                     body_interface.setRotation(entity.body.body_id, .{ entity.transform.rotation.x, entity.transform.rotation.y, entity.transform.rotation.z, entity.transform.rotation.w }, .activate);
+                } else if (entity.body.body_type == .Dynamic and entity.transform.dirty) {
+                    // Sync Dynamic if Transform changed externally (e.g. Editor Gizmo)
+                    // Check if the transform is significantly different from physics state to avoid feedback loop
+                    const phys_pos = body_interface.getPosition(entity.body.body_id);
+                    const phys_rot = body_interface.getRotation(entity.body.body_id);
+
+                    const t_pos = entity.transform.position;
+                    const t_rot = entity.transform.rotation;
+
+                    const dist_sq = (t_pos.x - phys_pos[0]) * (t_pos.x - phys_pos[0]) +
+                        (t_pos.y - phys_pos[1]) * (t_pos.y - phys_pos[1]) +
+                        (t_pos.z - phys_pos[2]) * (t_pos.z - phys_pos[2]);
+
+                    // Dot product of quaternions: if close to 1 or -1, they are same rotation
+                    const rot_dot = t_rot.x * phys_rot[0] + t_rot.y * phys_rot[1] + t_rot.z * phys_rot[2] + t_rot.w * phys_rot[3];
+                    const abs_dot = if (rot_dot < 0) -rot_dot else rot_dot;
+
+                    // Thresholds: 1mm squared = 0.000001, Rotation cos(angle) ~ 0.9999
+                    if (dist_sq > 0.000001 or abs_dot < 0.9999) {
+                        // Teleport body to new transform
+                        body_interface.setPosition(entity.body.body_id, .{ t_pos.x, t_pos.y, t_pos.z }, .activate);
+                        body_interface.setRotation(entity.body.body_id, .{ t_rot.x, t_rot.y, t_rot.z, t_rot.w }, .activate);
+                        
+                        // Reset velocities to stop movement (optional, but usually desired when dragging)
+                        body_interface.setLinearAndAngularVelocity(entity.body.body_id, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+                    }
                 }
             }
         }
@@ -135,21 +165,24 @@ pub const PhysicsSystem = struct {
         try self.physics_system.update(dt, .{ .collision_steps = 1 });
 
         // 3. Sync Physics Bodies -> ECS Transforms (Dynamic)
-        var dynamic_query = try world.query(struct {
-            transform: *Transform,
-            body: *RigidBody,
-        });
-        defer dynamic_query.deinit();
+        // Optimization: Use View(RigidBody) directly to avoid QueryIterator overhead
+        // and only look up Transform for dynamic bodies.
+        var rb_view = try world.view(RigidBody);
+        var rb_iter = rb_view.iterator();
 
-        while (dynamic_query.next()) |entity| {
-            if (entity.body.body_id != .invalid and entity.body.body_type == .Dynamic) {
-                if (body_interface.isActive(entity.body.body_id)) {
-                    const pos = body_interface.getPosition(entity.body.body_id);
-                    const rot = body_interface.getRotation(entity.body.body_id);
+        while (rb_iter.next()) |entry| {
+            const body = entry.component;
+            if (body.body_id != .invalid and body.body_type == .Dynamic) {
+                if (body_interface.isActive(body.body_id)) {
+                    // Only fetch transform if we actually need to update it
+                    if (world.getMut(Transform, entry.entity)) |transform| {
+                        const pos = body_interface.getPosition(body.body_id);
+                        const rot = body_interface.getRotation(body.body_id);
 
-                    entity.transform.position = .{ .x = pos[0], .y = pos[1], .z = pos[2] };
-                    entity.transform.rotation = .{ .x = rot[0], .y = rot[1], .z = rot[2], .w = rot[3] };
-                    entity.transform.dirty = true;
+                        transform.position = .{ .x = pos[0], .y = pos[1], .z = pos[2] };
+                        transform.rotation = .{ .x = rot[0], .y = rot[1], .z = rot[2], .w = rot[3] };
+                        transform.dirty = true;
+                    }
                 }
             }
         }

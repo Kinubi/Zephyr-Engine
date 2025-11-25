@@ -225,7 +225,7 @@ pub fn prepare(world: *World, dt: f32) !void {
     var enqueued_count: usize = 0;
     const total_scripts = view.len();
 
-    if (total_scripts < 2) {
+    if (total_scripts <= 2) {
         // For small numbers of per-frame scripts it's cheaper/simpler to run
         // them synchronously on the current thread to avoid thread pool
         // overhead and potential latency.

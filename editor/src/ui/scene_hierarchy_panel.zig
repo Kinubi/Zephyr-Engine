@@ -13,6 +13,11 @@ const PointLight = ecs.PointLight;
 const ParticleEmitter = ecs.ParticleEmitter;
 const ScriptComponent = ecs.ScriptComponent;
 const Name = ecs.Name;
+const RigidBody = ecs.RigidBody;
+const BoxCollider = ecs.BoxCollider;
+const SphereCollider = ecs.SphereCollider;
+const CapsuleCollider = ecs.CapsuleCollider;
+const MeshCollider = ecs.MeshCollider;
 
 const Scene = zephyr.Scene;
 const Math = zephyr.math;
@@ -447,6 +452,41 @@ pub const SceneHierarchyPanel = struct {
                     }
                 }
 
+                // Physics: RigidBody
+                if (scene.ecs_world.get(RigidBody, entity)) |rb| {
+                    if (c.ImGui_CollapsingHeader("Rigid Body", c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                        self.renderRigidBodyInspector(scene.ecs_world, entity, rb);
+                    }
+                }
+
+                // Physics: BoxCollider
+                if (scene.ecs_world.get(BoxCollider, entity)) |box| {
+                    if (c.ImGui_CollapsingHeader("Box Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                        self.renderBoxColliderInspector(scene.ecs_world, entity, box);
+                    }
+                }
+
+                // Physics: SphereCollider
+                if (scene.ecs_world.get(SphereCollider, entity)) |sphere| {
+                    if (c.ImGui_CollapsingHeader("Sphere Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                        self.renderSphereColliderInspector(scene.ecs_world, entity, sphere);
+                    }
+                }
+
+                // Physics: CapsuleCollider
+                if (scene.ecs_world.get(CapsuleCollider, entity)) |capsule| {
+                    if (c.ImGui_CollapsingHeader("Capsule Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                        self.renderCapsuleColliderInspector(scene.ecs_world, entity, capsule);
+                    }
+                }
+
+                // Physics: MeshCollider
+                if (scene.ecs_world.get(MeshCollider, entity)) |mesh| {
+                    if (c.ImGui_CollapsingHeader("Mesh Collider", c.ImGuiTreeNodeFlags_DefaultOpen)) {
+                        self.renderMeshColliderInspector(scene.ecs_world, entity, mesh);
+                    }
+                }
+
                 // Script component inspector/editor
                 if (scene.ecs_world.get(ScriptComponent, entity)) |sc| {
                     if (c.ImGui_CollapsingHeader("Script", c.ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -667,6 +707,44 @@ pub const SceneHierarchyPanel = struct {
                             if (scene.allocator.dupe(u8, default_script)) |script_mem| {
                                 _ = scene.ecs_world.emplace(ScriptComponent, entity, ScriptComponent.initDefault(script_mem)) catch {};
                             } else |_| {}
+                        }
+                    }
+
+                    c.ImGui_Separator();
+                    c.ImGui_Text("Physics");
+
+                    // RigidBody
+                    if (!scene.ecs_world.has(RigidBody, entity)) {
+                        if (c.ImGui_MenuItem("Rigid Body")) {
+                            _ = scene.ecs_world.emplace(RigidBody, entity, .{}) catch {};
+                        }
+                    }
+
+                    // BoxCollider
+                    if (!scene.ecs_world.has(BoxCollider, entity)) {
+                        if (c.ImGui_MenuItem("Box Collider")) {
+                            _ = scene.ecs_world.emplace(BoxCollider, entity, .{}) catch {};
+                        }
+                    }
+
+                    // SphereCollider
+                    if (!scene.ecs_world.has(SphereCollider, entity)) {
+                        if (c.ImGui_MenuItem("Sphere Collider")) {
+                            _ = scene.ecs_world.emplace(SphereCollider, entity, .{}) catch {};
+                        }
+                    }
+
+                    // CapsuleCollider
+                    if (!scene.ecs_world.has(CapsuleCollider, entity)) {
+                        if (c.ImGui_MenuItem("Capsule Collider")) {
+                            _ = scene.ecs_world.emplace(CapsuleCollider, entity, .{}) catch {};
+                        }
+                    }
+
+                    // MeshCollider
+                    if (!scene.ecs_world.has(MeshCollider, entity)) {
+                        if (c.ImGui_MenuItem("Mesh Collider")) {
+                            _ = scene.ecs_world.emplace(MeshCollider, entity, .{}) catch {};
                         }
                     }
 
@@ -915,5 +993,126 @@ pub const SceneHierarchyPanel = struct {
         // Velocity range
         c.ImGui_Text("Velocity Min: (%.2f, %.2f, %.2f)", emitter.velocity_min.x, emitter.velocity_min.y, emitter.velocity_min.z);
         c.ImGui_Text("Velocity Max: (%.2f, %.2f, %.2f)", emitter.velocity_max.x, emitter.velocity_max.y, emitter.velocity_max.z);
+    }
+
+    /// Render RigidBody component inspector
+    fn renderRigidBodyInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, rb: *RigidBody) void {
+        _ = self;
+        _ = world;
+        _ = entity;
+
+        // Body Type
+        const type_names = "Static\x00Kinematic\x00Dynamic\x00";
+        var current_type: i32 = @intFromEnum(rb.body_type);
+        if (c.ImGui_Combo("Body Type", &current_type, type_names)) {
+            rb.body_type = @enumFromInt(current_type);
+        }
+
+        // Mass
+        var mass = rb.mass;
+        if (c.ImGui_DragFloat("Mass", &mass)) {
+            rb.mass = mass;
+        }
+
+        // Friction
+        var friction = rb.friction;
+        if (c.ImGui_SliderFloat("Friction", &friction, 0.0, 1.0)) {
+            rb.friction = friction;
+        }
+
+        // Restitution
+        var restitution = rb.restitution;
+        if (c.ImGui_SliderFloat("Restitution", &restitution, 0.0, 1.0)) {
+            rb.restitution = restitution;
+        }
+
+        // Damping
+        var linear_damping = rb.linear_damping;
+        if (c.ImGui_SliderFloat("Linear Damping", &linear_damping, 0.0, 1.0)) {
+            rb.linear_damping = linear_damping;
+        }
+
+        var angular_damping = rb.angular_damping;
+        if (c.ImGui_SliderFloat("Angular Damping", &angular_damping, 0.0, 1.0)) {
+            rb.angular_damping = angular_damping;
+        }
+
+        // Is Sensor
+        var is_sensor = rb.is_sensor;
+        if (c.ImGui_Checkbox("Is Sensor", &is_sensor)) {
+            rb.is_sensor = is_sensor;
+        }
+        
+        c.ImGui_Text("Body ID: %u", @intFromEnum(rb.body_id));
+    }
+
+    /// Render BoxCollider component inspector
+    fn renderBoxColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, box: *BoxCollider) void {
+        _ = self;
+        _ = world;
+        _ = entity;
+
+        var half_extents = [3]f32{ box.half_extents[0], box.half_extents[1], box.half_extents[2] };
+        if (c.ImGui_DragFloat3("Half Extents", &half_extents)) {
+            box.half_extents = half_extents;
+        }
+
+        var offset = [3]f32{ box.offset[0], box.offset[1], box.offset[2] };
+        if (c.ImGui_DragFloat3("Offset", &offset)) {
+            box.offset = offset;
+        }
+    }
+
+    /// Render SphereCollider component inspector
+    fn renderSphereColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, sphere: *SphereCollider) void {
+        _ = self;
+        _ = world;
+        _ = entity;
+
+        var radius = sphere.radius;
+        if (c.ImGui_DragFloat("Radius", &radius)) {
+            sphere.radius = radius;
+        }
+
+        var offset = [3]f32{ sphere.offset[0], sphere.offset[1], sphere.offset[2] };
+        if (c.ImGui_DragFloat3("Offset", &offset)) {
+            sphere.offset = offset;
+        }
+    }
+
+    /// Render CapsuleCollider component inspector
+    fn renderCapsuleColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, capsule: *CapsuleCollider) void {
+        _ = self;
+        _ = world;
+        _ = entity;
+
+        var radius = capsule.radius;
+        if (c.ImGui_DragFloat("Radius", &radius)) {
+            capsule.radius = radius;
+        }
+
+        var height = capsule.height;
+        if (c.ImGui_DragFloat("Height", &height)) {
+            capsule.height = height;
+        }
+
+        var offset = [3]f32{ capsule.offset[0], capsule.offset[1], capsule.offset[2] };
+        if (c.ImGui_DragFloat3("Offset", &offset)) {
+            capsule.offset = offset;
+        }
+    }
+
+    /// Render MeshCollider component inspector
+    fn renderMeshColliderInspector(self: *SceneHierarchyPanel, world: *World, entity: EntityId, mesh: *MeshCollider) void {
+        _ = self;
+        _ = world;
+        _ = entity;
+
+        var convex = mesh.convex;
+        if (c.ImGui_Checkbox("Convex", &convex)) {
+            mesh.convex = convex;
+        }
+        
+        c.ImGui_Text("Mesh Asset ID: %u", mesh.mesh_asset_id);
     }
 };
