@@ -47,7 +47,9 @@ pub const UnifiedPipelineSystem = struct {
     descriptor_pools: std.HashMap(u32, *DescriptorPool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
 
     // Resource binding state
-    bound_resources: std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage),
+    // Hierarchical map: PipelineHash -> (BindingKey -> Resource)
+    // This allows O(1) access to a pipeline's resources and O(M) iteration for updates
+    bound_resources: std.AutoHashMap(u64, PipelineResourceMap),
 
     // Descriptor update tracking - signals when descriptors have been updated for each frame
     descriptor_update_signals: [MAX_FRAMES_IN_FLIGHT]bool = [_]bool{false} ** MAX_FRAMES_IN_FLIGHT,
@@ -109,7 +111,7 @@ pub const UnifiedPipelineSystem = struct {
             .pipelines = std.HashMap(PipelineId, Pipeline, PipelineIdContext, std.hash_map.default_max_load_percentage).init(allocator),
             .pending_pipeline_configs = std.HashMap(PipelineId, PipelineConfig, PipelineIdContext, std.hash_map.default_max_load_percentage).init(allocator),
             .descriptor_pools = std.HashMap(u32, *DescriptorPool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
-            .bound_resources = std.HashMap(ResourceBindingKey, BoundResource, ResourceBindingKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .bound_resources = std.AutoHashMap(u64, PipelineResourceMap).init(allocator),
             .shader_to_pipelines = std.HashMap([]const u8, std.ArrayList(PipelineId), std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .deferred_destroys = .{},
             .vulkan_pipeline_cache = vulkan_cache,
@@ -144,6 +146,10 @@ pub const UnifiedPipelineSystem = struct {
         self.descriptor_pools.deinit();
 
         // Clean up resources
+        var resource_iter = self.bound_resources.valueIterator();
+        while (resource_iter.next()) |map| {
+            map.deinit();
+        }
         self.bound_resources.deinit();
 
         // Clean up any remaining deferred destroys
@@ -776,8 +782,7 @@ pub const UnifiedPipelineSystem = struct {
             else => {},
         }
 
-        const key = ResourceBindingKey{
-            .pipeline_id = pipeline_id,
+        const key = InnerBindingKey{
             .set = set,
             .binding = binding,
             .frame_index = frame_index,
@@ -788,7 +793,13 @@ pub const UnifiedPipelineSystem = struct {
             .dirty = true,
         };
 
-        try self.bound_resources.put(key, bound_resource);
+        // Get or create the resource map for this pipeline
+        const result = try self.bound_resources.getOrPut(pipeline_id.hash);
+        if (!result.found_existing) {
+            result.value_ptr.* = PipelineResourceMap.init(self.allocator);
+        }
+        
+        try result.value_ptr.put(key, bound_resource);
     }
 
     fn getBindingDescriptorCount(_: *UnifiedPipelineSystem, pipeline: *const Pipeline, set: u32, binding_index: u32) ?u32 {
@@ -888,11 +899,10 @@ pub const UnifiedPipelineSystem = struct {
 
     /// Mark all bound resources for a pipeline as dirty (useful after pipeline recreation)
     pub fn markPipelineResourcesDirty(self: *UnifiedPipelineSystem, pipeline_id: PipelineId) void {
-        var resource_iter = self.bound_resources.iterator();
-        while (resource_iter.next()) |entry| {
-            const key = entry.key_ptr.*;
-            if (std.mem.eql(u8, key.pipeline_id.name, pipeline_id.name)) {
-                entry.value_ptr.dirty = true;
+        if (self.bound_resources.getPtr(pipeline_id.hash)) |map| {
+            var resource_iter = map.valueIterator();
+            while (resource_iter.next()) |bound_resource| {
+                bound_resource.dirty = true;
             }
         }
     }
@@ -904,20 +914,19 @@ pub const UnifiedPipelineSystem = struct {
             return;
         }
 
+        // Fast path: check if we have any resources for this pipeline
+        const map_ptr = self.bound_resources.getPtr(pipeline_id.hash) orelse return;
+
         var updates = std.ArrayList(DescriptorUpdate){};
         defer updates.deinit(self.allocator);
 
         // Collect dirty bindings for this specific pipeline and frame
-        var resource_iter = self.bound_resources.iterator();
+        var resource_iter = map_ptr.iterator();
         while (resource_iter.next()) |entry| {
             const key = entry.key_ptr.*;
             const bound_resource = entry.value_ptr.*;
 
-            if (key.frame_index == frame_index and
-                key.pipeline_id.hash == pipeline_id.hash and
-                std.mem.eql(u8, key.pipeline_id.name, pipeline_id.name) and
-                bound_resource.dirty)
-            {
+            if (key.frame_index == frame_index and bound_resource.dirty) {
                 const update = DescriptorUpdate{
                     .set = key.set,
                     .binding = key.binding,
@@ -958,36 +967,60 @@ pub const UnifiedPipelineSystem = struct {
         }
 
         // Collect all dirty bindings for this frame
-        var resource_iter = self.bound_resources.iterator();
+        var pipeline_iter = self.bound_resources.iterator();
         var dirty_count: u32 = 0;
-        while (resource_iter.next()) |entry| {
-            const key = entry.key_ptr.*;
-            const bound_resource = entry.value_ptr.*;
-
-            if (key.frame_index == frame_index and bound_resource.dirty) {
-                dirty_count += 1;
-
-                log(.DEBUG, "unified_pipeline", "Found dirty resource: pipeline={s}, set={}, binding={}, frame={}", .{
-                    key.pipeline_id.name,
-                    key.set,
-                    key.binding,
-                    key.frame_index,
-                });
-
-                const update = DescriptorUpdate{
-                    .set = key.set,
-                    .binding = key.binding,
-                    .resource = bound_resource.resource,
-                };
-
-                var result = try updates_by_pipeline.getOrPut(key.pipeline_id);
-                if (!result.found_existing) {
-                    result.value_ptr.* = std.ArrayList(DescriptorUpdate){};
+        
+        while (pipeline_iter.next()) |pipeline_entry| {
+            const pipeline_hash = pipeline_entry.key_ptr.*;
+            const map = pipeline_entry.value_ptr;
+            
+            // We need to find the PipelineId struct for this hash to use as key in updates_by_pipeline
+            // This is a bit inefficient but this is a legacy method anyway
+            // We can iterate pipelines to find the matching ID
+            var pipeline_id: PipelineId = undefined;
+            var found_pipeline = false;
+            
+            var p_iter = self.pipelines.keyIterator();
+            while (p_iter.next()) |pid| {
+                if (pid.hash == pipeline_hash) {
+                    pipeline_id = pid.*;
+                    found_pipeline = true;
+                    break;
                 }
-                try result.value_ptr.append(self.allocator, update);
+            }
+            
+            if (!found_pipeline) continue;
 
-                // Mark as clean
-                entry.value_ptr.dirty = false;
+            var resource_iter = map.iterator();
+            while (resource_iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const bound_resource = entry.value_ptr.*;
+
+                if (key.frame_index == frame_index and bound_resource.dirty) {
+                    dirty_count += 1;
+
+                    log(.DEBUG, "unified_pipeline", "Found dirty resource: pipeline={s}, set={}, binding={}, frame={}", .{
+                        pipeline_id.name,
+                        key.set,
+                        key.binding,
+                        key.frame_index,
+                    });
+
+                    const update = DescriptorUpdate{
+                        .set = key.set,
+                        .binding = key.binding,
+                        .resource = bound_resource.resource,
+                    };
+
+                    var result = try updates_by_pipeline.getOrPut(pipeline_id);
+                    if (!result.found_existing) {
+                        result.value_ptr.* = std.ArrayList(DescriptorUpdate){};
+                    }
+                    try result.value_ptr.append(self.allocator, update);
+
+                    // Mark as clean
+                    entry.value_ptr.dirty = false;
+                }
             }
         }
 
@@ -1026,24 +1059,9 @@ pub const UnifiedPipelineSystem = struct {
             log(.INFO, "unified_pipeline", "Destroying pipeline: {s}", .{key.name});
 
             // Remove bound resources for this pipeline
-            // We must do this because the keys in bound_resources point to the pipeline name string
-            // which we are about to free.
-            var keys_to_remove = std.ArrayList(ResourceBindingKey){};
-            defer keys_to_remove.deinit(self.allocator);
-
-            var resource_iter = self.bound_resources.keyIterator();
-            while (resource_iter.next()) |res_key| {
-                // Check if this resource belongs to the pipeline being destroyed
-                // We compare names because PipelineId is a struct with a pointer
-                if (std.mem.eql(u8, res_key.pipeline_id.name, key.name)) {
-                    keys_to_remove.append(self.allocator, res_key.*) catch |err| {
-                        log(.ERROR, "unified_pipeline", "Failed to track resource for removal (OOM): {}", .{err});
-                    };
-                }
-            }
-
-            for (keys_to_remove.items) |res_key| {
-                _ = self.bound_resources.remove(res_key);
+            if (self.bound_resources.fetchRemove(pipeline_id.hash)) |res_entry| {
+                var map = res_entry.value;
+                map.deinit();
             }
 
             // Defer destruction of the pipeline resources
@@ -1157,11 +1175,10 @@ pub const UnifiedPipelineSystem = struct {
             const config = old_pipeline.config;
 
             // Clear dirty flags for all resources of this pipeline to prevent descriptor updates on old sets
-            var resource_iter = self.bound_resources.iterator();
             var cleared_count: u32 = 0;
-            while (resource_iter.next()) |entry| {
-                const key = entry.key_ptr.*;
-                if (std.mem.eql(u8, key.pipeline_id.name, pipeline_id.name)) {
+            if (self.bound_resources.getPtr(pipeline_id.hash)) |map| {
+                var resource_iter = map.iterator();
+                while (resource_iter.next()) |entry| {
                     if (entry.value_ptr.dirty) {
                         entry.value_ptr.dirty = false;
                         cleared_count += 1;
@@ -2097,3 +2114,27 @@ const ResourceBindingKeyContext = struct {
             a.frame_index == b.frame_index;
     }
 };
+
+const InnerBindingKey = struct {
+    set: u32,
+    binding: u32,
+    frame_index: u32,
+};
+
+const InnerBindingKeyContext = struct {
+    pub fn hash(_: @This(), key: InnerBindingKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&key.set));
+        hasher.update(std.mem.asBytes(&key.binding));
+        hasher.update(std.mem.asBytes(&key.frame_index));
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), a: InnerBindingKey, b: InnerBindingKey) bool {
+        return a.set == b.set and
+            a.binding == b.binding and
+            a.frame_index == b.frame_index;
+    }
+};
+
+const PipelineResourceMap = std.HashMap(InnerBindingKey, BoundResource, InnerBindingKeyContext, std.hash_map.default_max_load_percentage);

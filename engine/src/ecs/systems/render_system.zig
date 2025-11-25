@@ -790,6 +790,35 @@ pub const RenderSystem = struct {
 
             self.instance_capacity = required_capacity;
             // log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{required_capacity});
+
+            // If we reallocated, we must upload ALL instances, not just the deltas.
+            // The deltas only contain changed instances, but the new buffer is empty.
+            // We use the cached raster data which contains the full state.
+            const active_idx = self.active_cache_index.load(.acquire);
+            if (self.cached_raster_data[active_idx]) |raster_data| {
+                var upload_buffer = std.ArrayList(u8){};
+                defer upload_buffer.deinit(self.allocator);
+                try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+
+                // Iterate batch lists and batches to collect all instances
+                for (raster_data.batch_lists) |list| {
+                    for (list.batches) |batch| {
+                        const batch_bytes = std.mem.sliceAsBytes(batch.instances);
+                        try upload_buffer.appendSlice(self.allocator, batch_bytes);
+                    }
+                }
+
+                // Write instance data to all frame buffers
+                for (&self.instance_buffers) |buf| {
+                    try buf.buffer.map(buffer_size, buf.arena_offset orelse 0);
+                    const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+                    @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
+                    buf.buffer.unmap();
+                }
+                
+                // Return early as we have updated everything
+                return;
+            }
         }
 
         // Apply delta updates (works for both full deltas and granular deltas)
@@ -898,10 +927,26 @@ pub const RenderSystem = struct {
         var changed_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
         defer changed_data.deinit(scratch);
 
-        // Generate delta for all instances (simpler approach - always send everything)
-        for (current_instances.items, 0..) |instance, i| {
-            try changed_indices.append(scratch, @intCast(i));
-            try changed_data.append(scratch, instance);
+        // Generate delta for all instances
+        // Optimization: Only send changed instances to reduce bandwidth
+        const min_len = @min(current_instances.items.len, self.last_instance_data.items.len);
+
+        for (0..min_len) |i| {
+            const current = current_instances.items[i];
+            const last = self.last_instance_data.items[i];
+
+            if (!std.meta.eql(current, last)) {
+                try changed_indices.append(scratch, @intCast(i));
+                try changed_data.append(scratch, current);
+            }
+        }
+
+        // Handle new instances (appended to the end)
+        if (current_instances.items.len > min_len) {
+            for (min_len..current_instances.items.len) |i| {
+                try changed_indices.append(scratch, @intCast(i));
+                try changed_data.append(scratch, current_instances.items[i]);
+            }
         }
 
         // Always store deltas in InstanceDeltasSet component (even if empty)

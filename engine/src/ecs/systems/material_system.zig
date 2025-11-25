@@ -455,7 +455,7 @@ pub const MaterialSystem = struct {
                 gop.value_ptr.* = std.ArrayList(ecs.EntityId){};
                 try gop.value_ptr.ensureTotalCapacity(self.allocator, @max(1, entity_count / 2));
             }
-            try gop.value_ptr.append(self.allocator, entity);
+            gop.value_ptr.appendAssumeCapacity(entity);
         }
 
         // Process each material set (ECS queries, compute indices, build deltas)

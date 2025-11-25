@@ -234,16 +234,27 @@ pub const Scene = struct {
         }
         if (self.physics_system) |ps| {
             ps.deinit();
-            // No need to call allocator.destroy(ps) here:
-            // PhysicsSystem.deinit() already destroys the struct itself (calls allocator.destroy(self)).
+            self.allocator.destroy(ps);
             self.physics_system = null;
         }
 
+        // Recreate ScriptingSystem to ensure clean state (no pending actions, fresh Lua states)
+        self.scripting_system.deinit();
+        self.allocator.destroy(self.scripting_system);
+        self.scripting_system = try self.allocator.create(ecs.ScriptingSystem);
+        self.scripting_system.* = try ecs.ScriptingSystem.init(self.allocator, self.thread_pool, 4);
+
+        // Recreate RenderSystem to ensure clean state (fresh instance buffers)
+        self.render_system.deinit();
+        self.allocator.destroy(self.render_system);
+        self.render_system = try self.allocator.create(ecs.RenderSystem);
+        self.render_system.* = try ecs.RenderSystem.init(self.allocator, self.thread_pool, self.buffer_manager);
+
+        // Restore render_system since clear() removed it (and we just recreated it)
+        try self.ecs_world.setUserData("render_system", @ptrCast(self.render_system));
+
         // Initialize Render Graph and Systems
         try self.initRenderGraphResources();
-
-        // Restore render_system since clear() removed it
-        try self.ecs_world.setUserData("render_system", @ptrCast(self.render_system));
 
         if (file_path) |path| {
             const file = try std.fs.cwd().openFile(path, .{});
