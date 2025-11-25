@@ -24,7 +24,7 @@ pub const ParticleEmitter = struct {
     /// Internal state
     time_since_last_emit: f32 = 0.0,
     active: bool = true,
-    
+
     /// Cached GPU ID to avoid hash map lookups
     gpu_id: ?u32 = null,
 

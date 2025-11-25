@@ -44,8 +44,20 @@ pub const SystemStage = struct {
     // Split into separate caches for prepare and update to allow concurrent execution
     prepare_items_cache: std.ArrayList(WorkItem),
     update_items_cache: std.ArrayList(WorkItem),
+    
+    // Persistent contexts for work items (allocated on heap to ensure stable addresses)
+    prepare_context: *StageContext,
+    update_context: *StageContext,
+    
+    prepare_count: usize = 0,
+    update_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) SystemStage {
+        const p_ctx = allocator.create(StageContext) catch @panic("OOM");
+        const u_ctx = allocator.create(StageContext) catch @panic("OOM");
+        p_ctx.* = undefined;
+        u_ctx.* = undefined;
+
         return .{
             .name = name,
             .systems = std.ArrayList(SystemDef){},
@@ -54,10 +66,14 @@ pub const SystemStage = struct {
             .allocator = allocator,
             .prepare_items_cache = std.ArrayList(WorkItem){},
             .update_items_cache = std.ArrayList(WorkItem){},
+            .prepare_context = p_ctx,
+            .update_context = u_ctx,
         };
     }
 
     pub fn deinit(self: *SystemStage) void {
+        self.allocator.destroy(self.prepare_context);
+        self.allocator.destroy(self.update_context);
         self.systems.deinit(self.allocator);
         self.prepare_items_cache.deinit(self.allocator);
         self.update_items_cache.deinit(self.allocator);
@@ -66,20 +82,39 @@ pub const SystemStage = struct {
     /// Add a system to this stage
     pub fn addSystem(self: *SystemStage, system: SystemDef) !void {
         try self.systems.append(self.allocator, system);
+        const index = self.systems.items.len - 1;
+
+        if (system.prepare_fn != null) {
+            self.prepare_count += 1;
+            try self.prepare_items_cache.append(self.allocator, .{
+                .id = 0, // Updated at runtime
+                .item_type = .ecs_update,
+                .priority = .high,
+                .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(index) } },
+                .worker_fn = systemWorker,
+                .context = self.prepare_context,
+            });
+        }
+
+        if (system.update_fn != null) {
+            self.update_count += 1;
+            try self.update_items_cache.append(self.allocator, .{
+                .id = 0, // Updated at runtime
+                .item_type = .ecs_update,
+                .priority = .high,
+                .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(index) } },
+                .worker_fn = systemWorker,
+                .context = self.update_context,
+            });
+        }
     }
 
     /// Execute all systems' prepare phase in this stage in parallel (main thread)
     pub fn executePrepare(self: *SystemStage, world: *World, dt: f32, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
-        // Count systems that have prepare_fn
-        var prepare_count: usize = 0;
-        for (self.systems.items) |system| {
-            if (system.prepare_fn != null) prepare_count += 1;
-        }
-
-        if (prepare_count == 0) return;
+        if (self.prepare_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (prepare_count <= 2 or thread_pool == null) {
+        if (self.prepare_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.prepare_fn) |prepare_fn| {
                     try prepare_fn(world, dt);
@@ -91,10 +126,10 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.prepare_completion.store(@intCast(prepare_count), .release);
+        self.prepare_completion.store(@intCast(self.prepare_count), .release);
 
-        // Build a stage-scoped immutable context and dispatch one job per system
-        var stage_ctx = StageContext{
+        // Update context
+        self.prepare_context.* = .{
             .world = world,
             .dt = dt,
             .frame_info = null, // No frame info for prepare phase
@@ -103,22 +138,11 @@ pub const SystemStage = struct {
             .phase = .prepare,
         };
 
-        // Prepare/reuse batch of work items
-        try self.prepare_items_cache.ensureTotalCapacity(self.allocator, prepare_count);
-        self.prepare_items_cache.clearRetainingCapacity();
-
-        for (self.systems.items, 0..) |system, i| {
-            if (system.prepare_fn != null) {
-                self.prepare_items_cache.appendAssumeCapacity(.{
-                    .id = work_id_counter.fetchAdd(1, .monotonic),
-                    .item_type = .ecs_update,
-                    .priority = .high,
-                    .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(i) } },
-                    .worker_fn = systemWorker,
-                    .context = &stage_ctx,
-                });
-            }
+        // Update IDs
+        for (self.prepare_items_cache.items) |*item| {
+            item.id = work_id_counter.fetchAdd(1, .monotonic);
         }
+
         // log(.INFO, "system_scheduler", "Dispatching {} prepare jobs for stage '{s}'", .{ prepare_count, self.name });
         try pool.submitBatch(self.prepare_items_cache.items);
 
@@ -132,16 +156,10 @@ pub const SystemStage = struct {
 
     /// Execute all systems' update phase in this stage in parallel (render thread)
     pub fn executeUpdate(self: *SystemStage, world: *World, frame_info: *FrameInfo, thread_pool: ?*ThreadPool, work_id_counter: *std.atomic.Value(u64)) !void {
-        // Count systems that have update_fn
-        var update_count: usize = 0;
-        for (self.systems.items) |system| {
-            if (system.update_fn != null) update_count += 1;
-        }
-
-        if (update_count == 0) return;
+        if (self.update_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (update_count <= 2 or thread_pool == null) {
+        if (self.update_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.update_fn) |update_fn| {
                     try update_fn(world, frame_info);
@@ -153,11 +171,11 @@ pub const SystemStage = struct {
         const pool = thread_pool.?;
 
         // Initialize completion counter
-        self.update_completion.store(@intCast(update_count), .release);
+        self.update_completion.store(@intCast(self.update_count), .release);
 
-        // Build a stage-scoped immutable context and dispatch one job per system
+        // Update context
         const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
-        var stage_ctx = StageContext{
+        self.update_context.* = .{
             .world = world,
             .dt = dt,
             .frame_info = frame_info,
@@ -166,21 +184,9 @@ pub const SystemStage = struct {
             .phase = .update,
         };
 
-        // Prepare/reuse batch of work items
-        try self.update_items_cache.ensureTotalCapacity(self.allocator, update_count);
-        self.update_items_cache.clearRetainingCapacity();
-
-        for (self.systems.items, 0..) |system, i| {
-            if (system.update_fn != null) {
-                self.update_items_cache.appendAssumeCapacity(.{
-                    .id = work_id_counter.fetchAdd(1, .monotonic),
-                    .item_type = .ecs_update,
-                    .priority = .high,
-                    .data = .{ .ecs_update = .{ .stage_index = 0, .job_index = @intCast(i) } },
-                    .worker_fn = systemWorker,
-                    .context = &stage_ctx,
-                });
-            }
+        // Update IDs
+        for (self.update_items_cache.items) |*item| {
+            item.id = work_id_counter.fetchAdd(1, .monotonic);
         }
 
         try pool.submitBatch(self.update_items_cache.items);

@@ -1823,7 +1823,7 @@ pub const RenderSystem = struct {
         for (instances, 0..) |*inst, i| {
             const obj = raster_objects[i];
             inst.* = active_rt.instances[i]; // Copy old data (mask, IDs)
-            
+
             const mat = math.Mat4x4{ .data = obj.transform };
             inst.transform = mat.to_3x4();
         }
@@ -1847,7 +1847,7 @@ pub const RenderSystem = struct {
 
         const total_time_ns = std.time.nanoTimestamp() - start_time;
         const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
-        
+
         // Frame budget enforcement (stricter for fast path)
         const budget_ms: f64 = 1.0;
         if (total_time_ms > budget_ms) {
@@ -1969,32 +1969,31 @@ pub fn prepare(world: *World, dt: f32) !void {
 
     // 4) Removed separate transform check loop (merged into step 3)
 
-
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
         // OPTIMIZATION: If only transforms changed, update in place
         // We assume the entity list order is stable because count didn't change and no structural changes detected
         if (is_transform_only and renderables_set.renderables.len > 0) {
-             var iter = mesh_view.iterator();
-             var i: usize = 0;
-             while (iter.next()) |entry| {
-                 const renderer = entry.component;
-                 if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+            var iter = mesh_view.iterator();
+            var i: usize = 0;
+            while (iter.next()) |entry| {
+                const renderer = entry.component;
+                if (!renderer.enabled or !renderer.hasValidAssets()) continue;
 
-                 if (i >= renderables_set.renderables.len) break;
+                if (i >= renderables_set.renderables.len) break;
 
-                 // Clear dirty flag and update transform
-                 if (world.get(Transform, entry.entity)) |transform| {
-                     transform.dirty = false;
-                     renderables_set.renderables[i].transform = transform.world_matrix;
-                 }
-                 i += 1;
-             }
-             
-             renderables_set.markDirty(true);
-             
-             // Calculate instance deltas using existing renderables
-             try self.calculateInstanceDeltas(world, renderables_set.renderables, asset_manager);
+                // Clear dirty flag and update transform
+                if (world.get(Transform, entry.entity)) |transform| {
+                    transform.dirty = false;
+                    renderables_set.renderables[i].transform = transform.world_matrix;
+                }
+                i += 1;
+            }
+
+            renderables_set.markDirty(true);
+
+            // Calculate instance deltas using existing renderables
+            try self.calculateInstanceDeltas(world, renderables_set.renderables, asset_manager);
         } else {
             // Pre-allocate with expected capacity to avoid reallocations
             // Use scratch allocator for temporary extraction list

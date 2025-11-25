@@ -357,15 +357,15 @@ pub const PhysicsSystem = struct {
         var it = self.active_bodies.iterator();
         while (it.next()) |entry| {
             const entity_id = entry.key_ptr.*;
-            
+
             // Check if entity still exists and has RigidBody
             const has_body = if (world.get(RigidBody, entity_id)) |rb| rb.body_id != .invalid else false;
-            
+
             // Check for colliders (must have at least one)
             const has_collider = (world.get(BoxCollider, entity_id) != null) or
-                                 (world.get(SphereCollider, entity_id) != null) or
-                                 (world.get(CapsuleCollider, entity_id) != null) or
-                                 (world.get(MeshCollider, entity_id) != null);
+                (world.get(SphereCollider, entity_id) != null) or
+                (world.get(CapsuleCollider, entity_id) != null) or
+                (world.get(MeshCollider, entity_id) != null);
 
             if (!has_body or !has_collider) {
                 try to_remove.append(self.allocator, entity_id);
