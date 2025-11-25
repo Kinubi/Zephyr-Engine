@@ -51,24 +51,25 @@ pub const PhysicsSystem = struct {
 
     pub fn deinit(self: *PhysicsSystem) void {
         log(.INFO, "physics_system", "PhysicsSystem deinit start", .{});
-        
+
         log(.INFO, "physics_system", "Destroying Jolt PhysicsSystem...", .{});
         self.physics_system.destroy();
         log(.INFO, "physics_system", "Jolt PhysicsSystem destroyed", .{});
-        
+
         log(.INFO, "physics_system", "Deinitializing zphysics...", .{});
         zphysics.deinit();
         log(.INFO, "physics_system", "zphysics deinitialized", .{});
-        
+
         _ = self.gpa.deinit();
         self.allocator.destroy(self);
         log(.INFO, "physics_system", "PhysicsSystem deinitialized", .{});
-    }    pub fn prepare(self: *PhysicsSystem, world: *World, dt: f32) !void {
-        log(.INFO, "physics_system", "PhysicsSystem prepare start", .{});
+    }
+    pub fn prepare(self: *PhysicsSystem, world: *World, dt: f32) !void {
+        // log(.INFO, "physics_system", "PhysicsSystem prepare start", .{});
         const body_interface = self.physics_system.getBodyInterfaceMut();
 
         // 1. Sync ECS Transforms -> Physics Bodies (Kinematic/Static) & Create Bodies
-        log(.INFO, "physics_system", "Querying entities...", .{});
+        // log(.INFO, "physics_system", "Querying entities...", .{});
         var query = try world.query(struct {
             transform: *Transform,
             body: *RigidBody,
@@ -76,10 +77,10 @@ pub const PhysicsSystem = struct {
             sphere: ?*SphereCollider,
         });
         defer query.deinit();
-        log(.INFO, "physics_system", "Query created", .{});
+        // log(.INFO, "physics_system", "Query created", .{});
 
         while (query.next()) |entity| {
-            log(.INFO, "physics_system", "Processing entity...", .{});
+            // log(.INFO, "physics_system", "Processing entity...", .{});
             if (entity.body.body_id == .invalid) {
                 // Create Shape
                 var shape_settings: *zphysics.ShapeSettings = undefined;
@@ -119,9 +120,7 @@ pub const PhysicsSystem = struct {
                 };
 
                 // Create Body
-                log(.INFO, "physics_system", "Creating body for entity...", .{});
                 const body_id = try body_interface.createAndAddBody(body_settings, .activate);
-                log(.INFO, "physics_system", "Body created: {}", .{body_id});
                 entity.body.body_id = body_id;
             } else {
                 // Sync Kinematic
@@ -133,12 +132,9 @@ pub const PhysicsSystem = struct {
         }
 
         // 2. Step Physics World
-        log(.INFO, "physics_system", "Stepping physics world...", .{});
         try self.physics_system.update(dt, .{ .collision_steps = 1 });
-        log(.INFO, "physics_system", "Physics world stepped", .{});
 
         // 3. Sync Physics Bodies -> ECS Transforms (Dynamic)
-        log(.INFO, "physics_system", "Syncing dynamic bodies...", .{});
         var dynamic_query = try world.query(struct {
             transform: *Transform,
             body: *RigidBody,
@@ -157,7 +153,6 @@ pub const PhysicsSystem = struct {
                 }
             }
         }
-        log(.INFO, "physics_system", "PhysicsSystem prepare complete", .{});
     }
 
     pub fn update(self: *PhysicsSystem, world: *World, frame_info: *FrameInfo) !void {

@@ -92,22 +92,17 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add physics system: {}", .{err});
                 };
 
-                // Stage 1.5: Material System (Isolated to avoid contention/crashes)
-                if (sched.addStage("MaterialUpdate")) |stage_mat| {
-                    stage_mat.addSystem(.{
-                        .name = "MaterialSystem",
-                        .prepare_fn = ecs.prepareMaterialSystem,
-                        .update_fn = ecs.updateMaterialSystem,
-                        .access = .{
-                            .reads = &[_][]const u8{ "MaterialSet", "MeshRenderer" },
-                            .writes = &[_][]const u8{},
-                        },
-                    }) catch |err| {
-                        log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
-                    };
-                } else |err| {
-                    log(.WARN, "scene_layer", "Failed to add stage 1.5: {}", .{err});
-                }
+                stage1.addSystem(.{
+                    .name = "MaterialSystem",
+                    .prepare_fn = ecs.prepareMaterialSystem,
+                    .update_fn = ecs.updateMaterialSystem,
+                    .access = .{
+                        .reads = &[_][]const u8{ "MaterialSet", "MeshRenderer" },
+                        .writes = &[_][]const u8{},
+                    },
+                }) catch |err| {
+                    log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
+                };
 
                 // Stage 2: Systems that depend on Stage 1
                 if (sched.addStage("DependentSystems")) |stage2| {
