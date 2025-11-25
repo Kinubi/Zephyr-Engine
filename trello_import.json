@@ -30,6 +30,26 @@
       "name": "Done",
       "cards": [
         {
+          "name": "Work-stealing job queue",
+          "desc": "Implemented a work-stealing scheduler for `ThreadPool` in `threading/thread_pool.zig`. Includes per-worker PRNG for efficient stealing and accurate queue size tracking.",
+          "labels": ["Optimization", "Engine"]
+        },
+        {
+          "name": "Physics System Optimization (Views)",
+          "desc": "Optimized `PhysicsSystem` to use `world.view()` for component access instead of repeated `world.get()` calls, reducing hash map lookups during the update loop.",
+          "labels": ["Optimization", "Engine"]
+        },
+        {
+          "name": "Fix Shutdown Crash (Vulkan Validation)",
+          "desc": "Resolved Vulkan validation errors and crashes on shutdown by correcting the deinitialization order of `FileWatcher`, `ThreadPool`, and `Engine` subsystems.",
+          "labels": ["Bug Fix", "Engine"]
+        },
+        {
+          "name": "Fix Editor Persistence (Lights)",
+          "desc": "Fixed an issue where lights created in the Editor persisted after stopping Play mode. Updated `EditorApp` to use `scene.spawnEmpty` for proper lifecycle management.",
+          "labels": ["Bug Fix", "Editor"]
+        },
+        {
           "name": "Physics Integration",
           "desc": "Integrate a physics engine (likely `zphysics` / Jolt Physics).\n\nImplementation Details:\n1. Add Jolt/PhysX bindings to `build.zig`.\n2. Create `PhysicsSystem` in `engine/src/ecs/systems/`.\n3. Define `RigidBody` (mass, friction, restitution) and `Collider` (Box, Sphere, Capsule, Mesh) components.\n4. In `PhysicsSystem.init`, initialize the physics world.\n5. In `PhysicsSystem.update`, copy ECS `Transform` to Physics Bodies (for kinematic/static) and copy Physics Bodies back to ECS `Transform` (for dynamic).\n6. Handle collision events and dispatch them.",
           "labels": ["Engine", "High Priority"]
@@ -178,11 +198,6 @@
           "name": "Automatic shader variant generation",
           "desc": "Automate shader variant generation in `shader_compiler.zig`.\n\nDetails:\n- Instead of manually defining permutations, generate them based on material usage.\n- E.g., generate variants for: `HAS_NORMAL_MAP`, `HAS_EMISSIVE`, `SKINNED`, `STATIC`.\n- Compile these variants offline or on-demand.",
           "labels": ["Feature", "Medium Priority"]
-        },
-        {
-          "name": "Work-stealing job queue",
-          "desc": "Implement a work-stealing scheduler for `ThreadPool` in `threading/thread_pool.zig`. This balances load across cores more effectively than a simple shared queue, especially for uneven tasks like BVH building.",
-          "labels": ["Optimization", "Medium Priority"]
         }
       ]
     },
