@@ -2,6 +2,10 @@ const std = @import("std");
 const zphysics = @import("zphysics");
 const AssetId = @import("../../assets/asset_types.zig").AssetId;
 
+fn jsonValueToF32(v: std.json.Value) f32 {
+    return @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
+}
+
 pub const BodyType = enum {
     Static,
     Kinematic,
@@ -56,21 +60,11 @@ pub const RigidBody = struct {
                 rb.body_type = bt;
             }
         }
-        if (value.object.get("mass")) |v| {
-            rb.mass = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
-        if (value.object.get("friction")) |v| {
-            rb.friction = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
-        if (value.object.get("restitution")) |v| {
-            rb.restitution = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
-        if (value.object.get("linear_damping")) |v| {
-            rb.linear_damping = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
-        if (value.object.get("angular_damping")) |v| {
-            rb.angular_damping = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
+        if (value.object.get("mass")) |v| rb.mass = jsonValueToF32(v);
+        if (value.object.get("friction")) |v| rb.friction = jsonValueToF32(v);
+        if (value.object.get("restitution")) |v| rb.restitution = jsonValueToF32(v);
+        if (value.object.get("linear_damping")) |v| rb.linear_damping = jsonValueToF32(v);
+        if (value.object.get("angular_damping")) |v| rb.angular_damping = jsonValueToF32(v);
         if (value.object.get("is_sensor")) |v| {
             rb.is_sensor = v.bool;
         }
@@ -106,16 +100,16 @@ pub const BoxCollider = struct {
         var bc = BoxCollider{};
         if (value.object.get("half_extents")) |v| {
             if (v == .array and v.array.items.len == 3) {
-                bc.half_extents[0] = @floatCast(if (v.array.items[0] == .float) v.array.items[0].float else @as(f64, @floatFromInt(v.array.items[0].integer)));
-                bc.half_extents[1] = @floatCast(if (v.array.items[1] == .float) v.array.items[1].float else @as(f64, @floatFromInt(v.array.items[1].integer)));
-                bc.half_extents[2] = @floatCast(if (v.array.items[2] == .float) v.array.items[2].float else @as(f64, @floatFromInt(v.array.items[2].integer)));
+                for (v.array.items, 0..) |item, i| {
+                    bc.half_extents[i] = jsonValueToF32(item);
+                }
             }
         }
         if (value.object.get("offset")) |v| {
             if (v == .array and v.array.items.len == 3) {
-                bc.offset[0] = @floatCast(if (v.array.items[0] == .float) v.array.items[0].float else @as(f64, @floatFromInt(v.array.items[0].integer)));
-                bc.offset[1] = @floatCast(if (v.array.items[1] == .float) v.array.items[1].float else @as(f64, @floatFromInt(v.array.items[1].integer)));
-                bc.offset[2] = @floatCast(if (v.array.items[2] == .float) v.array.items[2].float else @as(f64, @floatFromInt(v.array.items[2].integer)));
+                for (v.array.items, 0..) |item, i| {
+                    bc.offset[i] = jsonValueToF32(item);
+                }
             }
         }
         return bc;
@@ -144,14 +138,12 @@ pub const SphereCollider = struct {
     pub fn deserialize(serializer: anytype, value: std.json.Value) !SphereCollider {
         _ = serializer;
         var sc = SphereCollider{};
-        if (value.object.get("radius")) |v| {
-            sc.radius = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
+        if (value.object.get("radius")) |v| sc.radius = jsonValueToF32(v);
         if (value.object.get("offset")) |v| {
             if (v == .array and v.array.items.len == 3) {
-                sc.offset[0] = @floatCast(if (v.array.items[0] == .float) v.array.items[0].float else @as(f64, @floatFromInt(v.array.items[0].integer)));
-                sc.offset[1] = @floatCast(if (v.array.items[1] == .float) v.array.items[1].float else @as(f64, @floatFromInt(v.array.items[1].integer)));
-                sc.offset[2] = @floatCast(if (v.array.items[2] == .float) v.array.items[2].float else @as(f64, @floatFromInt(v.array.items[2].integer)));
+                for (v.array.items, 0..) |item, i| {
+                    sc.offset[i] = jsonValueToF32(item);
+                }
             }
         }
         return sc;
@@ -183,17 +175,13 @@ pub const CapsuleCollider = struct {
     pub fn deserialize(serializer: anytype, value: std.json.Value) !CapsuleCollider {
         _ = serializer;
         var cc = CapsuleCollider{};
-        if (value.object.get("radius")) |v| {
-            cc.radius = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
-        if (value.object.get("height")) |v| {
-            cc.height = @floatCast(if (v == .float) v.float else @as(f64, @floatFromInt(v.integer)));
-        }
+        if (value.object.get("radius")) |v| cc.radius = jsonValueToF32(v);
+        if (value.object.get("height")) |v| cc.height = jsonValueToF32(v);
         if (value.object.get("offset")) |v| {
             if (v == .array and v.array.items.len == 3) {
-                cc.offset[0] = @floatCast(if (v.array.items[0] == .float) v.array.items[0].float else @as(f64, @floatFromInt(v.array.items[0].integer)));
-                cc.offset[1] = @floatCast(if (v.array.items[1] == .float) v.array.items[1].float else @as(f64, @floatFromInt(v.array.items[1].integer)));
-                cc.offset[2] = @floatCast(if (v.array.items[2] == .float) v.array.items[2].float else @as(f64, @floatFromInt(v.array.items[2].integer)));
+                for (v.array.items, 0..) |item, i| {
+                    cc.offset[i] = jsonValueToF32(item);
+                }
             }
         }
         return cc;
@@ -233,8 +221,8 @@ pub const MeshCollider = struct {
                 // SceneSerializer.loadModel returns !AssetId
                 if (serializer.loadModel(v.string)) |id| {
                     mc.mesh_asset_id = id;
-                } else |_| {
-                    // Failed to load, maybe log?
+                } else |err| {
+                    std.log.err("Failed to load mesh asset for MeshCollider: {}", .{err});
                 }
             }
         }

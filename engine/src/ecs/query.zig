@@ -46,7 +46,11 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                     types[i] = void;
                 } else {
                     const CompT = ComponentType(field.type);
-                    types[i] = *DenseSet(CompT);
+                    if (IsOptional(field.type)) {
+                        types[i] = ?*DenseSet(CompT);
+                    } else {
+                        types[i] = *DenseSet(CompT);
+                    }
                 }
             }
             break :blk std.meta.Tuple(&types);
@@ -80,37 +84,25 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 const type_name = @typeName(CompT);
 
                 // Get storage from world
-                const storage_ptr = world.storages.get(type_name) orelse {
-                    // If a required component storage doesn't exist, the query is empty (unless it's optional)
+                if (world.storages.get(type_name)) |storage_ptr| {
+                    const storage: *DenseSet(CompT) = @ptrCast(@alignCast(storage_ptr));
+                    storages[i] = storage;
+
+                    // Find smallest storage to iterate over (optimization)
+                    // Only consider non-optional components for the main iterator
                     if (!IsOptional(field.type)) {
-                        // For now, if storage is missing, we can't even get the pointer to it.
-                        // But wait, if storage is missing, it means no entities have this component.
-                        // So if it's required, the query result is empty.
-                        // We can handle this by returning an empty iterator or error.
-                        // Returning error.ComponentNotRegistered is consistent with View.
+                        const len = storage.len();
+                        if (len < min_count) {
+                            min_count = len;
+                            main_idx = i;
+                        }
+                    }
+                } else {
+                    // Storage missing
+                    if (comptime !IsOptional(field.type)) {
                         return error.ComponentNotRegistered;
                     }
-                    // If optional and missing, we still need a "null" storage or handle it.
-                    // But DenseSet pointer cannot be null in our tuple.
-                    // Actually, if it's optional and missing, we can just treat it as always null.
-                    // But for simplicity, let's assume all storages exist for now, or fail.
-                    // A better approach for optional missing storage:
-                    // We can't easily put a null in the tuple if the type is *DenseSet(T).
-                    // We might need to change StorageTuple to hold ?*DenseSet(T).
-                    return error.ComponentNotRegistered;
-                };
-
-                const storage: *DenseSet(CompT) = @ptrCast(@alignCast(storage_ptr));
-                storages[i] = storage;
-
-                // Find smallest storage to iterate over (optimization)
-                // Only consider non-optional components for the main iterator
-                if (!IsOptional(field.type)) {
-                    const len = storage.len();
-                    if (len < min_count) {
-                        min_count = len;
-                        main_idx = i;
-                    }
+                    storages[i] = null;
                 }
             }
 
@@ -146,10 +138,16 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 inline for (Fields, 0..) |field, i| {
                     if (field.type != EntityId) {
                         if (i == self.main_storage_index) {
-                            const storage = self.storages[i];
-                            if (self.current_index < storage.entities.items.len) {
-                                entity = storage.entities.items[self.current_index];
-                                valid_index = true;
+                            const storage_maybe = self.storages[i];
+                            switch (@typeInfo(@TypeOf(storage_maybe))) {
+                                .optional => {},
+                                else => {
+                                    const storage = storage_maybe;
+                                    if (self.current_index < storage.entities.items.len) {
+                                        entity = storage.entities.items[self.current_index];
+                                        valid_index = true;
+                                    }
+                                },
                             }
                         }
                     }
@@ -162,11 +160,16 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                 var all_present = true;
                 inline for (Fields, 0..) |field, i| {
                     if (field.type == EntityId) continue;
-                    if (i != self.main_storage_index and !IsOptional(field.type)) {
-                        const storage = self.storages[i];
-                        if (!storage.has(entity)) {
-                            all_present = false;
-                            // break; // Can't break inline loop
+                    if (i != self.main_storage_index) {
+                        const storage_maybe = self.storages[i];
+                        switch (@typeInfo(@TypeOf(storage_maybe))) {
+                            .optional => {}, // Skip optional
+                            else => {
+                                const storage = storage_maybe;
+                                if (!storage.has(entity)) {
+                                    all_present = false;
+                                }
+                            }
                         }
                     }
                 }
@@ -180,24 +183,25 @@ pub fn QueryIterator(comptime QueryStruct: type) type {
                     if (field.type == EntityId) {
                         @field(result, field.name) = entity;
                     } else {
-                        const storage = self.storages[i];
-                        switch (@typeInfo(field.type)) {
-                            .optional => {
-                                // Optional: try get
+                        if (comptime IsOptional(field.type)) {
+                            // Optional: try get
+                            if (self.storages[i]) |storage| {
                                 if (storage.getMut(entity)) |ptr| {
                                     @field(result, field.name) = ptr;
                                 } else {
                                     @field(result, field.name) = null;
                                 }
-                            },
-                            else => {
-                                // Required: must exist (we checked)
-                                if (storage.getMut(entity)) |ptr| {
-                                    @field(result, field.name) = ptr;
-                                } else {
-                                    unreachable;
-                                }
-                            },
+                            } else {
+                                @field(result, field.name) = null;
+                            }
+                        } else {
+                            // Required: must exist (we checked)
+                            const storage = self.storages[i];
+                            if (storage.getMut(entity)) |ptr| {
+                                @field(result, field.name) = ptr;
+                            } else {
+                                unreachable;
+                            }
                         }
                     }
                 }

@@ -143,28 +143,31 @@ pub const SceneHierarchyPanel = struct {
                     scene.state = .Edit;
 
                     if (scene.play_mode_snapshot) |*snap| {
+                        // Ensure snapshot is cleaned up regardless of success/failure
+                        defer {
+                            snap.deinit(scene.allocator);
+                            scene.play_mode_snapshot = null;
+                        }
+
                         // Reset scene using load(null) to ensure clean state and re-initialized render graph
-                        scene.load(null) catch |err| {
+                        if (scene.load(null)) {
+                            // Deserialize
+                            var serializer = zephyr.SceneSerializer.init(scene);
+                            defer serializer.deinit();
+
+                            if (std.json.parseFromSlice(std.json.Value, scene.allocator, snap.items, .{})) |parsed| {
+                                defer parsed.deinit();
+                                if (serializer.deserialize(parsed.value)) {
+                                    // Success
+                                } else |err| {
+                                    std.log.err("Failed to deserialize snapshot: {}", .{err});
+                                }
+                            } else |err| {
+                                std.log.err("Failed to parse snapshot: {}", .{err});
+                            }
+                        } else |err| {
                             std.log.err("Failed to reset scene: {}", .{err});
-                        };
-
-                        // Deserialize
-                        var serializer = zephyr.SceneSerializer.init(scene);
-                        defer serializer.deinit();
-
-                        var parsed = std.json.parseFromSlice(std.json.Value, scene.allocator, snap.items, .{}) catch |err| {
-                            std.log.err("Failed to parse snapshot: {}", .{err});
-                            return;
-                        };
-                        defer parsed.deinit();
-
-                        serializer.deserialize(parsed.value) catch |err| {
-                            std.log.err("Failed to deserialize snapshot: {}", .{err});
-                        };
-
-                        // Clean up snapshot
-                        snap.deinit(scene.allocator);
-                        scene.play_mode_snapshot = null;
+                        }
                     }
                 }
             }

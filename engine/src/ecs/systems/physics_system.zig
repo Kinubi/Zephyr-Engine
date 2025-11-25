@@ -110,16 +110,20 @@ pub const PhysicsSystem = struct {
             if (data.body.body_id == .invalid) {
                 // Create Shape
                 var shape_settings: *zphysics.ShapeSettings = undefined;
+                var offset: [3]f32 = .{ 0, 0, 0 };
 
                 if (data.box) |box| {
                     const box_settings = try zphysics.BoxShapeSettings.create(.{ box.half_extents[0], box.half_extents[1], box.half_extents[2] });
                     shape_settings = @ptrCast(box_settings);
+                    offset = box.offset;
                 } else if (data.sphere) |sphere| {
                     const sphere_settings = try zphysics.SphereShapeSettings.create(sphere.radius);
                     shape_settings = @ptrCast(sphere_settings);
+                    offset = sphere.offset;
                 } else if (data.capsule) |capsule| {
                     const capsule_settings = try zphysics.CapsuleShapeSettings.create(capsule.height * 0.5, capsule.radius);
                     shape_settings = @ptrCast(capsule_settings);
+                    offset = capsule.offset;
                 } else if (data.mesh) |mesh| {
                     // TODO: Implement mesh collider creation. This will likely involve
                     // loading mesh data from the asset manager.
@@ -128,6 +132,17 @@ pub const PhysicsSystem = struct {
                     continue;
                 } else {
                     continue; // No collider
+                }
+
+                // Apply offset if needed
+                if (offset[0] != 0 or offset[1] != 0 or offset[2] != 0) {
+                    const rotated_settings = try zphysics.DecoratedShapeSettings.createRotatedTranslated(
+                        shape_settings,
+                        .{ 0, 0, 0, 1 }, // Identity rotation
+                        .{ offset[0], offset[1], offset[2] },
+                    );
+                    shape_settings.release(); // Release the child shape settings as the wrapper now holds a reference
+                    shape_settings = rotated_settings.asShapeSettings();
                 }
                 defer shape_settings.release();
 
@@ -152,6 +167,11 @@ pub const PhysicsSystem = struct {
                     .motion_type = motion_type,
                     .object_layer = object_layer,
                     .shape = shape,
+                    .friction = data.body.friction,
+                    .restitution = data.body.restitution,
+                    .linear_damping = data.body.linear_damping,
+                    .angular_damping = data.body.angular_damping,
+                    .is_sensor = data.body.is_sensor,
                 };
 
                 // Create Body
@@ -193,6 +213,7 @@ pub const PhysicsSystem = struct {
 
                         // Reset velocities to stop movement (optional, but usually desired when dragging)
                         body_interface.setLinearAndAngularVelocity(data.body.body_id, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+                        data.transform.dirty = false;
                     }
                 }
             }
@@ -218,6 +239,7 @@ pub const PhysicsSystem = struct {
         }
 
         // 2. Step Physics World
+        // TODO: Implement fixed timestep loop (accumulator) for stable physics simulation
         try self.physics_system.update(dt, .{ .collision_steps = 1 });
 
         // 3. Sync Physics Bodies -> ECS Transforms (Dynamic)
