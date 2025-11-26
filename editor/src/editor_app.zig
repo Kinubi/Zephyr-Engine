@@ -475,17 +475,8 @@ pub const App = struct {
 
             // MAIN THREAD: Prepare all layers (game logic, ECS queries, NO Vulkan)
             // This calls layer.prepare() which calls scene.prepareFrame()
+            // Note: SceneLayer.prepare() handles camera switching between editor/scene camera
             try self.engine.prepare(dt);
-
-            // In Play mode, use the scene's primary camera instead of editor camera
-            if (scene.state == .Play) {
-                if (scene.getPlayModeCamera()) |play_cam| {
-                    // Override editor camera with scene camera matrices
-                    camera.viewMatrix = play_cam.view_matrix;
-                    camera.projectionMatrix = play_cam.projection_matrix;
-                    camera.inverseViewMatrix = play_cam.inverse_view_matrix;
-                }
-            }
 
             // MAIN THREAD: Capture game state snapshot and signal render thread (non-blocking)
             // This copies data from World into snapshot for render thread to use

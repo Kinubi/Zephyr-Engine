@@ -5,15 +5,60 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Asset Importer",
-          "desc": "Implement drag-and-drop support in the Editor for importing external assets.\n\nImplementation Details:\n1. Detect dropped files via `ImGui.getDragDropPayload` or window events.\n2. Copy source files to the project `assets/` directory (organize by type: `assets/models`, `assets/textures`).\n3. Generate a `.meta` file for each asset containing a stable UUID and import settings (e.g., texture compression format, model scale).\n4. Register the new asset with `AssetManager` and reload the asset browser.",
-          "labels": ["Editor", "High Priority"]
+          "name": "Frustum Culling (CPU)",
+          "desc": "Implement CPU-side frustum culling in RenderSystem.\n\nCurrently rendering ALL entities every frame regardless of visibility. This will kill performance as scenes grow.\n\nImplementation:\n1. Extract 6 frustum planes from view-projection matrix\n2. Store AABB bounds in Mesh assets (min/max corners)\n3. Transform AABB to world space using entity Transform\n4. Test AABB against frustum planes (sphere approximation for speed)\n5. Skip adding to render list if fully outside frustum\n\nOptional: Add debug visualization (draw frustum, highlight culled objects)",
+          "labels": ["Optimization", "High Priority"]
+        },
+        {
+          "name": "Shadow Mapping",
+          "desc": "Implement shadow mapping for rasterization path.\n\nCurrently NO shadows - scenes look flat and unrealistic. This is the single biggest visual quality improvement available.\n\nImplementation:\n1. Add ShadowMapPass to render graph (renders depth from light perspective)\n2. For PointLights: Use cube shadow maps (6 faces)\n3. For DirectionalLights (if added): Use Cascaded Shadow Maps\n4. Bind shadow maps in lighting shaders\n5. Sample shadow map and compare depth\n6. Add PCF (Percentage Closer Filtering) for soft edges\n\nConsider: Shadow atlas to batch multiple lights",
+          "labels": ["Feature", "High Priority"]
+        },
+        {
+          "name": "Undo/Redo System",
+          "desc": "Implement Command pattern for editor actions.\n\nWithout undo, one wrong move requires manual fixing. Essential for usable content creation.\n\nImplementation:\n1. Create Command interface with execute() and undo()\n2. Implement commands:\n   - MoveEntityCommand (stores old/new transform)\n   - ChangePropertyCommand (stores old/new value)\n   - DeleteEntityCommand (stores full entity state)\n   - CreateEntityCommand\n   - ReparentEntityCommand\n3. Maintain undo/redo stacks in EditorApp\n4. Bind Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)\n5. Show undo history in Edit menu",
+          "labels": ["Feature", "Editor", "High Priority"]
+        },
+        {
+          "name": "GLTF/GLB Import",
+          "desc": "Add native GLTF/GLB model loading.\n\nOBJ is limited (no animations, poor materials). Real game assets use GLTF.\n\nImplementation:\n1. Integrate cgltf or write Zig parser\n2. Parse: nodes, meshes, materials, textures, animations, skins\n3. Convert to engine formats (Mesh, MaterialSet)\n4. Support embedded textures (GLB) and external files (GLTF)\n5. Handle node hierarchy → Transform parent/child\n6. Store animation data for future Animation System",
+          "labels": ["Feature", "Engine", "High Priority"]
+        },
+        {
+          "name": "Animation System",
+          "desc": "Implement skeletal animation support.\n\nCurrently static meshes only. Blocks any game with animated characters.\n\nImplementation:\n1. Add Skeleton component (bone hierarchy, bind poses)\n2. Add Animator component (clips, playback state, blending)\n3. Create AnimationClip asset (keyframes per bone: position, rotation, scale)\n4. Implement bone matrix calculation (local → world, with parent chain)\n5. Upload bone matrices to GPU (UBO or SSBO)\n6. Add skinning in vertex shader (weighted blend of bone transforms)\n7. Support blend trees / state machines (later)",
+          "labels": ["Feature", "Engine", "High Priority"]
+        },
+        {
+          "name": "External Asset Importer",
+          "desc": "Implement OS-level drag-and-drop for importing external assets from the file system.\n\nNote: Internal drag-drop (Asset Browser → Scene Hierarchy/Material Editor) is ALREADY COMPLETE.\n\nRemaining Work:\n1. Register GLFW drop callback to detect files dropped from OS file explorer.\n2. Copy source files to the project `assets/` directory (organize by type: `assets/models`, `assets/textures`).\n3. Generate a `.meta` file for each asset containing a stable UUID and import settings.\n4. Refresh the Asset Browser to show newly imported files.",
+          "labels": ["Editor", "Medium Priority"]
         }
       ]
     },
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Editor Camera Separation",
+          "desc": "Separated the Editor camera from the Game camera.\n\nCompleted:\n1. `CameraController` now has helper methods `getViewMatrix()`, `getInverseViewMatrix()`, `getPosition()` using YXZ Euler angles matching Camera.setViewYXZ.\n2. `SceneLayer.prepare()` handles camera switching based on scene state (Edit vs Play).\n3. In Edit mode: Uses CameraController's matrices directly.\n4. In Play mode: Uses scene's active Camera component.\n5. Removed redundant camera overrides from EditorApp.\n6. Fixed viewport camera mismatch that caused incorrect AABB calculations.",
+          "labels": ["Feature", "Editor"]
+        },
+        {
+          "name": "Fix Path Tracing Toggle Crash",
+          "desc": "Fixed race condition when toggling path tracing mode.\n\nRoot Cause:\n- Render thread's `end()` called `applyPendingPathTracingToggle()` which set `compiled = false`.\n- Main thread's `prepareExecute()` checked `compiled` flag simultaneously.\n- Race condition caused crashes or undefined behavior.\n\nFix:\n- Moved path tracing toggle from render thread's `end()` to main thread's `prepare()` in SceneLayer.\n- All render graph state modifications now happen on main thread before render thread executes.",
+          "labels": ["Bug Fix", "Engine"]
+        },
+        {
+          "name": "Fix Play/Stop Texture Loading Crash",
+          "desc": "Fixed crash when stopping Play mode due to same race condition as PT toggle.\n\nRoot Cause:\n- Same threading issue where render graph recompilation conflicted with render thread execution.\n\nFix:\n- Same fix as PT toggle - state changes moved to main thread's prepare phase.",
+          "labels": ["Bug Fix", "Engine"]
+        },
+        {
+          "name": "Add Script Execution Error Logging",
+          "desc": "Added warning logs when Lua script execution fails.\n\nPreviously scripts failed silently with `catch {}`. Now logs:\n- 'Failed to run one-shot script: {error}'\n- 'Failed to enqueue update script: {error}'\n\nHelps debug broken user scripts.",
+          "labels": ["Improvement", "Engine"]
+        },
         {
           "name": "Scripting Integration",
           "desc": "Fully integrated the Lua scripting subsystem with comprehensive game API.\n\nCompleted:\n1. Entity API: create, destroy, exists, find, get/set name\n2. Transform API: position, rotation, scale, translate, rotate, look_at, direction vectors\n3. Input API: keyboard keys, mouse buttons, mouse position with Key.* constants\n4. Time API: delta time, elapsed time, frame count\n5. Light API: color, intensity, range for PointLights\n6. Particles API: rate, color, active state for ParticleEmitters\n7. Physics API: get/set velocity, add_force, add_impulse via Jolt\n8. Math API: vec3, distance, lerp, clamp, normalize, dot, cross\n9. Scene API: get current scene name\n10. Console & CVar APIs: logging, commands, configuration\n\nDocumentation: docs/SCRIPTING_API.md",
@@ -247,11 +292,6 @@
         {
           "name": "Selection System",
           "desc": "Implement multi-entity selection in the Editor.\n\nDetails:\n- Update `SelectionContext` to hold `ArrayList(EntityId)`.\n- Render selection outlines: Render selected entities to a stencil buffer or separate color attachment, then edge-detect in post-process.",
-          "labels": ["Feature"]
-        },
-        {
-          "name": "Editor Camera",
-          "desc": "Separate the Editor camera from the Game camera.\n\nDetails:\n- `EditorApp` should own an `EditorCamera` (free-fly).\n- `Scene` owns `GameCamera` components.\n- Toggle viewport rendering source based on Edit/Play state.",
           "labels": ["Feature"]
         }
       ]

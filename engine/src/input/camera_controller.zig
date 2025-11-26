@@ -149,4 +149,73 @@ pub const CameraController = struct {
         // Update view matrix
         camera.setViewYXZ(self.position, self.rotation);
     }
+
+    /// Get the current view matrix from controller state without modifying any camera
+    /// Use this when you need the editor camera's view separately
+    /// Compute camera basis vectors (u, v, w) from rotation using YXZ Euler angles.
+    /// This matches the calculation in Camera.setViewYXZ exactly.
+    /// u = right vector, v = up vector, w = forward vector
+    fn computeBasisVectors(self: *const CameraController) struct { u: Math.Vec3, v: Math.Vec3, w: Math.Vec3 } {
+        const c3 = std.math.cos(self.rotation.z); // roll
+        const s3 = std.math.sin(self.rotation.z);
+        const c2 = std.math.cos(self.rotation.x); // pitch
+        const s2 = std.math.sin(self.rotation.x);
+        const c1 = std.math.cos(self.rotation.y); // yaw
+        const s1 = std.math.sin(self.rotation.y);
+
+        return .{
+            .u = Math.Vec3.init(c1 * c3 + s1 * s2 * s3, c2 * s3, c1 * s2 * s3 - c3 * s1),
+            .v = Math.Vec3.init(c3 * s1 * s2 - c1 * s3, c2 * c3, c1 * c3 * s2 + s1 * s3),
+            .w = Math.Vec3.init(c2 * s1, -s2, c1 * c2),
+        };
+    }
+
+    /// Get the current view matrix from controller state.
+    /// Uses the same YXZ Euler angle calculation as Camera.setViewYXZ.
+    pub fn getViewMatrix(self: *const CameraController) Math.Mat4x4 {
+        const basis = self.computeBasisVectors();
+
+        var view = Math.Mat4x4.identity();
+        view.data[0] = basis.u.x;
+        view.data[1] = basis.v.x;
+        view.data[2] = basis.w.x;
+        view.data[4] = basis.u.y;
+        view.data[5] = basis.v.y;
+        view.data[6] = basis.w.y;
+        view.data[8] = basis.u.z;
+        view.data[9] = basis.v.z;
+        view.data[10] = basis.w.z;
+        view.data[12] = -Math.Vec3.dot(basis.u, self.position);
+        view.data[13] = -Math.Vec3.dot(basis.v, self.position);
+        view.data[14] = -Math.Vec3.dot(basis.w, self.position);
+
+        return view;
+    }
+
+    /// Get the current inverse view matrix (world transform) from controller state.
+    /// Uses the same YXZ Euler angle calculation as Camera.setViewYXZ.
+    pub fn getInverseViewMatrix(self: *const CameraController) Math.Mat4x4 {
+        const basis = self.computeBasisVectors();
+
+        var inv_view = Math.Mat4x4.identity();
+        inv_view.data[0] = basis.u.x;
+        inv_view.data[1] = basis.u.y;
+        inv_view.data[2] = basis.u.z;
+        inv_view.data[4] = basis.v.x;
+        inv_view.data[5] = basis.v.y;
+        inv_view.data[6] = basis.v.z;
+        inv_view.data[8] = basis.w.x;
+        inv_view.data[9] = basis.w.y;
+        inv_view.data[10] = basis.w.z;
+        inv_view.data[12] = self.position.x;
+        inv_view.data[13] = self.position.y;
+        inv_view.data[14] = self.position.z;
+
+        return inv_view;
+    }
+
+    /// Get the current position
+    pub fn getPosition(self: *const CameraController) Math.Vec3 {
+        return self.position;
+    }
 };
