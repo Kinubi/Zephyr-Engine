@@ -314,7 +314,9 @@ pub fn prepare(world: *World, dt: f32) !void {
 
                 if (sc.run_once) {
                     // Run one-shot script (async to avoid blocking main thread)
-                    _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch {};
+                    _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch |err| {
+                        log(.WARN, "scripting", "Failed to run one-shot script: {}", .{err});
+                    };
                     // Disable run_once flag so it doesn't run again
                     sc.run_once = false;
                     continue;
@@ -325,7 +327,9 @@ pub fn prepare(world: *World, dt: f32) !void {
                 // Enqueue per-frame ScriptComponent scripts as async jobs so they run
                 // on the thread pool / state_pool instead of synchronously on the
                 // system thread. This uses ScriptRunner.enqueueScript via runScript.
-                _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch {};
+                _ = sys.runScript(sc.script, @ptrCast(sc), entry.entity, @ptrCast(scene)) catch |err| {
+                    log(.WARN, "scripting", "Failed to enqueue update script: {}", .{err});
+                };
                 enqueued_count += 1;
             }
         }
