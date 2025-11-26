@@ -203,6 +203,13 @@ pub const SceneLayer = struct {
         // PHASE 2.1: MAIN THREAD - Game logic, ECS queries (NO Vulkan work)
         // Note: No performance monitoring here - this runs on main thread without frame context
 
+        // Apply pending path tracing toggle FIRST, before any graph operations
+        // This must happen on the main thread to avoid race with prepareExecute()
+        // The graph recompilation is safe here since we haven't started prepare yet.
+        _ = self.scene.applyPendingPathTracingToggle() catch |err| {
+            log(.ERROR, "scene_layer", "Failed to apply PT toggle in prepare: {}", .{err});
+        };
+
         // Apply camera controller (movement/rotation, FOV) once per frame
         self.controller.update(self.camera, dt);
 
@@ -320,16 +327,9 @@ pub const SceneLayer = struct {
 
     fn end(base: *Layer, frame_info: *FrameInfo) !void {
         const self: *SceneLayer = @fieldParentPtr("base", base);
+        _ = self;
         _ = frame_info;
-
-        // PHASE 2.1: Apply pending path tracing toggles AFTER endFrame() when GPU is idle
-        // This is safe because:
-        // 1. GPU has finished all work (frame submission completed)
-        // 2. No fences are in-flight (they've all been waited on)
-        // 3. Render graph recompile can happen without fence conflicts
-        _ = self.scene.applyPendingPathTracingToggle() catch |err| {
-            log(.ERROR, "scene_layer", "Failed to apply PT toggle: {}", .{err});
-        };
+        // PT toggle moved to prepare() to avoid race condition with graph compilation
     }
 
     fn event(base: *Layer, evt: *Event) void {
