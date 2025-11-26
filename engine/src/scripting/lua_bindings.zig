@@ -6,15 +6,32 @@ const c = @cImport({
     @cInclude("lauxlib.h");
     @cInclude("lualib.h");
     @cInclude("string.h");
+    @cInclude("GLFW/glfw3.h"); // For key constants only (GLFW_KEY_*)
 });
 
 const Scene = @import("../scene/scene.zig").Scene;
 const ecs = @import("../ecs.zig");
 const Transform = ecs.Transform;
+const PointLight = ecs.PointLight;
+const ParticleEmitter = ecs.ParticleEmitter;
+const Name = ecs.Name;
+const ScriptComponent = @import("../ecs/components/script.zig").ScriptComponent;
+const RigidBody = @import("../ecs/components/physics_components.zig").RigidBody;
 const Math = @import("../utils/math.zig");
 const Vec3 = Math.Vec3;
+const Quat = Math.Quat;
 const EntityId = @import("../ecs/entity_registry.zig").EntityId;
 const cvar = @import("../core/cvar.zig");
+const zphysics = @import("zphysics");
+
+// =============================================================================
+// Global Script Context (set per-frame by ScriptingSystem)
+// =============================================================================
+pub var g_delta_time: f32 = 0.0;
+pub var g_time_since_start: f64 = 0.0;
+pub var g_frame_count: u64 = 0;
+// Note: g_scene is set per-script execution via executeLuaBuffer's scene_ptr parameter
+// Input state is read from Scene, not GLFW directly
 
 /// Create a new lua_State. Returns null on failure.
 pub fn createLuaState(_: std.mem.Allocator) ?*anyopaque {
@@ -80,6 +97,51 @@ pub fn callNamedHandler(allocator: std.mem.Allocator, state: *anyopaque, handler
         return ExecuteResult{ .success = false, .message = out[0..msg_len] };
     }
 
+    return ExecuteResult{ .success = true, .message = "" };
+}
+
+/// Call a global Lua function by name with optional dt argument.
+/// Used for lifecycle callbacks like on_init() and on_update(dt).
+/// Returns success even if the function doesn't exist (not an error).
+pub fn callScriptFunction(allocator: std.mem.Allocator, state: *anyopaque, func_name: []const u8, dt: ?f32) !ExecuteResult {
+    const L: *c.lua_State = @ptrCast(state);
+
+    // Get the function by name
+    const name_ptr: [*]const u8 = @ptrCast(func_name.ptr);
+    _ = c.lua_getglobal(L, name_ptr);
+
+    // Check if it's a function
+    if (c.lua_type(L, -1) != c.LUA_TFUNCTION) {
+        // Not a function (nil or other type) - just pop and return success
+        _ = c.lua_settop(L, 0);
+        return ExecuteResult{ .success = true, .message = "" };
+    }
+
+    // Push dt argument if provided
+    var arg_count: c_int = 0;
+    if (dt) |delta| {
+        c.lua_pushnumber(L, @floatCast(delta));
+        arg_count = 1;
+    }
+
+    // Call the function
+    const pcall_res = c.lua_pcallk(L, arg_count, 0, 0, @as(c.lua_KContext, 0), null);
+    if (pcall_res != 0) {
+        var msg_len: usize = 0;
+        const msg = c.lua_tolstring(L, -1, &msg_len);
+        if (msg == null) {
+            _ = c.lua_settop(L, 0);
+            return ExecuteResult{ .success = false, .message = "" };
+        }
+        const out = try allocator.alloc(u8, msg_len + 1);
+        const msg_ptr: [*]const u8 = @ptrCast(msg);
+        std.mem.copyForwards(u8, out[0..msg_len], msg_ptr[0..msg_len]);
+        out[msg_len] = 0;
+        _ = c.lua_settop(L, 0);
+        return ExecuteResult{ .success = false, .message = out[0..msg_len] };
+    }
+
+    _ = c.lua_settop(L, 0);
     return ExecuteResult{ .success = true, .message = "" };
 }
 
@@ -322,6 +384,38 @@ fn l_engine_log(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
+/// console.log(level, message)
+/// level: "info", "warn", "error", "debug"
+fn l_console_log(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+
+    // Get level string
+    var level_len: usize = 0;
+    const level_ptr = c.luaL_checklstring(Lnon, 1, &level_len);
+
+    // Get message string
+    var msg_len: usize = 0;
+    const msg_ptr = c.luaL_checklstring(Lnon, 2, &msg_len);
+
+    if (level_ptr != null and msg_ptr != null) {
+        const level_slice: []const u8 = @as([*]const u8, @ptrCast(level_ptr))[0..level_len];
+        const msg_slice: []const u8 = @as([*]const u8, @ptrCast(msg_ptr))[0..msg_len];
+
+        // Map level string to log level
+        if (std.mem.eql(u8, level_slice, "error")) {
+            log(.ERROR, "lua", "{s}", .{msg_slice});
+        } else if (std.mem.eql(u8, level_slice, "warn")) {
+            log(.WARN, "lua", "{s}", .{msg_slice});
+        } else if (std.mem.eql(u8, level_slice, "debug")) {
+            log(.DEBUG, "lua", "{s}", .{msg_slice});
+        } else {
+            // Default to INFO for "info" or any other value
+            log(.INFO, "lua", "{s}", .{msg_slice});
+        }
+    }
+    return 0;
+}
+
 /// Translate the owning entity by dx,dy,dz.
 fn l_translate_entity(L: ?*c.lua_State) callconv(.c) c_int {
     const Lnon = L orelse return 0;
@@ -378,6 +472,13 @@ fn registerEngineBindings(L: *c.lua_State) void {
     c.lua_pushcfunction(L, l_translate_entity);
     c.lua_setglobal(L, "translate_entity");
 
+    // Register console table with log function
+    // console.log(level, message) where level is "info", "warn", "error", "debug"
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_console_log);
+    c.lua_setfield(L, -2, "log");
+    c.lua_setglobal(L, "console");
+
     // Expose a namespaced proxy table for CVars so Lua can use
     // `RenderSystem.PathTracing.RayCount` syntax for get/set.
     pushCVarNamespace(L, "RenderSystem");
@@ -402,6 +503,9 @@ fn registerEngineBindings(L: *c.lua_State) void {
     c.lua_pushcfunction(L, l_cvar_on_change);
     c.lua_setfield(L, -2, "on_change");
     c.lua_setglobal(L, "cvar");
+
+    // Register the comprehensive zephyr.* API
+    registerZephyrAPI(L);
 }
 
 // Create a proxy table for a namespaced CVar root (e.g. "RenderSystem").
@@ -714,4 +818,1052 @@ fn l_cvar_on_change(L: ?*c.lua_State) callconv(.c) c_int {
     const ok = reg.setLuaOnChange(name_ptr[0..name_len], handler_ptr[0..handler_len]) catch false;
     c.lua_pushboolean(Lnon, if (ok) 1 else 0);
     return 1;
+}
+
+// =============================================================================
+// ZEPHYR SCRIPTING API
+// =============================================================================
+
+// Helper to get Scene pointer from Lua global
+fn getSceneFromLua(L: *c.lua_State) ?*Scene {
+    _ = c.lua_getglobal(L, "zephyr_user_ctx");
+    const ptr = c.lua_touserdata(L, -1);
+    c.lua_pop(L, 1);
+    if (ptr == null) return null;
+    return @ptrCast(@alignCast(ptr.?));
+}
+
+// Helper to get entity ID from Lua (accepts integer or userdata)
+fn getEntityFromArg(L: *c.lua_State, idx: c_int) ?EntityId {
+    if (c.lua_isinteger(L, idx) != 0) {
+        var is_num: c_int = 0;
+        const id = c.lua_tointegerx(L, idx, &is_num);
+        return @enumFromInt(@as(u32, @intCast(id)));
+    } else if (c.lua_isuserdata(L, idx) != 0) {
+        const p = c.lua_touserdata(L, idx);
+        if (p) |ptr| {
+            const ud: *u32 = @ptrCast(@alignCast(ptr));
+            return @enumFromInt(ud.*);
+        }
+    }
+    return null;
+}
+
+// -----------------------------------------------------------------------------
+// Entity API: zephyr.entity.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.entity.create() -> entity_id
+fn l_entity_create(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+
+    const game_object = scene.spawnEmpty(null) catch {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+
+    c.lua_pushinteger(Lnon, @intCast(@intFromEnum(game_object.entity_id)));
+    return 1;
+}
+
+/// zephyr.entity.destroy(entity_id)
+fn l_entity_destroy(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    // Release any Lua state owned by a ScriptComponent before destroying the entity
+    if (scene.ecs_world.get(ScriptComponent, entity)) |sc| {
+        scene.scripting_system.releaseScriptState(sc);
+    }
+
+    scene.ecs_world.destroyEntity(entity);
+    return 0;
+}
+
+/// zephyr.entity.exists(entity_id) -> bool
+fn l_entity_exists(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse {
+        c.lua_pushboolean(Lnon, 0);
+        return 1;
+    };
+    const entity = getEntityFromArg(Lnon, 1) orelse {
+        c.lua_pushboolean(Lnon, 0);
+        return 1;
+    };
+
+    const exists = scene.ecs_world.isValid(entity);
+    c.lua_pushboolean(Lnon, if (exists) 1 else 0);
+    return 1;
+}
+
+/// zephyr.entity.get_name(entity_id) -> string or nil
+fn l_entity_get_name(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+    const entity = getEntityFromArg(Lnon, 1) orelse {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+
+    if (scene.ecs_world.getConst(Name, entity)) |name| {
+        const ptr: [*]const u8 = @ptrCast(name.name.ptr);
+        _ = c.lua_pushlstring(Lnon, ptr, name.name.len);
+        return 1;
+    }
+    c.lua_pushnil(Lnon);
+    return 1;
+}
+
+/// zephyr.entity.set_name(entity_id, name)
+fn l_entity_set_name(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    var name_len: usize = 0;
+    const name_str = c.luaL_checklstring(Lnon, 2, &name_len);
+    if (name_str == null) return 0;
+
+    const name_ptr: [*]const u8 = @ptrCast(name_str);
+    const name_comp = Name.init(scene.allocator, name_ptr[0..name_len]) catch return 0;
+
+    // Remove old name if exists, then add new
+    _ = scene.ecs_world.remove(Name, entity);
+    scene.ecs_world.emplace(Name, entity, name_comp) catch {};
+    return 0;
+}
+
+/// zephyr.entity.find(name) -> entity_id or nil
+fn l_entity_find(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+
+    var name_len: usize = 0;
+    const name_str = c.luaL_checklstring(Lnon, 1, &name_len);
+    if (name_str == null) {
+        c.lua_pushnil(Lnon);
+        return 1;
+    }
+    const name_ptr: [*]const u8 = @ptrCast(name_str);
+    const search_name = name_ptr[0..name_len];
+
+    // Iterate through all entities with Name component
+    var view = scene.ecs_world.view(Name) catch {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+    var iter = view.iterator();
+    while (iter.next()) |item| {
+        if (std.mem.eql(u8, item.component.name, search_name)) {
+            c.lua_pushinteger(Lnon, @intCast(@intFromEnum(item.entity)));
+            return 1;
+        }
+    }
+
+    c.lua_pushnil(Lnon);
+    return 1;
+}
+
+// -----------------------------------------------------------------------------
+// Transform API: zephyr.transform.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.transform.get_position(entity_id) -> x, y, z
+fn l_transform_get_position(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(Transform, entity)) |t| {
+        c.lua_pushnumber(Lnon, @floatCast(t.position.x));
+        c.lua_pushnumber(Lnon, @floatCast(t.position.y));
+        c.lua_pushnumber(Lnon, @floatCast(t.position.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.transform.set_position(entity_id, x, y, z)
+fn l_transform_set_position(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const x = c.luaL_checknumber(Lnon, 2);
+    const y = c.luaL_checknumber(Lnon, 3);
+    const z = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(Transform, entity)) |t| {
+        t.setPosition(Vec3.init(@floatCast(x), @floatCast(y), @floatCast(z)));
+    }
+    return 0;
+}
+
+/// zephyr.transform.translate(entity_id, dx, dy, dz)
+fn l_transform_translate(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const dx = c.luaL_checknumber(Lnon, 2);
+    const dy = c.luaL_checknumber(Lnon, 3);
+    const dz = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(Transform, entity)) |t| {
+        t.translate(Vec3.init(@floatCast(dx), @floatCast(dy), @floatCast(dz)));
+    }
+    return 0;
+}
+
+/// zephyr.transform.get_rotation(entity_id) -> pitch, yaw, roll (Euler angles in radians)
+fn l_transform_get_rotation(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(Transform, entity)) |t| {
+        const euler = t.rotation.toEuler();
+        c.lua_pushnumber(Lnon, @floatCast(euler.x));
+        c.lua_pushnumber(Lnon, @floatCast(euler.y));
+        c.lua_pushnumber(Lnon, @floatCast(euler.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.transform.set_rotation(entity_id, pitch, yaw, roll)
+fn l_transform_set_rotation(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const pitch = c.luaL_checknumber(Lnon, 2);
+    const yaw = c.luaL_checknumber(Lnon, 3);
+    const roll = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(Transform, entity)) |t| {
+        t.setRotation(Vec3.init(@floatCast(pitch), @floatCast(yaw), @floatCast(roll)));
+    }
+    return 0;
+}
+
+/// zephyr.transform.rotate(entity_id, dpitch, dyaw, droll)
+fn l_transform_rotate(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const dpitch = c.luaL_checknumber(Lnon, 2);
+    const dyaw = c.luaL_checknumber(Lnon, 3);
+    const droll = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(Transform, entity)) |t| {
+        t.rotate(Vec3.init(@floatCast(dpitch), @floatCast(dyaw), @floatCast(droll)));
+    }
+    return 0;
+}
+
+/// zephyr.transform.get_scale(entity_id) -> sx, sy, sz
+fn l_transform_get_scale(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(Transform, entity)) |t| {
+        c.lua_pushnumber(Lnon, @floatCast(t.scale.x));
+        c.lua_pushnumber(Lnon, @floatCast(t.scale.y));
+        c.lua_pushnumber(Lnon, @floatCast(t.scale.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.transform.set_scale(entity_id, sx, sy, sz)
+fn l_transform_set_scale(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const sx = c.luaL_checknumber(Lnon, 2);
+    const sy = c.luaL_checknumber(Lnon, 3);
+    const sz = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(Transform, entity)) |t| {
+        t.setScale(Vec3.init(@floatCast(sx), @floatCast(sy), @floatCast(sz)));
+    }
+    return 0;
+}
+
+/// zephyr.transform.get_forward(entity_id) -> x, y, z
+fn l_transform_get_forward(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(Transform, entity)) |t| {
+        const fwd = t.forward();
+        c.lua_pushnumber(Lnon, @floatCast(fwd.x));
+        c.lua_pushnumber(Lnon, @floatCast(fwd.y));
+        c.lua_pushnumber(Lnon, @floatCast(fwd.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.transform.get_right(entity_id) -> x, y, z
+fn l_transform_get_right(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(Transform, entity)) |t| {
+        const r = t.right();
+        c.lua_pushnumber(Lnon, @floatCast(r.x));
+        c.lua_pushnumber(Lnon, @floatCast(r.y));
+        c.lua_pushnumber(Lnon, @floatCast(r.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.transform.get_up(entity_id) -> x, y, z
+fn l_transform_get_up(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(Transform, entity)) |t| {
+        const u = t.up();
+        c.lua_pushnumber(Lnon, @floatCast(u.x));
+        c.lua_pushnumber(Lnon, @floatCast(u.y));
+        c.lua_pushnumber(Lnon, @floatCast(u.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.transform.look_at(entity_id, target_x, target_y, target_z, [preserve_roll])
+/// Points the entity's forward direction (-Z) at the target position.
+/// If preserve_roll is true (or any truthy value), the existing roll is preserved.
+/// Otherwise, roll is reset to 0 (default behavior, assumes Y-up world).
+fn l_transform_look_at(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const tx = c.luaL_checknumber(Lnon, 2);
+    const ty = c.luaL_checknumber(Lnon, 3);
+    const tz = c.luaL_checknumber(Lnon, 4);
+
+    // Optional 5th argument: preserve_roll (default: false)
+    const preserve_roll = if (c.lua_gettop(Lnon) >= 5) c.lua_toboolean(Lnon, 5) != 0 else false;
+
+    if (scene.ecs_world.get(Transform, entity)) |t| {
+        const target = Vec3.init(@floatCast(tx), @floatCast(ty), @floatCast(tz));
+        const dir = Vec3.sub(target, t.position);
+        if (Vec3.dot(dir, dir) > 0.0001) {
+            const normalized = Vec3.normalize(dir);
+            // Calculate yaw and pitch from direction
+            const yaw = std.math.atan2(normalized.x, normalized.z);
+            const pitch = -std.math.asin(normalized.y);
+
+            // Preserve existing roll if requested, otherwise reset to 0
+            const roll = if (preserve_roll) t.rotation.toEuler().z else 0;
+            t.setRotation(Vec3.init(pitch, yaw, roll));
+        }
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Input API: zephyr.input.*
+// These read input state from the Scene, which is updated by SceneLayer events
+// -----------------------------------------------------------------------------
+
+/// zephyr.input.is_key_down(key) -> bool
+fn l_input_is_key_down(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const key = c.luaL_checkinteger(Lnon, 1);
+
+    if (getSceneFromLua(Lnon)) |scene| {
+        const is_down = scene.isKeyDown(@intCast(key));
+        c.lua_pushboolean(Lnon, if (is_down) 1 else 0);
+    } else {
+        log(.WARN, "lua_input", "is_key_down: no scene context!", .{});
+        c.lua_pushboolean(Lnon, 0);
+    }
+    return 1;
+}
+
+/// zephyr.input.is_mouse_button_down(button) -> bool
+fn l_input_is_mouse_button_down(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const button = c.luaL_checkinteger(Lnon, 1);
+
+    if (getSceneFromLua(Lnon)) |scene| {
+        const is_down = scene.isMouseButtonDown(@intCast(button));
+        c.lua_pushboolean(Lnon, if (is_down) 1 else 0);
+    } else {
+        c.lua_pushboolean(Lnon, 0);
+    }
+    return 1;
+}
+
+/// zephyr.input.get_mouse_position() -> x, y
+fn l_input_get_mouse_position(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+
+    if (getSceneFromLua(Lnon)) |scene| {
+        const pos = scene.getMousePosition();
+        c.lua_pushnumber(Lnon, pos.x);
+        c.lua_pushnumber(Lnon, pos.y);
+    } else {
+        c.lua_pushnumber(Lnon, 0);
+        c.lua_pushnumber(Lnon, 0);
+    }
+    return 2;
+}
+
+// -----------------------------------------------------------------------------
+// Time API: zephyr.time.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.time.delta() -> dt (seconds)
+fn l_time_delta(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    c.lua_pushnumber(Lnon, @floatCast(g_delta_time));
+    return 1;
+}
+
+/// zephyr.time.elapsed() -> time since start (seconds)
+fn l_time_elapsed(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    c.lua_pushnumber(Lnon, g_time_since_start);
+    return 1;
+}
+
+/// zephyr.time.frame() -> frame count
+fn l_time_frame(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    c.lua_pushinteger(Lnon, @intCast(g_frame_count));
+    return 1;
+}
+
+// -----------------------------------------------------------------------------
+// PointLight API: zephyr.light.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.light.get_color(entity_id) -> r, g, b
+fn l_light_get_color(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(PointLight, entity)) |light| {
+        c.lua_pushnumber(Lnon, @floatCast(light.color.x));
+        c.lua_pushnumber(Lnon, @floatCast(light.color.y));
+        c.lua_pushnumber(Lnon, @floatCast(light.color.z));
+        return 3;
+    }
+    return 0;
+}
+
+/// zephyr.light.set_color(entity_id, r, g, b)
+fn l_light_set_color(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const r = c.luaL_checknumber(Lnon, 2);
+    const g = c.luaL_checknumber(Lnon, 3);
+    const b = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(PointLight, entity)) |light| {
+        light.color = Vec3.init(@floatCast(r), @floatCast(g), @floatCast(b));
+    }
+    return 0;
+}
+
+/// zephyr.light.get_intensity(entity_id) -> intensity
+fn l_light_get_intensity(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(PointLight, entity)) |light| {
+        c.lua_pushnumber(Lnon, @floatCast(light.intensity));
+        return 1;
+    }
+    return 0;
+}
+
+/// zephyr.light.set_intensity(entity_id, intensity)
+fn l_light_set_intensity(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const intensity = c.luaL_checknumber(Lnon, 2);
+
+    if (scene.ecs_world.get(PointLight, entity)) |light| {
+        light.intensity = @floatCast(intensity);
+    }
+    return 0;
+}
+
+/// zephyr.light.set_range(entity_id, range)
+fn l_light_set_range(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const range = c.luaL_checknumber(Lnon, 2);
+
+    if (scene.ecs_world.get(PointLight, entity)) |light| {
+        light.range = @floatCast(range);
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// ParticleEmitter API: zephyr.particles.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.particles.set_rate(entity_id, rate)
+fn l_particles_set_rate(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const rate = c.luaL_checknumber(Lnon, 2);
+
+    if (scene.ecs_world.get(ParticleEmitter, entity)) |emitter| {
+        emitter.emission_rate = @floatCast(rate);
+    }
+    return 0;
+}
+
+/// zephyr.particles.set_color(entity_id, r, g, b)
+fn l_particles_set_color(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const r = c.luaL_checknumber(Lnon, 2);
+    const g = c.luaL_checknumber(Lnon, 3);
+    const b = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.get(ParticleEmitter, entity)) |emitter| {
+        emitter.setColor(Vec3.init(@floatCast(r), @floatCast(g), @floatCast(b)));
+    }
+    return 0;
+}
+
+/// zephyr.particles.set_active(entity_id, active)
+fn l_particles_set_active(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const active = c.lua_toboolean(Lnon, 2);
+
+    if (scene.ecs_world.get(ParticleEmitter, entity)) |emitter| {
+        emitter.active = active != 0;
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Physics API: zephyr.physics.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.physics.get_velocity(entity_id) -> vx, vy, vz
+fn l_physics_get_velocity(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    if (scene.ecs_world.getConst(RigidBody, entity)) |rb| {
+        if (rb.body_id != .invalid) {
+            if (scene.physics_system) |ps| {
+                const body_interface = ps.physics_system.getBodyInterface();
+                const vel = body_interface.getLinearVelocity(rb.body_id);
+                c.lua_pushnumber(Lnon, @floatCast(vel[0]));
+                c.lua_pushnumber(Lnon, @floatCast(vel[1]));
+                c.lua_pushnumber(Lnon, @floatCast(vel[2]));
+                return 3;
+            }
+        }
+    }
+    c.lua_pushnumber(Lnon, 0);
+    c.lua_pushnumber(Lnon, 0);
+    c.lua_pushnumber(Lnon, 0);
+    return 3;
+}
+
+/// zephyr.physics.set_velocity(entity_id, vx, vy, vz)
+fn l_physics_set_velocity(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const vx = c.luaL_checknumber(Lnon, 2);
+    const vy = c.luaL_checknumber(Lnon, 3);
+    const vz = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.getConst(RigidBody, entity)) |rb| {
+        if (rb.body_id != .invalid) {
+            if (scene.physics_system) |ps| {
+                const body_interface = ps.physics_system.getBodyInterfaceMut();
+                body_interface.setLinearVelocity(
+                    rb.body_id,
+                    .{ @floatCast(vx), @floatCast(vy), @floatCast(vz) },
+                );
+            }
+        }
+    }
+    return 0;
+}
+
+/// zephyr.physics.add_force(entity_id, fx, fy, fz)
+fn l_physics_add_force(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const fx = c.luaL_checknumber(Lnon, 2);
+    const fy = c.luaL_checknumber(Lnon, 3);
+    const fz = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.getConst(RigidBody, entity)) |rb| {
+        if (rb.body_id != .invalid) {
+            if (scene.physics_system) |ps| {
+                const body_interface = ps.physics_system.getBodyInterfaceMut();
+                body_interface.addForce(
+                    rb.body_id,
+                    .{ @floatCast(fx), @floatCast(fy), @floatCast(fz) },
+                );
+            }
+        }
+    }
+    return 0;
+}
+
+/// zephyr.physics.add_impulse(entity_id, ix, iy, iz)
+fn l_physics_add_impulse(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse return 0;
+    const entity = getEntityFromArg(Lnon, 1) orelse return 0;
+
+    const ix = c.luaL_checknumber(Lnon, 2);
+    const iy = c.luaL_checknumber(Lnon, 3);
+    const iz = c.luaL_checknumber(Lnon, 4);
+
+    if (scene.ecs_world.getConst(RigidBody, entity)) |rb| {
+        if (rb.body_id != .invalid) {
+            if (scene.physics_system) |ps| {
+                const body_interface = ps.physics_system.getBodyInterfaceMut();
+                body_interface.addImpulse(
+                    rb.body_id,
+                    .{ @floatCast(ix), @floatCast(iy), @floatCast(iz) },
+                );
+            }
+        }
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Math utilities: zephyr.math.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.math.vec3(x, y, z) -> table {x, y, z}
+fn l_math_vec3(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const x = c.luaL_checknumber(Lnon, 1);
+    const y = c.luaL_checknumber(Lnon, 2);
+    const z = c.luaL_checknumber(Lnon, 3);
+
+    c.lua_newtable(Lnon);
+    c.lua_pushnumber(Lnon, x);
+    c.lua_setfield(Lnon, -2, "x");
+    c.lua_pushnumber(Lnon, y);
+    c.lua_setfield(Lnon, -2, "y");
+    c.lua_pushnumber(Lnon, z);
+    c.lua_setfield(Lnon, -2, "z");
+    return 1;
+}
+
+/// zephyr.math.distance(x1, y1, z1, x2, y2, z2) -> distance
+fn l_math_distance(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const x1: f32 = @floatCast(c.luaL_checknumber(Lnon, 1));
+    const y1: f32 = @floatCast(c.luaL_checknumber(Lnon, 2));
+    const z1: f32 = @floatCast(c.luaL_checknumber(Lnon, 3));
+    const x2: f32 = @floatCast(c.luaL_checknumber(Lnon, 4));
+    const y2: f32 = @floatCast(c.luaL_checknumber(Lnon, 5));
+    const z2: f32 = @floatCast(c.luaL_checknumber(Lnon, 6));
+
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dz = z2 - z1;
+    const dist = @sqrt(dx * dx + dy * dy + dz * dz);
+    c.lua_pushnumber(Lnon, @floatCast(dist));
+    return 1;
+}
+
+/// zephyr.math.lerp(a, b, t) -> interpolated value
+fn l_math_lerp(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const a = c.luaL_checknumber(Lnon, 1);
+    const b = c.luaL_checknumber(Lnon, 2);
+    const t = c.luaL_checknumber(Lnon, 3);
+
+    const result = a + (b - a) * t;
+    c.lua_pushnumber(Lnon, result);
+    return 1;
+}
+
+/// zephyr.math.clamp(value, min, max) -> clamped value
+fn l_math_clamp(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const v = c.luaL_checknumber(Lnon, 1);
+    const min_v = c.luaL_checknumber(Lnon, 2);
+    const max_v = c.luaL_checknumber(Lnon, 3);
+
+    var result = v;
+    if (result < min_v) result = min_v;
+    if (result > max_v) result = max_v;
+    c.lua_pushnumber(Lnon, result);
+    return 1;
+}
+
+/// zephyr.math.normalize(x, y, z) -> nx, ny, nz
+fn l_math_normalize(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const x: f32 = @floatCast(c.luaL_checknumber(Lnon, 1));
+    const y: f32 = @floatCast(c.luaL_checknumber(Lnon, 2));
+    const z: f32 = @floatCast(c.luaL_checknumber(Lnon, 3));
+
+    const len = @sqrt(x * x + y * y + z * z);
+    if (len > 0.0001) {
+        c.lua_pushnumber(Lnon, @floatCast(x / len));
+        c.lua_pushnumber(Lnon, @floatCast(y / len));
+        c.lua_pushnumber(Lnon, @floatCast(z / len));
+    } else {
+        c.lua_pushnumber(Lnon, 0);
+        c.lua_pushnumber(Lnon, 0);
+        c.lua_pushnumber(Lnon, 0);
+    }
+    return 3;
+}
+
+/// zephyr.math.dot(x1, y1, z1, x2, y2, z2) -> dot product
+fn l_math_dot(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const x1 = c.luaL_checknumber(Lnon, 1);
+    const y1 = c.luaL_checknumber(Lnon, 2);
+    const z1 = c.luaL_checknumber(Lnon, 3);
+    const x2 = c.luaL_checknumber(Lnon, 4);
+    const y2 = c.luaL_checknumber(Lnon, 5);
+    const z2 = c.luaL_checknumber(Lnon, 6);
+
+    const result = x1 * x2 + y1 * y2 + z1 * z2;
+    c.lua_pushnumber(Lnon, result);
+    return 1;
+}
+
+/// zephyr.math.cross(x1, y1, z1, x2, y2, z2) -> rx, ry, rz
+fn l_math_cross(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const x1: f32 = @floatCast(c.luaL_checknumber(Lnon, 1));
+    const y1: f32 = @floatCast(c.luaL_checknumber(Lnon, 2));
+    const z1: f32 = @floatCast(c.luaL_checknumber(Lnon, 3));
+    const x2: f32 = @floatCast(c.luaL_checknumber(Lnon, 4));
+    const y2: f32 = @floatCast(c.luaL_checknumber(Lnon, 5));
+    const z2: f32 = @floatCast(c.luaL_checknumber(Lnon, 6));
+
+    c.lua_pushnumber(Lnon, @floatCast(y1 * z2 - z1 * y2));
+    c.lua_pushnumber(Lnon, @floatCast(z1 * x2 - x1 * z2));
+    c.lua_pushnumber(Lnon, @floatCast(x1 * y2 - y1 * x2));
+    return 3;
+}
+
+// -----------------------------------------------------------------------------
+// Scene API: zephyr.scene.*
+// -----------------------------------------------------------------------------
+
+/// zephyr.scene.get_name() -> string
+fn l_scene_get_name(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+    const scene = getSceneFromLua(Lnon) orelse {
+        c.lua_pushnil(Lnon);
+        return 1;
+    };
+
+    const ptr: [*]const u8 = @ptrCast(scene.name.ptr);
+    _ = c.lua_pushlstring(Lnon, ptr, scene.name.len);
+    return 1;
+}
+
+// -----------------------------------------------------------------------------
+// Key constants for input
+// -----------------------------------------------------------------------------
+
+fn registerKeyConstants(L: *c.lua_State) void {
+    c.lua_newtable(L);
+
+    // Common keys (both uppercase and capitalized for convenience)
+    c.lua_pushinteger(L, c.GLFW_KEY_SPACE);
+    c.lua_setfield(L, -2, "SPACE");
+    c.lua_pushinteger(L, c.GLFW_KEY_SPACE);
+    c.lua_setfield(L, -2, "Space");
+    c.lua_pushinteger(L, c.GLFW_KEY_ESCAPE);
+    c.lua_setfield(L, -2, "ESCAPE");
+    c.lua_pushinteger(L, c.GLFW_KEY_ESCAPE);
+    c.lua_setfield(L, -2, "Escape");
+    c.lua_pushinteger(L, c.GLFW_KEY_ENTER);
+    c.lua_setfield(L, -2, "ENTER");
+    c.lua_pushinteger(L, c.GLFW_KEY_ENTER);
+    c.lua_setfield(L, -2, "Enter");
+    c.lua_pushinteger(L, c.GLFW_KEY_TAB);
+    c.lua_setfield(L, -2, "TAB");
+    c.lua_pushinteger(L, c.GLFW_KEY_TAB);
+    c.lua_setfield(L, -2, "Tab");
+
+    // Arrow keys (uppercase and capitalized)
+    c.lua_pushinteger(L, c.GLFW_KEY_UP);
+    c.lua_setfield(L, -2, "UP");
+    c.lua_pushinteger(L, c.GLFW_KEY_UP);
+    c.lua_setfield(L, -2, "Up");
+    c.lua_pushinteger(L, c.GLFW_KEY_DOWN);
+    c.lua_setfield(L, -2, "DOWN");
+    c.lua_pushinteger(L, c.GLFW_KEY_DOWN);
+    c.lua_setfield(L, -2, "Down");
+    c.lua_pushinteger(L, c.GLFW_KEY_LEFT);
+    c.lua_setfield(L, -2, "LEFT");
+    c.lua_pushinteger(L, c.GLFW_KEY_LEFT);
+    c.lua_setfield(L, -2, "Left");
+    c.lua_pushinteger(L, c.GLFW_KEY_RIGHT);
+    c.lua_setfield(L, -2, "RIGHT");
+    c.lua_pushinteger(L, c.GLFW_KEY_RIGHT);
+    c.lua_setfield(L, -2, "Right");
+
+    // WASD
+    c.lua_pushinteger(L, c.GLFW_KEY_W);
+    c.lua_setfield(L, -2, "W");
+    c.lua_pushinteger(L, c.GLFW_KEY_A);
+    c.lua_setfield(L, -2, "A");
+    c.lua_pushinteger(L, c.GLFW_KEY_S);
+    c.lua_setfield(L, -2, "S");
+    c.lua_pushinteger(L, c.GLFW_KEY_D);
+    c.lua_setfield(L, -2, "D");
+    // Also add R for reset
+    c.lua_pushinteger(L, c.GLFW_KEY_R);
+    c.lua_setfield(L, -2, "R");
+
+    // Modifiers
+    c.lua_pushinteger(L, c.GLFW_KEY_LEFT_SHIFT);
+    c.lua_setfield(L, -2, "LSHIFT");
+    c.lua_pushinteger(L, c.GLFW_KEY_RIGHT_SHIFT);
+    c.lua_setfield(L, -2, "RSHIFT");
+    c.lua_pushinteger(L, c.GLFW_KEY_LEFT_CONTROL);
+    c.lua_setfield(L, -2, "LCTRL");
+    c.lua_pushinteger(L, c.GLFW_KEY_RIGHT_CONTROL);
+    c.lua_setfield(L, -2, "RCTRL");
+
+    // Number keys
+    c.lua_pushinteger(L, c.GLFW_KEY_0);
+    c.lua_setfield(L, -2, "NUM_0");
+    c.lua_pushinteger(L, c.GLFW_KEY_1);
+    c.lua_setfield(L, -2, "NUM_1");
+    c.lua_pushinteger(L, c.GLFW_KEY_2);
+    c.lua_setfield(L, -2, "NUM_2");
+    c.lua_pushinteger(L, c.GLFW_KEY_3);
+    c.lua_setfield(L, -2, "NUM_3");
+    c.lua_pushinteger(L, c.GLFW_KEY_4);
+    c.lua_setfield(L, -2, "NUM_4");
+    c.lua_pushinteger(L, c.GLFW_KEY_5);
+    c.lua_setfield(L, -2, "NUM_5");
+    c.lua_pushinteger(L, c.GLFW_KEY_6);
+    c.lua_setfield(L, -2, "NUM_6");
+    c.lua_pushinteger(L, c.GLFW_KEY_7);
+    c.lua_setfield(L, -2, "NUM_7");
+    c.lua_pushinteger(L, c.GLFW_KEY_8);
+    c.lua_setfield(L, -2, "NUM_8");
+    c.lua_pushinteger(L, c.GLFW_KEY_9);
+    c.lua_setfield(L, -2, "NUM_9");
+
+    // Function keys
+    c.lua_pushinteger(L, c.GLFW_KEY_F1);
+    c.lua_setfield(L, -2, "F1");
+    c.lua_pushinteger(L, c.GLFW_KEY_F2);
+    c.lua_setfield(L, -2, "F2");
+    c.lua_pushinteger(L, c.GLFW_KEY_F3);
+    c.lua_setfield(L, -2, "F3");
+    c.lua_pushinteger(L, c.GLFW_KEY_F4);
+    c.lua_setfield(L, -2, "F4");
+    c.lua_pushinteger(L, c.GLFW_KEY_F5);
+    c.lua_setfield(L, -2, "F5");
+
+    // Mouse buttons
+    c.lua_pushinteger(L, c.GLFW_MOUSE_BUTTON_LEFT);
+    c.lua_setfield(L, -2, "MOUSE_LEFT");
+    c.lua_pushinteger(L, c.GLFW_MOUSE_BUTTON_RIGHT);
+    c.lua_setfield(L, -2, "MOUSE_RIGHT");
+    c.lua_pushinteger(L, c.GLFW_MOUSE_BUTTON_MIDDLE);
+    c.lua_setfield(L, -2, "MOUSE_MIDDLE");
+
+    c.lua_setglobal(L, "Key");
+}
+
+// -----------------------------------------------------------------------------
+// Registration: register all zephyr.* namespaces
+// -----------------------------------------------------------------------------
+
+pub fn registerZephyrAPI(L: *c.lua_State) void {
+    // Create main 'zephyr' table
+    c.lua_newtable(L);
+
+    // zephyr.entity
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_entity_create);
+    c.lua_setfield(L, -2, "create");
+    c.lua_pushcfunction(L, l_entity_destroy);
+    c.lua_setfield(L, -2, "destroy");
+    c.lua_pushcfunction(L, l_entity_exists);
+    c.lua_setfield(L, -2, "exists");
+    c.lua_pushcfunction(L, l_entity_get_name);
+    c.lua_setfield(L, -2, "get_name");
+    c.lua_pushcfunction(L, l_entity_set_name);
+    c.lua_setfield(L, -2, "set_name");
+    c.lua_pushcfunction(L, l_entity_find);
+    c.lua_setfield(L, -2, "find");
+    c.lua_setfield(L, -2, "entity");
+
+    // zephyr.transform
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_transform_get_position);
+    c.lua_setfield(L, -2, "get_position");
+    c.lua_pushcfunction(L, l_transform_set_position);
+    c.lua_setfield(L, -2, "set_position");
+    c.lua_pushcfunction(L, l_transform_translate);
+    c.lua_setfield(L, -2, "translate");
+    c.lua_pushcfunction(L, l_transform_get_rotation);
+    c.lua_setfield(L, -2, "get_rotation");
+    c.lua_pushcfunction(L, l_transform_set_rotation);
+    c.lua_setfield(L, -2, "set_rotation");
+    c.lua_pushcfunction(L, l_transform_rotate);
+    c.lua_setfield(L, -2, "rotate");
+    c.lua_pushcfunction(L, l_transform_get_scale);
+    c.lua_setfield(L, -2, "get_scale");
+    c.lua_pushcfunction(L, l_transform_set_scale);
+    c.lua_setfield(L, -2, "set_scale");
+    c.lua_pushcfunction(L, l_transform_get_forward);
+    c.lua_setfield(L, -2, "get_forward");
+    c.lua_pushcfunction(L, l_transform_get_right);
+    c.lua_setfield(L, -2, "get_right");
+    c.lua_pushcfunction(L, l_transform_get_up);
+    c.lua_setfield(L, -2, "get_up");
+    c.lua_pushcfunction(L, l_transform_look_at);
+    c.lua_setfield(L, -2, "look_at");
+    c.lua_setfield(L, -2, "transform");
+
+    // zephyr.input
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_input_is_key_down);
+    c.lua_setfield(L, -2, "is_key_down");
+    c.lua_pushcfunction(L, l_input_is_mouse_button_down);
+    c.lua_setfield(L, -2, "is_mouse_button_down");
+    c.lua_pushcfunction(L, l_input_get_mouse_position);
+    c.lua_setfield(L, -2, "get_mouse_position");
+    c.lua_setfield(L, -2, "input");
+
+    // zephyr.time
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_time_delta);
+    c.lua_setfield(L, -2, "delta");
+    c.lua_pushcfunction(L, l_time_elapsed);
+    c.lua_setfield(L, -2, "elapsed");
+    c.lua_pushcfunction(L, l_time_frame);
+    c.lua_setfield(L, -2, "frame");
+    c.lua_setfield(L, -2, "time");
+
+    // zephyr.light
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_light_get_color);
+    c.lua_setfield(L, -2, "get_color");
+    c.lua_pushcfunction(L, l_light_set_color);
+    c.lua_setfield(L, -2, "set_color");
+    c.lua_pushcfunction(L, l_light_get_intensity);
+    c.lua_setfield(L, -2, "get_intensity");
+    c.lua_pushcfunction(L, l_light_set_intensity);
+    c.lua_setfield(L, -2, "set_intensity");
+    c.lua_pushcfunction(L, l_light_set_range);
+    c.lua_setfield(L, -2, "set_range");
+    c.lua_setfield(L, -2, "light");
+
+    // zephyr.particles
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_particles_set_rate);
+    c.lua_setfield(L, -2, "set_rate");
+    c.lua_pushcfunction(L, l_particles_set_color);
+    c.lua_setfield(L, -2, "set_color");
+    c.lua_pushcfunction(L, l_particles_set_active);
+    c.lua_setfield(L, -2, "set_active");
+    c.lua_setfield(L, -2, "particles");
+
+    // zephyr.physics
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_physics_get_velocity);
+    c.lua_setfield(L, -2, "get_velocity");
+    c.lua_pushcfunction(L, l_physics_set_velocity);
+    c.lua_setfield(L, -2, "set_velocity");
+    c.lua_pushcfunction(L, l_physics_add_force);
+    c.lua_setfield(L, -2, "add_force");
+    c.lua_pushcfunction(L, l_physics_add_impulse);
+    c.lua_setfield(L, -2, "add_impulse");
+    c.lua_setfield(L, -2, "physics");
+
+    // zephyr.math
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_math_vec3);
+    c.lua_setfield(L, -2, "vec3");
+    c.lua_pushcfunction(L, l_math_distance);
+    c.lua_setfield(L, -2, "distance");
+    c.lua_pushcfunction(L, l_math_lerp);
+    c.lua_setfield(L, -2, "lerp");
+    c.lua_pushcfunction(L, l_math_clamp);
+    c.lua_setfield(L, -2, "clamp");
+    c.lua_pushcfunction(L, l_math_normalize);
+    c.lua_setfield(L, -2, "normalize");
+    c.lua_pushcfunction(L, l_math_dot);
+    c.lua_setfield(L, -2, "dot");
+    c.lua_pushcfunction(L, l_math_cross);
+    c.lua_setfield(L, -2, "cross");
+    c.lua_setfield(L, -2, "math");
+
+    // zephyr.scene
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_scene_get_name);
+    c.lua_setfield(L, -2, "get_name");
+    c.lua_setfield(L, -2, "scene");
+
+    // Set global 'zephyr'
+    c.lua_setglobal(L, "zephyr");
+
+    // Register Key constants
+    registerKeyConstants(L);
 }

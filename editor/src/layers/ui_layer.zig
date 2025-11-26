@@ -295,8 +295,17 @@ pub const UILayer = struct {
     fn event(base: *Layer, evt: *Event) void {
         const self: *UILayer = @fieldParentPtr("base", base);
 
+        // In Play mode, only handle ESC key to allow pausing/stopping
+        // All other input should pass through to scripts
+        const in_play_mode = self.scene.state == .Play;
+
         switch (evt.event_type) {
             .KeyPressed => {
+                // In play mode, only ESC is handled by UI (to allow stopping play mode)
+                if (in_play_mode and evt.data.KeyPressed.key != c.GLFW_KEY_ESCAPE) {
+                    return; // Let scripts handle all other keys
+                }
+
                 // Determine whether UI panels should consume keyboard input.
                 // We prefer the engine to receive input when the viewport is focused.
                 const io = c.ImGui_GetIO();
@@ -374,6 +383,10 @@ pub const UILayer = struct {
                 }
             },
             .KeyReleased => {
+                // In play mode, let scripts handle key releases
+                if (in_play_mode) {
+                    return;
+                }
                 // Forward key up events to ImGui and consume if panels are focused
                 const io = c.ImGui_GetIO();
                 var want_kb: bool = false;
@@ -400,6 +413,10 @@ pub const UILayer = struct {
                 }
             },
             .KeyTyped => {
+                // In play mode, let scripts handle typed characters
+                if (in_play_mode) {
+                    return;
+                }
                 // Forward character input to ImGui
                 const io = c.ImGui_GetIO();
                 var want_kb: bool = false;
@@ -441,6 +458,10 @@ pub const UILayer = struct {
             },
 
             .MouseButtonPressed, .MouseButtonReleased, .MouseMoved, .MouseScrolled => {
+                // In play mode, don't consume mouse events - let scripts handle them
+                if (in_play_mode) {
+                    return;
+                }
                 // When panels (e.g., console) are focused, consume mouse events so the
                 // camera/controller doesn't activate mouselook or scroll zoom.
                 const io = c.ImGui_GetIO();

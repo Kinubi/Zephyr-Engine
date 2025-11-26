@@ -116,6 +116,15 @@ pub const Scene = struct {
     // Render thread holds shared lock during update/render
     state_lock: std.Thread.RwLock = .{},
 
+    // Input state tracking for scripts (updated by SceneLayer from events)
+    // Tracks up to 512 keys (covers all GLFW key codes)
+    key_states: [512]bool = [_]bool{false} ** 512,
+    // Mouse button states (up to 8 buttons)
+    mouse_button_states: [8]bool = [_]bool{false} ** 8,
+    // Mouse position
+    mouse_x: f64 = 0,
+    mouse_y: f64 = 0,
+
     // Engine context references
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
@@ -683,6 +692,11 @@ pub const Scene = struct {
     pub fn destroyObject(self: *Scene, game_object: *GameObject) void {
         const entity_id = game_object.entity_id;
 
+        // Release any Lua state owned by a ScriptComponent before destroying the entity
+        if (self.ecs_world.get(ecs.ScriptComponent, entity_id)) |sc| {
+            self.scripting_system.releaseScriptState(sc);
+        }
+
         // Destroy in ECS world
         self.ecs_world.destroyEntity(entity_id);
 
@@ -718,6 +732,13 @@ pub const Scene = struct {
     /// Unload scene - destroys all entities
     pub fn unload(self: *Scene) void {
         log(.INFO, "scene", "Unloading scene: {s} ({} entities)", .{ self.name, self.entities.items.len });
+
+        // Release all Lua states before destroying entities
+        for (self.entities.items) |entity_id| {
+            if (self.ecs_world.get(ecs.ScriptComponent, entity_id)) |sc| {
+                self.scripting_system.releaseScriptState(sc);
+            }
+        }
 
         // Destroy all entities in reverse order
         var i = self.entities.items.len;
@@ -1027,7 +1048,10 @@ pub const Scene = struct {
 
     /// Render the scene using the RenderGraph
     pub fn render(self: *Scene, frame_info: FrameInfo) !void {
-        self.state_lock.lockShared();
+        // Try to acquire shared lock - if exclusive lock is held (scene loading), skip this frame
+        if (!self.state_lock.tryLockShared()) {
+            return;
+        }
         defer self.state_lock.unlockShared();
 
         if (self.render_graph) |graph| {
@@ -1042,7 +1066,11 @@ pub const Scene = struct {
     /// Phase 2.1: Main thread preparation (game logic, ECS queries)
     /// Call this on the MAIN THREAD before capturing snapshot
     pub fn prepareFrame(self: *Scene, global_ubo: *GlobalUbo) !void {
-        self.state_lock.lockShared();
+        // Try to acquire shared lock - if exclusive lock is held (scene loading), skip this frame
+        if (!self.state_lock.tryLockShared()) {
+            // Scene is being loaded/modified, skip preparation this frame
+            return;
+        }
         defer self.state_lock.unlockShared();
 
         // Apply any pending path tracing toggles FIRST (CPU-side state change)
@@ -1069,7 +1097,10 @@ pub const Scene = struct {
     /// Update scene state (Vulkan descriptor updates)
     /// Call this once per frame on RENDER THREAD before rendering
     pub fn update(self: *Scene, frame_info: FrameInfo, global_ubo: *GlobalUbo) !void {
-        self.state_lock.lockShared();
+        // Try to acquire shared lock - if exclusive lock is held (scene loading), skip this frame
+        if (!self.state_lock.tryLockShared()) {
+            return;
+        }
         defer self.state_lock.unlockShared();
 
         _ = global_ubo;
@@ -1089,6 +1120,13 @@ pub const Scene = struct {
 
     fn clearInternal(self: *Scene) void {
         log(.INFO, "scene", "Clearing scene...", .{});
+
+        // Release all Lua states before destroying entities
+        for (self.entities.items) |entity| {
+            if (self.ecs_world.get(ecs.ScriptComponent, entity)) |sc| {
+                self.scripting_system.releaseScriptState(sc);
+            }
+        }
 
         // Destroy all entities in the ECS world
         for (self.entities.items) |entity| {
@@ -1116,6 +1154,151 @@ pub const Scene = struct {
 
         // Remove render_system from ECS user data
         _ = self.ecs_world.removeUserData("render_system");
+    }
+
+    /// Get camera matrices from the primary ECS camera (for play mode rendering)
+    /// Returns null if no primary camera exists in the scene
+    pub const PlayCameraData = struct {
+        view_matrix: Math.Mat4x4,
+        projection_matrix: Math.Mat4x4,
+        inverse_view_matrix: Math.Mat4x4,
+        position: Vec3,
+    };
+
+    pub fn getPlayModeCamera(self: *Scene) ?PlayCameraData {
+        // Find the primary camera in the ECS world
+        var camera_view = self.ecs_world.view(Camera) catch return null;
+        var iter = camera_view.iterator();
+
+        while (iter.next()) |entry| {
+            const camera = entry.component;
+            if (camera.is_primary) {
+                // Get the transform for this camera entity
+                const transform = self.ecs_world.get(Transform, entry.entity) orelse continue;
+
+                // Build view matrix from quaternion rotation and position
+                // View matrix = inverse of model matrix
+                // For an orthogonal rotation matrix, inverse = transpose
+                // We need to build the rotation matrix, transpose it, then apply -position
+
+                const q = transform.rotation;
+                const pos = transform.position;
+
+                // Convert quaternion to rotation matrix (for the camera's forward/right/up)
+                const rot_mat = q.toMat4();
+
+                // Extract basis vectors from rotation matrix
+                const right = Vec3.init(rot_mat.data[0], rot_mat.data[1], rot_mat.data[2]);
+                const up = Vec3.init(rot_mat.data[4], rot_mat.data[5], rot_mat.data[6]);
+                const forward = Vec3.init(rot_mat.data[8], rot_mat.data[9], rot_mat.data[10]);
+
+                // Build view matrix: rotation transposed + translation
+                var view_matrix = Math.Mat4x4.identity();
+                // Transpose the rotation part
+                view_matrix.data[0] = right.x;
+                view_matrix.data[1] = up.x;
+                view_matrix.data[2] = forward.x;
+                view_matrix.data[4] = right.y;
+                view_matrix.data[5] = up.y;
+                view_matrix.data[6] = forward.y;
+                view_matrix.data[8] = right.z;
+                view_matrix.data[9] = up.z;
+                view_matrix.data[10] = forward.z;
+                // Translation: -dot(axis, position) for each axis
+                view_matrix.data[12] = -Vec3.dot(right, pos);
+                view_matrix.data[13] = -Vec3.dot(up, pos);
+                view_matrix.data[14] = -Vec3.dot(forward, pos);
+
+                // Build inverse view matrix (the world matrix)
+                var inverse_view = Math.Mat4x4.identity();
+                inverse_view.data[0] = right.x;
+                inverse_view.data[1] = right.y;
+                inverse_view.data[2] = right.z;
+                inverse_view.data[4] = up.x;
+                inverse_view.data[5] = up.y;
+                inverse_view.data[6] = up.z;
+                inverse_view.data[8] = forward.x;
+                inverse_view.data[9] = forward.y;
+                inverse_view.data[10] = forward.z;
+                inverse_view.data[12] = pos.x;
+                inverse_view.data[13] = pos.y;
+                inverse_view.data[14] = pos.z;
+
+                // Ensure projection matrix is up to date
+                var cam_mut = self.ecs_world.getMut(Camera, entry.entity) orelse continue;
+                cam_mut.updateProjectionMatrix();
+
+                return PlayCameraData{
+                    .view_matrix = view_matrix,
+                    .projection_matrix = cam_mut.projection_matrix,
+                    .inverse_view_matrix = inverse_view,
+                    .position = pos,
+                };
+            }
+        }
+
+        return null;
+    }
+
+    // =========================================================================
+    // Input State Management (for scripts)
+    // Updated by SceneLayer from events, read by lua_bindings
+    // =========================================================================
+
+    /// Handle an input event and update key/mouse state
+    pub fn handleInputEvent(self: *Scene, event: *const @import("../core/event.zig").Event) void {
+        switch (event.event_type) {
+            .KeyPressed => {
+                const key = event.data.KeyPressed.key;
+                if (key >= 0 and key < 512) {
+                    self.key_states[@intCast(key)] = true;
+                }
+            },
+            .KeyReleased => {
+                const key = event.data.KeyReleased.key;
+                if (key >= 0 and key < 512) {
+                    self.key_states[@intCast(key)] = false;
+                }
+            },
+            .MouseButtonPressed => {
+                const button = event.data.MouseButtonPressed.button;
+                if (button >= 0 and button < 8) {
+                    self.mouse_button_states[@intCast(button)] = true;
+                }
+            },
+            .MouseButtonReleased => {
+                const button = event.data.MouseButtonReleased.button;
+                if (button >= 0 and button < 8) {
+                    self.mouse_button_states[@intCast(button)] = false;
+                }
+            },
+            .MouseMoved => {
+                self.mouse_x = event.data.MouseMoved.x;
+                self.mouse_y = event.data.MouseMoved.y;
+            },
+            else => {},
+        }
+    }
+
+    /// Check if a key is currently pressed
+    pub fn isKeyDown(self: *const Scene, key: i32) bool {
+        if (key >= 0 and key < 512) {
+            return self.key_states[@intCast(key)];
+        }
+        return false;
+    }
+
+    /// Check if a mouse button is currently pressed
+    pub fn isMouseButtonDown(self: *const Scene, button: i32) bool {
+        if (button >= 0 and button < 8) {
+            return self.mouse_button_states[@intCast(button)];
+        }
+        return false;
+    }
+
+    /// Get current mouse position
+    pub fn getMousePosition(self: *const Scene) struct { x: f64, y: f64 } {
+        return .{ .x = self.mouse_x, .y = self.mouse_y };
     }
 };
 

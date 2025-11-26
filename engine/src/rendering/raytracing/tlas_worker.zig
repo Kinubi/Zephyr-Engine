@@ -283,7 +283,34 @@ fn tlasWorkerImpl(job: *TlasJob) !void {
 fn handleError(err: anyerror, job: *TlasJob) void {
     log(.ERROR, "tlas_worker", "TLAS worker failed for job {}: {}", .{ job.job_id, err });
 
+    // Signal failure to the raytracing system by storing a sentinel "failed" result
+    // This allows bvh_build_in_progress to be reset so future builds can be attempted
+    const failed_result = job.allocator.create(TlasResult) catch {
+        log(.ERROR, "tlas_worker", "Failed to allocate failure sentinel - build will be stuck", .{});
+        // Still clean up job resources
+        cleanupJobResources(job);
+        return;
+    };
+    // Use null_handle to indicate failure - tryPickupCompletedTlas will detect this
+    failed_result.* = TlasResult{
+        .acceleration_structure = .null_handle,
+        .buffer = undefined,
+        .instance_buffer = undefined,
+        .device_address = 0,
+        .instance_count = 0,
+        .build_time_ns = 0,
+    };
+    
+    // Store the failure sentinel
+    if (job.builder.completed_tlas.swap(failed_result, .release)) |old_ptr| {
+        job.allocator.destroy(old_ptr);
+    }
+
     // Clean up job resources on error
+    cleanupJobResources(job);
+}
+
+fn cleanupJobResources(job: *TlasJob) void {
     job.allocator.free(job.required_geometry_ids);
     job.allocator.free(job.geom_id_to_buffer_index);
     job.allocator.free(job.geometries);

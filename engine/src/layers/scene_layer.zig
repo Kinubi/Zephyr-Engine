@@ -335,29 +335,42 @@ pub const SceneLayer = struct {
     fn event(base: *Layer, evt: *Event) void {
         const self: *SceneLayer = @fieldParentPtr("base", base);
 
+        // In Play mode, disable editor camera controller - scripts handle input
+        const in_play_mode = self.scene.state == .Play;
+
+        // Always forward input events to Scene for script input tracking
         switch (evt.event_type) {
-            // First, give camera controller a chance to consume input
+            .KeyPressed, .KeyReleased, .MouseButtonPressed, .MouseButtonReleased, .MouseMoved => {
+                self.scene.handleInputEvent(evt);
+            },
+            else => {},
+        }
+
+        switch (evt.event_type) {
+            // First, give camera controller a chance to consume input (only in Edit/Pause mode)
             .KeyReleased, .MouseButtonPressed, .MouseButtonReleased, .MouseMoved, .MouseScrolled => {
-                if (self.controller.event(evt)) {
+                if (!in_play_mode and self.controller.event(evt)) {
                     evt.markHandled();
                     return;
                 }
             },
             .KeyPressed => {
-                if (self.controller.event(evt)) {
+                if (!in_play_mode and self.controller.event(evt)) {
                     evt.markHandled();
                     return;
                 }
                 // Handle scene-affecting hotkeys here by consuming events.
-                // Example: toggle path tracing on 'T'.
-                const GLFW_KEY_T: i32 = 84; // using ASCII 'T' code from GLFW
-                if (evt.data.KeyPressed.key == GLFW_KEY_T) {
-                    if (self.scene.render_graph != null) {
-                        const pt_enabled = if (self.scene.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
-                        self.scene.setPathTracingEnabled(!pt_enabled) catch |err| {
-                            log(.WARN, "scene_layer", "Failed to toggle PT: {}", .{err});
-                        };
-                        evt.markHandled();
+                // Example: toggle path tracing on 'T' (only in edit mode).
+                if (!in_play_mode) {
+                    const GLFW_KEY_T: i32 = 84; // using ASCII 'T' code from GLFW
+                    if (evt.data.KeyPressed.key == GLFW_KEY_T) {
+                        if (self.scene.render_graph != null) {
+                            const pt_enabled = if (self.scene.render_graph.?.getPass("path_tracing_pass")) |pass| pass.enabled else false;
+                            self.scene.setPathTracingEnabled(!pt_enabled) catch |err| {
+                                log(.WARN, "scene_layer", "Failed to toggle PT: {}", .{err});
+                            };
+                            evt.markHandled();
+                        }
                     }
                 }
             },

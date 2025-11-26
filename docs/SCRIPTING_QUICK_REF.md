@@ -331,6 +331,214 @@ print("Position: " .. transform.position.x)
 
 ---
 
+## Zephyr Scripting API
+
+The `zephyr.*` namespace provides a comprehensive game scripting API for entity management, transforms, input, time, components, and math utilities.
+
+### Entity API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `create` | `zephyr.entity.create() -> entity_id` | Create new empty entity |
+| `destroy` | `zephyr.entity.destroy(entity_id)` | Destroy entity |
+| `exists` | `zephyr.entity.exists(entity_id) -> bool` | Check if entity exists |
+| `find` | `zephyr.entity.find(name) -> entity_id or nil` | Find entity by name |
+| `get_name` | `zephyr.entity.get_name(entity_id) -> string or nil` | Get entity name |
+| `set_name` | `zephyr.entity.set_name(entity_id, name)` | Set entity name |
+
+```lua
+-- Create and name an entity
+local entity = zephyr.entity.create()
+zephyr.entity.set_name(entity, "Player")
+
+-- Find by name later
+local player = zephyr.entity.find("Player")
+if player then
+    print("Found: " .. zephyr.entity.get_name(player))
+end
+
+-- Cleanup
+zephyr.entity.destroy(entity)
+```
+
+### Transform API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `get_position` | `zephyr.transform.get_position(entity) -> x, y, z` | Get world position |
+| `set_position` | `zephyr.transform.set_position(entity, x, y, z)` | Set world position |
+| `get_rotation` | `zephyr.transform.get_rotation(entity) -> pitch, yaw, roll` | Get rotation as Euler angles (radians) |
+| `set_rotation` | `zephyr.transform.set_rotation(entity, pitch, yaw, roll)` | Set rotation from Euler angles (radians) |
+| `get_scale` | `zephyr.transform.get_scale(entity) -> x, y, z` | Get scale |
+| `set_scale` | `zephyr.transform.set_scale(entity, x, y, z)` | Set scale |
+| `translate` | `zephyr.transform.translate(entity, dx, dy, dz)` | Move relative |
+| `rotate` | `zephyr.transform.rotate(entity, dpitch, dyaw, droll)` | Rotate by Euler angle deltas (radians) |
+| `look_at` | `zephyr.transform.look_at(entity, tx, ty, tz, [preserve_roll])` | Point at target (resets roll unless preserve_roll=true) |
+| `forward` | `zephyr.transform.forward(entity) -> x, y, z` | Get forward vector |
+| `right` | `zephyr.transform.right(entity) -> x, y, z` | Get right vector |
+| `up` | `zephyr.transform.up(entity) -> x, y, z` | Get up vector |
+
+```lua
+-- Movement example
+local speed = 5.0
+local dt = zephyr.time.delta()
+
+if zephyr.input.is_key_down(Key.W) then
+    local fx, fy, fz = zephyr.transform.forward(player)
+    zephyr.transform.translate(player, fx * speed * dt, fy * speed * dt, fz * speed * dt)
+end
+
+-- Look at target (resets roll to 0)
+zephyr.transform.look_at(player, target_x, target_y, target_z)
+
+-- Look at target but keep current roll (e.g., for banking aircraft)
+zephyr.transform.look_at(aircraft, target_x, target_y, target_z, true)
+```
+
+### Input API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `is_key_down` | `zephyr.input.is_key_down(key) -> bool` | Check key state |
+| `is_mouse_button_down` | `zephyr.input.is_mouse_button_down(button) -> bool` | Check mouse button |
+| `get_mouse_position` | `zephyr.input.get_mouse_position() -> x, y` | Get cursor position |
+
+**Key Constants**: `Key.A` - `Key.Z`, `Key.Space`, `Key.Escape`, `Key.Enter`, `Key.Left/Right/Up/Down`, `Key.LeftShift`, `Key.LeftControl`, `Key.Tab`
+
+**Mouse Buttons**: 0 = Left, 1 = Right, 2 = Middle
+
+```lua
+-- Input handling
+if zephyr.input.is_key_down(Key.Space) then
+    jump()
+end
+
+if zephyr.input.is_mouse_button_down(0) then
+    local mx, my = zephyr.input.get_mouse_position()
+    shoot_at(mx, my)
+end
+```
+
+### Time API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `delta` | `zephyr.time.delta() -> seconds` | Frame delta time |
+| `elapsed` | `zephyr.time.elapsed() -> seconds` | Time since start |
+| `frame` | `zephyr.time.frame() -> count` | Current frame number |
+
+```lua
+-- Smooth movement
+local velocity = 10.0
+local dt = zephyr.time.delta()
+zephyr.transform.translate(entity, velocity * dt, 0, 0)
+
+-- Pulsing effect using elapsed time
+local pulse = math.sin(zephyr.time.elapsed() * 2.0) * 0.5 + 0.5
+```
+
+### Light API (PointLight)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `get_color` | `zephyr.light.get_color(entity) -> r, g, b` | Get light color |
+| `set_color` | `zephyr.light.set_color(entity, r, g, b)` | Set light color |
+| `get_intensity` | `zephyr.light.get_intensity(entity) -> float` | Get intensity |
+| `set_intensity` | `zephyr.light.set_intensity(entity, value)` | Set intensity |
+| `get_range` | `zephyr.light.get_range(entity) -> float` | Get range |
+| `set_range` | `zephyr.light.set_range(entity, value)` | Set range |
+
+```lua
+-- Dynamic lighting
+local t = zephyr.time.elapsed()
+local flicker = 0.8 + math.sin(t * 10) * 0.2
+zephyr.light.set_intensity(torch, flicker)
+
+-- Color shift
+zephyr.light.set_color(light, 1.0, 0.5 + math.sin(t) * 0.5, 0.0)
+```
+
+### Particles API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `set_rate` | `zephyr.particles.set_rate(entity, rate)` | Particles per second |
+| `set_color` | `zephyr.particles.set_color(entity, r, g, b)` | Particle color |
+| `set_active` | `zephyr.particles.set_active(entity, active)` | Enable/disable |
+
+```lua
+-- Activate particles on impact
+zephyr.particles.set_active(sparks, true)
+zephyr.particles.set_rate(sparks, 100)
+zephyr.particles.set_color(sparks, 1.0, 0.8, 0.2)
+```
+
+### Physics API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `get_velocity` | `zephyr.physics.get_velocity(entity) -> vx, vy, vz` | Get linear velocity |
+| `set_velocity` | `zephyr.physics.set_velocity(entity, vx, vy, vz)` | Set linear velocity |
+| `add_force` | `zephyr.physics.add_force(entity, fx, fy, fz)` | Apply force |
+| `add_impulse` | `zephyr.physics.add_impulse(entity, ix, iy, iz)` | Apply impulse |
+
+```lua
+-- Jump
+if zephyr.input.is_key_down(Key.Space) and on_ground then
+    zephyr.physics.add_impulse(player, 0, 10, 0)
+end
+
+-- Horizontal movement
+local move_force = 50.0
+if zephyr.input.is_key_down(Key.D) then
+    zephyr.physics.add_force(player, move_force, 0, 0)
+end
+```
+
+### Math API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `vec3` | `zephyr.math.vec3(x, y, z) -> {x, y, z}` | Create vector table |
+| `distance` | `zephyr.math.distance(x1,y1,z1, x2,y2,z2) -> float` | 3D distance |
+| `lerp` | `zephyr.math.lerp(a, b, t) -> float` | Linear interpolation |
+| `clamp` | `zephyr.math.clamp(v, min, max) -> float` | Clamp value |
+| `normalize` | `zephyr.math.normalize(x, y, z) -> nx, ny, nz` | Normalize vector |
+| `dot` | `zephyr.math.dot(x1,y1,z1, x2,y2,z2) -> float` | Dot product |
+| `cross` | `zephyr.math.cross(x1,y1,z1, x2,y2,z2) -> x, y, z` | Cross product |
+
+```lua
+-- Distance check
+local px, py, pz = zephyr.transform.get_position(player)
+local ex, ey, ez = zephyr.transform.get_position(enemy)
+local dist = zephyr.math.distance(px, py, pz, ex, ey, ez)
+
+if dist < 5.0 then
+    -- In range!
+end
+
+-- Smooth follow
+local tx, ty, tz = zephyr.transform.get_position(target)
+local cx, cy, cz = zephyr.transform.get_position(camera)
+local t = zephyr.math.clamp(zephyr.time.delta() * 5.0, 0, 1)
+local nx = zephyr.math.lerp(cx, tx, t)
+local ny = zephyr.math.lerp(cy, ty, t)
+local nz = zephyr.math.lerp(cz, tz, t)
+zephyr.transform.set_position(camera, nx, ny, nz)
+```
+
+### Scene API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `get_name` | `zephyr.scene.get_name() -> string` | Get current scene name |
+
+```lua
+print("Current scene: " .. zephyr.scene.get_name())
+```
+
+---
+
 ## Message Formats
 
 ### CVarLua Message

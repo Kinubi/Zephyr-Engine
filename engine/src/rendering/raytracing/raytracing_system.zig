@@ -605,89 +605,102 @@ pub const RaytracingSystem = struct {
         // FIRST: Check if TLAS worker has completed and pick up the result
         // Only pick up once per frame to prevent rapid successive rebuilds
         if (self.bvh_build_in_progress and self.last_tlas_pickup_frame != frame_index) {
-            if (self.bvh_builder.tryPickupCompletedTlas()) |tlas_result| {
-                self.last_tlas_pickup_frame = frame_index; // Mark this frame as having picked up a TLAS
-                completed_tlas_this_call = true; // Mark completion in THIS call
+            const pickup_result = self.bvh_builder.tryPickupCompletedTlas();
+            switch (pickup_result) {
+                .pending => {}, // Still building, nothing to do
+                .failed => {
+                    // Build failed - reset state so we can try again
+                    log(.WARN, "raytracing", "TLAS build failed, resetting build state", .{});
+                    self.last_tlas_pickup_frame = frame_index;
+                    self.bvh_build_in_progress = false;
+                    // Don't set cooldown - allow immediate retry on next frame
+                    // Force rebuild will be set again if PT is still enabled
+                    self.force_rebuild = true;
+                },
+                .success => |tlas_result| {
+                    self.last_tlas_pickup_frame = frame_index; // Mark this frame as having picked up a TLAS
+                    completed_tlas_this_call = true; // Mark completion in THIS call
 
-                // TLAS build completed successfully!
-                const default_set = try self.createSet("default");
+                    // TLAS build completed successfully!
+                    const default_set = try self.createSet("default");
 
-                // Create new TLAS entry (heap allocated for atomic pointer)
-                const new_entry = try self.allocator.create(TlasEntry);
-                new_entry.* = .{
-                    .acceleration_structure = tlas_result.acceleration_structure,
-                    .buffer = tlas_result.buffer,
-                    .instance_buffer = tlas_result.instance_buffer,
-                    .device_address = tlas_result.device_address,
-                    .instance_count = tlas_result.instance_count,
-                    .build_time_ns = tlas_result.build_time_ns,
-                    .created_frame = frame_index,
-                };
-
-                // Atomic swap: get old TLAS, store new TLAS (lock-free, safe)
-                const old_entry = default_set.tlas.current.swap(new_entry, .acq_rel);
-
-                // Queue old TLAS for destruction (if it existed)
-                if (old_entry) |old| {
-                    // Queue acceleration structure handle
-                    self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, old.acceleration_structure) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue old TLAS handle: {}", .{err});
-                        self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old.acceleration_structure, null);
+                    // Create new TLAS entry (heap allocated for atomic pointer)
+                    const new_entry = try self.allocator.create(TlasEntry);
+                    new_entry.* = .{
+                        .acceleration_structure = tlas_result.acceleration_structure,
+                        .buffer = tlas_result.buffer,
+                        .instance_buffer = tlas_result.instance_buffer,
+                        .device_address = tlas_result.device_address,
+                        .instance_count = tlas_result.instance_count,
+                        .build_time_ns = tlas_result.build_time_ns,
+                        .created_frame = frame_index,
                     };
 
-                    // Queue buffers
-                    self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old.buffer) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue old TLAS buffer: {}", .{err});
-                        var immediate = old.buffer;
-                        immediate.deinit();
-                    };
+                    // Atomic swap: get old TLAS, store new TLAS (lock-free, safe)
+                    const old_entry = default_set.tlas.current.swap(new_entry, .acq_rel);
 
-                    self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, old.instance_buffer) catch |err| {
-                        log(.ERROR, "raytracing", "Failed to queue old TLAS instance buffer: {}", .{err});
-                        var immediate = old.instance_buffer;
-                        immediate.deinit();
-                    };
+                    // Queue old TLAS for destruction (if it existed)
+                    if (old_entry) |old| {
+                        // Queue acceleration structure handle
+                        self.per_frame_destroy[frame_index].tlas_handles.append(self.allocator, old.acceleration_structure) catch |err| {
+                            log(.ERROR, "raytracing", "Failed to queue old TLAS handle: {}", .{err});
+                            self.gc.vkd.destroyAccelerationStructureKHR(self.gc.dev, old.acceleration_structure, null);
+                        };
 
-                    // Free the old entry struct itself
-                    self.allocator.destroy(old);
-                }
+                        // Queue buffers
+                        self.per_frame_destroy[frame_index].tlas_buffers.append(self.allocator, old.buffer) catch |err| {
+                            log(.ERROR, "raytracing", "Failed to queue old TLAS buffer: {}", .{err});
+                            var immediate = old.buffer;
+                            immediate.deinit();
+                        };
 
-                // Update geometry buffers (vertex/index arrays) with current raytracing data
-                const rt_data = try render_system.getRaytracingData();
-                defer {
-                    self.allocator.free(rt_data.instances);
-                    self.allocator.free(rt_data.geometries);
-                    self.allocator.free(rt_data.materials);
-                }
-                try default_set.geometry_buffers.updateFromGeometries(rt_data);
+                        self.per_frame_destroy[frame_index].tlas_instance_buffers.append(self.allocator, old.instance_buffer) catch |err| {
+                            log(.ERROR, "raytracing", "Failed to queue old TLAS instance buffer: {}", .{err});
+                            var immediate = old.instance_buffer;
+                            immediate.deinit();
+                        };
 
-                // Mark build as no longer in progress
-                self.bvh_build_in_progress = false;
+                        // Free the old entry struct itself
+                        self.allocator.destroy(old);
+                    }
 
-                // Check if force rebuild was requested while this build was in progress
-                if (self.force_rebuild) {
-                    // Skip cooldown to allow immediate rebuild
-                    self.tlas_rebuild_cooldown_frames = 0;
-                } else {
-                    // Start cooldown to prevent rapid rebuilds that cause flashing
-                    // Use longer cooldown than MAX_FRAMES_IN_FLIGHT to batch updates
-                    self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT * 3; // 9 frames ~= 150ms at 60fps
-                }
+                    // Update geometry buffers (vertex/index arrays) with current raytracing data
+                    const rt_data = try render_system.getRaytracingData();
+                    defer {
+                        self.allocator.free(rt_data.instances);
+                        self.allocator.free(rt_data.geometries);
+                        self.allocator.free(rt_data.materials);
+                    }
+                    try default_set.geometry_buffers.updateFromGeometries(rt_data);
 
-                // CRITICAL: Set pending bind mask BEFORE incrementing generation
-                // This prevents race where frames see generation change before mask is set
-                // Use .release ordering to ensure mask write is visible before generation increment
-                const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
-                default_set.tlas.pending_bind_mask.store(all_frames_mask, .release);
+                    // Mark build as no longer in progress
+                    self.bvh_build_in_progress = false;
 
-                // Increment generation atomically (for descriptor tracking)
-                // Resource binder will see this change and bind each frame,
-                // clearing mask bits as it goes. It reverts last_generation
-                // until all frames have bound (mask == 0).
-                // Use .acq_rel to establish happens-before relationship with mask store
-                _ = default_set.tlas.generation.fetchAdd(1, .acq_rel);
+                    // Check if force rebuild was requested while this build was in progress
+                    if (self.force_rebuild) {
+                        // Skip cooldown to allow immediate rebuild
+                        self.tlas_rebuild_cooldown_frames = 0;
+                    } else {
+                        // Start cooldown to prevent rapid rebuilds that cause flashing
+                        // Use longer cooldown than MAX_FRAMES_IN_FLIGHT to batch updates
+                        self.tlas_rebuild_cooldown_frames = MAX_FRAMES_IN_FLIGHT * 3; // 9 frames ~= 150ms at 60fps
+                    }
 
-                return true;
+                    // CRITICAL: Set pending bind mask BEFORE incrementing generation
+                    // This prevents race where frames see generation change before mask is set
+                    // Use .release ordering to ensure mask write is visible before generation increment
+                    const all_frames_mask = (@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
+                    default_set.tlas.pending_bind_mask.store(all_frames_mask, .release);
+
+                    // Increment generation atomically (for descriptor tracking)
+                    // Resource binder will see this change and bind each frame,
+                    // clearing mask bits as it goes. It reverts last_generation
+                    // until all frames have bound (mask == 0).
+                    // Use .acq_rel to establish happens-before relationship with mask store
+                    _ = default_set.tlas.generation.fetchAdd(1, .acq_rel);
+
+                    return true;
+                },
             }
         }
 
@@ -790,6 +803,12 @@ pub const RaytracingSystem = struct {
 
     /// Spawn TLAS worker as a ThreadPool job - event-driven approach
     fn spawnTlasWorker(self: *RaytracingSystem, rt_data: RenderData.RaytracingData) !void {
+        // Don't spawn a job if there are no instances - nothing to build
+        if (rt_data.instances.len == 0) {
+            log(.DEBUG, "raytracing", "Skipping TLAS build - no instances in scene", .{});
+            return;
+        }
+
         // Extract stable geometry IDs from rt_data using asset IDs
         const required_geom_ids = try self.allocator.alloc(u32, rt_data.geometries.len);
         for (rt_data.geometries, 0..) |geom, i| {
