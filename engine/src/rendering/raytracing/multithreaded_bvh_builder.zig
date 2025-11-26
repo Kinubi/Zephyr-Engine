@@ -295,17 +295,33 @@ pub const MultithreadedBvhBuilder = struct {
     }
 
     /// Try to pick up completed TLAS if available (lock-free) and take ownership
-    pub fn tryPickupCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
+    /// Result of trying to pick up a completed TLAS build
+    pub const TlasPickupResult = union(enum) {
+        /// No result available yet
+        pending,
+        /// Build completed successfully
+        success: TlasResult,
+        /// Build failed - caller should reset state and potentially retry
+        failed,
+    };
+
+    pub fn tryPickupCompletedTlas(self: *MultithreadedBvhBuilder) TlasPickupResult {
         if (self.completed_tlas.swap(null, .acquire)) |tlas_ptr| {
             const result = tlas_ptr.*;
             self.allocator.destroy(tlas_ptr);
-            return result;
+            
+            // Check for failure sentinel (null_handle indicates worker failed)
+            if (result.acceleration_structure == .null_handle) {
+                return .failed;
+            }
+            
+            return .{ .success = result };
         }
-        return null;
+        return .pending;
     }
 
     /// Take TLAS result if available (lock-free) and take ownership
-    pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) ?TlasResult {
+    pub fn takeCompletedTlas(self: *MultithreadedBvhBuilder) TlasPickupResult {
         return self.tryPickupCompletedTlas();
     }
 
