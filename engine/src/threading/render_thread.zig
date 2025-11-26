@@ -283,11 +283,8 @@ fn renderThreadLoopImpl(ctx: *RenderThreadContext) !void {
 
         const snapshot = &ctx.game_state[read_idx];
 
-        if (snapshot.entity_count == 0) {
-            ctx.main_thread_ready[read_idx].post();
-            read_idx = (read_idx + 1) % ctx.buffer_count;
-            continue;
-        }
+        // Note: We must still render even with 0 entities to present UI and keep window alive
+        // The snapshot contains imgui_draw_data which needs to be rendered
 
         if (engine_ptr) |engine| {
             // Render thread: beginFrame -> update -> render -> endFrame

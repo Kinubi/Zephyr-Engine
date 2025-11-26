@@ -1,0 +1,237 @@
+{
+    "name": "cornell_box",
+    "entities": [
+        {
+            "uuid": "a0000001-0000-0000-0000-000000000001",
+            "components": {
+                "Name": {
+                    "name": "GameManager"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "ScriptComponent": {
+                    "asset": "assets/scripts/avoider_game.lua",
+                    "enabled": true,
+                    "run_on_update": true,
+                    "run_once": false
+                }
+            }
+        },
+        {
+            "uuid": "a0000001-0000-0000-0000-000000000002",
+            "components": {
+                "Name": {
+                    "name": "Player"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0.0000005707402124244254,
+                        "y": -2.59999942779541,
+                        "z": 0.000000022042732084059935
+                    },
+                    "rotation": {
+                        "x": 0.000000011941427402462068,
+                        "y": -0.00000002002837895531684,
+                        "z": 0.00000036042200690644677,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "RigidBody": {
+                    "body_type": "Dynamic",
+                    "mass": 1,
+                    "friction": 0.5,
+                    "restitution": 0,
+                    "linear_damping": 0.10000000149011612,
+                    "angular_damping": 0.5,
+                    "is_sensor": false
+                },
+                "BoxCollider": {
+                    "half_extents": [
+                        0.5,
+                        0.5,
+                        0.5
+                    ],
+                    "offset": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [
+                        0.20000000298023224,
+                        0.6000000238418579,
+                        1,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "a0000001-0000-0000-0000-000000000003",
+            "components": {
+                "Name": {
+                    "name": "Floor"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -2,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 12,
+                        "y": 0.20000000298023224,
+                        "z": 4
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "RigidBody": {
+                    "body_type": "Static",
+                    "mass": 0,
+                    "friction": 0.800000011920929,
+                    "restitution": 0,
+                    "linear_damping": 0,
+                    "angular_damping": 0,
+                    "is_sensor": false
+                },
+                "BoxCollider": {
+                    "half_extents": [
+                        6,
+                        0.10000000149011612,
+                        2
+                    ],
+                    "offset": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [
+                        0.30000001192092896,
+                        0.30000001192092896,
+                        0.30000001192092896,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "uuid": "a0000001-0000-0000-0000-000000000004",
+            "components": {
+                "Name": {
+                    "name": "GameLight"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 10,
+                        "z": -5
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                }
+            }
+        },
+        {
+            "uuid": "a0000001-0000-0000-0000-000000000010",
+            "components": {
+                "Name": {
+                    "name": "PlayerCamera"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 5,
+                        "z": -15
+                    },
+                    "rotation": {
+                        "x": 0.1305262,
+                        "y": 0,
+                        "z": 0,
+                        "w": 0.9914449
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "Camera": {
+                    "projection_type": "perspective",
+                    "fov": 60.0,
+                    "near_plane": 0.1,
+                    "far_plane": 1000.0,
+                    "aspect_ratio": 1.7777778,
+                    "is_primary": true
+                }
+            }
+        }
+    ]
+}

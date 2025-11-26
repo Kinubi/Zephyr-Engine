@@ -82,12 +82,10 @@ pub const ScriptComponent = struct {
             }
         }
 
-        // If no asset, or as a fallback/override, we might want to save the script content?
-        // For now, let's only save script content if there is no asset.
-        if (self.asset == null or !self.asset.?.isValid()) {
-            try writer.objectField("script");
-            try writer.write(self.script);
-        }
+        // Always serialize the script content as well - this ensures play mode snapshots
+        // can restore the exact script state even if the file on disk changes
+        try writer.objectField("script");
+        try writer.write(self.script);
 
         try writer.objectField("enabled");
         try writer.write(self.enabled);
@@ -105,18 +103,32 @@ pub const ScriptComponent = struct {
     pub fn deserialize(serializer: anytype, value: std.json.Value) !ScriptComponent {
         var script_comp = ScriptComponent.initDefault("");
 
-        if (value.object.get("asset")) |path_val| {
-            if (path_val == .string) {
-                if (serializer.getAssetId(path_val.string)) |id| {
-                    script_comp.asset = id;
-                }
+        // First check for inline script content (preferred - may be from play mode snapshot)
+        if (value.object.get("script")) |val| {
+            if (val == .string and val.string.len > 0) {
+                script_comp.script = try serializer.allocator.dupe(u8, val.string);
+                script_comp.owns_memory = true;
             }
         }
 
-        if (value.object.get("script")) |val| {
-            if (val == .string) {
-                script_comp.script = try serializer.allocator.dupe(u8, val.string);
-                script_comp.owns_memory = true;
+        // If we have an asset path, set up the asset ID and optionally load from file
+        if (value.object.get("asset")) |path_val| {
+            if (path_val == .string) {
+                const path = path_val.string;
+                // Try to get existing asset ID or register a new one
+                if (serializer.getAssetId(path)) |id| {
+                    script_comp.asset = id;
+                }
+                // If no inline script content was provided, load from the file
+                if (script_comp.script.len == 0) {
+                    if (std.fs.cwd().openFile(path, .{})) |file| {
+                        defer file.close();
+                        if (file.readToEndAlloc(serializer.allocator, 64 * 1024)) |content| {
+                            script_comp.script = content;
+                            script_comp.owns_memory = true;
+                        } else |_| {}
+                    } else |_| {}
+                }
             }
         }
 
