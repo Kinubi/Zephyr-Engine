@@ -338,6 +338,14 @@ pub const SceneLayer = struct {
         // In Play mode, disable editor camera controller - scripts handle input
         const in_play_mode = self.scene.state == .Play;
 
+        // Always forward input events to Scene for script input tracking
+        switch (evt.event_type) {
+            .KeyPressed, .KeyReleased, .MouseButtonPressed, .MouseButtonReleased, .MouseMoved => {
+                self.scene.handleInputEvent(evt);
+            },
+            else => {},
+        }
+
         switch (evt.event_type) {
             // First, give camera controller a chance to consume input (only in Edit/Pause mode)
             .KeyReleased, .MouseButtonPressed, .MouseButtonReleased, .MouseMoved, .MouseScrolled => {

@@ -31,7 +31,7 @@ pub const Window = struct {
     fn keyCallback(window: ?*c.GLFWwindow, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.c) void {
         const self = getUserPointer(window);
         if (self.event_bus) |bus| {
-            if (action == c.GLFW_PRESS) {
+            if (action == c.GLFW_PRESS or action == c.GLFW_REPEAT) {
                 const event = Event.init(.KeyPressed, .{ .KeyPressed = .{ .key = key, .scancode = scancode, .mods = mods } });
                 bus.queueEvent(event) catch {};
             } else if (action == c.GLFW_RELEASE) {

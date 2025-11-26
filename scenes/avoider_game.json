@@ -42,7 +42,7 @@
                 "Transform": {
                     "position": {
                         "x": 0.0000005707402124244254,
-                        "y": -2.59999942779541,
+                        "y": -0.6118158102035522,
                         "z": 0.000000022042732084059935
                     },
                     "rotation": {
@@ -72,7 +72,7 @@
                     "alpha_cutoff": 0.5
                 },
                 "RigidBody": {
-                    "body_type": "Dynamic",
+                    "body_type": "Kinematic",
                     "mass": 1,
                     "friction": 0.5,
                     "restitution": 0,
@@ -112,7 +112,7 @@
                 "Transform": {
                     "position": {
                         "x": 0,
-                        "y": -2,
+                        "y": -6.464032173156738,
                         "z": 0
                     },
                     "rotation": {
@@ -212,10 +212,10 @@
                         "z": -15
                     },
                     "rotation": {
-                        "x": 0.1305262,
+                        "x": 0.13052619993686676,
                         "y": 0,
                         "z": 0,
-                        "w": 0.9914449
+                        "w": 0.9914448857307434
                     },
                     "scale": {
                         "x": 1,
@@ -225,11 +225,231 @@
                 },
                 "Camera": {
                     "projection_type": "perspective",
-                    "fov": 60.0,
-                    "near_plane": 0.1,
-                    "far_plane": 1000.0,
-                    "aspect_ratio": 1.7777778,
-                    "is_primary": true
+                    "is_primary": true,
+                    "near_plane": 0.10000000149011612,
+                    "far_plane": 1000,
+                    "fov": 60,
+                    "aspect_ratio": 1.7777777910232544
+                }
+            }
+        },
+        {
+            "uuid": "b0000001-0000-0000-0000-000000000001",
+            "components": {
+                "Name": {
+                    "name": "Obstacle1"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -100,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [1.0, 0.2, 0.2, 1.0]
+                }
+            }
+        },
+        {
+            "uuid": "b0000001-0000-0000-0000-000000000002",
+            "components": {
+                "Name": {
+                    "name": "Obstacle2"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -100,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [1.0, 0.2, 0.2, 1.0]
+                }
+            }
+        },
+        {
+            "uuid": "b0000001-0000-0000-0000-000000000003",
+            "components": {
+                "Name": {
+                    "name": "Obstacle3"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -100,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [1.0, 0.2, 0.2, 1.0]
+                }
+            }
+        },
+        {
+            "uuid": "b0000001-0000-0000-0000-000000000004",
+            "components": {
+                "Name": {
+                    "name": "Obstacle4"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -100,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [1.0, 0.2, 0.2, 1.0]
+                }
+            }
+        },
+        {
+            "uuid": "b0000001-0000-0000-0000-000000000005",
+            "components": {
+                "Name": {
+                    "name": "Obstacle5"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": -100,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "MeshRenderer": {
+                    "model_asset": "assets/models/cube.obj",
+                    "enabled": true,
+                    "layer": 0,
+                    "casts_shadows": true,
+                    "receives_shadows": true
+                },
+                "MaterialSet": {
+                    "set_name": "opaque",
+                    "shader_variant": "pbr_standard",
+                    "casts_shadows": true,
+                    "receives_shadows": true,
+                    "alpha_cutoff": 0.5
+                },
+                "AlbedoMaterial": {
+                    "texture": "assets/textures/missing.png",
+                    "color": [1.0, 0.2, 0.2, 1.0]
                 }
             }
         }

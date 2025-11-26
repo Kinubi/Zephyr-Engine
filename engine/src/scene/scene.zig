@@ -116,6 +116,15 @@ pub const Scene = struct {
     // Render thread holds shared lock during update/render
     state_lock: std.Thread.RwLock = .{},
 
+    // Input state tracking for scripts (updated by SceneLayer from events)
+    // Tracks up to 512 keys (covers all GLFW key codes)
+    key_states: [512]bool = [_]bool{false} ** 512,
+    // Mouse button states (up to 8 buttons)
+    mouse_button_states: [8]bool = [_]bool{false} ** 8,
+    // Mouse position
+    mouse_x: f64 = 0,
+    mouse_y: f64 = 0,
+
     // Engine context references
     graphics_context: *GraphicsContext,
     pipeline_system: *UnifiedPipelineSystem,
@@ -1210,6 +1219,67 @@ pub const Scene = struct {
         }
 
         return null;
+    }
+
+    // =========================================================================
+    // Input State Management (for scripts)
+    // Updated by SceneLayer from events, read by lua_bindings
+    // =========================================================================
+
+    /// Handle an input event and update key/mouse state
+    pub fn handleInputEvent(self: *Scene, event: *const @import("../core/event.zig").Event) void {
+        switch (event.event_type) {
+            .KeyPressed => {
+                const key = event.data.KeyPressed.key;
+                if (key >= 0 and key < 512) {
+                    self.key_states[@intCast(key)] = true;
+                }
+            },
+            .KeyReleased => {
+                const key = event.data.KeyReleased.key;
+                if (key >= 0 and key < 512) {
+                    self.key_states[@intCast(key)] = false;
+                }
+            },
+            .MouseButtonPressed => {
+                const button = event.data.MouseButtonPressed.button;
+                if (button >= 0 and button < 8) {
+                    self.mouse_button_states[@intCast(button)] = true;
+                }
+            },
+            .MouseButtonReleased => {
+                const button = event.data.MouseButtonReleased.button;
+                if (button >= 0 and button < 8) {
+                    self.mouse_button_states[@intCast(button)] = false;
+                }
+            },
+            .MouseMoved => {
+                self.mouse_x = event.data.MouseMoved.x;
+                self.mouse_y = event.data.MouseMoved.y;
+            },
+            else => {},
+        }
+    }
+
+    /// Check if a key is currently pressed
+    pub fn isKeyDown(self: *const Scene, key: i32) bool {
+        if (key >= 0 and key < 512) {
+            return self.key_states[@intCast(key)];
+        }
+        return false;
+    }
+
+    /// Check if a mouse button is currently pressed
+    pub fn isMouseButtonDown(self: *const Scene, button: i32) bool {
+        if (button >= 0 and button < 8) {
+            return self.mouse_button_states[@intCast(button)];
+        }
+        return false;
+    }
+
+    /// Get current mouse position
+    pub fn getMousePosition(self: *const Scene) struct { x: f64, y: f64 } {
+        return .{ .x = self.mouse_x, .y = self.mouse_y };
     }
 };
 

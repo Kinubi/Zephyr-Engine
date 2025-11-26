@@ -23,6 +23,11 @@ pub const ScriptComponent = struct {
     run_once: bool,
     /// If true, the script string is owned by this component and should be freed on deinit
     owns_memory: bool = false,
+    /// Persistent Lua state for this script (assigned by ScriptingSystem on first run)
+    /// This ensures the same Lua state is used across frames, preserving script globals.
+    lua_state: ?*anyopaque = null,
+    /// True if the script has been initialized (first execution done)
+    initialized: bool = false,
 
     pub fn init(script: []const u8, run_on_update: bool, run_once: bool) ScriptComponent {
         return ScriptComponent{
@@ -32,6 +37,8 @@ pub const ScriptComponent = struct {
             .run_on_update = run_on_update,
             .run_once = run_once,
             .owns_memory = false,
+            .lua_state = null,
+            .initialized = false,
         };
     }
 
@@ -46,6 +53,8 @@ pub const ScriptComponent = struct {
             .run_on_update = run_on_update,
             .run_once = run_once,
             .owns_memory = false,
+            .lua_state = null,
+            .initialized = false,
         };
     }
 
@@ -60,6 +69,8 @@ pub const ScriptComponent = struct {
             .run_on_update = false,
             .run_once = false,
             .owns_memory = false,
+            .lua_state = null,
+            .initialized = false,
         };
     }
 

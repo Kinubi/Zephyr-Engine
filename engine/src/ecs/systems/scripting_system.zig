@@ -12,6 +12,9 @@ const cvar = @import("../../core/cvar.zig");
 const ActionKind = @import("../../scripting/action_queue.zig").ActionKind;
 const EntityId = @import("../entity_registry.zig").EntityId;
 
+/// Global frame counter to track script execution (incremented each frame)
+var g_script_frame: u64 = 0;
+
 pub const NativeCallbackDescriptor = struct {
     cb: ?*const fn ([]const u8, []const u8, []const u8) void,
 };
@@ -79,12 +82,18 @@ pub const ScriptingSystem = struct {
 /// Looks up the scene-owned ScriptingSystem instance from World.userdata
 /// (key: "scripting_system") and invokes its instance update method.
 pub fn prepare(world: *World, dt: f32) !void {
-    _ = dt;
     // Scheduler wrapper: perform the per-frame scripting work directly (no call to
     // `update`) so the scheduler executes the system's logic inline. This mirrors
     // other scheduler functions which operate directly on Scene-owned state.
     const scene_ptr = world.getUserData("scene") orelse return;
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
+
+    // Set global delta time for Lua scripts before execution
+    lua.g_delta_time = dt;
+
+    // Increment frame counter and update Lua global
+    g_script_frame += 1;
+    lua.g_frame_count = g_script_frame;
 
     // Use a local alias to the Scene-owned ScriptingSystem instance
     var sys: *ScriptingSystem = scene.scripting_system;
@@ -238,14 +247,49 @@ pub fn prepare(world: *World, dt: f32) !void {
                 if (!sc.run_on_update) continue;
 
                 if (sys.runner.state_pool) |sp| {
-                    const leased = sp.acquire();
                     const owner_u32 = @intFromEnum(entry.entity);
-                    if (lua.executeLuaBuffer(sys.runner.allocator, leased, sc.script, owner_u32, @ptrCast(scene))) |res| {
-                        if (res.message.len > 0) sys.runner.allocator.free(res.message);
-                    } else |err| {
-                        log(.WARN, "scripting", "synchronous script execution failed: {}", .{err});
+
+                    // Check if this script has been initialized
+                    if (!sc.initialized) {
+                        // First run: acquire a Lua state and keep it for this script
+                        const leased = sp.acquire();
+                        sc.lua_state = leased;
+
+                        // Execute the full script buffer to define globals/functions
+                        if (lua.executeLuaBuffer(sys.runner.allocator, leased, sc.script, owner_u32, @ptrCast(scene))) |res| {
+                            if (!res.success) {
+                                log(.WARN, "scripting", "Script load failed: {s}", .{res.message});
+                            }
+                            if (res.message.len > 0) sys.runner.allocator.free(res.message);
+                        } else |err| {
+                            log(.WARN, "scripting", "Script load error: {}", .{err});
+                        }
+
+                        // Call init() if it exists
+                        if (lua.callScriptFunction(sys.runner.allocator, leased, "init", null)) |res| {
+                            if (!res.success) {
+                                log(.WARN, "scripting", "init() failed: {s}", .{res.message});
+                            }
+                            if (res.message.len > 0) sys.runner.allocator.free(res.message);
+                        } else |err| {
+                            log(.WARN, "scripting", "init() error: {}", .{err});
+                        }
+
+                        sc.initialized = true;
+                        // Note: We do NOT release the state - it stays with this script
                     }
-                    sp.release(leased);
+
+                    // Every frame: call prepare(dt) using the script's persistent Lua state
+                    if (sc.lua_state) |state| {
+                        if (lua.callScriptFunction(sys.runner.allocator, state, "prepare", lua.g_delta_time)) |res| {
+                            if (!res.success) {
+                                log(.WARN, "scripting", "prepare() failed: {s}", .{res.message});
+                            }
+                            if (res.message.len > 0) sys.runner.allocator.free(res.message);
+                        } else |err| {
+                            log(.WARN, "scripting", "prepare() error: {}", .{err});
+                        }
+                    }
                 } else {
                     log(.WARN, "scripting", "no lua state pool available to run per-frame script synchronously", .{});
                 }

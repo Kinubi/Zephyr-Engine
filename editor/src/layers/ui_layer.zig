@@ -383,6 +383,10 @@ pub const UILayer = struct {
                 }
             },
             .KeyReleased => {
+                // In play mode, let scripts handle key releases
+                if (in_play_mode) {
+                    return;
+                }
                 // Forward key up events to ImGui and consume if panels are focused
                 const io = c.ImGui_GetIO();
                 var want_kb: bool = false;
@@ -409,6 +413,10 @@ pub const UILayer = struct {
                 }
             },
             .KeyTyped => {
+                // In play mode, let scripts handle typed characters
+                if (in_play_mode) {
+                    return;
+                }
                 // Forward character input to ImGui
                 const io = c.ImGui_GetIO();
                 var want_kb: bool = false;

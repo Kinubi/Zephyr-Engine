@@ -6,7 +6,7 @@ const c = @cImport({
     @cInclude("lauxlib.h");
     @cInclude("lualib.h");
     @cInclude("string.h");
-    @cInclude("GLFW/glfw3.h");
+    @cInclude("GLFW/glfw3.h"); // For key constants only (GLFW_KEY_*)
 });
 
 const Scene = @import("../scene/scene.zig").Scene;
@@ -29,7 +29,8 @@ const zphysics = @import("zphysics");
 pub var g_delta_time: f32 = 0.0;
 pub var g_time_since_start: f64 = 0.0;
 pub var g_frame_count: u64 = 0;
-pub var g_glfw_window: ?*anyopaque = null; // For input queries
+// Note: g_scene is set per-script execution via executeLuaBuffer's scene_ptr parameter
+// Input state is read from Scene, not GLFW directly
 
 /// Create a new lua_State. Returns null on failure.
 pub fn createLuaState(_: std.mem.Allocator) ?*anyopaque {
@@ -95,6 +96,51 @@ pub fn callNamedHandler(allocator: std.mem.Allocator, state: *anyopaque, handler
         return ExecuteResult{ .success = false, .message = out[0..msg_len] };
     }
 
+    return ExecuteResult{ .success = true, .message = "" };
+}
+
+/// Call a global Lua function by name with optional dt argument.
+/// Used for lifecycle callbacks like on_init() and on_update(dt).
+/// Returns success even if the function doesn't exist (not an error).
+pub fn callScriptFunction(allocator: std.mem.Allocator, state: *anyopaque, func_name: []const u8, dt: ?f32) !ExecuteResult {
+    const L: *c.lua_State = @ptrCast(state);
+
+    // Get the function by name
+    const name_ptr: [*]const u8 = @ptrCast(func_name.ptr);
+    _ = c.lua_getglobal(L, name_ptr);
+
+    // Check if it's a function
+    if (c.lua_type(L, -1) != c.LUA_TFUNCTION) {
+        // Not a function (nil or other type) - just pop and return success
+        _ = c.lua_settop(L, 0);
+        return ExecuteResult{ .success = true, .message = "" };
+    }
+
+    // Push dt argument if provided
+    var arg_count: c_int = 0;
+    if (dt) |delta| {
+        c.lua_pushnumber(L, @floatCast(delta));
+        arg_count = 1;
+    }
+
+    // Call the function
+    const pcall_res = c.lua_pcallk(L, arg_count, 0, 0, @as(c.lua_KContext, 0), null);
+    if (pcall_res != 0) {
+        var msg_len: usize = 0;
+        const msg = c.lua_tolstring(L, -1, &msg_len);
+        if (msg == null) {
+            _ = c.lua_settop(L, 0);
+            return ExecuteResult{ .success = false, .message = "" };
+        }
+        const out = try allocator.alloc(u8, msg_len + 1);
+        const msg_ptr: [*]const u8 = @ptrCast(msg);
+        std.mem.copyForwards(u8, out[0..msg_len], msg_ptr[0..msg_len]);
+        out[msg_len] = 0;
+        _ = c.lua_settop(L, 0);
+        return ExecuteResult{ .success = false, .message = out[0..msg_len] };
+    }
+
+    _ = c.lua_settop(L, 0);
     return ExecuteResult{ .success = true, .message = "" };
 }
 
@@ -337,6 +383,38 @@ fn l_engine_log(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
+/// console.log(level, message)
+/// level: "info", "warn", "error", "debug"
+fn l_console_log(L: ?*c.lua_State) callconv(.c) c_int {
+    const Lnon = L orelse return 0;
+
+    // Get level string
+    var level_len: usize = 0;
+    const level_ptr = c.luaL_checklstring(Lnon, 1, &level_len);
+
+    // Get message string
+    var msg_len: usize = 0;
+    const msg_ptr = c.luaL_checklstring(Lnon, 2, &msg_len);
+
+    if (level_ptr != null and msg_ptr != null) {
+        const level_slice: []const u8 = @as([*]const u8, @ptrCast(level_ptr))[0..level_len];
+        const msg_slice: []const u8 = @as([*]const u8, @ptrCast(msg_ptr))[0..msg_len];
+
+        // Map level string to log level
+        if (std.mem.eql(u8, level_slice, "error")) {
+            log(.ERROR, "lua", "{s}", .{msg_slice});
+        } else if (std.mem.eql(u8, level_slice, "warn")) {
+            log(.WARN, "lua", "{s}", .{msg_slice});
+        } else if (std.mem.eql(u8, level_slice, "debug")) {
+            log(.DEBUG, "lua", "{s}", .{msg_slice});
+        } else {
+            // Default to INFO for "info" or any other value
+            log(.INFO, "lua", "{s}", .{msg_slice});
+        }
+    }
+    return 0;
+}
+
 /// Translate the owning entity by dx,dy,dz.
 fn l_translate_entity(L: ?*c.lua_State) callconv(.c) c_int {
     const Lnon = L orelse return 0;
@@ -392,6 +470,13 @@ fn registerEngineBindings(L: *c.lua_State) void {
     // Entity helpers
     c.lua_pushcfunction(L, l_translate_entity);
     c.lua_setglobal(L, "translate_entity");
+
+    // Register console table with log function
+    // console.log(level, message) where level is "info", "warn", "error", "debug"
+    c.lua_newtable(L);
+    c.lua_pushcfunction(L, l_console_log);
+    c.lua_setfield(L, -2, "log");
+    c.lua_setglobal(L, "console");
 
     // Expose a namespaced proxy table for CVars so Lua can use
     // `RenderSystem.PathTracing.RayCount` syntax for get/set.
@@ -1089,6 +1174,7 @@ fn l_transform_look_at(L: ?*c.lua_State) callconv(.c) c_int {
 
 // -----------------------------------------------------------------------------
 // Input API: zephyr.input.*
+// These read input state from the Scene, which is updated by SceneLayer events
 // -----------------------------------------------------------------------------
 
 /// zephyr.input.is_key_down(key) -> bool
@@ -1096,10 +1182,11 @@ fn l_input_is_key_down(L: ?*c.lua_State) callconv(.c) c_int {
     const Lnon = L orelse return 0;
     const key = c.luaL_checkinteger(Lnon, 1);
 
-    if (g_glfw_window) |window| {
-        const state = c.glfwGetKey(@ptrCast(window), @intCast(key));
-        c.lua_pushboolean(Lnon, if (state == c.GLFW_PRESS) 1 else 0);
+    if (getSceneFromLua(Lnon)) |scene| {
+        const is_down = scene.isKeyDown(@intCast(key));
+        c.lua_pushboolean(Lnon, if (is_down) 1 else 0);
     } else {
+        log(.WARN, "lua_input", "is_key_down: no scene context!", .{});
         c.lua_pushboolean(Lnon, 0);
     }
     return 1;
@@ -1110,9 +1197,9 @@ fn l_input_is_mouse_button_down(L: ?*c.lua_State) callconv(.c) c_int {
     const Lnon = L orelse return 0;
     const button = c.luaL_checkinteger(Lnon, 1);
 
-    if (g_glfw_window) |window| {
-        const state = c.glfwGetMouseButton(@ptrCast(window), @intCast(button));
-        c.lua_pushboolean(Lnon, if (state == c.GLFW_PRESS) 1 else 0);
+    if (getSceneFromLua(Lnon)) |scene| {
+        const is_down = scene.isMouseButtonDown(@intCast(button));
+        c.lua_pushboolean(Lnon, if (is_down) 1 else 0);
     } else {
         c.lua_pushboolean(Lnon, 0);
     }
@@ -1123,12 +1210,10 @@ fn l_input_is_mouse_button_down(L: ?*c.lua_State) callconv(.c) c_int {
 fn l_input_get_mouse_position(L: ?*c.lua_State) callconv(.c) c_int {
     const Lnon = L orelse return 0;
 
-    if (g_glfw_window) |window| {
-        var x: f64 = 0;
-        var y: f64 = 0;
-        c.glfwGetCursorPos(@ptrCast(window), &x, &y);
-        c.lua_pushnumber(Lnon, x);
-        c.lua_pushnumber(Lnon, y);
+    if (getSceneFromLua(Lnon)) |scene| {
+        const pos = scene.getMousePosition();
+        c.lua_pushnumber(Lnon, pos.x);
+        c.lua_pushnumber(Lnon, pos.y);
     } else {
         c.lua_pushnumber(Lnon, 0);
         c.lua_pushnumber(Lnon, 0);
@@ -1525,25 +1610,41 @@ fn l_scene_get_name(L: ?*c.lua_State) callconv(.c) c_int {
 fn registerKeyConstants(L: *c.lua_State) void {
     c.lua_newtable(L);
 
-    // Common keys
+    // Common keys (both uppercase and capitalized for convenience)
     c.lua_pushinteger(L, c.GLFW_KEY_SPACE);
     c.lua_setfield(L, -2, "SPACE");
+    c.lua_pushinteger(L, c.GLFW_KEY_SPACE);
+    c.lua_setfield(L, -2, "Space");
     c.lua_pushinteger(L, c.GLFW_KEY_ESCAPE);
     c.lua_setfield(L, -2, "ESCAPE");
+    c.lua_pushinteger(L, c.GLFW_KEY_ESCAPE);
+    c.lua_setfield(L, -2, "Escape");
     c.lua_pushinteger(L, c.GLFW_KEY_ENTER);
     c.lua_setfield(L, -2, "ENTER");
+    c.lua_pushinteger(L, c.GLFW_KEY_ENTER);
+    c.lua_setfield(L, -2, "Enter");
     c.lua_pushinteger(L, c.GLFW_KEY_TAB);
     c.lua_setfield(L, -2, "TAB");
+    c.lua_pushinteger(L, c.GLFW_KEY_TAB);
+    c.lua_setfield(L, -2, "Tab");
 
-    // Arrow keys
+    // Arrow keys (uppercase and capitalized)
     c.lua_pushinteger(L, c.GLFW_KEY_UP);
     c.lua_setfield(L, -2, "UP");
+    c.lua_pushinteger(L, c.GLFW_KEY_UP);
+    c.lua_setfield(L, -2, "Up");
     c.lua_pushinteger(L, c.GLFW_KEY_DOWN);
     c.lua_setfield(L, -2, "DOWN");
+    c.lua_pushinteger(L, c.GLFW_KEY_DOWN);
+    c.lua_setfield(L, -2, "Down");
     c.lua_pushinteger(L, c.GLFW_KEY_LEFT);
     c.lua_setfield(L, -2, "LEFT");
+    c.lua_pushinteger(L, c.GLFW_KEY_LEFT);
+    c.lua_setfield(L, -2, "Left");
     c.lua_pushinteger(L, c.GLFW_KEY_RIGHT);
     c.lua_setfield(L, -2, "RIGHT");
+    c.lua_pushinteger(L, c.GLFW_KEY_RIGHT);
+    c.lua_setfield(L, -2, "Right");
 
     // WASD
     c.lua_pushinteger(L, c.GLFW_KEY_W);
@@ -1554,6 +1655,9 @@ fn registerKeyConstants(L: *c.lua_State) void {
     c.lua_setfield(L, -2, "S");
     c.lua_pushinteger(L, c.GLFW_KEY_D);
     c.lua_setfield(L, -2, "D");
+    // Also add R for reset
+    c.lua_pushinteger(L, c.GLFW_KEY_R);
+    c.lua_setfield(L, -2, "R");
 
     // Modifiers
     c.lua_pushinteger(L, c.GLFW_KEY_LEFT_SHIFT);
