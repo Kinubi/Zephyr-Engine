@@ -55,6 +55,18 @@ pub const ScriptingSystem = struct {
         std.heap.page_allocator.destroy(self.action_queue);
     }
 
+    /// Release a Lua state that was acquired for a ScriptComponent.
+    /// Call this when an entity with a ScriptComponent is destroyed to prevent leaks.
+    pub fn releaseScriptState(self: *ScriptingSystem, sc: *ScriptComponent) void {
+        if (sc.lua_state) |state| {
+            if (self.runner.state_pool) |sp| {
+                sp.release(state);
+            }
+            sc.lua_state = null;
+            sc.initialized = false;
+        }
+    }
+
     /// Enqueue a script to be executed on the thread pool. ctx is an opaque pointer
     /// that will be delivered with the Action; use null if not needed.
     pub fn runScript(self: *ScriptingSystem, script: []const u8, ctx: *anyopaque, owner: EntityId, scene_ptr: *anyopaque) !u64 {

@@ -367,13 +367,13 @@ zephyr.entity.destroy(entity)
 |----------|-----------|-------------|
 | `get_position` | `zephyr.transform.get_position(entity) -> x, y, z` | Get world position |
 | `set_position` | `zephyr.transform.set_position(entity, x, y, z)` | Set world position |
-| `get_rotation` | `zephyr.transform.get_rotation(entity) -> x, y, z, w` | Get rotation quaternion |
-| `set_rotation` | `zephyr.transform.set_rotation(entity, x, y, z, w)` | Set rotation quaternion |
+| `get_rotation` | `zephyr.transform.get_rotation(entity) -> pitch, yaw, roll` | Get rotation as Euler angles (radians) |
+| `set_rotation` | `zephyr.transform.set_rotation(entity, pitch, yaw, roll)` | Set rotation from Euler angles (radians) |
 | `get_scale` | `zephyr.transform.get_scale(entity) -> x, y, z` | Get scale |
 | `set_scale` | `zephyr.transform.set_scale(entity, x, y, z)` | Set scale |
 | `translate` | `zephyr.transform.translate(entity, dx, dy, dz)` | Move relative |
-| `rotate` | `zephyr.transform.rotate(entity, ax, ay, az, angle)` | Rotate around axis (radians) |
-| `look_at` | `zephyr.transform.look_at(entity, tx, ty, tz)` | Point at target |
+| `rotate` | `zephyr.transform.rotate(entity, dpitch, dyaw, droll)` | Rotate by Euler angle deltas (radians) |
+| `look_at` | `zephyr.transform.look_at(entity, tx, ty, tz, [preserve_roll])` | Point at target (resets roll unless preserve_roll=true) |
 | `forward` | `zephyr.transform.forward(entity) -> x, y, z` | Get forward vector |
 | `right` | `zephyr.transform.right(entity) -> x, y, z` | Get right vector |
 | `up` | `zephyr.transform.up(entity) -> x, y, z` | Get up vector |
@@ -388,8 +388,11 @@ if zephyr.input.is_key_down(Key.W) then
     zephyr.transform.translate(player, fx * speed * dt, fy * speed * dt, fz * speed * dt)
 end
 
--- Look at target
+-- Look at target (resets roll to 0)
 zephyr.transform.look_at(player, target_x, target_y, target_z)
+
+-- Look at target but keep current roll (e.g., for banking aircraft)
+zephyr.transform.look_at(aircraft, target_x, target_y, target_z, true)
 ```
 
 ### Input API
@@ -460,14 +463,14 @@ zephyr.light.set_color(light, 1.0, 0.5 + math.sin(t) * 0.5, 0.0)
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `set_rate` | `zephyr.particles.set_rate(entity, rate)` | Particles per second |
-| `set_color` | `zephyr.particles.set_color(entity, r, g, b, a)` | Particle color |
+| `set_color` | `zephyr.particles.set_color(entity, r, g, b)` | Particle color |
 | `set_active` | `zephyr.particles.set_active(entity, active)` | Enable/disable |
 
 ```lua
 -- Activate particles on impact
 zephyr.particles.set_active(sparks, true)
 zephyr.particles.set_rate(sparks, 100)
-zephyr.particles.set_color(sparks, 1.0, 0.8, 0.2, 1.0)
+zephyr.particles.set_color(sparks, 1.0, 0.8, 0.2)
 ```
 
 ### Physics API

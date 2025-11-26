@@ -15,6 +15,7 @@ const Transform = ecs.Transform;
 const PointLight = ecs.PointLight;
 const ParticleEmitter = ecs.ParticleEmitter;
 const Name = ecs.Name;
+const ScriptComponent = @import("../ecs/components/script.zig").ScriptComponent;
 const RigidBody = @import("../ecs/components/physics_components.zig").RigidBody;
 const Math = @import("../utils/math.zig");
 const Vec3 = Math.Vec3;
@@ -875,6 +876,11 @@ fn l_entity_destroy(L: ?*c.lua_State) callconv(.c) c_int {
     const scene = getSceneFromLua(Lnon) orelse return 0;
     const entity = getEntityFromArg(Lnon, 1) orelse return 0;
 
+    // Release any Lua state owned by a ScriptComponent before destroying the entity
+    if (scene.ecs_world.get(ScriptComponent, entity)) |sc| {
+        scene.scripting_system.releaseScriptState(sc);
+    }
+
     scene.ecs_world.destroyEntity(entity);
     return 0;
 }
@@ -1148,7 +1154,10 @@ fn l_transform_get_up(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-/// zephyr.transform.look_at(entity_id, target_x, target_y, target_z)
+/// zephyr.transform.look_at(entity_id, target_x, target_y, target_z, [preserve_roll])
+/// Points the entity's forward direction (-Z) at the target position.
+/// If preserve_roll is true (or any truthy value), the existing roll is preserved.
+/// Otherwise, roll is reset to 0 (default behavior, assumes Y-up world).
 fn l_transform_look_at(L: ?*c.lua_State) callconv(.c) c_int {
     const Lnon = L orelse return 0;
     const scene = getSceneFromLua(Lnon) orelse return 0;
@@ -1158,6 +1167,9 @@ fn l_transform_look_at(L: ?*c.lua_State) callconv(.c) c_int {
     const ty = c.luaL_checknumber(Lnon, 3);
     const tz = c.luaL_checknumber(Lnon, 4);
 
+    // Optional 5th argument: preserve_roll (default: false)
+    const preserve_roll = if (c.lua_gettop(Lnon) >= 5) c.lua_toboolean(Lnon, 5) != 0 else false;
+
     if (scene.ecs_world.get(Transform, entity)) |t| {
         const target = Vec3.init(@floatCast(tx), @floatCast(ty), @floatCast(tz));
         const dir = Vec3.sub(target, t.position);
@@ -1166,7 +1178,10 @@ fn l_transform_look_at(L: ?*c.lua_State) callconv(.c) c_int {
             // Calculate yaw and pitch from direction
             const yaw = std.math.atan2(normalized.x, normalized.z);
             const pitch = -std.math.asin(normalized.y);
-            t.setRotation(Vec3.init(pitch, yaw, 0));
+
+            // Preserve existing roll if requested, otherwise reset to 0
+            const roll = if (preserve_roll) t.rotation.toEuler().z else 0;
+            t.setRotation(Vec3.init(pitch, yaw, roll));
         }
     }
     return 0;

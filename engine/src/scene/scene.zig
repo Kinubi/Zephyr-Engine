@@ -692,6 +692,11 @@ pub const Scene = struct {
     pub fn destroyObject(self: *Scene, game_object: *GameObject) void {
         const entity_id = game_object.entity_id;
 
+        // Release any Lua state owned by a ScriptComponent before destroying the entity
+        if (self.ecs_world.get(ecs.ScriptComponent, entity_id)) |sc| {
+            self.scripting_system.releaseScriptState(sc);
+        }
+
         // Destroy in ECS world
         self.ecs_world.destroyEntity(entity_id);
 
@@ -727,6 +732,13 @@ pub const Scene = struct {
     /// Unload scene - destroys all entities
     pub fn unload(self: *Scene) void {
         log(.INFO, "scene", "Unloading scene: {s} ({} entities)", .{ self.name, self.entities.items.len });
+
+        // Release all Lua states before destroying entities
+        for (self.entities.items) |entity_id| {
+            if (self.ecs_world.get(ecs.ScriptComponent, entity_id)) |sc| {
+                self.scripting_system.releaseScriptState(sc);
+            }
+        }
 
         // Destroy all entities in reverse order
         var i = self.entities.items.len;
@@ -1108,6 +1120,13 @@ pub const Scene = struct {
 
     fn clearInternal(self: *Scene) void {
         log(.INFO, "scene", "Clearing scene...", .{});
+
+        // Release all Lua states before destroying entities
+        for (self.entities.items) |entity| {
+            if (self.ecs_world.get(ecs.ScriptComponent, entity)) |sc| {
+                self.scripting_system.releaseScriptState(sc);
+            }
+        }
 
         // Destroy all entities in the ECS world
         for (self.entities.items) |entity| {

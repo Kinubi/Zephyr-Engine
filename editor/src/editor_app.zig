@@ -225,7 +225,7 @@ pub const App = struct {
             swapchain,
             thread_pool,
             global_ubo_set,
-            "cornell_box",
+            "avoider_game",
         );
 
         // Register scene pointer in World so systems can access it

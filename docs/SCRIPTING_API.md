@@ -120,10 +120,10 @@ Manipulate entity position, rotation, and scale in 3D space.
 
 | Function | Signature | Returns | Description |
 |----------|-----------|---------|-------------|
-| `get_rotation` | `zephyr.transform.get_rotation(entity)` | `x, y, z, w` | Get rotation as quaternion |
-| `set_rotation` | `zephyr.transform.set_rotation(entity, x, y, z, w)` | `void` | Set rotation as quaternion |
-| `rotate` | `zephyr.transform.rotate(entity, ax, ay, az, angle)` | `void` | Rotate around axis (radians) |
-| `look_at` | `zephyr.transform.look_at(entity, tx, ty, tz)` | `void` | Orient to face target point |
+| `get_rotation` | `zephyr.transform.get_rotation(entity)` | `pitch, yaw, roll` | Get rotation as Euler angles (radians) |
+| `set_rotation` | `zephyr.transform.set_rotation(entity, pitch, yaw, roll)` | `void` | Set rotation from Euler angles (radians) |
+| `rotate` | `zephyr.transform.rotate(entity, dpitch, dyaw, droll)` | `void` | Rotate by Euler angle deltas (radians) |
+| `look_at` | `zephyr.transform.look_at(entity, tx, ty, tz, [preserve_roll])` | `void` | Orient to face target point. Resets roll to 0 unless preserve_roll is true. |
 
 ### Scale Functions
 
@@ -172,7 +172,7 @@ end
 -- Rotation
 local rot_speed = 2.0
 if zephyr.input.is_key_down(Key.Q) then
-    zephyr.transform.rotate(player, 0, 1, 0, rot_speed * dt)  -- Rotate left
+    zephyr.transform.rotate(player, 0, rot_speed * dt, 0)  -- Rotate left (yaw)
 end
 
 -- Look at target
@@ -264,11 +264,11 @@ local velocity = 10.0
 local dt = zephyr.time.delta()
 zephyr.transform.translate(entity, velocity * dt, 0, 0)
 
--- Animation using elapsed time
+-- Animation using elapsed time (bobbing motion)
 local t = zephyr.time.elapsed()
-local bob = math.sin(t * 2.0) * 0.5  -- Bobbing motion
-local x, y, z = zephyr.transform.get_position(entity)
-zephyr.transform.set_position(entity, x, y + bob * dt, z)
+local bob = math.sin(t * 2.0) * 0.5  -- Oscillates between -0.5 and 0.5
+local base_y = 0  -- Base y position
+zephyr.transform.set_position(entity, 0, base_y + bob, 0)
 
 -- Pulsing effect
 local pulse = math.sin(zephyr.time.elapsed() * 3.0) * 0.5 + 0.5  -- 0 to 1
@@ -351,7 +351,7 @@ Control ParticleEmitter components.
 | Function | Signature | Returns | Description |
 |----------|-----------|---------|-------------|
 | `set_rate` | `zephyr.particles.set_rate(entity, rate)` | `void` | Set particles per second |
-| `set_color` | `zephyr.particles.set_color(entity, r, g, b, a)` | `void` | Set particle color |
+| `set_color` | `zephyr.particles.set_color(entity, r, g, b)` | `void` | Set particle color |
 | `set_active` | `zephyr.particles.set_active(entity, active)` | `void` | Enable/disable emitter |
 
 ### Examples
@@ -365,7 +365,7 @@ local fire = zephyr.entity.find("Fire")
 function on_hit()
     zephyr.particles.set_active(sparks, true)
     zephyr.particles.set_rate(sparks, 200)
-    zephyr.particles.set_color(sparks, 1.0, 0.8, 0.2, 1.0)  -- Orange sparks
+    zephyr.particles.set_color(sparks, 1.0, 0.8, 0.2)  -- Orange sparks
 end
 
 -- Speed-based dust
@@ -379,7 +379,7 @@ if fuel > 0 then
     fuel = fuel - zephyr.time.delta()
     zephyr.particles.set_rate(fire, fuel)
     local intensity = fuel / 100
-    zephyr.particles.set_color(fire, 1.0, intensity * 0.5, 0, 1.0)
+    zephyr.particles.set_color(fire, 1.0, intensity * 0.5, 0)
 else
     zephyr.particles.set_active(fire, false)
 end
@@ -699,10 +699,10 @@ end
 
 -- Rotation
 if zephyr.input.is_key_down(Key.Q) then
-    zephyr.transform.rotate(player, 0, 1, 0, look_speed * dt)
+    zephyr.transform.rotate(player, 0, look_speed * dt, 0)
 end
 if zephyr.input.is_key_down(Key.E) then
-    zephyr.transform.rotate(player, 0, 1, 0, -look_speed * dt)
+    zephyr.transform.rotate(player, 0, -look_speed * dt, 0)
 end
 
 -- Jump
@@ -813,7 +813,7 @@ for _, name in ipairs(collectibles) do
     local coin = zephyr.entity.find(name)
     if coin and zephyr.entity.exists(coin) then
         -- Spin animation
-        zephyr.transform.rotate(coin, 0, 1, 0, spin_speed * dt)
+        zephyr.transform.rotate(coin, 0, spin_speed * dt, 0)
         
         -- Bob animation
         local cx, cy, cz = zephyr.transform.get_position(coin)
