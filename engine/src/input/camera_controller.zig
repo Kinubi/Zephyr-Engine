@@ -149,4 +149,76 @@ pub const CameraController = struct {
         // Update view matrix
         camera.setViewYXZ(self.position, self.rotation);
     }
+
+    /// Get the current view matrix from controller state without modifying any camera
+    /// Use this when you need the editor camera's view separately
+    pub fn getViewMatrix(self: *const CameraController) Math.Mat4x4 {
+        // Build view matrix from position and rotation (pitch, yaw, roll)
+        const cos_pitch = std.math.cos(self.rotation.x);
+        const sin_pitch = std.math.sin(self.rotation.x);
+        const cos_yaw = std.math.cos(self.rotation.y);
+        const sin_yaw = std.math.sin(self.rotation.y);
+
+        // Forward = -Z direction rotated by yaw and pitch
+        const forward = Math.Vec3.init(
+            -sin_yaw * cos_pitch,
+            sin_pitch,
+            -cos_yaw * cos_pitch,
+        );
+        const right = Math.Vec3.init(cos_yaw, 0, -sin_yaw);
+        const up = Math.Vec3.cross(right, forward);
+
+        var view = Math.Mat4x4.identity();
+        view.data[0] = right.x;
+        view.data[1] = up.x;
+        view.data[2] = forward.x;
+        view.data[4] = right.y;
+        view.data[5] = up.y;
+        view.data[6] = forward.y;
+        view.data[8] = right.z;
+        view.data[9] = up.z;
+        view.data[10] = forward.z;
+        view.data[12] = -Math.Vec3.dot(right, self.position);
+        view.data[13] = -Math.Vec3.dot(up, self.position);
+        view.data[14] = -Math.Vec3.dot(forward, self.position);
+
+        return view;
+    }
+
+    /// Get the current inverse view matrix (world transform) from controller state
+    pub fn getInverseViewMatrix(self: *const CameraController) Math.Mat4x4 {
+        const cos_pitch = std.math.cos(self.rotation.x);
+        const sin_pitch = std.math.sin(self.rotation.x);
+        const cos_yaw = std.math.cos(self.rotation.y);
+        const sin_yaw = std.math.sin(self.rotation.y);
+
+        const forward = Math.Vec3.init(
+            -sin_yaw * cos_pitch,
+            sin_pitch,
+            -cos_yaw * cos_pitch,
+        );
+        const right = Math.Vec3.init(cos_yaw, 0, -sin_yaw);
+        const up = Math.Vec3.cross(right, forward);
+
+        var inv_view = Math.Mat4x4.identity();
+        inv_view.data[0] = right.x;
+        inv_view.data[1] = right.y;
+        inv_view.data[2] = right.z;
+        inv_view.data[4] = up.x;
+        inv_view.data[5] = up.y;
+        inv_view.data[6] = up.z;
+        inv_view.data[8] = forward.x;
+        inv_view.data[9] = forward.y;
+        inv_view.data[10] = forward.z;
+        inv_view.data[12] = self.position.x;
+        inv_view.data[13] = self.position.y;
+        inv_view.data[14] = self.position.z;
+
+        return inv_view;
+    }
+
+    /// Get the current position
+    pub fn getPosition(self: *const CameraController) Math.Vec3 {
+        return self.position;
+    }
 };

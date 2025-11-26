@@ -210,13 +210,29 @@ pub const SceneLayer = struct {
             log(.ERROR, "scene_layer", "Failed to apply PT toggle in prepare: {}", .{err});
         };
 
-        // Apply camera controller (movement/rotation, FOV) once per frame
-        self.controller.update(self.camera, dt);
+        // Camera handling depends on scene state:
+        // - Edit mode: Use editor camera (CameraController updates it)
+        // - Play mode: Use scene's primary camera (from ECS Camera component)
+        const in_play_mode = self.scene.state == .Play;
+
+        if (!in_play_mode) {
+            // Edit mode: Apply camera controller (movement/rotation, FOV)
+            self.controller.update(self.camera, dt);
+        } else {
+            // Play mode: Override camera with scene's primary camera
+            if (self.scene.getPlayModeCamera()) |play_cam| {
+                self.camera.viewMatrix = play_cam.view_matrix;
+                self.camera.projectionMatrix = play_cam.projection_matrix;
+                self.camera.inverseViewMatrix = play_cam.inverse_view_matrix;
+            }
+            // If no primary camera in scene, keep using editor camera as fallback
+        }
 
         // Select the UBO snapshot for this prepare() frame
         const prep_idx = self.prepare_frame_index % MAX_FRAMES_IN_FLIGHT;
 
         // Build UBO for scene preparation (includes lights after prepareFrame)
+        // Uses whichever camera is active (editor or scene)
         self.prepared_ubo[prep_idx] = GlobalUbo{
             .view = self.camera.viewMatrix,
             .projection = self.camera.projectionMatrix,
