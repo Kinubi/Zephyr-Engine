@@ -1382,6 +1382,14 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
     };
     dynamic_rendering_features.p_next = &sync2_features;
 
+    // Enable Vulkan 1.0 core features (samplerAnisotropy for texture filtering)
+    var features2 = vk.PhysicalDeviceFeatures2{
+        .features = .{
+            .sampler_anisotropy = .true,
+        },
+    };
+    sync2_features.p_next = &features2;
+
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);
 }

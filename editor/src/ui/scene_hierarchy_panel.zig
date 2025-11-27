@@ -1049,6 +1049,17 @@ pub const SceneHierarchyPanel = struct {
                 c.ImGui_SameLine();
                 c.ImGui_TextColored(.{ .x = 1.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "[Press Enter]");
             }
+
+            // Drag-drop target for HDR files
+            if (c.ImGui_BeginDragDropTarget()) {
+                if (c.ImGui_AcceptDragDropPayload("ASSET_PATH", 0)) |payload| {
+                    const dropped_path: [*:0]const u8 = @ptrCast(@alignCast(payload.*.Data));
+                    const path_slice = std.mem.sliceTo(dropped_path, 0);
+                    skybox.setTexturePath(path_slice);
+                    skybox.confirmTexturePath();
+                }
+                c.ImGui_EndDragDropTarget();
+            }
         }
 
         // Active checkbox

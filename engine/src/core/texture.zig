@@ -721,6 +721,7 @@ pub const Texture = struct {
         const image_view = gc.vkd.createImageView(gc.dev, &view_info, null) catch return error.FailedToCreateImageView;
 
         // Create sampler with clamp-to-edge for env maps
+        // Enable anisotropic filtering for sharper quality
         const sampler_info = vk.SamplerCreateInfo{
             .s_type = vk.StructureType.sampler_create_info,
             .mag_filter = vk.Filter.linear,
@@ -730,7 +731,7 @@ pub const Texture = struct {
             .address_mode_v = vk.SamplerAddressMode.clamp_to_edge,
             .address_mode_w = vk.SamplerAddressMode.clamp_to_edge,
             .mip_lod_bias = 0.0,
-            .max_anisotropy = 1.0,
+            .max_anisotropy = 16.0,
             .min_lod = 0.0,
             .max_lod = @floatFromInt(mip_levels),
             .border_color = vk.BorderColor.float_opaque_black,
@@ -739,7 +740,7 @@ pub const Texture = struct {
             .unnormalized_coordinates = .false,
             .compare_enable = .false,
             .compare_op = vk.CompareOp.always,
-            .anisotropy_enable = .false,
+            .anisotropy_enable = .true,
         };
 
         const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;

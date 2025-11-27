@@ -495,7 +495,7 @@
             "uuid": "bccfc32f-6833-4350-9d6e-46cda15dabe3",
             "components": {
                 "Name": {
-                    "name": "Empty Entity"
+                    "name": "Skybox"
                 },
                 "Transform": {
                     "position": {

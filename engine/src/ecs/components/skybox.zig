@@ -234,10 +234,15 @@ pub const Skybox = struct {
         }
 
         // Path confirmed (texture loads immediately if true)
+        // Auto-confirm if loading from scene with a valid texture path
         if (value.object.get("path_confirmed")) |v| {
             if (v == .bool) {
                 skybox.path_confirmed = v.bool;
             }
+        }
+        // If we have a texture path from the scene file, auto-confirm it
+        if (skybox.getTexturePath().len > 0 and skybox.source_type != .procedural) {
+            skybox.path_confirmed = true;
         }
 
         // Procedural sky settings

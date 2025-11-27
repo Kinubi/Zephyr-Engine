@@ -6,138 +6,40 @@
         }
     ],
     "types" : {
-        "_40" : {
-            "name" : "GlobalUBO",
+        "_11" : {
+            "name" : "_11",
             "members" : [
                 {
-                    "name" : "projection",
-                    "type" : "mat4",
-                    "offset" : 0,
-                    "matrix_stride" : 16
+                    "name" : "Color",
+                    "type" : "vec4"
                 },
                 {
-                    "name" : "view",
-                    "type" : "mat4",
-                    "offset" : 64,
-                    "matrix_stride" : 16
-                },
-                {
-                    "name" : "projectionView",
-                    "type" : "mat4",
-                    "offset" : 128,
-                    "matrix_stride" : 16
-                },
-                {
-                    "name" : "cameraPosition",
-                    "type" : "vec3",
-                    "offset" : 192
-                },
-                {
-                    "name" : "time",
-                    "type" : "float",
-                    "offset" : 204
-                }
-            ]
-        },
-        "_83" : {
-            "name" : "SkyboxPushConstants",
-            "members" : [
-                {
-                    "name" : "rotation",
-                    "type" : "float",
-                    "offset" : 0
-                },
-                {
-                    "name" : "exposure",
-                    "type" : "float",
-                    "offset" : 4
-                },
-                {
-                    "name" : "_pad0",
-                    "type" : "vec2",
-                    "offset" : 8
-                },
-                {
-                    "name" : "tint",
-                    "type" : "vec4",
-                    "offset" : 16
-                },
-                {
-                    "name" : "sourceType",
-                    "type" : "int",
-                    "offset" : 32
-                },
-                {
-                    "name" : "_pad1",
-                    "type" : "int",
-                    "array" : [
-                        3
-                    ],
-                    "array_size_is_literal" : [
-                        true
-                    ],
-                    "offset" : 36,
-                    "array_stride" : 4
-                },
-                {
-                    "name" : "sunDirection",
-                    "type" : "vec4",
-                    "offset" : 48
-                },
-                {
-                    "name" : "groundColor",
-                    "type" : "vec4",
-                    "offset" : 64
-                },
-                {
-                    "name" : "horizonColor",
-                    "type" : "vec4",
-                    "offset" : 80
-                },
-                {
-                    "name" : "zenithColor",
-                    "type" : "vec4",
-                    "offset" : 96
+                    "name" : "UV",
+                    "type" : "vec2"
                 }
             ]
         }
     },
     "inputs" : [
         {
-            "type" : "vec2",
-            "name" : "fragUV",
+            "type" : "_11",
+            "name" : "In",
             "location" : 0
         }
     ],
     "outputs" : [
         {
             "type" : "vec4",
-            "name" : "outColor",
+            "name" : "fColor",
             "location" : 0
         }
     ],
     "textures" : [
         {
             "type" : "sampler2D",
-            "name" : "envMap",
-            "set" : 0,
-            "binding" : 1
-        }
-    ],
-    "ubos" : [
-        {
-            "type" : "_40",
-            "name" : "GlobalUBO",
-            "block_size" : 208,
+            "name" : "sTexture",
             "set" : 0,
             "binding" : 0
-        }
-    ],
-    "push_constants" : [
-        {
-            "type" : "_83",
-            "name" : "skybox",
-            "push_constant" : true
         }
     ]
 }
