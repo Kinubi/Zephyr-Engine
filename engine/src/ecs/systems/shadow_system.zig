@@ -131,6 +131,10 @@ pub const ShadowSystem = struct {
     // System generation - incremented on any change
     generation: u32 = 0,
 
+    // Track which frame buffers have been initialized with data
+    // Each bit corresponds to a frame index - set when that buffer is updated
+    frame_buffers_initialized: u32 = 0,
+
     pub fn init(allocator: std.mem.Allocator) ShadowSystem {
         return .{
             .allocator = allocator,
@@ -162,15 +166,23 @@ pub const ShadowSystem = struct {
     }
 
     pub fn deinit(self: *ShadowSystem) void {
+        log(.INFO, "shadow_system", "deinit called, buffers_initialized={}", .{self.buffers_initialized});
+
         // Clean up pending delta
         self.pending_delta.deinit(self.allocator);
 
         if (self.buffers_initialized) {
             if (self.buffer_manager) |bm| {
-                for (&self.shadow_data_buffers) |buffer| {
-                    bm.destroyBuffer(buffer) catch {};
+                log(.INFO, "shadow_system", "Destroying {} shadow data buffers", .{MAX_FRAMES_IN_FLIGHT});
+                for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+                    bm.destroyBuffer(self.shadow_data_buffers[i]) catch |err| {
+                        log(.WARN, "shadow_system", "Failed to destroy buffer {}: {}", .{ i, err });
+                    };
                 }
+            } else {
+                log(.WARN, "shadow_system", "buffer_manager is null, cannot destroy buffers!", .{});
             }
+            self.buffers_initialized = false;
         }
     }
 
@@ -190,12 +202,12 @@ pub const ShadowSystem = struct {
     /// Query ECS for shadow-casting lights and detect changes
     /// Stores pending delta for update phase to process
     pub fn prepareFromECS(self: *ShadowSystem, world: *World) !void {
-        // Reset pending delta
-        self.pending_delta.reset(self.allocator);
-
-        // Check if any transforms or lights changed globally
-        const transforms_changed = world.hasChanged(Transform);
-        _ = world.hasChanged(PointLight); // Updates last_checked_version for lights
+        // Only reset delta if all frame buffers have been initialized
+        // Otherwise we lose the "dirty" state before all buffers are updated
+        const all_frames_init = self.frame_buffers_initialized == ((@as(u32, 1) << MAX_FRAMES_IN_FLIGHT) - 1);
+        if (all_frames_init) {
+            self.pending_delta.reset(self.allocator);
+        }
 
         // Query for all shadow-casting lights (include EntityId to track which entity)
         var query = world.query(struct {
@@ -236,6 +248,7 @@ pub const ShadowSystem = struct {
         // Detect if light list changed (added/removed)
         if (new_light_count != self.active_light_count) {
             self.pending_delta.lights_changed = true;
+            log(.DEBUG, "shadow_system", "Light count changed: {} -> {}", .{ self.active_light_count, new_light_count });
         }
 
         // Check each light for changes
@@ -244,13 +257,18 @@ pub const ShadowSystem = struct {
             const entity = found_entities[i];
             const new_pos = found_positions[i];
 
-            // Check if this slot's entity changed
+            // Check if this slot's entity changed or slot was inactive
             var slot_changed = false;
             if (!self.light_cache[i].active or
                 !std.meta.eql(self.light_cache[i].entity, entity))
             {
                 slot_changed = true;
                 self.pending_delta.lights_changed = true;
+                log(.DEBUG, "shadow_system", "Light {} slot changed (was_active={}, entity_match={})", .{
+                    i,
+                    self.light_cache[i].active,
+                    std.meta.eql(self.light_cache[i].entity, entity),
+                });
             }
 
             // Check if position changed (comparing floats with tolerance)
@@ -258,9 +276,10 @@ pub const ShadowSystem = struct {
             const pos_diff = Math.Vec3.sub(new_pos, old_pos);
             const pos_changed = Math.Vec3.dot(pos_diff, pos_diff) > 0.0001;
 
-            if (slot_changed or pos_changed or (transforms_changed and self.light_cache[i].active)) {
+            if (slot_changed or pos_changed) {
                 // Mark this light as dirty
                 try self.pending_delta.dirty_light_indices.append(self.allocator, idx);
+                log(.DEBUG, "shadow_system", "Marked light {} dirty (slot_changed={}, pos_changed={})", .{ i, slot_changed, pos_changed });
             }
 
             // Update cache immediately (prepare can modify state)
@@ -290,27 +309,57 @@ pub const ShadowSystem = struct {
     pub fn processPendingChanges(self: *ShadowSystem, frame_index: u32) bool {
         const delta = &self.pending_delta;
 
-        // Early exit if nothing changed
-        if (delta.dirty_light_indices.items.len == 0 and !delta.lights_changed) {
+        // Check if this frame buffer needs initialization
+        const frame_bit: u32 = @as(u32, 1) << @intCast(frame_index);
+        const frame_needs_init = (self.frame_buffers_initialized & frame_bit) == 0;
+
+        // Early exit if nothing changed AND this frame buffer is already initialized
+        if (delta.dirty_light_indices.items.len == 0 and !delta.lights_changed and !frame_needs_init) {
             return false;
         }
 
-        // Recompute view*projection matrices for dirty lights
-        for (delta.dirty_light_indices.items) |light_idx| {
-            if (light_idx >= MAX_SHADOW_LIGHTS) continue;
+        log(.DEBUG, "shadow_system", "processPendingChanges: frame={}, dirty={}, lights_changed={}, frame_needs_init={}", .{
+            frame_index,
+            delta.dirty_light_indices.items.len,
+            delta.lights_changed,
+            frame_needs_init,
+        });
 
-            const cache = &self.light_cache[light_idx];
-            if (!cache.active) continue;
+        // If frame needs init, compute matrices for ALL active lights (not just dirty ones)
+        // This ensures all frame buffers have complete data
+        if (frame_needs_init) {
+            for (0..self.active_light_count) |i| {
+                const cache = &self.light_cache[i];
+                if (!cache.active) continue;
 
-            // Compute all 6 face view*projection matrices
-            for (0..6) |face| {
-                const view = buildFaceViewMatrix(cache.position, @intCast(face));
-                cache.face_view_projs[face] = self.shadow_projection.mul(view);
+                // Compute all 6 face view*projection matrices
+                for (0..6) |face| {
+                    const view = buildFaceViewMatrix(cache.position, @intCast(face));
+                    cache.face_view_projs[face] = self.shadow_projection.mul(view);
+                }
+
+                log(.DEBUG, "shadow_system", "Init: Computed view matrices for light {} at ({d:.2}, {d:.2}, {d:.2})", .{
+                    i, cache.position.x, cache.position.y, cache.position.z,
+                });
             }
+        } else {
+            // Only recompute for dirty lights
+            for (delta.dirty_light_indices.items) |light_idx| {
+                if (light_idx >= MAX_SHADOW_LIGHTS) continue;
 
-            log(.DEBUG, "shadow_system", "Recomputed view matrices for light {} at ({d:.2}, {d:.2}, {d:.2})", .{
-                light_idx, cache.position.x, cache.position.y, cache.position.z,
-            });
+                const cache = &self.light_cache[light_idx];
+                if (!cache.active) continue;
+
+                // Compute all 6 face view*projection matrices
+                for (0..6) |face| {
+                    const view = buildFaceViewMatrix(cache.position, @intCast(face));
+                    cache.face_view_projs[face] = self.shadow_projection.mul(view);
+                }
+
+                log(.DEBUG, "shadow_system", "Recomputed view matrices for light {} at ({d:.2}, {d:.2}, {d:.2})", .{
+                    light_idx, cache.position.x, cache.position.y, cache.position.z,
+                });
+            }
         }
 
         // Update GPU SSBO struct with all light data including view_proj matrices
@@ -355,6 +404,8 @@ pub const ShadowSystem = struct {
                 bm.updateBuffer(buffer, data, frame_index) catch |err| {
                     log(.WARN, "shadow_system", "Failed to update shadow SSBO: {}", .{err});
                 };
+                // Mark this frame buffer as initialized
+                self.frame_buffers_initialized |= (@as(u32, 1) << @intCast(frame_index));
             }
         }
 
@@ -362,6 +413,8 @@ pub const ShadowSystem = struct {
 
         if (delta.lights_changed) {
             log(.INFO, "shadow_system", "Shadow lights changed: {} active", .{self.active_light_count});
+            // Reset frame buffer tracking so all frames get updated with new light data
+            self.frame_buffers_initialized = 0;
         }
 
         return true;

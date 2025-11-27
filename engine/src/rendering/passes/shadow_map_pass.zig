@@ -242,8 +242,9 @@ pub const ShadowMapPass = struct {
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.shadow_pipeline, frame_info.current_frame);
 
         // Render 6 passes - one per cube face, all lights rendered simultaneously via multiview
-        // view_mask covers all active lights (e.g., 3 lights = 0b111 = 7)
-        const view_mask: u32 = (@as(u32, 1) << @intCast(active_light_count)) - 1;
+        // view_mask must match pipeline's view_mask (MAX_SHADOW_LIGHTS) - we always render all layers
+        // even if not all lights are active (inactive lights will just have garbage data that won't be sampled)
+        const view_mask: u32 = (@as(u32, 1) << MAX_SHADOW_LIGHTS) - 1;
 
         for (0..6) |face_idx| {
             try self.renderFaceForAllLights(cmd, shadow_cube, @intCast(face_idx), view_mask, active_light_count);
