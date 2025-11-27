@@ -28,6 +28,7 @@ pub const RasterizationData = struct {
 
         mesh_handle: MeshHandle,
         instances: []const InstanceData, // Per-instance data
+        instance_buffer_offset: u32 = 0, // Offset into global instance SSBO (set by batch builder)
         visible: bool = true,
     };
 

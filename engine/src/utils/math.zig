@@ -78,6 +78,15 @@ pub const Vec3 = struct {
         if (len == 0) return Vec3.zero();
         return self.scale(1.0 / len);
     }
+    /// Access component by index (0=x, 1=y, 2=z)
+    pub fn at(self: Vec3, idx: usize) f32 {
+        return switch (idx) {
+            0 => self.x,
+            1 => self.y,
+            2 => self.z,
+            else => unreachable,
+        };
+    }
 };
 
 pub const Vec4 = struct {
@@ -409,3 +418,292 @@ pub const Mat3 = struct {
 pub const Mat4x4 = Mat4;
 pub const Mat3x3 = Mat3;
 pub const Mat2x2 = Mat2;
+
+// ============================================================================
+// Frustum Culling
+// ============================================================================
+
+/// A plane in 3D space represented as ax + by + cz + d = 0
+/// Normal is (a, b, c), normalized. d is distance from origin.
+pub const Plane = struct {
+    normal: Vec3,
+    d: f32,
+
+    /// Distance from point to plane (positive = in front, negative = behind)
+    pub inline fn distanceToPoint(self: Plane, point: Vec3) f32 {
+        return self.normal.x * point.x + self.normal.y * point.y + self.normal.z * point.z + self.d;
+    }
+};
+
+/// Axis-Aligned Bounding Box
+pub const AABB = struct {
+    min: Vec3,
+    max: Vec3,
+
+    /// Get the center of the AABB
+    pub inline fn center(self: AABB) Vec3 {
+        return Vec3.init(
+            (self.min.x + self.max.x) * 0.5,
+            (self.min.y + self.max.y) * 0.5,
+            (self.min.z + self.max.z) * 0.5,
+        );
+    }
+
+    /// Get the half-extents (half-size) of the AABB
+    pub inline fn extents(self: AABB) Vec3 {
+        return Vec3.init(
+            (self.max.x - self.min.x) * 0.5,
+            (self.max.y - self.min.y) * 0.5,
+            (self.max.z - self.min.z) * 0.5,
+        );
+    }
+
+    /// Get bounding sphere radius (distance from center to corner)
+    pub inline fn boundingSphereRadius(self: AABB) f32 {
+        const ext = self.extents();
+        return @sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+    }
+
+    /// Transform an AABB by a 4x4 matrix, returning a new world-space AABB
+    /// Uses the separating axis theorem approach for tight bounds
+    /// Fully unrolled for maximum performance (no branches in hot path)
+    pub inline fn transform(self: AABB, mat: Mat4) AABB {
+        const d = mat.data;
+        const smin = self.min;
+        const smax = self.max;
+
+        // Extract translation (column 3)
+        var min_x = d[12];
+        var min_y = d[13];
+        var min_z = d[14];
+        var max_x = d[12];
+        var max_y = d[13];
+        var max_z = d[14];
+
+        // Column 0 contribution (X axis of local space)
+        {
+            const e0 = d[0];
+            const e1 = d[1];
+            const e2 = d[2];
+            const a0 = e0 * smin.x;
+            const b0 = e0 * smax.x;
+            const a1 = e1 * smin.x;
+            const b1 = e1 * smax.x;
+            const a2 = e2 * smin.x;
+            const b2 = e2 * smax.x;
+            min_x += @min(a0, b0);
+            max_x += @max(a0, b0);
+            min_y += @min(a1, b1);
+            max_y += @max(a1, b1);
+            min_z += @min(a2, b2);
+            max_z += @max(a2, b2);
+        }
+
+        // Column 1 contribution (Y axis of local space)
+        {
+            const e0 = d[4];
+            const e1 = d[5];
+            const e2 = d[6];
+            const a0 = e0 * smin.y;
+            const b0 = e0 * smax.y;
+            const a1 = e1 * smin.y;
+            const b1 = e1 * smax.y;
+            const a2 = e2 * smin.y;
+            const b2 = e2 * smax.y;
+            min_x += @min(a0, b0);
+            max_x += @max(a0, b0);
+            min_y += @min(a1, b1);
+            max_y += @max(a1, b1);
+            min_z += @min(a2, b2);
+            max_z += @max(a2, b2);
+        }
+
+        // Column 2 contribution (Z axis of local space)
+        {
+            const e0 = d[8];
+            const e1 = d[9];
+            const e2 = d[10];
+            const a0 = e0 * smin.z;
+            const b0 = e0 * smax.z;
+            const a1 = e1 * smin.z;
+            const b1 = e1 * smax.z;
+            const a2 = e2 * smin.z;
+            const b2 = e2 * smax.z;
+            min_x += @min(a0, b0);
+            max_x += @max(a0, b0);
+            min_y += @min(a1, b1);
+            max_y += @max(a1, b1);
+            min_z += @min(a2, b2);
+            max_z += @max(a2, b2);
+        }
+
+        return AABB{
+            .min = Vec3.init(min_x, min_y, min_z),
+            .max = Vec3.init(max_x, max_y, max_z),
+        };
+    }
+};
+
+/// View frustum with 6 planes for culling
+/// Planes face inward (positive half-space is inside frustum)
+pub const Frustum = struct {
+    planes: [6]Plane, // left, right, bottom, top, near, far
+
+    /// Extract frustum planes from a view-projection matrix
+    /// Uses Gribb/Hartmann method for plane extraction
+    pub fn fromViewProjection(vp: Mat4) Frustum {
+        var frustum: Frustum = undefined;
+
+        // Row extraction from column-major matrix:
+        // row0 = [data[0], data[4], data[8], data[12]]
+        // row1 = [data[1], data[5], data[9], data[13]]
+        // row2 = [data[2], data[6], data[10], data[14]]
+        // row3 = [data[3], data[7], data[11], data[15]]
+
+        const row0 = Vec4.init(vp.data[0], vp.data[4], vp.data[8], vp.data[12]);
+        const row1 = Vec4.init(vp.data[1], vp.data[5], vp.data[9], vp.data[13]);
+        const row2 = Vec4.init(vp.data[2], vp.data[6], vp.data[10], vp.data[14]);
+        const row3 = Vec4.init(vp.data[3], vp.data[7], vp.data[11], vp.data[15]);
+
+        // Left: row3 + row0
+        frustum.planes[0] = normalizePlane(
+            row3.x + row0.x,
+            row3.y + row0.y,
+            row3.z + row0.z,
+            row3.w + row0.w,
+        );
+
+        // Right: row3 - row0
+        frustum.planes[1] = normalizePlane(
+            row3.x - row0.x,
+            row3.y - row0.y,
+            row3.z - row0.z,
+            row3.w - row0.w,
+        );
+
+        // Bottom: row3 + row1
+        frustum.planes[2] = normalizePlane(
+            row3.x + row1.x,
+            row3.y + row1.y,
+            row3.z + row1.z,
+            row3.w + row1.w,
+        );
+
+        // Top: row3 - row1
+        frustum.planes[3] = normalizePlane(
+            row3.x - row1.x,
+            row3.y - row1.y,
+            row3.z - row1.z,
+            row3.w - row1.w,
+        );
+
+        // Near: row2 (for Vulkan [0,1] depth range, clip.z >= 0)
+        frustum.planes[4] = normalizePlane(
+            row2.x,
+            row2.y,
+            row2.z,
+            row2.w,
+        );
+
+        // Far: row3 - row2
+        frustum.planes[5] = normalizePlane(
+            row3.x - row2.x,
+            row3.y - row2.y,
+            row3.z - row2.z,
+            row3.w - row2.w,
+        );
+
+        return frustum;
+    }
+
+    /// Check if the frustum is valid (not from an identity/degenerate matrix)
+    pub fn isValid(self: Frustum) bool {
+        // A valid frustum should have reasonable plane normals
+        // If all planes have tiny normals, it's probably from an identity matrix
+        var valid_planes: usize = 0;
+        for (self.planes) |plane| {
+            const len_sq = plane.normal.x * plane.normal.x +
+                plane.normal.y * plane.normal.y +
+                plane.normal.z * plane.normal.z;
+            if (len_sq > 0.5) { // Should be ~1.0 for normalized planes
+                valid_planes += 1;
+            }
+        }
+        if (valid_planes < 4) return false;
+
+        // Additional check: A real perspective frustum has near/far planes with
+        // different distances. If near.d and far.d are too similar (like both ~1),
+        // it's probably from an identity or degenerate matrix.
+        const near_d = @abs(self.planes[4].d);
+        const far_d = @abs(self.planes[5].d);
+
+        // For a real camera, far is typically much larger than near
+        // Identity matrix gives near.d=1, far.d=1 which is invalid
+        if (far_d < 2.0 and near_d < 2.0) {
+            // Both planes very close to origin - likely identity matrix
+            return false;
+        }
+
+        return true;
+    }
+
+    /// Test if an AABB is visible (intersects or is inside the frustum)
+    /// Returns true if the AABB should be rendered
+    /// Uses optimized p-vertex computation with branchless selection
+    pub inline fn testAABB(self: Frustum, aabb: AABB) bool {
+        // Unrolled loop for better instruction-level parallelism
+        // Test each plane - early exit on first failure
+        inline for (0..6) |i| {
+            const plane = self.planes[i];
+            const n = plane.normal;
+
+            // Branchless p-vertex selection using sign comparison
+            // p-vertex is the corner furthest in direction of plane normal
+            const px = if (n.x >= 0) aabb.max.x else aabb.min.x;
+            const py = if (n.y >= 0) aabb.max.y else aabb.min.y;
+            const pz = if (n.z >= 0) aabb.max.z else aabb.min.z;
+
+            // If p-vertex is behind plane, AABB is fully outside
+            if (n.x * px + n.y * py + n.z * pz + plane.d < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Fast sphere pre-test + AABB test combined
+    /// Use this when you have both center and radius available
+    pub inline fn testAABBWithSphere(self: Frustum, aabb: AABB, sphere_center: Vec3, sphere_radius: f32) bool {
+        // Quick sphere rejection test first (very cheap)
+        // If sphere is fully outside any plane, AABB must also be outside
+        for (self.planes) |plane| {
+            if (plane.distanceToPoint(sphere_center) < -sphere_radius) {
+                return false;
+            }
+        }
+        // Sphere test passed - do precise AABB test
+        return self.testAABB(aabb);
+    }
+
+    /// Test if a sphere is visible
+    pub fn testSphere(self: Frustum, center: Vec3, radius: f32) bool {
+        for (self.planes) |plane| {
+            if (plane.distanceToPoint(center) < -radius) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+fn normalizePlane(a: f32, b: f32, c: f32, d: f32) Plane {
+    const len = @sqrt(a * a + b * b + c * c);
+    if (len == 0) {
+        return Plane{ .normal = Vec3.init(0, 1, 0), .d = 0 };
+    }
+    const inv_len = 1.0 / len;
+    return Plane{
+        .normal = Vec3.init(a * inv_len, b * inv_len, c * inv_len),
+        .d = d * inv_len,
+    };
+}

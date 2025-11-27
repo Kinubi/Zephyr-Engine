@@ -19,6 +19,7 @@ pub const InstanceDelta = struct {
 pub const RenderChangeFlags = struct {
     renderables_dirty: bool = false, // If true, caches need rebuild
     transform_only_change: bool = false, // If true, only TLAS needs update
+    frustum_dirty: bool = false, // If true, re-apply frustum culling (camera moved)
     raster_descriptors_dirty: bool = false, // If true, descriptor sets need update
     raytracing_descriptors_dirty: bool = false, // If true, RT descriptor sets need update
 };
@@ -37,6 +38,7 @@ pub const GameStateSnapshot = struct {
     camera_view_matrix: Math.Mat4x4,
     camera_projection_matrix: Math.Mat4x4,
     camera_view_projection_matrix: Math.Mat4x4,
+    camera_frustum: Math.Frustum, // For frustum culling
 
     // Entity data (flat arrays, cache-friendly)
     entities: []EntityRenderData,
@@ -90,6 +92,7 @@ pub const GameStateSnapshot = struct {
             .camera_view_matrix = Math.Mat4x4.identity(),
             .camera_projection_matrix = Math.Mat4x4.identity(),
             .camera_view_projection_matrix = Math.Mat4x4.identity(),
+            .camera_frustum = Math.Frustum{ .planes = undefined }, // Default frustum
             .entities = &.{},
             .entity_count = 0,
             .point_lights = &.{},
@@ -170,6 +173,7 @@ pub fn captureSnapshot(
         .camera_view_matrix = undefined,
         .camera_projection_matrix = undefined,
         .camera_view_projection_matrix = undefined,
+        .camera_frustum = undefined,
         .entities = undefined,
         .entity_count = 0,
         .point_lights = undefined,
@@ -186,6 +190,9 @@ pub fn captureSnapshot(
     snapshot.camera_view_matrix = camera.viewMatrix;
     snapshot.camera_projection_matrix = camera.projectionMatrix;
     snapshot.camera_view_projection_matrix = snapshot.camera_projection_matrix.mul(snapshot.camera_view_matrix);
+
+    // Extract frustum planes for frustum culling
+    snapshot.camera_frustum = Math.Frustum.fromViewProjection(snapshot.camera_view_projection_matrix);
 
     // Read extracted renderables from RenderablesSet component (NO ECS QUERIES!)
     // RenderSystem.prepare() already did all the ECS extraction work
