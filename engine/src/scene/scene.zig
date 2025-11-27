@@ -34,6 +34,7 @@ const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPa
 const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
 const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
+const ShadowMapPass = @import("../rendering/passes/shadow_map_pass.zig").ShadowMapPass;
 const SkyboxPass = @import("../rendering/passes/skybox_pass.zig").SkyboxPass;
 const TonemapPass = @import("../rendering/passes/tonemap_pass.zig").TonemapPass;
 const BaseRenderPass = @import("../rendering/passes/base_render_pass.zig").BaseRenderPass;
@@ -976,12 +977,32 @@ pub const Scene = struct {
             break :blk null;
         };
 
+        // Create and add ShadowMapPass (renders depth from light perspective before geometry)
+        const shadow_map_pass = ShadowMapPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            buffer_manager,
+            texture_manager,
+            self.ecs_world,
+            self.render_system,
+        ) catch |err| blk: {
+            log(.WARN, "scene", "Failed to create ShadowMapPass: {}. Shadows disabled.", .{err});
+            break :blk null;
+        };
+
+        if (shadow_map_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+        }
+
         if (skybox_pass) |pass| {
             try self.render_graph.?.addPass(&pass.base);
         }
 
         // Add GeometryPass SECOND (renders over skybox with depth test)
+        // Wire shadow pass reference so geometry pass can bind shadow map + shadow UBO
         if (geometry_pass) |pass| {
+            pass.shadow_pass = shadow_map_pass;
             try self.render_graph.?.addPass(&pass.base);
         }
 

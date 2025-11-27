@@ -1013,6 +1013,18 @@ pub const SceneHierarchyPanel = struct {
         if (c.ImGui_SliderFloat("Intensity", &intensity, 0.0, 10.0)) {
             light.intensity = intensity;
         }
+
+        // Range slider
+        var range = light.range;
+        if (c.ImGui_SliderFloat("Range", &range, 0.1, 100.0)) {
+            light.range = range;
+        }
+
+        // Cast shadows checkbox
+        var cast_shadows = light.cast_shadows;
+        if (c.ImGui_Checkbox("Cast Shadows", &cast_shadows)) {
+            light.cast_shadows = cast_shadows;
+        }
     }
 
     /// Render Skybox component inspector with editable fields

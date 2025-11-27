@@ -429,7 +429,7 @@
                 },
                 "Transform": {
                     "position": {
-                        "x": 1.5,
+                        "x": -0.5,
                         "y": 0.5,
                         "z": 0
                     },
@@ -451,9 +451,9 @@
                         "y": 0,
                         "z": 0
                     },
-                    "intensity": 9.354000091552734,
+                    "intensity": 1.8389999866485596,
                     "range": 10,
-                    "cast_shadows": false
+                    "cast_shadows": true
                 }
             }
         },

@@ -29,6 +29,7 @@ const Mesh = @import("../mesh.zig").Mesh;
 
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
+const ShadowMapPass = @import("shadow_map_pass.zig").ShadowMapPass;
 
 /// GeometryPass renders opaque ECS entities using dynamic rendering
 /// Uses automatic resource management: binds resources once in setup,
@@ -66,6 +67,9 @@ pub const GeometryPass = struct {
 
     // Shared render system (pointer to scene's render system)
     render_system: *RenderSystem,
+
+    // Shadow pass for accessing shadow map texture
+    shadow_pass: ?*ShadowMapPass = null,
 
     // Target material set name (e.g. "opaque", "transparent")
     target_set_name: []const u8,
@@ -256,6 +260,37 @@ pub const GeometryPass = struct {
             "GlobalUbo",
             self.global_ubo_set.frame_buffers,
         );
+
+        // Bind shadow data UBO and shadow map if shadow pass is available
+        log(.INFO, "geometry_pass", "bindResources: shadow_pass = {}", .{@intFromPtr(self.shadow_pass)});
+        if (self.shadow_pass) |shadow_pass| {
+            // Bind shadow data buffer (light space matrix, bias, enabled flag)
+            var shadow_buffers: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer = undefined;
+            for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+                if (shadow_pass.getShadowDataBuffer(@intCast(i))) |buf| {
+                    shadow_buffers[i] = buf;
+                }
+            }
+
+            self.resource_binder.bindUniformBufferNamed(
+                self.geometry_pipeline,
+                "ShadowUbo",
+                shadow_buffers,
+            ) catch |err| {
+                log(.WARN, "geometry_pass", "Failed to bind ShadowUbo: {}", .{err});
+            };
+
+            // Bind shadow map texture with comparison sampler
+            if (shadow_pass.getShadowMap()) |shadow_map| {
+                try self.resource_binder.bindTextureNamed(
+                    self.geometry_pipeline,
+                    "shadowMap",
+                    shadow_map,
+                );
+            }
+        } else {
+            log(.WARN, "geometry_pass", "No shadow_pass available during bindResources", .{});
+        }
 
         // Bind instance data SSBO from render system (generation tracked automatically)
         // RenderSystem owns and manages this buffer (starts as dummy, gets replaced when instances exist)

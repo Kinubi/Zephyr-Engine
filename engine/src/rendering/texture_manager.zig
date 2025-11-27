@@ -38,6 +38,9 @@ pub const ManagedTexture = struct {
     resize_source: ?*ManagedTexture = null,
     match_format: bool = false,
     binding_info: ?BindingInfo = null,
+    /// Optional custom sampler (e.g., for shadow maps with depth comparison)
+    /// If set, this sampler is used instead of the texture's default sampler
+    custom_sampler: ?vk.Sampler = null,
 
     pub const BindingInfo = struct {
         set: u32,
@@ -46,8 +49,13 @@ pub const ManagedTexture = struct {
     };
 
     /// Get descriptor info for manual binding
+    /// Uses custom_sampler if set, otherwise uses the texture's default sampler
     pub fn getDescriptorInfo(self: *const ManagedTexture) vk.DescriptorImageInfo {
-        return self.texture.getDescriptorInfo();
+        var info = self.texture.getDescriptorInfo();
+        if (self.custom_sampler) |sampler| {
+            info.sampler = sampler;
+        }
+        return info;
     }
 
     /// Check if linked texture changed and auto-resize/format-match if needed
@@ -204,6 +212,110 @@ pub const TextureManager = struct {
         return managed;
     }
 
+    /// Sampler configuration for custom samplers (e.g., shadow map comparison samplers)
+    pub const SamplerConfig = struct {
+        mag_filter: vk.Filter = .linear,
+        min_filter: vk.Filter = .linear,
+        mipmap_mode: vk.SamplerMipmapMode = .linear,
+        address_mode_u: vk.SamplerAddressMode = .clamp_to_border,
+        address_mode_v: vk.SamplerAddressMode = .clamp_to_border,
+        address_mode_w: vk.SamplerAddressMode = .clamp_to_border,
+        border_color: vk.BorderColor = .float_opaque_white,
+        /// Enable depth comparison for shadow mapping
+        compare_enable: bool = false,
+        compare_op: vk.CompareOp = .less_or_equal,
+        anisotropy_enable: bool = false,
+        max_anisotropy: f32 = 1.0,
+    };
+
+    /// Create managed texture with a custom sampler
+    /// Use this for special textures like shadow maps that need comparison samplers
+    pub fn createTextureWithSampler(
+        self: *TextureManager,
+        config: TextureConfig,
+        sampler_config: SamplerConfig,
+    ) !*ManagedTexture {
+        // Duplicate the name for ownership
+        const owned_name = try self.allocator.dupe(u8, config.name);
+        errdefer self.allocator.free(owned_name);
+
+        // Create the texture using initSingleTime to avoid command pool dependency
+        const texture = try Texture.initSingleTime(
+            self.graphics_context,
+            config.format,
+            config.extent,
+            config.usage,
+            config.samples,
+        );
+
+        // Create custom sampler
+        const sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = sampler_config.mag_filter,
+            .min_filter = sampler_config.min_filter,
+            .mipmap_mode = sampler_config.mipmap_mode,
+            .address_mode_u = sampler_config.address_mode_u,
+            .address_mode_v = sampler_config.address_mode_v,
+            .address_mode_w = sampler_config.address_mode_w,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = sampler_config.max_anisotropy,
+            .min_lod = 0.0,
+            .max_lod = 1.0,
+            .border_color = sampler_config.border_color,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = if (sampler_config.compare_enable) .true else .false,
+            .compare_op = sampler_config.compare_op,
+            .anisotropy_enable = if (sampler_config.anisotropy_enable) .true else .false,
+        };
+        const custom_sampler = self.graphics_context.vkd.createSampler(
+            self.graphics_context.dev,
+            &sampler_info,
+            null,
+        ) catch return error.FailedToCreateSampler;
+
+        // Allocate the managed texture on the heap so we can track it
+        const managed = try self.allocator.create(ManagedTexture);
+        errdefer self.allocator.destroy(managed);
+
+        managed.* = ManagedTexture{
+            .texture = texture,
+            .name = owned_name,
+            .format = config.format,
+            .extent = config.extent,
+            .usage = config.usage,
+            .samples = config.samples,
+            .created_frame = self.frame_counter,
+            .generation = 1, // Start at generation 1
+            .resize_source = config.resize_source,
+            .match_format = config.match_format,
+            .custom_sampler = custom_sampler,
+        };
+
+        // Add to statistics
+        try self.all_textures.put(owned_name, TextureStats{
+            .format = config.format,
+            .extent = config.extent,
+            .created_frame = self.frame_counter,
+            .last_updated = self.frame_counter,
+        });
+
+        // Automatically register for resize updates
+        try self.registerTexture(managed);
+
+        log(.INFO, "texture_manager", "Created texture with custom sampler '{s}' ({}x{}x{}, format: {}, compare: {})", .{
+            config.name,
+            config.extent.width,
+            config.extent.height,
+            config.extent.depth,
+            config.format,
+            sampler_config.compare_enable,
+        });
+
+        return managed;
+    }
+
     /// Find an existing texture by name
     pub fn findTexture(self: *TextureManager, name: []const u8) ?*ManagedTexture {
         for (self.managed_textures.items) |managed| {
@@ -304,6 +416,11 @@ pub const TextureManager = struct {
     pub fn destroyTexture(self: *TextureManager, managed: *ManagedTexture) void {
         // Unregister from update list
         self.unregisterTexture(managed);
+
+        // Destroy custom sampler if present
+        if (managed.custom_sampler) |sampler| {
+            self.graphics_context.vkd.destroySampler(self.graphics_context.dev, sampler, null);
+        }
 
         // Defer texture cleanup to avoid in-flight frame issues
         self.deferTextureCleanup(managed.texture) catch |err| {

@@ -158,6 +158,8 @@ pub fn prepare(world: *World, dt: f32) !void {
             };
             count += 1;
         }
+        // Update world matrix and clear dirty flag for lights (they don't go through render system)
+        transform_ptr.updateWorldMatrix();
     }
 
     // Sort by stable entity id
@@ -167,25 +169,14 @@ pub fn prepare(world: *World, dt: f32) !void {
         }
     }.lessThan);
 
-    // Animate and write to UBO in sorted order with even angular spacing
-    const radius: f32 = 1.5;
-    const height: f32 = 0.5;
-    const speed: f32 = 1.0;
-    const two_pi: f32 = 2.0 * std.math.pi;
-
+    // Write light data to UBO using current transform positions (no animation)
     var i: usize = 0;
     while (i < count) : (i += 1) {
-        const phase = if (count > 0) (@as(f32, @floatFromInt(i)) * (two_pi / @as(f32, @floatFromInt(count)))) else 0.0;
-        const angle = State.time_elapsed * speed + phase;
-        const x = @cos(angle) * radius;
-        const z = @sin(angle) * radius;
-
-        // Update transform position and UBO
-        list[i].transform.setPosition(Math.Vec3.init(x, height, z));
+        const pos = list[i].transform.position;
 
         if (global_ubo) |ubo| {
             ubo.point_lights[i] = .{
-                .position = Math.Vec4.init(x, height, z, 1.0),
+                .position = Math.Vec4.init(pos.x, pos.y, pos.z, 1.0),
                 .color = Math.Vec4.init(
                     list[i].light.color.x * list[i].light.intensity,
                     list[i].light.color.y * list[i].light.intensity,

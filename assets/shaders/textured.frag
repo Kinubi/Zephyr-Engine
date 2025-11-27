@@ -38,8 +38,53 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 ambientColor;
     PointLight pointLights[16];
     int numPointLights;
-    float dt;
 } ubo;
+
+// Shadow data UBO (set 0, binding 2) - from shadow pass
+layout(set = 0, binding = 2) uniform ShadowUbo {
+    mat4 lightSpaceMatrix;
+    float shadowBias;
+    uint shadowEnabled;
+    vec2 _padding;
+} shadow;
+
+// Shadow map sampler (set 0, binding 3)
+layout(set = 0, binding = 3) uniform sampler2DShadow shadowMap;
+
+// Calculate shadow factor using PCF
+float calculateShadow(vec3 worldPos) {
+    if (shadow.shadowEnabled == 0) return 1.0;
+    
+    // Transform world position to light space
+    vec4 lightSpacePos = shadow.lightSpaceMatrix * vec4(worldPos, 1.0);
+    vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+    
+    // Transform to [0,1] range for texture sampling
+    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    
+    // Check if outside shadow map bounds
+    if (projCoords.x < 0.0 || projCoords.x > 1.0 || 
+        projCoords.y < 0.0 || projCoords.y > 1.0 ||
+        projCoords.z < 0.0 || projCoords.z > 1.0) {
+        return 1.0;
+    }
+    
+    // Apply bias to reduce shadow acne
+    float currentDepth = projCoords.z - shadow.shadowBias;
+    
+    // PCF (Percentage Closer Filtering) for soft shadows
+    float shadowVal = 0.0;
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec2 offset = vec2(x, y) * texelSize;
+            shadowVal += texture(shadowMap, vec3(projCoords.xy + offset, currentDepth));
+        }
+    }
+    shadowVal /= 9.0;
+    
+    return shadowVal;
+}
 
 layout(set = 1, binding = 0) readonly buffer MaterialBuffer {
     Material materials[];
@@ -104,10 +149,13 @@ void main() {
         occlusion = mix(1.0, texture(textures[mat.occlusion_idx], uv).r, mat.occlusion_strength);
     }
 
-    // Start with ambient lighting
+    // Calculate shadow factor
+    float shadowFactor = calculateShadow(positionWorld);
+
+    // Start with ambient lighting (not affected by shadows)
     vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w * occlusion;
 
-    // Add point light contributions
+    // Add point light contributions (affected by shadows)
     for (int i = 0; i < ubo.numPointLights; i++) {
         PointLight light = ubo.pointLights[i];
         vec3 directionToLight = light.position.xyz - positionWorld;
@@ -122,7 +170,9 @@ void main() {
         float diffuseFactor = cosAngIncidence * (1.0 - roughness * 0.5) * (1.0 - metallic * 0.8);
         
         vec3 lightColor = light.color.xyz * light.color.w * attenuation;
-        diffuseLight += lightColor * diffuseFactor * occlusion;
+        // Apply shadow factor to direct lighting (only first light casts shadows for now)
+        float lightShadow = (i == 0) ? shadowFactor : 1.0;
+        diffuseLight += lightColor * diffuseFactor * occlusion * lightShadow;
     }
 
     // Add emissive contribution

@@ -8,7 +8,7 @@ const MAX_FRAMES_IN_FLIGHT = @import("../core/swapchain.zig").MAX_FRAMES_IN_FLIG
 /// Performance monitoring with CPU and GPU timing
 pub const PerformanceMonitor = struct {
     const MAX_FRAMES = MAX_FRAMES_IN_FLIGHT;
-    const MAX_PASSES = 16; // Maximum number of passes to track
+    const MAX_PASSES = 20; // Maximum number of passes to track (increased for shadow pass + imgui)
     const QUERIES_PER_FRAME = MAX_PASSES * 2 + 2; // Frame start/end + per-pass begin/end
     const QUERY_RESULT_CAPACITY = QUERIES_PER_FRAME * 2; // Timestamp + availability per query
     const HISTORY_SIZE = 20000; // Track last 20000 frames for graphs (~14 seconds at 1400fps)
