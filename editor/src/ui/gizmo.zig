@@ -25,7 +25,7 @@ pub const Gizmo = struct {
         drag_origin: Math.Vec3 = Math.Vec3.zero(),
         drag_mouse_start: [2]f32 = .{ 0.0, 0.0 },
         initial_pos: Math.Vec3 = Math.Vec3.zero(),
-        initial_rot: Math.Vec3 = Math.Vec3.zero(),
+        initial_rot: Math.Quat = Math.Quat.identity(),
         initial_scale: Math.Vec3 = Math.Vec3.init(1, 1, 1),
     };
 

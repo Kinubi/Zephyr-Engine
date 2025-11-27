@@ -239,6 +239,20 @@ pub const Quat = struct {
         };
     }
 
+    /// Create a quaternion from an axis and angle (in radians)
+    pub fn fromAxisAngle(axis: Vec3, angle: f32) Quat {
+        const half_angle = angle * 0.5;
+        const s = @sin(half_angle);
+        const c = @cos(half_angle);
+        const norm_axis = axis.normalize();
+        return Quat{
+            .x = norm_axis.x * s,
+            .y = norm_axis.y * s,
+            .z = norm_axis.z * s,
+            .w = c,
+        };
+    }
+
     pub fn identity() Quat {
         return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
     }
