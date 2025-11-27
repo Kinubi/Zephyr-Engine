@@ -34,6 +34,7 @@ const GeometryPass = @import("../rendering/passes/geometry_pass.zig").GeometryPa
 const LightVolumePass = @import("../rendering/passes/light_volume_pass.zig").LightVolumePass;
 const ParticlePass = @import("../rendering/passes/particle_pass.zig").ParticlePass;
 const PathTracingPass = @import("../rendering/passes/path_tracing_pass.zig").PathTracingPass;
+const SkyboxPass = @import("../rendering/passes/skybox_pass.zig").SkyboxPass;
 const TonemapPass = @import("../rendering/passes/tonemap_pass.zig").TonemapPass;
 const BaseRenderPass = @import("../rendering/passes/base_render_pass.zig").BaseRenderPass;
 const vertex_formats = @import("../rendering/vertex_formats.zig");
@@ -102,6 +103,7 @@ pub const Scene = struct {
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
     particle_system: ?*ecs.ParticleSystem = null,
+    skybox_system: ?*ecs.SkyboxSystem = null,
     // NOTE: TextureSystem moved to Engine - it manages infrastructure textures (HDR/LDR)
 
     // Performance monitoring
@@ -235,6 +237,11 @@ pub const Scene = struct {
             ps.deinit();
             self.allocator.destroy(ps);
             self.particle_system = null;
+        }
+        if (self.skybox_system) |ss| {
+            ss.deinit();
+            self.allocator.destroy(ss);
+            self.skybox_system = null;
         }
         if (self.material_system) |ms| {
             ms.deinit();
@@ -898,6 +905,13 @@ pub const Scene = struct {
 
         log(.INFO, "scene", "Initialized particle system (ECS-driven)", .{});
 
+        // Create skybox system (manages environment maps with version tracking)
+        const skybox_system = try self.allocator.create(ecs.SkyboxSystem);
+        skybox_system.* = try ecs.SkyboxSystem.init(self.allocator, self.asset_manager, texture_manager);
+        self.skybox_system = skybox_system;
+
+        log(.INFO, "scene", "Initialized skybox system (ECS-driven)", .{});
+
         // Initialize Physics System if not already (e.g. after load/clear)
         if (self.physics_system == null) {
             self.physics_system = try ecs.PhysicsSystem.init(self.allocator);
@@ -948,6 +962,25 @@ pub const Scene = struct {
             break :blk null;
         };
 
+        // Create and add SkyboxPass FIRST (clears framebuffer and renders background)
+        const skybox_pass = SkyboxPass.create(
+            self.allocator,
+            graphics_context,
+            pipeline_system,
+            global_ubo_set,
+            self.skybox_system.?,
+            swapchain.hdr_format,
+            try swapchain.depthFormat(),
+        ) catch |err| blk: {
+            log(.WARN, "scene", "Failed to create SkyboxPass: {}. Skybox rendering disabled.", .{err});
+            break :blk null;
+        };
+
+        if (skybox_pass) |pass| {
+            try self.render_graph.?.addPass(&pass.base);
+        }
+
+        // Add GeometryPass SECOND (renders over skybox with depth test)
         if (geometry_pass) |pass| {
             try self.render_graph.?.addPass(&pass.base);
         }

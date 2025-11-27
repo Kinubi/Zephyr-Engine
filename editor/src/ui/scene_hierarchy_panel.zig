@@ -10,6 +10,7 @@ const Transform = ecs.Transform;
 const MeshRenderer = ecs.MeshRenderer;
 const Camera = ecs.Camera;
 const PointLight = ecs.PointLight;
+const Skybox = ecs.Skybox;
 const ParticleEmitter = ecs.ParticleEmitter;
 const ScriptComponent = ecs.ScriptComponent;
 const Name = ecs.Name;
@@ -548,6 +549,9 @@ pub const SceneHierarchyPanel = struct {
                 // PointLight component
                 self.renderComponentInspector(scene, entity, PointLight, "Point Light", renderPointLightInspector);
 
+                // Skybox component
+                self.renderComponentInspector(scene, entity, Skybox, "Skybox", renderSkyboxInspector);
+
                 // ParticleEmitter component
                 self.renderComponentInspector(scene, entity, ParticleEmitter, "Particle Emitter", renderParticleEmitterInspector);
 
@@ -757,13 +761,6 @@ pub const SceneHierarchyPanel = struct {
                         }
                     }
 
-                    // PointLight
-                    if (!scene.ecs_world.has(PointLight, entity)) {
-                        if (c.ImGui_MenuItem("Point Light")) {
-                            _ = scene.ecs_world.emplace(PointLight, entity, .{ .color = Math.Vec3.init(1.0, 1.0, 1.0), .intensity = 1.0, .range = 10.0 }) catch {};
-                        }
-                    }
-
                     // Camera
                     if (!scene.ecs_world.has(Camera, entity)) {
                         if (c.ImGui_MenuItem("Camera")) {
@@ -793,6 +790,7 @@ pub const SceneHierarchyPanel = struct {
                     c.ImGui_Text("Lighting");
 
                     self.addComponentMenuItem(scene.ecs_world, entity, PointLight, "Point Light");
+                    self.addComponentMenuItem(scene.ecs_world, entity, Skybox, "Skybox");
 
                     c.ImGui_Separator();
                     c.ImGui_Text("Physics");
@@ -1014,6 +1012,106 @@ pub const SceneHierarchyPanel = struct {
         var intensity = light.intensity;
         if (c.ImGui_SliderFloat("Intensity", &intensity, 0.0, 10.0)) {
             light.intensity = intensity;
+        }
+    }
+
+    /// Render Skybox component inspector with editable fields
+    fn renderSkyboxInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, skybox: *Skybox) void {
+        _ = self;
+        _ = scene;
+        _ = entity;
+
+        // Source type selector
+        const source_names = "Equirectangular\x00Cubemap\x00Procedural\x00";
+        var current_source: i32 = @intFromEnum(skybox.source_type);
+        if (c.ImGui_Combo("Source Type", &current_source, source_names)) {
+            skybox.source_type = @enumFromInt(current_source);
+        }
+
+        // Texture path (for non-procedural)
+        if (skybox.source_type != .procedural) {
+            var path_buf: [256:0]u8 = std.mem.zeroes([256:0]u8);
+            const current_path = skybox.getTexturePath();
+            @memcpy(path_buf[0..current_path.len], current_path);
+
+            // Use EnterReturnsTrue so we only update + confirm when Enter is pressed
+            if (c.ImGui_InputText("Texture Path", &path_buf, 256, c.ImGuiInputTextFlags_EnterReturnsTrue)) {
+                const new_len = std.mem.indexOfScalar(u8, &path_buf, 0) orelse path_buf.len;
+                skybox.setTexturePath(path_buf[0..new_len]);
+                skybox.confirmTexturePath(); // Trigger texture load
+            }
+
+            // Show confirmation status
+            if (skybox.path_confirmed) {
+                c.ImGui_SameLine();
+                c.ImGui_TextColored(.{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "[Loaded]");
+            } else if (current_path.len > 0) {
+                c.ImGui_SameLine();
+                c.ImGui_TextColored(.{ .x = 1.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "[Press Enter]");
+            }
+        }
+
+        // Active checkbox
+        var active = skybox.is_active;
+        if (c.ImGui_Checkbox("Active", &active)) {
+            skybox.is_active = active;
+        }
+
+        // Rotation slider
+        var rotation_deg = skybox.rotation * (180.0 / std.math.pi);
+        if (c.ImGui_SliderFloat("Rotation", &rotation_deg, -180.0, 180.0)) {
+            skybox.rotation = rotation_deg * (std.math.pi / 180.0);
+        }
+
+        // Exposure slider
+        var exposure = skybox.exposure;
+        if (c.ImGui_SliderFloat("Exposure", &exposure, 0.0, 5.0)) {
+            skybox.exposure = exposure;
+        }
+
+        // Tint color
+        var tint = [3]f32{ skybox.tint.x, skybox.tint.y, skybox.tint.z };
+        if (c.ImGui_ColorEdit3("Tint", &tint, 0)) {
+            skybox.tint = Math.Vec3.init(tint[0], tint[1], tint[2]);
+        }
+
+        // Procedural sky settings
+        if (skybox.source_type == .procedural) {
+            c.ImGui_Separator();
+            c.ImGui_Text("Procedural Sky Settings");
+
+            // Sun direction as angles
+            const sun_elev = std.math.asin(skybox.sun_direction.y);
+            const sun_azim = std.math.atan2(skybox.sun_direction.z, skybox.sun_direction.x);
+            var elev_deg = sun_elev * (180.0 / std.math.pi);
+            var azim_deg = sun_azim * (180.0 / std.math.pi);
+
+            var sun_changed = false;
+            if (c.ImGui_SliderFloat("Sun Elevation", &elev_deg, -90.0, 90.0)) {
+                sun_changed = true;
+            }
+            if (c.ImGui_SliderFloat("Sun Azimuth", &azim_deg, -180.0, 180.0)) {
+                sun_changed = true;
+            }
+            if (sun_changed) {
+                skybox.setSunFromAngles(azim_deg * (std.math.pi / 180.0), elev_deg * (std.math.pi / 180.0));
+            }
+
+            // Sky colors
+            var ground = [3]f32{ skybox.ground_color.x, skybox.ground_color.y, skybox.ground_color.z };
+            if (c.ImGui_ColorEdit3("Ground Color", &ground, 0)) {
+                skybox.ground_color = Math.Vec3.init(ground[0], ground[1], ground[2]);
+            }
+
+            var horizon = [3]f32{ skybox.horizon_color.x, skybox.horizon_color.y, skybox.horizon_color.z };
+            if (c.ImGui_ColorEdit3("Horizon Color", &horizon, 0)) {
+                skybox.horizon_color = Math.Vec3.init(horizon[0], horizon[1], horizon[2]);
+            }
+
+            var zenith = [3]f32{ skybox.zenith_color.x, skybox.zenith_color.y, skybox.zenith_color.z };
+            if (c.ImGui_ColorEdit3("Zenith Color", &zenith, 0)) {
+                skybox.zenith_color = Math.Vec3.init(zenith[0], zenith[1], zenith[2]);
+            }
         }
     }
 

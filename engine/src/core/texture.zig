@@ -543,6 +543,226 @@ pub const Texture = struct {
         };
     }
 
+    /// Load an HDR environment map from file (equirectangular format)
+    /// Returns a texture with R32G32B32A32_SFLOAT format
+    /// Uses ONLY synchronous single-time commands to ensure texture is ready immediately
+    pub fn initHdrFromFile(
+        gc: *GraphicsContext,
+        allocator: std.mem.Allocator,
+        filepath: []const u8,
+    ) !Texture {
+        // Convert filepath to null-terminated string for zstbi
+        const filepath_z = try std.mem.concatWithSentinel(allocator, u8, @ptrCast(&filepath), 0);
+        defer allocator.free(filepath_z);
+
+        // Ensure zstbi is initialized (thread-safe, once per application)
+        ensureZstbiInit(allocator);
+
+        // Check if it's actually HDR
+        if (!zstbi.isHdr(filepath_z)) {
+            log(.WARN, "texture", "File is not HDR format: {s}, loading as LDR", .{filepath});
+            return initFromFile(gc, allocator, filepath, .rgba8);
+        }
+
+        // Load HDR image (zstbi auto-detects and loads as float)
+        var image = try zstbi.Image.loadFromFile(filepath_z, 4); // Force 4 components (RGBA)
+        defer image.deinit();
+
+        if (!image.is_hdr) {
+            log(.WARN, "texture", "Expected HDR but got LDR: {s}", .{filepath});
+        }
+
+        log(.INFO, "texture", "HDR image: {}x{}, {} components, {} bytes/component, is_hdr={}", .{
+            image.width, image.height, image.num_components, image.bytes_per_component, image.is_hdr,
+        });
+
+        const mip_levels: u32 = 1; // HDR env maps typically don't need mipmaps for skybox
+        const extent = vk.Extent3D{
+            .width = image.width,
+            .height = image.height,
+            .depth = 1,
+        };
+
+        // Choose format based on actual bytes per component from zstbi
+        // zstbi returns HDR as 16-bit half floats (2 bytes) or 32-bit floats (4 bytes)
+        const vk_format = if (image.bytes_per_component == 4)
+            vk.Format.r32g32b32a32_sfloat
+        else
+            vk.Format.r16g16b16a16_sfloat;
+
+        // Calculate buffer size using actual bytes per component from image
+        const buffer_size = image.width * image.height * image.num_components * image.bytes_per_component;
+
+        // Create staging buffer
+        var staging_buffer = try Buffer.init(
+            gc,
+            buffer_size,
+            1,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+        );
+        defer staging_buffer.deinit();
+
+        try staging_buffer.map(buffer_size, 0);
+        staging_buffer.writeToBuffer(image.data, buffer_size, 0);
+        staging_buffer.unmap();
+
+        // Create image
+        const image_info = vk.ImageCreateInfo{
+            .s_type = vk.StructureType.image_create_info,
+            .image_type = vk.ImageType.@"2d",
+            .format = vk_format,
+            .extent = extent,
+            .mip_levels = mip_levels,
+            .array_layers = 1,
+            .samples = vk.SampleCountFlags{ .@"1_bit" = true },
+            .tiling = vk.ImageTiling.optimal,
+            .usage = vk.ImageUsageFlags{
+                .transfer_dst_bit = true,
+                .sampled_bit = true,
+            },
+            .initial_layout = vk.ImageLayout.undefined,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .flags = .{},
+            .p_next = null,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        };
+
+        var image_handle: vk.Image = undefined;
+        var memory: vk.DeviceMemory = undefined;
+        try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image_handle, &memory);
+
+        // Use synchronous single-time commands for all operations
+        // This ensures the texture is fully ready before returning, regardless of calling thread
+
+        // 1. Transition to transfer dst
+        const transition1_cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            transition1_cmd,
+            image_handle,
+            vk.ImageLayout.undefined,
+            vk.ImageLayout.transfer_dst_optimal,
+            .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = mip_levels,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+        try gc.endSingleTimeCommands(transition1_cmd);
+
+        // 2. Copy buffer to image
+        const copy_cmd = try gc.beginSingleTimeCommands();
+        const region = vk.BufferImageCopy{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_subresource = .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .mip_level = 0,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+            .image_extent = .{ .width = image.width, .height = image.height, .depth = 1 },
+        };
+        gc.vkd.cmdCopyBufferToImage(
+            copy_cmd,
+            staging_buffer.buffer,
+            image_handle,
+            vk.ImageLayout.transfer_dst_optimal,
+            1,
+            @ptrCast(&region),
+        );
+        try gc.endSingleTimeCommands(copy_cmd);
+
+        // 3. Transition to general layout (we use GENERAL everywhere for synchronization2)
+        const transition2_cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            transition2_cmd,
+            image_handle,
+            vk.ImageLayout.transfer_dst_optimal,
+            vk.ImageLayout.general,
+            .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = mip_levels,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        );
+        try gc.endSingleTimeCommands(transition2_cmd);
+
+        // Create image view
+        const view_info = vk.ImageViewCreateInfo{
+            .s_type = vk.StructureType.image_view_create_info,
+            .view_type = vk.ImageViewType.@"2d",
+            .format = vk_format,
+            .subresource_range = .{
+                .aspect_mask = vk.ImageAspectFlags{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = mip_levels,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image = image_handle,
+            .components = .{
+                .r = vk.ComponentSwizzle.identity,
+                .g = vk.ComponentSwizzle.identity,
+                .b = vk.ComponentSwizzle.identity,
+                .a = vk.ComponentSwizzle.identity,
+            },
+            .flags = .{},
+            .p_next = null,
+        };
+
+        const image_view = gc.vkd.createImageView(gc.dev, &view_info, null) catch return error.FailedToCreateImageView;
+
+        // Create sampler with clamp-to-edge for env maps
+        const sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = vk.Filter.linear,
+            .min_filter = vk.Filter.linear,
+            .mipmap_mode = vk.SamplerMipmapMode.linear,
+            .address_mode_u = vk.SamplerAddressMode.clamp_to_edge,
+            .address_mode_v = vk.SamplerAddressMode.clamp_to_edge,
+            .address_mode_w = vk.SamplerAddressMode.clamp_to_edge,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = 1.0,
+            .min_lod = 0.0,
+            .max_lod = @floatFromInt(mip_levels),
+            .border_color = vk.BorderColor.float_opaque_black,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = .false,
+            .compare_op = vk.CompareOp.always,
+            .anisotropy_enable = .false,
+        };
+
+        const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
+
+        log(.INFO, "texture", "Loaded HDR environment map: {s} ({}x{})", .{ filepath, image.width, image.height });
+
+        return Texture{
+            .image = image_handle,
+            .image_view = image_view,
+            .memory = memory,
+            .sampler = sampler,
+            .mip_levels = mip_levels,
+            .extent = extent,
+            .format = vk_format,
+            .descriptor = vk.DescriptorImageInfo{
+                .sampler = sampler,
+                .image_view = image_view,
+                .image_layout = vk.ImageLayout.general,
+            },
+            .gc = gc,
+        };
+    }
+
     pub fn initFromMemory(
         gc: *GraphicsContext,
         allocator: std.mem.Allocator,

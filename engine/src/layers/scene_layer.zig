@@ -104,6 +104,18 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
                 };
 
+                stage1.addSystem(.{
+                    .name = "SkyboxSystem",
+                    .prepare_fn = ecs.prepareSkyboxSystem,
+                    .update_fn = ecs.updateSkyboxSystem,
+                    .access = .{
+                        .reads = &[_][]const u8{"Skybox"},
+                        .writes = &[_][]const u8{},
+                    },
+                }) catch |err| {
+                    log(.WARN, "scene_layer", "Failed to add skybox system: {}", .{err});
+                };
+
                 // Stage 2: Systems that depend on Stage 1
                 if (sched.addStage("DependentSystems")) |stage2| {
                     stage2.addSystem(.{

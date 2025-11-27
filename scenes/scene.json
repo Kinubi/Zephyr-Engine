@@ -429,9 +429,9 @@
                 },
                 "Transform": {
                     "position": {
-                        "x": 1.4888447523117065,
+                        "x": 1.5,
                         "y": 0.5,
-                        "z": -0.18259543180465698
+                        "z": 0
                     },
                     "rotation": {
                         "x": 0,
@@ -488,6 +488,45 @@
                     "far_plane": 1000,
                     "fov": 45,
                     "aspect_ratio": 1.7777777910232544
+                }
+            }
+        },
+        {
+            "uuid": "bccfc32f-6833-4350-9d6e-46cda15dabe3",
+            "components": {
+                "Name": {
+                    "name": "Empty Entity"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "Skybox": {
+                    "source_type": "equirectangular",
+                    "texture_path": "assets/environment_maps/meadow_2_2k.hdr",
+                    "rotation": 0,
+                    "exposure": 1,
+                    "tint": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    },
+                    "is_active": true,
+                    "path_confirmed": true
                 }
             }
         }

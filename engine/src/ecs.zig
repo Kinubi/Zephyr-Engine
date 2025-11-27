@@ -16,6 +16,7 @@ pub const Transform = @import("ecs/components/transform.zig").Transform;
 pub const MeshRenderer = @import("ecs/components/mesh_renderer.zig").MeshRenderer;
 pub const Camera = @import("ecs/components/camera.zig").Camera;
 pub const PointLight = @import("ecs/components/point_light.zig").PointLight;
+pub const Skybox = @import("ecs/components/skybox.zig").Skybox;
 pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").ParticleEmitter;
 pub const Name = @import("ecs/components/name.zig").Name;
 pub const UuidComponent = @import("ecs/components/uuid.zig").UuidComponent;
@@ -53,6 +54,8 @@ pub const ParticleBuffers = @import("ecs/systems/particle_system.zig").ParticleB
 pub const ParticleGPUResources = @import("ecs/systems/particle_system.zig").ParticleGPUResources;
 pub const ScriptingSystem = @import("ecs/systems/scripting_system.zig").ScriptingSystem;
 pub const PhysicsSystem = @import("ecs/systems/physics_system.zig").PhysicsSystem;
+pub const SkyboxSystem = @import("ecs/systems/skybox_system.zig").SkyboxSystem;
+pub const SkyboxGPUData = @import("ecs/systems/skybox_system.zig").SkyboxGPUData;
 
 // System functions for parallel execution
 pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").update;
@@ -65,6 +68,8 @@ pub const prepareRenderSystem = @import("ecs/systems/render_system.zig").prepare
 pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
 pub const prepareMaterialSystem = @import("ecs/systems/material_system.zig").prepare;
 pub const updateMaterialSystem = @import("ecs/systems/material_system.zig").update;
+pub const prepareSkyboxSystem = @import("ecs/systems/skybox_system.zig").prepare;
+pub const updateSkyboxSystem = @import("ecs/systems/skybox_system.zig").update;
 
 // Parallel System Execution
 pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;

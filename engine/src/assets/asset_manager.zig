@@ -371,6 +371,31 @@ pub const AssetManager = struct {
         return asset_id;
     }
 
+    /// Load an HDR environment map synchronously
+    /// Returns the AssetId and the loaded Texture pointer for direct access
+    pub fn loadHdrTextureSync(self: *AssetManager, path: []const u8) !struct { id: AssetId, texture: *Texture } {
+        // Register the asset first
+        const asset_id = try self.registry.registerAsset(path, .texture);
+
+        // Register with hot reload manager if available
+        if (self.hot_reload_manager) |hot_reload| {
+            hot_reload.registerAsset(asset_id, path, .texture) catch |err| {
+                log(.WARN, "asset_manager", "Failed to register HDR texture for hot reload: {s} ({})", .{ path, err });
+            };
+        }
+
+        // Load HDR texture using the specialized loader
+        const texture = try self.allocator.create(Texture);
+        texture.* = try Texture.initHdrFromFile(self.loader.graphics_context, self.allocator, path);
+        try self.loaded_textures.append(self.allocator, texture);
+        try self.asset_to_texture.put(asset_id, @intCast(self.loaded_textures.items.len - 1));
+
+        // Mark as loaded in registry
+        self.registry.markAsLoaded(asset_id, texture.extent.width * texture.extent.height * 16); // 16 bytes per RGBA32F pixel
+
+        return .{ .id = asset_id, .texture = texture };
+    }
+
     /// Clean up resources
     pub fn deinit(self: *AssetManager) void {
         // Clean up hot reload manager first

@@ -1,6 +1,12 @@
 {
   "version": 1,
   "entries": {
+    "assets/shaders/skybox.vert": {
+      "cached_spirv_path": "assets/shaders/cached/skybox.vert.spv",
+      "file_hash": "16741677725487772589",
+      "options_hash": "13509613240315378116",
+      "compile_time": 1764234347
+    },
     "assets/shaders/RayTracingTriangle.rgen.hlsl": {
       "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rgen.hlsl.spv",
       "file_hash": "10272834657836244884",

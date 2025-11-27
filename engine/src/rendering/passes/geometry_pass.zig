@@ -283,13 +283,11 @@ pub const GeometryPass = struct {
         // Get batches for this specific material set (e.g. "opaque")
         const batches = raster_data.getBatches(self.target_set_name);
 
-        // Setup dynamic rendering with helper
-        const rendering = DynamicRenderingHelper.init(
+        // Setup dynamic rendering with LOAD (skybox already rendered, don't clear)
+        const rendering = DynamicRenderingHelper.initLoad(
             frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
-            .{ 0.01, 0.01, 0.01, 1.0 }, // clear color (dark gray)
-            1.0, // clear depth
         );
 
         // Begin rendering (also sets viewport and scissor) - always do this to clear the framebuffer
