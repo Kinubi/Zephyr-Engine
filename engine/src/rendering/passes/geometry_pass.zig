@@ -283,12 +283,6 @@ pub const GeometryPass = struct {
         // Get batches for this specific material set (e.g. "opaque")
         const batches = raster_data.getBatches(self.target_set_name);
 
-        if (batches.len == 0) {
-            // Only log trace if we expected something but got nothing
-            // log(.TRACE, "geometry_pass", "No batches for set '{s}'", .{self.target_set_name});
-            return;
-        }
-
         // Setup dynamic rendering with helper
         const rendering = DynamicRenderingHelper.init(
             frame_info.hdr_texture.?.image_view,
@@ -298,8 +292,14 @@ pub const GeometryPass = struct {
             1.0, // clear depth
         );
 
-        // Begin rendering (also sets viewport and scissor)
+        // Begin rendering (also sets viewport and scissor) - always do this to clear the framebuffer
         rendering.begin(self.graphics_context, cmd);
+
+        if (batches.len == 0) {
+            // No geometry to draw, but we still cleared the framebuffer
+            rendering.end(self.graphics_context, cmd);
+            return;
+        }
 
         // Bind pipeline with all descriptor sets (Set 0: global UBO, Set 1: materials/textures)
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.geometry_pipeline, frame_index);
@@ -318,22 +318,16 @@ pub const GeometryPass = struct {
             }
         }
 
-        var instance_offset: u32 = 0;
         for (batches) |batch| {
             if (!batch.visible) continue;
 
             const mesh = batch.mesh_handle.getMesh();
             const instance_count: u32 = @intCast(batch.instances.len);
 
-            // Bounds validation: Ensure we don't read past the end of the instance buffer
-            // This catches bugs where instance_offset or instance_count is incorrect
-            // Note: We can't easily validate against total buffer size here without passing it down,
-            // but we can validate consistency within the batch list.
-            // std.debug.assert(instance_offset + instance_count <= total_instance_count);
-
-            // Push instance offset so shader knows where to read in SSBO
+            // Use pre-computed instance buffer offset from batch
+            // This correctly handles frustum culling where some objects are skipped
             const push_constants = GeometryPushConstants{
-                .instance_offset = instance_offset,
+                .instance_offset = batch.instance_buffer_offset,
             };
             self.graphics_context.vkd.cmdPushConstants(
                 cmd,
@@ -352,8 +346,6 @@ pub const GeometryPass = struct {
                 instance_count, // Draw all instances at once
                 0, // firstInstance = 0 (offset handled by push constant)
             );
-
-            instance_offset += instance_count;
         }
 
         // End rendering

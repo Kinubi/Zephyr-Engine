@@ -38,6 +38,10 @@ pub const RenderSystem = struct {
     last_total_entity_count: usize = 0, // Total entities with MeshRenderer (including disabled)
     last_geometry_count: usize = 0,
 
+    // Camera tracking for frustum culling
+    last_camera_view_proj: math.Mat4 = math.Mat4.identity(),
+    frustum_culling_enabled: bool = true, // CPU-side frustum culling
+
     // Descriptor update flags
     raster_descriptors_dirty: bool = true,
     raytracing_descriptors_dirty: bool = true,
@@ -175,25 +179,45 @@ pub const RenderSystem = struct {
         // Clean up tracking
         self.last_instance_data.deinit(self.allocator);
 
-        // Clean up both cache buffers
-        for (&self.cached_raster_data) |*data| {
-            if (data.*) |cache| {
-                self.allocator.free(cache.objects);
-                // Clean up instanced batches
-                for (cache.batch_lists) |list| {
-                    for (list.batches) |batch| {
-                        self.allocator.free(batch.instances);
-                    }
-                    self.allocator.free(list.batches);
+        // Clean up both cache buffers - avoid double-free when both buffers share the same data
+        // Check if both raster slots point to the same batch_lists (happens during frustum-only rebuilds)
+        const raster0 = self.cached_raster_data[0];
+        const raster1 = self.cached_raster_data[1];
+        const same_raster_batches = if (raster0 != null and raster1 != null)
+            raster0.?.batch_lists.ptr == raster1.?.batch_lists.ptr
+        else
+            false;
+
+        // Free first raster slot if it exists
+        if (raster0) |cache| {
+            self.allocator.free(cache.objects);
+            for (cache.batch_lists) |list| {
+                for (list.batches) |batch| {
+                    self.allocator.free(batch.instances);
                 }
-                self.allocator.free(cache.batch_lists);
+                self.allocator.free(list.batches);
             }
+            self.allocator.free(cache.batch_lists);
         }
-        for (&self.cached_raytracing_data) |*data| {
-            if (data.*) |cache| {
-                self.allocator.free(cache.instances);
-                self.allocator.free(cache.geometries);
-                self.allocator.free(cache.materials);
+        // Free second raster slot only if different from first
+        if (raster1 != null and !same_raster_batches) {
+            self.allocator.free(raster1.?.objects);
+            for (raster1.?.batch_lists) |list| {
+                for (list.batches) |batch| {
+                    self.allocator.free(batch.instances);
+                }
+                self.allocator.free(list.batches);
+            }
+            self.allocator.free(raster1.?.batch_lists);
+        }
+
+        // Clean up raytracing data - each slot is independently allocated
+        // (no more shallow copies since rebuildRasterCacheOnly doesn't touch RT)
+        for (&self.cached_raytracing_data) |maybe_rt| {
+            if (maybe_rt) |cache| {
+                if (cache.instances.len > 0) self.allocator.free(cache.instances);
+                if (cache.geometries.len > 0) self.allocator.free(cache.geometries);
+                if (cache.materials.len > 0) self.allocator.free(cache.materials);
             }
         }
     }
@@ -529,11 +553,14 @@ pub const RenderSystem = struct {
         // Build caches from snapshot entities
         const entities = snapshot.entities[0..snapshot.entity_count];
 
+        // Get frustum for culling (only apply if enabled)
+        const frustum = if (self.frustum_culling_enabled) &snapshot.camera_frustum else null;
+
         // Use parallel cache building if thread_pool available and enough work
         if (self.thread_pool != null and entities.len >= 50) {
-            try self.buildCachesFromSnapshotParallel(entities, asset_manager, write_idx);
+            try self.buildCachesFromSnapshotParallel(entities, asset_manager, write_idx, frustum);
         } else {
-            try self.buildCachesFromSnapshotSingleThreaded(entities, asset_manager, write_idx);
+            try self.buildCachesFromSnapshotSingleThreaded(entities, asset_manager, write_idx, frustum);
         }
 
         const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
@@ -556,39 +583,189 @@ pub const RenderSystem = struct {
         }
     }
 
-    /// Upload instance data from batches to GPU buffer
-    /// Called after cache rebuild when batches are updated
-    /// If snapshot has instance_delta, applies granular updates; otherwise does full rebuild
-    fn uploadInstanceDataToGPU(self: *RenderSystem) !void {
+    /// Rebuild only the rasterization cache (camera/frustum changed, PT data unchanged)
+    /// This is an optimization: PT needs all geometry regardless of camera position
+    pub fn rebuildRasterCacheOnly(
+        self: *RenderSystem,
+        snapshot: *const GameStateSnapshot,
+        asset_manager: *AssetManager,
+    ) !void {
+        const start_time = std.time.nanoTimestamp();
+
+        // Determine which buffer to write to (inactive = opposite of active)
+        const active_idx = self.active_cache_index.load(.acquire);
+        const write_idx = 1 - active_idx;
+
+        // Clean up old raster data in the WRITE buffer only
+        // Do NOT touch RT data - it stays in the active buffer and is not affected by frustum culling
+        if (self.cached_raster_data[write_idx]) |data| {
+            self.allocator.free(data.objects);
+            for (data.batch_lists) |list| {
+                for (list.batches) |batch| {
+                    self.allocator.free(batch.instances);
+                }
+                self.allocator.free(list.batches);
+            }
+            self.allocator.free(data.batch_lists);
+        }
+
+        // RT data is NOT copied - it remains only in the active buffer
+        // This avoids creating aliased pointers that cause double-free on scene reload
+        // The RT system reads from cached_raytracing_data[active_idx] directly
+
+        const entities = snapshot.entities[0..snapshot.entity_count];
+        const frustum = if (self.frustum_culling_enabled) &snapshot.camera_frustum else null;
+
+        // Build only raster cache with frustum culling
+        try self.buildRasterCacheOnly(entities, asset_manager, write_idx, frustum);
+
+        // Upload instance data to GPU after rebuilding batches
+        // This syncs the instance buffer with the new culled batch layout
+        try self.uploadInstanceBufferFromBatches();
+
+        const total_time_ns = std.time.nanoTimestamp() - start_time;
+        const total_time_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
+
+        if (total_time_ms > 1.0) {
+            log(.DEBUG, "render_system", "Raster-only rebuild: {d:.2}ms", .{total_time_ms});
+        }
+    }
+
+    /// Build only rasterization cache (used for frustum-only updates)
+    fn buildRasterCacheOnly(
+        self: *RenderSystem,
+        entities: []const GameStateSnapshot.EntityRenderData,
+        asset_manager: *AssetManager,
+        write_idx: u8,
+        frustum: ?*const math.Frustum,
+    ) !void {
+        // Count total meshes
+        var total_meshes: usize = 0;
+        for (entities) |entity_data| {
+            const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
+            total_meshes += model.meshes.items.len;
+        }
+
+        // Allocate raster objects
+        const raster_objects = try self.allocator.alloc(RasterizationData.RenderableObject, total_meshes);
+        errdefer self.allocator.free(raster_objects);
+
+        // Build instanced batches partitioned by material set
+        var builders = std.StringHashMap(BatchBuilder).init(self.allocator);
+        defer {
+            var iter = builders.valueIterator();
+            while (iter.next()) |builder| {
+                builder.deinit();
+            }
+            builders.deinit();
+        }
+
+        var mesh_idx: usize = 0;
+
+        for (entities, 0..) |entity_data, i| {
+            const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
+
+            var material_index: u32 = 0;
+            if (entity_data.material_buffer_index) |idx| {
+                material_index = idx;
+            }
+
+            const set_name = if (entity_data.material_set_name.len > 0) entity_data.material_set_name else "opaque";
+
+            const builder_entry = try builders.getOrPut(set_name);
+            if (!builder_entry.found_existing) {
+                builder_entry.value_ptr.* = BatchBuilder.init(self.allocator);
+            }
+            const builder = builder_entry.value_ptr;
+
+            for (model.meshes.items) |model_mesh| {
+                // Frustum culling for rasterization (only if frustum is valid)
+                var is_visible = true;
+                if (frustum) |f| {
+                    if (f.isValid()) {
+                        if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
+                            const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
+                            const world_aabb = local_aabb.transform(entity_data.transform);
+                            is_visible = f.testAABB(world_aabb);
+                        }
+                    }
+                }
+
+                raster_objects[mesh_idx] = .{
+                    .transform = entity_data.transform.data,
+                    .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
+                    .material_index = material_index,
+                    .visible = is_visible,
+                    .entity_index = @intCast(i),
+                };
+
+                // Only add visible objects to batches
+                if (is_visible) {
+                    try builder.addObject(model_mesh.geometry.mesh, mesh_idx, entity_data.entity_id);
+                }
+
+                mesh_idx += 1;
+            }
+        }
+
+        // Build final batch lists
+        const batch_lists = try self.allocator.alloc(render_data_types.RasterizationData.BatchList, builders.count());
+        var list_idx: usize = 0;
+        var iter = builders.iterator();
+        while (iter.next()) |entry| {
+            const set_name = entry.key_ptr.*;
+            var builder = entry.value_ptr;
+            const batches = try builder.buildBatches(raster_objects, self.allocator);
+
+            batch_lists[list_idx] = .{
+                .set_name = set_name,
+                .batches = batches,
+            };
+            list_idx += 1;
+        }
+
+        // Increment cache generation
+        self.cache_generation +%= 1;
+
+        // Store raster data only
+        self.cached_raster_data[write_idx] = .{
+            .objects = raster_objects,
+            .batch_lists = batch_lists,
+        };
+
+        // Atomically flip to make the new cache active
+        self.active_cache_index.store(write_idx, .release);
+    }
+
+    /// Upload instance buffer from current batches to GPU
+    /// Called after frustum culling rebuilds batches with only visible objects
+    fn uploadInstanceBufferFromBatches(self: *RenderSystem) !void {
         const buffer_manager = self.buffer_manager orelse return;
 
         // Get active cache with batches
         const active_idx = self.active_cache_index.load(.acquire);
         const raster_data = self.cached_raster_data[active_idx] orelse return;
 
-        if (raster_data.batches.len == 0) return;
-
-        // Count total instances across all batches
+        // Count total instances across all batch lists
         var total_instances: usize = 0;
-        for (raster_data.batches) |batch| {
-            total_instances += batch.instances.len;
+        for (raster_data.batch_lists) |list| {
+            for (list.batches) |batch| {
+                total_instances += batch.instances.len;
+            }
         }
 
         if (total_instances == 0) return;
 
-        // Calculate buffer size
         const buffer_size = total_instances * @sizeOf(render_data_types.RasterizationData.InstanceData);
 
         // Check if we need to reallocate (capacity change)
-        const needs_realloc = self.instance_capacity < total_instances;
-
-        if (needs_realloc) {
-            log(.INFO, "render_system", "Reallocating instance buffers ({} -> {} instances)", .{
+        if (self.instance_capacity < total_instances) {
+            log(.INFO, "render_system", "Reallocating instance buffers for frustum culling ({} -> {} instances)", .{
                 self.instance_capacity,
                 total_instances,
             });
 
-            // Reallocate each frame's buffer from its arena
+            // Reallocate each frame's buffer
             for (&self.instance_buffers, 0..) |*buf_ptr, frame_idx| {
                 const frame = @as(u32, @intCast(frame_idx));
                 const buf = buf_ptr.*;
@@ -601,12 +778,11 @@ pub const RenderSystem = struct {
                 ) catch |err| {
                     if (err == error.ArenaRequiresCompaction) {
                         log(.WARN, "render_system", "Arena full for frame {}, creating dedicated buffer", .{frame});
-                        // Fall back to dedicated buffer - free old buffer and create new dedicated one
                         self.allocator.free(buf.name);
                         self.allocator.destroy(buf);
 
                         const dedicated_name = try std.fmt.allocPrint(self.allocator, "instance_buffer_frame{d}_dedicated", .{frame});
-                        defer self.allocator.free(dedicated_name); // createBuffer duplicates the name
+                        defer self.allocator.free(dedicated_name);
                         const dedicated = try buffer_manager.createBuffer(
                             .{
                                 .name = dedicated_name,
@@ -623,7 +799,6 @@ pub const RenderSystem = struct {
                     return err;
                 };
 
-                // Update buffer to point to new arena allocation
                 buf.buffer = alloc_result.buffer.buffer;
                 buf.arena_offset = alloc_result.offset;
                 buf.size = buffer_size;
@@ -631,93 +806,26 @@ pub const RenderSystem = struct {
             }
 
             self.instance_capacity = total_instances;
-            log(.INFO, "render_system", "Reallocated instance buffers to {} instances", .{total_instances});
+        }
 
-            // Full rewrite after reallocation
-            var upload_buffer = std.ArrayList(u8){};
-            defer upload_buffer.deinit(self.allocator);
-            try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
+        // Build upload buffer from all batches (in batch_lists order)
+        var upload_buffer = std.ArrayList(u8){};
+        defer upload_buffer.deinit(self.allocator);
+        try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
 
-            for (raster_data.batches) |batch| {
+        for (raster_data.batch_lists) |list| {
+            for (list.batches) |batch| {
                 const batch_bytes = std.mem.sliceAsBytes(batch.instances);
                 try upload_buffer.appendSlice(self.allocator, batch_bytes);
             }
+        }
 
-            // Write instance data to all frame buffers
-            for (&self.instance_buffers) |buf| {
-                try buf.buffer.map(buffer_size, buf.arena_offset orelse 0);
-                const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
-                @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
-                buf.buffer.unmap();
-            }
-
-            log(.INFO, "render_system", "Wrote {} instances to all frame buffers after reallocation", .{total_instances});
-
-            // Update tracking
-            self.last_instance_data.clearRetainingCapacity();
-            for (raster_data.batches) |batch| {
-                try self.last_instance_data.appendSlice(self.allocator, batch.instances);
-            }
-        } else {
-            // No reallocation - check for granular changes
-            var upload_buffer = std.ArrayList(u8){};
-            defer upload_buffer.deinit(self.allocator);
-            try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
-
-            // Collect all current instance data
-            var current_instances = std.ArrayList(render_data_types.RasterizationData.InstanceData){};
-            defer current_instances.deinit(self.allocator);
-
-            for (raster_data.batches) |batch| {
-                try current_instances.appendSlice(self.allocator, batch.instances);
-            }
-
-            // Detect changes by comparing with last frame
-            var changed_indices = std.ArrayList(u32){};
-            defer changed_indices.deinit(self.allocator);
-
-            const compare_count = @min(current_instances.items.len, self.last_instance_data.items.len);
-
-            for (current_instances.items[0..compare_count], 0..) |current, i| {
-                if (i >= self.last_instance_data.items.len) break;
-                const last = self.last_instance_data.items[i];
-
-                // Compare instance data (transform matrix + material index)
-                if (!std.meta.eql(current, last)) {
-                    try changed_indices.append(self.allocator, @intCast(i));
-                }
-            }
-
-            // Any new instances beyond last count are also "changed"
-            if (current_instances.items.len > self.last_instance_data.items.len) {
-                var i = self.last_instance_data.items.len;
-                while (i < current_instances.items.len) : (i += 1) {
-                    try changed_indices.append(self.allocator, @intCast(i));
-                }
-            }
-
-            if (changed_indices.items.len > 0) {
-
-                // Apply granular updates to each frame's buffer
-                for (&self.instance_buffers) |buf| {
-                    for (changed_indices.items) |idx| {
-                        const instance_data = current_instances.items[idx];
-                        const offset = (buf.arena_offset orelse 0) + (idx * @sizeOf(render_data_types.RasterizationData.InstanceData));
-
-                        try buf.buffer.map(@sizeOf(render_data_types.RasterizationData.InstanceData), offset);
-                        const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
-                        const bytes = std.mem.asBytes(&instance_data);
-                        @memcpy(data_ptr[0..bytes.len], bytes);
-                        buf.buffer.unmap();
-                    }
-                }
-            } else {
-                log(.TRACE, "render_system", "No instance changes detected", .{});
-            }
-
-            // Update tracking
-            self.last_instance_data.clearRetainingCapacity();
-            try self.last_instance_data.appendSlice(self.allocator, current_instances.items);
+        // Write to all frame buffers
+        for (&self.instance_buffers) |buf| {
+            try buf.buffer.map(buffer_size, buf.arena_offset orelse 0);
+            const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+            @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
+            buf.buffer.unmap();
         }
     }
 
@@ -815,7 +923,7 @@ pub const RenderSystem = struct {
                     @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
                     buf.buffer.unmap();
                 }
-                
+
                 // Return early as we have updated everything
                 return;
             }
@@ -1058,7 +1166,8 @@ pub const RenderSystem = struct {
             }
             std.mem.sort(usize, mesh_keys.items, {}, std.sort.asc(usize));
 
-            // Build batches in sorted order
+            // Build batches in sorted order, tracking running offset for instance buffer
+            var running_offset: u32 = 0;
             for (mesh_keys.items, 0..) |mesh_key, batch_idx| {
                 const instances_with_entities = self.mesh_to_instances.getPtr(mesh_key).?;
 
@@ -1083,8 +1192,10 @@ pub const RenderSystem = struct {
                 batches[batch_idx] = .{
                     .mesh_handle = .{ .mesh_ptr = first_obj.mesh_handle.mesh_ptr },
                     .instances = instances,
+                    .instance_buffer_offset = running_offset,
                     .visible = true,
                 };
+                running_offset += @intCast(instances.len);
             }
 
             return batches;
@@ -1096,6 +1207,7 @@ pub const RenderSystem = struct {
         entities: []const GameStateSnapshot.EntityRenderData,
         asset_manager: *AssetManager,
         write_idx: u8,
+        frustum: ?*const math.Frustum,
     ) !void {
         // Count total meshes
         var total_meshes: usize = 0;
@@ -1128,6 +1240,8 @@ pub const RenderSystem = struct {
         }
 
         var mesh_idx: usize = 0;
+        var culled_count: usize = 0;
+
         for (entities, 0..) |entity_data, i| {
             const model = asset_manager.getModel(entity_data.model_asset) orelse continue;
 
@@ -1148,17 +1262,33 @@ pub const RenderSystem = struct {
             const builder = builder_entry.value_ptr;
 
             for (model.meshes.items) |model_mesh| {
+                // Frustum culling for rasterization only (RT needs all geometry)
+                var is_visible = true;
+                if (frustum) |f| {
+                    if (f.isValid()) {
+                        if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
+                            const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
+                            const world_aabb = local_aabb.transform(entity_data.transform);
+                            is_visible = f.testAABB(world_aabb);
+                            if (!is_visible) culled_count += 1;
+                        }
+                    }
+                }
+
                 raster_objects[mesh_idx] = .{
                     .transform = entity_data.transform.data,
                     .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
                     .material_index = material_index,
-                    .visible = true,
+                    .visible = is_visible,
                     .entity_index = @intCast(i),
                 };
 
-                // Register this object with the batch builder for its set
-                try builder.addObject(model_mesh.geometry.mesh, mesh_idx, entity_data.entity_id);
+                // Only add visible objects to raster batches (RT gets everything)
+                if (is_visible) {
+                    try builder.addObject(model_mesh.geometry.mesh, mesh_idx, entity_data.entity_id);
+                }
 
+                // RT always gets all geometry (needed for ray intersections)
                 geometries[mesh_idx] = .{
                     .mesh_ptr = model_mesh.geometry.mesh,
                     .blas = null,
@@ -1175,6 +1305,10 @@ pub const RenderSystem = struct {
 
                 mesh_idx += 1;
             }
+        }
+
+        if (culled_count > 0) {
+            log(.DEBUG, "render_system", "Frustum culled {} of {} objects", .{ culled_count, mesh_idx });
         }
 
         // Build final batch lists
@@ -1218,6 +1352,7 @@ pub const RenderSystem = struct {
         entities: []const GameStateSnapshot.EntityRenderData,
         asset_manager: *AssetManager,
         write_idx: u8,
+        frustum: ?*const math.Frustum,
     ) !void {
         const pool = self.thread_pool.?;
 
@@ -1279,6 +1414,7 @@ pub const RenderSystem = struct {
                 .asset_manager = asset_manager,
                 .output_offset = current_offset,
                 .completion = &completion,
+                .frustum = frustum,
             };
 
             try pool.submitWork(.{
@@ -1328,8 +1464,11 @@ pub const RenderSystem = struct {
             }
             const builder = builder_entry.value_ptr;
 
-            for (model.meshes.items) |model_mesh| {
-                try builder.addObject(model_mesh.geometry.mesh, obj_idx, entity_data.entity_id);
+            for (model.meshes.items) |_| {
+                // Only add visible objects to batches (frustum culling applied by worker)
+                if (raster_objects[obj_idx].visible) {
+                    try builder.addObject(raster_objects[obj_idx].mesh_handle.mesh_ptr, obj_idx, entity_data.entity_id);
+                }
                 obj_idx += 1;
             }
         }
@@ -1380,6 +1519,7 @@ pub const RenderSystem = struct {
         asset_manager: *AssetManager,
         output_offset: usize,
         completion: *std.atomic.Value(usize),
+        frustum: ?*const math.Frustum, // For frustum culling
     };
 
     /// Worker function for snapshot-based parallel cache building
@@ -1401,11 +1541,23 @@ pub const RenderSystem = struct {
             for (model.meshes.items) |model_mesh| {
                 const output_idx = ctx.output_offset + mesh_offset;
 
+                // Frustum culling for rasterization
+                var is_visible = true;
+                if (ctx.frustum) |f| {
+                    if (f.isValid()) {
+                        if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
+                            const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
+                            const world_aabb = local_aabb.transform(entity_data.transform);
+                            is_visible = f.testAABB(world_aabb);
+                        }
+                    }
+                }
+
                 ctx.raster_objects[output_idx] = .{
                     .transform = entity_data.transform.data,
                     .mesh_handle = .{ .mesh_ptr = model_mesh.geometry.mesh },
                     .material_index = material_index,
-                    .visible = true,
+                    .visible = is_visible,
                 };
 
                 ctx.geometries[output_idx] = .{
@@ -1908,6 +2060,17 @@ pub const RenderSystem = struct {
     }
 };
 
+/// Compare two 4x4 matrices for approximate equality (for camera change detection)
+fn matricesApproxEqual(a: math.Mat4, b: math.Mat4) bool {
+    const epsilon: f32 = 0.0001;
+    for (0..16) |i| {
+        if (@abs(a.data[i] - b.data[i]) > epsilon) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// MAIN THREAD: Prepare phase - change detection and dirty flag management
 /// Runs RenderSystem change detection ONLY - does NOT build caches
 /// Cache building happens on render thread via rebuildCachesFromSnapshot() (update phase)
@@ -1938,16 +2101,40 @@ pub fn prepare(world: *World, dt: f32) !void {
     // FAST PATH: Check for changes BEFORE doing expensive extraction
     var changes_detected = false;
     var is_transform_only = false;
+    var is_camera_only = false;
     var reason: []const u8 = "";
 
     // Reset scratch arena for this frame's temporary allocations
     _ = self.scratch_arena.reset(.retain_capacity);
+
+    // 0) Check if camera moved (for frustum culling)
+    // Get the actual camera view-projection from GlobalUbo (works for both edit and play mode)
+    var current_view_proj = math.Mat4.identity();
+    if (world.getUserData("global_ubo")) |ubo_ptr| {
+        const GlobalUbo = @import("../../rendering/frameinfo.zig").GlobalUbo;
+        const global_ubo: *GlobalUbo = @ptrCast(@alignCast(ubo_ptr));
+        current_view_proj = global_ubo.projection.mul(global_ubo.view);
+    }
+
+    // Check if camera changed significantly (compare view-projection matrix)
+    const camera_changed = !matricesApproxEqual(current_view_proj, self.last_camera_view_proj);
+    if (camera_changed and self.frustum_culling_enabled) {
+        self.last_camera_view_proj = current_view_proj;
+        // Camera moved - need to rebuild with new frustum culling
+        // But only if we have existing data (not first frame)
+        if (self.cached_raster_data[self.active_cache_index.load(.acquire)] != null) {
+            changes_detected = true;
+            is_camera_only = true;
+            reason = "camera_moved";
+        }
+    }
 
     // 1) Quick check: Cache missing (first frame) - NOT transform-only
     const active_idx = self.active_cache_index.load(.acquire);
     if (self.cached_raster_data[active_idx] == null) {
         changes_detected = true;
         is_transform_only = false;
+        is_camera_only = false;
         reason = "cache_missing";
     }
 
@@ -1955,6 +2142,7 @@ pub fn prepare(world: *World, dt: f32) !void {
     if (!changes_detected and current_count != self.last_total_entity_count) {
         changes_detected = true;
         is_transform_only = false;
+        is_camera_only = false;
         reason = "count_changed";
     }
 
@@ -2016,9 +2204,13 @@ pub fn prepare(world: *World, dt: f32) !void {
 
     // ONLY extract if changes detected - this is the expensive part!
     if (changes_detected) {
+        // OPTIMIZATION: Camera-only change - don't re-extract, just mark frustum dirty
+        if (is_camera_only and renderables_set.renderables.len > 0) {
+            // Reuse existing renderables, just mark for frustum re-culling
+            renderables_set.markFrustumDirty();
+        }
         // OPTIMIZATION: If only transforms changed, update in place
-        // We assume the entity list order is stable because count didn't change and no structural changes detected
-        if (is_transform_only and renderables_set.renderables.len > 0) {
+        else if (is_transform_only and renderables_set.renderables.len > 0) {
             var iter = mesh_view.iterator();
             var i: usize = 0;
             while (iter.next()) |entry| {
@@ -2133,8 +2325,12 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
             log(.INFO, "render_system", "First frame detected - forcing cache rebuild ({} entities)", .{snapshot.entity_count});
         }
 
+        // OPTIMIZATION: If only camera/frustum changed, only rebuild raster cache (PT needs all geometry)
+        if (snapshot.render_changes.frustum_dirty and !snapshot.render_changes.transform_only_change and !is_first_frame) {
+            try self.rebuildRasterCacheOnly(snapshot, asset_manager);
+        }
         // OPTIMIZATION: If only transforms changed, skip full cache rebuild
-        if (snapshot.render_changes.transform_only_change and !is_first_frame) {
+        else if (snapshot.render_changes.transform_only_change and !is_first_frame) {
             try self.updateCachesForTransformsOnly(snapshot);
         } else {
             try self.rebuildCachesFromSnapshot(snapshot, asset_manager);

@@ -72,6 +72,15 @@ pub const RenderablesSet = struct {
         self.changes.raytracing_descriptors_dirty = !transform_only;
     }
 
+    /// Mark dirty due to camera/frustum change only (no ECS changes)
+    /// This triggers frustum re-culling without re-extracting from ECS
+    pub fn markFrustumDirty(self: *RenderablesSet) void {
+        self.changes.renderables_dirty = true;
+        self.changes.frustum_dirty = true;
+        // Don't set transform_only_change - we want full raster rebuild with new frustum
+        // Don't dirty RT descriptors - RT needs all geometry regardless of frustum
+    }
+
     pub fn clearDirty(self: *RenderablesSet) void {
         self.changes = .{};
     }
