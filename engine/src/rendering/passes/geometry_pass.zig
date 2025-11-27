@@ -261,30 +261,21 @@ pub const GeometryPass = struct {
             self.global_ubo_set.frame_buffers,
         );
 
-        // Bind shadow data UBO and shadow map if shadow pass is available
+        // Bind shadow data SSBO and shadow cube array map if shadow pass is available
         log(.INFO, "geometry_pass", "bindResources: shadow_pass = {}", .{@intFromPtr(self.shadow_pass)});
         if (self.shadow_pass) |shadow_pass| {
-            // Bind shadow data buffer (light space matrix, bias, enabled flag)
-            var shadow_buffers: [MAX_FRAMES_IN_FLIGHT]*const ManagedBuffer = undefined;
-            for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-                if (shadow_pass.getShadowDataBuffer(@intCast(i))) |buf| {
-                    shadow_buffers[i] = buf;
-                }
-            }
-
-            self.resource_binder.bindUniformBufferNamed(
+            // Bind shadow data SSBO (all lights' data from ShadowSystem)
+            try self.resource_binder.bindStorageBufferArrayNamed(
                 self.geometry_pipeline,
-                "ShadowUbo",
-                shadow_buffers,
-            ) catch |err| {
-                log(.WARN, "geometry_pass", "Failed to bind ShadowUbo: {}", .{err});
-            };
+                "ShadowDataSSBO",
+                shadow_pass.shadow_system.shadow_data_buffers,
+            );
 
-            // Bind shadow cube texture with comparison sampler
+            // Bind shadow 2D array texture with comparison sampler
             if (shadow_pass.getShadowCube()) |shadow_cube| {
                 try self.resource_binder.bindTextureNamed(
                     self.geometry_pipeline,
-                    "shadowCubeMap",
+                    "shadowArrayMap",
                     shadow_cube,
                 );
             }

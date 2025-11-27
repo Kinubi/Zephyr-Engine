@@ -128,6 +128,19 @@ pub const SceneLayer = struct {
                     }) catch |err| {
                         log(.WARN, "scene_layer", "Failed to add transform system: {}", .{err});
                     };
+
+                    // ShadowSystem runs after transforms to detect light position changes
+                    stage2.addSystem(.{
+                        .name = "ShadowSystem",
+                        .prepare_fn = ecs.prepareShadowSystem,
+                        .update_fn = ecs.updateShadowSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{ "Transform", "PointLight" },
+                            .writes = &[_][]const u8{},
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add shadow system: {}", .{err});
+                    };
                 } else |err| {
                     log(.WARN, "scene_layer", "Failed to add stage 2: {}", .{err});
                 }

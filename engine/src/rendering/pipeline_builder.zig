@@ -324,6 +324,7 @@ pub const PipelineBuilder = struct {
     color_attachment_formats: ?[]const vk.Format = null,
     depth_attachment_format: vk.Format = .undefined,
     stencil_attachment_format: vk.Format = .undefined,
+    view_mask: u32 = 0, // For VK_KHR_multiview support
 
     // Compute specific
     compute_shader: ?*const Shader = null,
@@ -509,6 +510,21 @@ pub const PipelineBuilder = struct {
         self.color_attachment_formats = color_formats;
         self.depth_attachment_format = depth_format;
         self.stencil_attachment_format = .undefined;
+        self.render_pass = null; // Clear render pass
+        return self;
+    }
+
+    /// Configure pipeline for dynamic rendering with multiview support
+    pub fn withDynamicRenderingMultiview(
+        self: *PipelineBuilder,
+        color_formats: []const vk.Format,
+        depth_format: vk.Format,
+        view_mask: u32,
+    ) *PipelineBuilder {
+        self.color_attachment_formats = color_formats;
+        self.depth_attachment_format = depth_format;
+        self.stencil_attachment_format = .undefined;
+        self.view_mask = view_mask;
         self.render_pass = null; // Clear render pass
         return self;
     }
@@ -746,7 +762,7 @@ pub const PipelineBuilder = struct {
             dynamic_rendering_info = vk.PipelineRenderingCreateInfo{
                 .s_type = .pipeline_rendering_create_info,
                 .p_next = null,
-                .view_mask = 0,
+                .view_mask = self.view_mask,
                 .color_attachment_count = @intCast(self.color_attachment_formats.?.len),
                 .p_color_attachment_formats = self.color_attachment_formats.?.ptr,
                 .depth_attachment_format = self.depth_attachment_format,

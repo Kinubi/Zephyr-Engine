@@ -64,9 +64,25 @@ pub const ManagedTexture = struct {
         return self.texture.getFaceView(face);
     }
 
+    /// Get a face array view for cube array textures with multiview support
+    /// Returns a 2D_ARRAY view covering the same face across all cubes
+    pub fn getFaceArrayView(self: *const ManagedTexture, face: u32) ?vk.ImageView {
+        return self.texture.getFaceArrayView(face);
+    }
+
     /// Check if this is a cube texture
     pub fn isCube(self: *const ManagedTexture) bool {
         return self.texture.is_cube;
+    }
+
+    /// Check if this is a cube array texture (for multi-light shadows)
+    pub fn isCubeArray(self: *const ManagedTexture) bool {
+        return self.texture.cube_count > 0;
+    }
+
+    /// Get the number of cubes in a cube array texture (0 if not a cube array)
+    pub fn getCubeCount(self: *const ManagedTexture) u32 {
+        return self.texture.cube_count;
     }
 
     /// Check if linked texture changed and auto-resize/format-match if needed
@@ -381,6 +397,74 @@ pub const TextureManager = struct {
             name,
             size,
             size,
+            format,
+            compare_enable,
+        });
+
+        return managed;
+    }
+
+    /// Create a managed cube depth array texture for multi-light shadow mapping with VK_KHR_multiview
+    /// Creates cube_count cubes for simultaneous rendering of all shadow-casting lights
+    /// Returns a pointer to the managed texture (with texture.cube_count > 0)
+    ///
+    /// Memory layout optimized for multiview: [face0_light0..N, face1_light0..N, ...]
+    /// This allows one render pass per face to update all lights via multiview
+    pub fn createCubeDepthArrayTexture(
+        self: *TextureManager,
+        name: []const u8,
+        size: u32,
+        cube_count: u32,
+        format: vk.Format,
+        compare_enable: bool,
+        compare_op: vk.CompareOp,
+    ) !*ManagedTexture {
+        // Duplicate the name for ownership
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        // Create the cube depth array texture
+        const cube_array_texture = try Texture.initCubeDepthArray(
+            self.graphics_context,
+            size,
+            cube_count,
+            format,
+            compare_enable,
+            compare_op,
+        );
+
+        // Allocate the managed texture on the heap
+        const managed = try self.allocator.create(ManagedTexture);
+        errdefer self.allocator.destroy(managed);
+
+        const extent = vk.Extent3D{ .width = size, .height = size, .depth = 1 };
+        managed.* = ManagedTexture{
+            .texture = cube_array_texture,
+            .name = owned_name,
+            .format = format,
+            .extent = extent,
+            .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
+            .samples = .{ .@"1_bit" = true },
+            .created_frame = self.frame_counter,
+            .generation = 1,
+        };
+
+        // Add to statistics
+        try self.all_textures.put(owned_name, TextureStats{
+            .format = format,
+            .extent = extent,
+            .created_frame = self.frame_counter,
+            .last_updated = self.frame_counter,
+        });
+
+        // Automatically register for updates
+        try self.registerTexture(managed);
+
+        log(.INFO, "texture_manager", "Created cube depth array texture '{s}' ({}x{} per face, {} cubes, format: {}, compare: {})", .{
+            name,
+            size,
+            size,
+            cube_count,
             format,
             compare_enable,
         });

@@ -529,6 +529,42 @@
                     "path_confirmed": true
                 }
             }
+        },
+        {
+            "uuid": "73bbfea3-60ce-4f17-9716-7c840ebd43bb",
+            "components": {
+                "Name": {
+                    "name": "light"
+                },
+                "Transform": {
+                    "position": {
+                        "x": -1,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "PointLight": {
+                    "color": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    },
+                    "intensity": 1.437000036239624,
+                    "range": 10,
+                    "cast_shadows": true
+                }
+            }
         }
     ]
 }

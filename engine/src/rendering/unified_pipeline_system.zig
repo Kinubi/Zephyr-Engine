@@ -550,7 +550,11 @@ pub const UnifiedPipelineSystem = struct {
                 // Use provided formats or fall back to defaults
                 const color_formats = config.dynamic_rendering_color_formats orelse &[_]vk.Format{.r16g16b16a16_sfloat};
                 const depth_format = config.dynamic_rendering_depth_format orelse .d32_sfloat_s8_uint;
-                _ = builder.withDynamicRendering(color_formats, depth_format);
+                if (config.dynamic_rendering_view_mask != 0) {
+                    _ = builder.withDynamicRenderingMultiview(color_formats, depth_format, config.dynamic_rendering_view_mask);
+                } else {
+                    _ = builder.withDynamicRendering(color_formats, depth_format);
+                }
             } else {
                 _ = builder.withRenderPass(config.render_pass, config.subpass);
             }
@@ -798,7 +802,7 @@ pub const UnifiedPipelineSystem = struct {
         if (!result.found_existing) {
             result.value_ptr.* = PipelineResourceMap.init(self.allocator);
         }
-        
+
         try result.value_ptr.put(key, bound_resource);
     }
 
@@ -969,17 +973,17 @@ pub const UnifiedPipelineSystem = struct {
         // Collect all dirty bindings for this frame
         var pipeline_iter = self.bound_resources.iterator();
         var dirty_count: u32 = 0;
-        
+
         while (pipeline_iter.next()) |pipeline_entry| {
             const pipeline_hash = pipeline_entry.key_ptr.*;
             const map = pipeline_entry.value_ptr;
-            
+
             // We need to find the PipelineId struct for this hash to use as key in updates_by_pipeline
             // This is a bit inefficient but this is a legacy method anyway
             // We can iterate pipelines to find the matching ID
             var pipeline_id: PipelineId = undefined;
             var found_pipeline = false;
-            
+
             var p_iter = self.pipelines.keyIterator();
             while (p_iter.next()) |pid| {
                 if (pid.hash == pipeline_hash) {
@@ -988,7 +992,7 @@ pub const UnifiedPipelineSystem = struct {
                     break;
                 }
             }
-            
+
             if (!found_pipeline) continue;
 
             var resource_iter = map.iterator();
@@ -1888,6 +1892,7 @@ pub const PipelineConfig = struct {
     // Dynamic rendering formats (used when render_pass is .null_handle)
     dynamic_rendering_color_formats: ?[]const vk.Format = null,
     dynamic_rendering_depth_format: ?vk.Format = null,
+    dynamic_rendering_view_mask: u32 = 0, // For VK_KHR_multiview support
 
     /// Clone the config with deep copies of all slices
     pub fn clone(self: PipelineConfig, allocator: std.mem.Allocator) !PipelineConfig {

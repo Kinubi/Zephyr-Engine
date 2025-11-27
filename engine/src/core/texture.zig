@@ -58,6 +58,15 @@ pub const Texture = struct {
     /// Individual face views for rendering to cube faces (order: +X, -X, +Y, -Y, +Z, -Z)
     /// Only valid when is_cube = true
     face_views: ?[6]vk.ImageView = null,
+
+    // Cube array texture support for multi-light shadow mapping with multiview
+    /// Number of cubes in a cube array (0 = not a cube array)
+    cube_count: u32 = 0,
+    /// Face array views for multiview rendering - each view covers the same face across all cubes
+    /// face_array_views[face] covers layers [face, face+6, face+12, ...] for all cubes
+    /// Used with VK_KHR_multiview to render all lights simultaneously
+    face_array_views: ?[6]vk.ImageView = null,
+
     pub fn init(
         gc: *GraphicsContext,
         format: vk.Format,
@@ -1121,6 +1130,13 @@ pub const Texture = struct {
             }
         }
 
+        // Destroy face array views if this is a cube array texture (for multiview)
+        if (self.face_array_views) |views| {
+            for (views) |view| {
+                self.gc.vkd.destroyImageView(self.gc.dev, view, null);
+            }
+        }
+
         // Destroy Vulkan resources in reverse order of creation
         self.gc.vkd.destroySampler(self.gc.dev, self.sampler, null);
         self.gc.vkd.destroyImageView(self.gc.dev, self.image_view, null);
@@ -1131,6 +1147,15 @@ pub const Texture = struct {
     /// Get a specific face view for rendering (only valid for cube textures)
     pub fn getFaceView(self: *const Texture, face: u32) ?vk.ImageView {
         if (self.face_views) |views| {
+            return views[face];
+        }
+        return null;
+    }
+
+    /// Get a face array view for multiview rendering (only valid for cube array textures)
+    /// Returns a 2D_ARRAY view covering the same face across all cubes
+    pub fn getFaceArrayView(self: *const Texture, face: u32) ?vk.ImageView {
+        if (self.face_array_views) |views| {
             return views[face];
         }
         return null;
@@ -1287,6 +1312,196 @@ pub const Texture = struct {
             .memory_size = memory_size,
             .is_cube = true,
             .face_views = face_views,
+        };
+    }
+
+    /// Initialize a cube depth array texture for multi-light shadow mapping with VK_KHR_multiview
+    /// Creates cube_count cubes (cube_count * 6 layers) for rendering all lights simultaneously
+    ///
+    /// Memory layout: [light0_face0, light0_face1, ..., light0_face5, light1_face0, ..., lightN_face5]
+    ///
+    /// Creates two types of views:
+    /// - Main view: CUBE_ARRAY for sampling in shaders (samplerCubeArray)
+    /// - Face array views[6]: Each is a 2D_ARRAY covering the same face across ALL cubes
+    ///   For multiview rendering: face_array_views[face] renders to layers [face, face+6, face+12, ...]
+    pub fn initCubeDepthArray(
+        gc: *GraphicsContext,
+        size: u32,
+        cube_count: u32,
+        format: vk.Format,
+        compare_enable: bool,
+        compare_op: vk.CompareOp,
+    ) !Texture {
+        if (cube_count == 0) return error.InvalidCubeCount;
+
+        const extent = vk.Extent3D{ .width = size, .height = size, .depth = 1 };
+        const total_layers: u32 = cube_count * 6;
+
+        // Create 2D array image with cube_count * 6 array layers (face-major layout)
+        // Layout: [face0_light0..N, face1_light0..N, ...] for efficient multiview rendering
+        const image_info = vk.ImageCreateInfo{
+            .s_type = vk.StructureType.image_create_info,
+            .image_type = .@"2d",
+            .format = format,
+            .extent = extent,
+            .mip_levels = 1,
+            .array_layers = total_layers,
+            .samples = .{ .@"1_bit" = true },
+            .tiling = vk.ImageTiling.optimal,
+            .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
+            .initial_layout = vk.ImageLayout.undefined,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .flags = .{}, // No cube_compatible_bit - using 2D array with manual cube math
+            .p_next = null,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        };
+
+        var image: vk.Image = undefined;
+        var memory: vk.DeviceMemory = undefined;
+        try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image, &memory);
+
+        // Query memory size for tracking
+        const mem_reqs = gc.vkd.getImageMemoryRequirements(gc.dev, image);
+        const memory_size = mem_reqs.size;
+
+        const aspect_mask = vk.ImageAspectFlags{ .depth_bit = true };
+
+        // Create 2D_ARRAY image view for sampling (all layers as 2D array)
+        // Layout: [face0_light0..N, face1_light0..N, ...] - face-major for multiview
+        // Shader manually computes layer = face * num_lights + light_idx
+        const array_view_info = vk.ImageViewCreateInfo{
+            .s_type = vk.StructureType.image_view_create_info,
+            .view_type = .@"2d_array",
+            .format = format,
+            .subresource_range = .{
+                .aspect_mask = aspect_mask,
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = total_layers,
+            },
+            .image = image,
+            .components = .{
+                .r = vk.ComponentSwizzle.identity,
+                .g = vk.ComponentSwizzle.identity,
+                .b = vk.ComponentSwizzle.identity,
+                .a = vk.ComponentSwizzle.identity,
+            },
+            .flags = .{},
+            .p_next = null,
+        };
+        const array_view = gc.vkd.createImageView(gc.dev, &array_view_info, null) catch return error.FailedToCreateImageView;
+
+        // Create face array views for multiview rendering
+        // Each face view is a 2D_ARRAY covering layers [face * cube_count, (face+1) * cube_count - 1]
+        // These are used with VK_KHR_multiview to render all lights in one draw call per face
+        var face_array_views: [6]vk.ImageView = undefined;
+        for (0..6) |face_idx| {
+            // Layout: [face0_light0..N, face1_light0..N, ...]
+            // So face_array_views[face] covers layers [face * cube_count, face * cube_count + cube_count - 1]
+            //
+            // Alternative approach: Use contiguous layout [face0_all_lights, face1_all_lights, ...]
+            // Layer layout: [light0_f0, light1_f0, ..., lightN_f0, light0_f1, light1_f1, ...]
+            //
+            // For now, create a 2D_ARRAY view for each face starting at layer face_idx * cube_count
+            // This requires changing the memory layout!
+            //
+            // Updated layout: [face0_light0, face0_light1, ..., face0_lightN, face1_light0, ...]
+            // So face_array_views[face] covers layers [face * cube_count, face * cube_count + cube_count - 1]
+            const base_layer: u32 = @as(u32, @intCast(face_idx)) * cube_count;
+
+            const face_array_view_info = vk.ImageViewCreateInfo{
+                .s_type = vk.StructureType.image_view_create_info,
+                .view_type = .@"2d_array",
+                .format = format,
+                .subresource_range = .{
+                    .aspect_mask = aspect_mask,
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = base_layer,
+                    .layer_count = cube_count,
+                },
+                .image = image,
+                .components = .{
+                    .r = vk.ComponentSwizzle.identity,
+                    .g = vk.ComponentSwizzle.identity,
+                    .b = vk.ComponentSwizzle.identity,
+                    .a = vk.ComponentSwizzle.identity,
+                },
+                .flags = .{},
+                .p_next = null,
+            };
+            face_array_views[face_idx] = gc.vkd.createImageView(gc.dev, &face_array_view_info, null) catch return error.FailedToCreateImageView;
+        }
+
+        // Transition all layers to general layout
+        const cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            cmd,
+            image,
+            vk.ImageLayout.undefined,
+            vk.ImageLayout.general,
+            .{
+                .aspect_mask = aspect_mask,
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = total_layers,
+            },
+        );
+        try gc.endSingleTimeCommands(cmd);
+
+        // Create comparison sampler for shadow mapping
+        const sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = vk.Filter.linear,
+            .min_filter = vk.Filter.linear,
+            .mipmap_mode = vk.SamplerMipmapMode.nearest,
+            .address_mode_u = vk.SamplerAddressMode.clamp_to_edge,
+            .address_mode_v = vk.SamplerAddressMode.clamp_to_edge,
+            .address_mode_w = vk.SamplerAddressMode.clamp_to_edge,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = 1.0,
+            .min_lod = 0.0,
+            .max_lod = 1.0,
+            .border_color = vk.BorderColor.float_opaque_white,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = if (compare_enable) .true else .false,
+            .compare_op = compare_op,
+            .anisotropy_enable = .false,
+        };
+        const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
+
+        log(.INFO, "texture", "Created cube depth array texture {}x{} ({} cubes, {} total layers)", .{
+            size,
+            size,
+            cube_count,
+            total_layers,
+        });
+        log(.INFO, "texture", "  Layout: [face0_light0..N, face1_light0..N, ...] for multiview", .{});
+
+        return Texture{
+            .image = image,
+            .image_view = array_view, // Main view is 2D_ARRAY for sampling with sampler2DArrayShadow
+            .memory = memory,
+            .sampler = sampler,
+            .mip_levels = 1,
+            .extent = extent,
+            .format = format,
+            .descriptor = vk.DescriptorImageInfo{
+                .sampler = sampler,
+                .image_view = array_view,
+                .image_layout = vk.ImageLayout.general,
+            },
+            .gc = gc,
+            .memory_size = memory_size,
+            .is_cube = true,
+            .cube_count = cube_count,
+            .face_views = null, // Not used for cube arrays
+            .face_array_views = face_array_views,
         };
     }
 };

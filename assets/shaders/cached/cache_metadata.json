@@ -53,7 +53,7 @@
       "cached_spirv_path": "assets/shaders/cached/shadow.vert.spv",
       "file_hash": "10519132088184541413",
       "options_hash": "13509613240315378116",
-      "compile_time": 1764260033
+      "compile_time": 1764261524
     },
     "assets/shaders/point_light.vert": {
       "cached_spirv_path": "assets/shaders/cached/point_light.vert.spv",
@@ -83,7 +83,7 @@
       "cached_spirv_path": "assets/shaders/cached/shadow.frag.spv",
       "file_hash": "4495634644260806229",
       "options_hash": "13509613240315378116",
-      "compile_time": 1764260033
+      "compile_time": 1764261524
     },
     "assets/shaders/textured.vert": {
       "cached_spirv_path": "assets/shaders/cached/textured.vert.spv",
@@ -99,9 +99,9 @@
     },
     "assets/shaders/textured.frag": {
       "cached_spirv_path": "assets/shaders/cached/textured.frag.spv",
-      "file_hash": "13438621427383401453",
+      "file_hash": "17969395945890609890",
       "options_hash": "13509613240315378116",
-      "compile_time": 1764261196
+      "compile_time": 1764261838
     },
     "assets/shaders/skybox.frag": {
       "cached_spirv_path": "assets/shaders/cached/skybox.frag.spv",

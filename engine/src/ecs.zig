@@ -56,6 +56,13 @@ pub const ScriptingSystem = @import("ecs/systems/scripting_system.zig").Scriptin
 pub const PhysicsSystem = @import("ecs/systems/physics_system.zig").PhysicsSystem;
 pub const SkyboxSystem = @import("ecs/systems/skybox_system.zig").SkyboxSystem;
 pub const SkyboxGPUData = @import("ecs/systems/skybox_system.zig").SkyboxGPUData;
+pub const ShadowSystem = @import("ecs/systems/shadow_system.zig").ShadowSystem;
+pub const ShadowData = @import("ecs/systems/shadow_system.zig").ShadowData;
+pub const ShadowDataSSBO = @import("ecs/systems/shadow_system.zig").ShadowDataSSBO;
+pub const ShadowLightGPU = @import("ecs/systems/shadow_system.zig").ShadowLightGPU;
+pub const ShadowGPUResources = @import("ecs/systems/shadow_system.zig").ShadowGPUResources;
+pub const MAX_SHADOW_LIGHTS = @import("ecs/systems/shadow_system.zig").MAX_SHADOW_LIGHTS;
+pub const SHADOW_FAR = @import("ecs/systems/shadow_system.zig").SHADOW_FAR;
 
 // System functions for parallel execution
 pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").update;
@@ -70,6 +77,8 @@ pub const prepareMaterialSystem = @import("ecs/systems/material_system.zig").pre
 pub const updateMaterialSystem = @import("ecs/systems/material_system.zig").update;
 pub const prepareSkyboxSystem = @import("ecs/systems/skybox_system.zig").prepare;
 pub const updateSkyboxSystem = @import("ecs/systems/skybox_system.zig").update;
+pub const prepareShadowSystem = @import("ecs/systems/shadow_system.zig").prepare;
+pub const updateShadowSystem = @import("ecs/systems/shadow_system.zig").update;
 
 // Parallel System Execution
 pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;

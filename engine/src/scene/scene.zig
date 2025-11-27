@@ -105,6 +105,7 @@ pub const Scene = struct {
     material_system: ?*MaterialSystem = null,
     particle_system: ?*ecs.ParticleSystem = null,
     skybox_system: ?*ecs.SkyboxSystem = null,
+    shadow_system: ?*ecs.ShadowSystem = null,
     // NOTE: TextureSystem moved to Engine - it manages infrastructure textures (HDR/LDR)
 
     // Performance monitoring
@@ -243,6 +244,11 @@ pub const Scene = struct {
             ss.deinit();
             self.allocator.destroy(ss);
             self.skybox_system = null;
+        }
+        if (self.shadow_system) |ss| {
+            ss.deinit();
+            self.allocator.destroy(ss);
+            self.shadow_system = null;
         }
         if (self.material_system) |ms| {
             ms.deinit();
@@ -913,6 +919,16 @@ pub const Scene = struct {
 
         log(.INFO, "scene", "Initialized skybox system (ECS-driven)", .{});
 
+        // Create shadow system (manages shadow-casting lights with change detection)
+        const shadow_system = try self.allocator.create(ecs.ShadowSystem);
+        shadow_system.* = ecs.ShadowSystem.init(self.allocator);
+        self.shadow_system = shadow_system;
+
+        // Initialize shadow system GPU buffers
+        try shadow_system.initGPUBuffers(buffer_manager);
+
+        log(.INFO, "scene", "Initialized shadow system (ECS-driven)", .{});
+
         // Initialize Physics System if not already (e.g. after load/clear)
         if (self.physics_system == null) {
             self.physics_system = try ecs.PhysicsSystem.init(self.allocator);
@@ -978,18 +994,21 @@ pub const Scene = struct {
         };
 
         // Create and add ShadowMapPass (renders depth from light perspective before geometry)
-        const shadow_map_pass = ShadowMapPass.create(
-            self.allocator,
-            graphics_context,
-            pipeline_system,
-            buffer_manager,
-            texture_manager,
-            self.ecs_world,
-            self.render_system,
-        ) catch |err| blk: {
-            log(.WARN, "scene", "Failed to create ShadowMapPass: {}. Shadows disabled.", .{err});
-            break :blk null;
-        };
+        // Requires shadow_system to be initialized
+        const shadow_map_pass = if (self.shadow_system) |shadow_sys|
+            ShadowMapPass.create(
+                self.allocator,
+                graphics_context,
+                pipeline_system,
+                texture_manager,
+                self.render_system,
+                shadow_sys,
+            ) catch |err| blk: {
+                log(.WARN, "scene", "Failed to create ShadowMapPass: {}. Shadows disabled.", .{err});
+                break :blk null;
+            }
+        else
+            null;
 
         if (shadow_map_pass) |pass| {
             try self.render_graph.?.addPass(&pass.base);
