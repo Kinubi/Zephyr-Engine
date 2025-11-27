@@ -441,7 +441,7 @@ pub const AABB = struct {
     max: Vec3,
 
     /// Get the center of the AABB
-    pub fn center(self: AABB) Vec3 {
+    pub inline fn center(self: AABB) Vec3 {
         return Vec3.init(
             (self.min.x + self.max.x) * 0.5,
             (self.min.y + self.max.y) * 0.5,
@@ -450,7 +450,7 @@ pub const AABB = struct {
     }
 
     /// Get the half-extents (half-size) of the AABB
-    pub fn extents(self: AABB) Vec3 {
+    pub inline fn extents(self: AABB) Vec3 {
         return Vec3.init(
             (self.max.x - self.min.x) * 0.5,
             (self.max.y - self.min.y) * 0.5,
@@ -458,48 +458,89 @@ pub const AABB = struct {
         );
     }
 
+    /// Get bounding sphere radius (distance from center to corner)
+    pub inline fn boundingSphereRadius(self: AABB) f32 {
+        const ext = self.extents();
+        return @sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+    }
+
     /// Transform an AABB by a 4x4 matrix, returning a new world-space AABB
     /// Uses the separating axis theorem approach for tight bounds
-    pub fn transform(self: AABB, mat: Mat4) AABB {
-        // Extract translation from matrix (column 3)
-        const translation = Vec3.init(mat.data[12], mat.data[13], mat.data[14]);
+    /// Fully unrolled for maximum performance (no branches in hot path)
+    pub inline fn transform(self: AABB, mat: Mat4) AABB {
+        const d = mat.data;
+        const smin = self.min;
+        const smax = self.max;
 
-        // Start with translation
-        var new_min = translation;
-        var new_max = translation;
+        // Extract translation (column 3)
+        var min_x = d[12];
+        var min_y = d[13];
+        var min_z = d[14];
+        var max_x = d[12];
+        var max_y = d[13];
+        var max_z = d[14];
 
-        // For each axis, compute contribution from rotation/scale
-        // Matrix is column-major: col0 = [0,1,2,3], col1 = [4,5,6,7], col2 = [8,9,10,11]
-        inline for (0..3) |i| {
-            inline for (0..3) |j| {
-                const e = mat.data[j * 4 + i]; // mat[row i, col j]
-                const a = e * self.min.at(j);
-                const b = e * self.max.at(j);
-
-                const min_ptr = switch (i) {
-                    0 => &new_min.x,
-                    1 => &new_min.y,
-                    2 => &new_min.z,
-                    else => unreachable,
-                };
-                const max_ptr = switch (i) {
-                    0 => &new_max.x,
-                    1 => &new_max.y,
-                    2 => &new_max.z,
-                    else => unreachable,
-                };
-
-                if (a < b) {
-                    min_ptr.* += a;
-                    max_ptr.* += b;
-                } else {
-                    min_ptr.* += b;
-                    max_ptr.* += a;
-                }
-            }
+        // Column 0 contribution (X axis of local space)
+        {
+            const e0 = d[0];
+            const e1 = d[1];
+            const e2 = d[2];
+            const a0 = e0 * smin.x;
+            const b0 = e0 * smax.x;
+            const a1 = e1 * smin.x;
+            const b1 = e1 * smax.x;
+            const a2 = e2 * smin.x;
+            const b2 = e2 * smax.x;
+            min_x += @min(a0, b0);
+            max_x += @max(a0, b0);
+            min_y += @min(a1, b1);
+            max_y += @max(a1, b1);
+            min_z += @min(a2, b2);
+            max_z += @max(a2, b2);
         }
 
-        return AABB{ .min = new_min, .max = new_max };
+        // Column 1 contribution (Y axis of local space)
+        {
+            const e0 = d[4];
+            const e1 = d[5];
+            const e2 = d[6];
+            const a0 = e0 * smin.y;
+            const b0 = e0 * smax.y;
+            const a1 = e1 * smin.y;
+            const b1 = e1 * smax.y;
+            const a2 = e2 * smin.y;
+            const b2 = e2 * smax.y;
+            min_x += @min(a0, b0);
+            max_x += @max(a0, b0);
+            min_y += @min(a1, b1);
+            max_y += @max(a1, b1);
+            min_z += @min(a2, b2);
+            max_z += @max(a2, b2);
+        }
+
+        // Column 2 contribution (Z axis of local space)
+        {
+            const e0 = d[8];
+            const e1 = d[9];
+            const e2 = d[10];
+            const a0 = e0 * smin.z;
+            const b0 = e0 * smax.z;
+            const a1 = e1 * smin.z;
+            const b1 = e1 * smax.z;
+            const a2 = e2 * smin.z;
+            const b2 = e2 * smax.z;
+            min_x += @min(a0, b0);
+            max_x += @max(a0, b0);
+            min_y += @min(a1, b1);
+            max_y += @max(a1, b1);
+            min_z += @min(a2, b2);
+            max_z += @max(a2, b2);
+        }
+
+        return AABB{
+            .min = Vec3.init(min_x, min_y, min_z),
+            .max = Vec3.init(max_x, max_y, max_z),
+        };
     }
 };
 
@@ -608,22 +649,40 @@ pub const Frustum = struct {
 
     /// Test if an AABB is visible (intersects or is inside the frustum)
     /// Returns true if the AABB should be rendered
-    pub fn testAABB(self: Frustum, aabb: AABB) bool {
-        for (self.planes) |plane| {
-            // Find the positive vertex (furthest along plane normal)
-            const p = Vec3.init(
-                if (plane.normal.x >= 0) aabb.max.x else aabb.min.x,
-                if (plane.normal.y >= 0) aabb.max.y else aabb.min.y,
-                if (plane.normal.z >= 0) aabb.max.z else aabb.min.z,
-            );
+    /// Uses optimized p-vertex computation with branchless selection
+    pub inline fn testAABB(self: Frustum, aabb: AABB) bool {
+        // Unrolled loop for better instruction-level parallelism
+        // Test each plane - early exit on first failure
+        inline for (0..6) |i| {
+            const plane = self.planes[i];
+            const n = plane.normal;
 
-            // If positive vertex is behind the plane, AABB is fully outside
-            if (plane.distanceToPoint(p) < 0) {
+            // Branchless p-vertex selection using sign comparison
+            // p-vertex is the corner furthest in direction of plane normal
+            const px = if (n.x >= 0) aabb.max.x else aabb.min.x;
+            const py = if (n.y >= 0) aabb.max.y else aabb.min.y;
+            const pz = if (n.z >= 0) aabb.max.z else aabb.min.z;
+
+            // If p-vertex is behind plane, AABB is fully outside
+            if (n.x * px + n.y * py + n.z * pz + plane.d < 0) {
                 return false;
             }
         }
-
         return true;
+    }
+
+    /// Fast sphere pre-test + AABB test combined
+    /// Use this when you have both center and radius available
+    pub inline fn testAABBWithSphere(self: Frustum, aabb: AABB, sphere_center: Vec3, sphere_radius: f32) bool {
+        // Quick sphere rejection test first (very cheap)
+        // If sphere is fully outside any plane, AABB must also be outside
+        for (self.planes) |plane| {
+            if (plane.distanceToPoint(sphere_center) < -sphere_radius) {
+                return false;
+            }
+        }
+        // Sphere test passed - do precise AABB test
+        return self.testAABB(aabb);
     }
 
     /// Test if a sphere is visible

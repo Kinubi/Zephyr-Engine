@@ -639,6 +639,9 @@ pub const RenderSystem = struct {
         write_idx: u8,
         frustum: ?*const math.Frustum,
     ) !void {
+        // Validate frustum once upfront (not in hot loop)
+        const valid_frustum: ?*const math.Frustum = if (frustum) |f| (if (f.isValid()) f else null) else null;
+
         // Count total meshes
         var total_meshes: usize = 0;
         for (entities) |entity_data| {
@@ -679,15 +682,13 @@ pub const RenderSystem = struct {
             const builder = builder_entry.value_ptr;
 
             for (model.meshes.items) |model_mesh| {
-                // Frustum culling for rasterization (only if frustum is valid)
+                // Frustum culling for rasterization (frustum validated upfront)
                 var is_visible = true;
-                if (frustum) |f| {
-                    if (f.isValid()) {
-                        if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
-                            const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
-                            const world_aabb = local_aabb.transform(entity_data.transform);
-                            is_visible = f.testAABB(world_aabb);
-                        }
+                if (valid_frustum) |f| {
+                    if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
+                        const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
+                        const world_aabb = local_aabb.transform(entity_data.transform);
+                        is_visible = f.testAABB(world_aabb);
                     }
                 }
 
@@ -746,7 +747,7 @@ pub const RenderSystem = struct {
         const active_idx = self.active_cache_index.load(.acquire);
         const raster_data = self.cached_raster_data[active_idx] orelse return;
 
-        // Count total instances across all batch lists
+        // Count total instances across all batch lists (single pass)
         var total_instances: usize = 0;
         for (raster_data.batch_lists) |list| {
             for (list.batches) |batch| {
@@ -756,7 +757,8 @@ pub const RenderSystem = struct {
 
         if (total_instances == 0) return;
 
-        const buffer_size = total_instances * @sizeOf(render_data_types.RasterizationData.InstanceData);
+        const instance_size = @sizeOf(render_data_types.RasterizationData.InstanceData);
+        const buffer_size = total_instances * instance_size;
 
         // Check if we need to reallocate (capacity change)
         if (self.instance_capacity < total_instances) {
@@ -808,23 +810,19 @@ pub const RenderSystem = struct {
             self.instance_capacity = total_instances;
         }
 
-        // Build upload buffer from all batches (in batch_lists order)
-        var upload_buffer = std.ArrayList(u8){};
-        defer upload_buffer.deinit(self.allocator);
-        try upload_buffer.ensureTotalCapacity(self.allocator, buffer_size);
-
-        for (raster_data.batch_lists) |list| {
-            for (list.batches) |batch| {
-                const batch_bytes = std.mem.sliceAsBytes(batch.instances);
-                try upload_buffer.appendSlice(self.allocator, batch_bytes);
-            }
-        }
-
-        // Write to all frame buffers
+        // Write directly to mapped buffers (avoid intermediate ArrayList allocation)
         for (&self.instance_buffers) |buf| {
             try buf.buffer.map(buffer_size, buf.arena_offset orelse 0);
-            const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
-            @memcpy(data_ptr[0..upload_buffer.items.len], upload_buffer.items);
+            var data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+
+            // Copy batches directly to mapped memory
+            for (raster_data.batch_lists) |list| {
+                for (list.batches) |batch| {
+                    const batch_bytes = std.mem.sliceAsBytes(batch.instances);
+                    @memcpy(data_ptr[0..batch_bytes.len], batch_bytes);
+                    data_ptr += batch_bytes.len;
+                }
+            }
             buf.buffer.unmap();
         }
     }
@@ -1209,6 +1207,9 @@ pub const RenderSystem = struct {
         write_idx: u8,
         frustum: ?*const math.Frustum,
     ) !void {
+        // Validate frustum once upfront (not in hot loop)
+        const valid_frustum: ?*const math.Frustum = if (frustum) |f| (if (f.isValid()) f else null) else null;
+
         // Count total meshes
         var total_meshes: usize = 0;
         for (entities) |entity_data| {
@@ -1263,15 +1264,14 @@ pub const RenderSystem = struct {
 
             for (model.meshes.items) |model_mesh| {
                 // Frustum culling for rasterization only (RT needs all geometry)
+                // Frustum validated upfront to avoid check in hot loop
                 var is_visible = true;
-                if (frustum) |f| {
-                    if (f.isValid()) {
-                        if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
-                            const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
-                            const world_aabb = local_aabb.transform(entity_data.transform);
-                            is_visible = f.testAABB(world_aabb);
-                            if (!is_visible) culled_count += 1;
-                        }
+                if (valid_frustum) |f| {
+                    if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
+                        const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
+                        const world_aabb = local_aabb.transform(entity_data.transform);
+                        is_visible = f.testAABB(world_aabb);
+                        if (!is_visible) culled_count += 1;
                     }
                 }
 
@@ -1356,6 +1356,9 @@ pub const RenderSystem = struct {
     ) !void {
         const pool = self.thread_pool.?;
 
+        // Validate frustum once upfront (workers will use pre-validated frustum)
+        const valid_frustum: ?*const math.Frustum = if (frustum) |f| (if (f.isValid()) f else null) else null;
+
         // Count meshes per entity
         var mesh_counts = try self.allocator.alloc(usize, entities.len);
         defer self.allocator.free(mesh_counts);
@@ -1414,7 +1417,7 @@ pub const RenderSystem = struct {
                 .asset_manager = asset_manager,
                 .output_offset = current_offset,
                 .completion = &completion,
-                .frustum = frustum,
+                .frustum = valid_frustum, // Pre-validated frustum
             };
 
             try pool.submitWork(.{
@@ -1541,15 +1544,13 @@ pub const RenderSystem = struct {
             for (model.meshes.items) |model_mesh| {
                 const output_idx = ctx.output_offset + mesh_offset;
 
-                // Frustum culling for rasterization
+                // Frustum culling for rasterization (frustum pre-validated by caller)
                 var is_visible = true;
                 if (ctx.frustum) |f| {
-                    if (f.isValid()) {
-                        if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
-                            const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
-                            const world_aabb = local_aabb.transform(entity_data.transform);
-                            is_visible = f.testAABB(world_aabb);
-                        }
+                    if (model_mesh.geometry.mesh.getOrComputeLocalBounds()) |bounds| {
+                        const local_aabb = math.AABB{ .min = bounds.min, .max = bounds.max };
+                        const world_aabb = local_aabb.transform(entity_data.transform);
+                        is_visible = f.testAABB(world_aabb);
                     }
                 }
 
