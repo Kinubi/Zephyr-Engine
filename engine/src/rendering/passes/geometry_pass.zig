@@ -280,12 +280,12 @@ pub const GeometryPass = struct {
                 log(.WARN, "geometry_pass", "Failed to bind ShadowUbo: {}", .{err});
             };
 
-            // Bind shadow map texture with comparison sampler
-            if (shadow_pass.getShadowMap()) |shadow_map| {
+            // Bind shadow cube texture with comparison sampler
+            if (shadow_pass.getShadowCube()) |shadow_cube| {
                 try self.resource_binder.bindTextureNamed(
                     self.geometry_pipeline,
-                    "shadowMap",
-                    shadow_map,
+                    "shadowCubeMap",
+                    shadow_cube,
                 );
             }
         } else {

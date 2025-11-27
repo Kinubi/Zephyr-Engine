@@ -26,6 +26,7 @@ pub const TextureStats = struct {
 };
 
 /// Managed texture with generation tracking for automatic rebinding
+/// Supports both 2D textures and cube textures (check texture.is_cube)
 pub const ManagedTexture = struct {
     texture: Texture,
     name: []const u8,
@@ -56,6 +57,16 @@ pub const ManagedTexture = struct {
             info.sampler = sampler;
         }
         return info;
+    }
+
+    /// Get a specific face view for cube textures (returns null for 2D textures)
+    pub fn getFaceView(self: *const ManagedTexture, face: u32) ?vk.ImageView {
+        return self.texture.getFaceView(face);
+    }
+
+    /// Check if this is a cube texture
+    pub fn isCube(self: *const ManagedTexture) bool {
+        return self.texture.is_cube;
     }
 
     /// Check if linked texture changed and auto-resize/format-match if needed
@@ -311,6 +322,67 @@ pub const TextureManager = struct {
             config.extent.depth,
             config.format,
             sampler_config.compare_enable,
+        });
+
+        return managed;
+    }
+
+    /// Create a managed cube depth texture for omnidirectional shadow mapping
+    /// Returns a pointer to the managed texture (with texture.is_cube = true)
+    pub fn createCubeDepthTexture(
+        self: *TextureManager,
+        name: []const u8,
+        size: u32,
+        format: vk.Format,
+        compare_enable: bool,
+        compare_op: vk.CompareOp,
+    ) !*ManagedTexture {
+        // Duplicate the name for ownership
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        // Create the cube depth texture
+        const cube_texture = try Texture.initCubeDepth(
+            self.graphics_context,
+            size,
+            format,
+            compare_enable,
+            compare_op,
+        );
+
+        // Allocate the managed texture on the heap
+        const managed = try self.allocator.create(ManagedTexture);
+        errdefer self.allocator.destroy(managed);
+
+        const extent = vk.Extent3D{ .width = size, .height = size, .depth = 1 };
+        managed.* = ManagedTexture{
+            .texture = cube_texture,
+            .name = owned_name,
+            .format = format,
+            .extent = extent,
+            .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
+            .samples = .{ .@"1_bit" = true },
+            .created_frame = self.frame_counter,
+            .generation = 1,
+        };
+
+        // Add to statistics
+        try self.all_textures.put(owned_name, TextureStats{
+            .format = format,
+            .extent = extent,
+            .created_frame = self.frame_counter,
+            .last_updated = self.frame_counter,
+        });
+
+        // Automatically register for updates
+        try self.registerTexture(managed);
+
+        log(.INFO, "texture_manager", "Created cube depth texture '{s}' ({}x{} per face, format: {}, compare: {})", .{
+            name,
+            size,
+            size,
+            format,
+            compare_enable,
         });
 
         return managed;

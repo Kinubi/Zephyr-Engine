@@ -42,46 +42,46 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
 
 // Shadow data UBO (set 0, binding 2) - from shadow pass
 layout(set = 0, binding = 2) uniform ShadowUbo {
-    mat4 lightSpaceMatrix;
+    vec4 lightPos;      // xyz = light position, w = far plane
     float shadowBias;
     uint shadowEnabled;
     vec2 _padding;
 } shadow;
 
-// Shadow map sampler (set 0, binding 3)
-layout(set = 0, binding = 3) uniform sampler2DShadow shadowMap;
+// Shadow cube map sampler (set 0, binding 3)
+layout(set = 0, binding = 3) uniform samplerCubeShadow shadowCubeMap;
 
-// Calculate shadow factor using PCF
-float calculateShadow(vec3 worldPos) {
+// Calculate shadow factor for omnidirectional point light shadow
+float calculateShadow(vec3 worldPos, vec3 surfNormal) {
     if (shadow.shadowEnabled == 0) return 1.0;
     
-    // Transform world position to light space
-    vec4 lightSpacePos = shadow.lightSpaceMatrix * vec4(worldPos, 1.0);
-    vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+    // Vector from light to fragment - this is the cube map lookup direction
+    vec3 lightToFrag = worldPos - shadow.lightPos.xyz;
+    vec3 lightDir = normalize(-lightToFrag); // Direction TO light
     
-    // Transform to [0,1] range for texture sampling
-    projCoords.xy = projCoords.xy * 0.5 + 0.5;
-    
-    // Check if outside shadow map bounds
-    if (projCoords.x < 0.0 || projCoords.x > 1.0 || 
-        projCoords.y < 0.0 || projCoords.y > 1.0 ||
-        projCoords.z < 0.0 || projCoords.z > 1.0) {
-        return 1.0;
+    // Check if surface faces the light - back faces are always in shadow
+    float NdotL = dot(surfNormal, lightDir);
+    if (NdotL <= 0.0) {
+        return 0.0; // Surface faces away from light = shadowed
     }
     
-    // Apply bias to reduce shadow acne
-    float currentDepth = projCoords.z - shadow.shadowBias;
+    // Distance from light to fragment (for depth comparison)
+    float currentDepth = length(lightToFrag);
     
-    // PCF (Percentage Closer Filtering) for soft shadows
-    float shadowVal = 0.0;
-    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-    for (int x = -1; x <= 1; x++) {
-        for (int y = -1; y <= 1; y++) {
-            vec2 offset = vec2(x, y) * texelSize;
-            shadowVal += texture(shadowMap, vec3(projCoords.xy + offset, currentDepth));
-        }
-    }
-    shadowVal /= 9.0;
+    // Normalize depth to [0,1] using far plane (matches what shadow.frag writes)
+    float farPlane = shadow.lightPos.w;
+    float normalizedDepth = currentDepth / farPlane;
+    
+    // Apply bias to avoid shadow acne
+    normalizedDepth -= shadow.shadowBias;
+    
+    // Sample the cube map
+    // Coordinate adjustments to match shadow pass view matrices:
+    // - X faces have swapped view direction, so negate Y and Z for sampling
+    vec3 sampleDir = lightToFrag * vec3(1.0, -1.0, -1.0);
+    
+    // Sample with comparison - returns 1.0 if lit, 0.0 if shadowed
+    float shadowVal = texture(shadowCubeMap, vec4(normalize(sampleDir), normalizedDepth));
     
     return shadowVal;
 }
@@ -149,8 +149,8 @@ void main() {
         occlusion = mix(1.0, texture(textures[mat.occlusion_idx], uv).r, mat.occlusion_strength);
     }
 
-    // Calculate shadow factor
-    float shadowFactor = calculateShadow(positionWorld);
+    // Calculate shadow factor (pass surface normal for back-face check)
+    float shadowFactor = calculateShadow(positionWorld, surfaceNormal);
 
     // Start with ambient lighting (not affected by shadows)
     vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w * occlusion;
@@ -181,5 +181,6 @@ void main() {
         emissive *= texture(textures[mat.emissive_idx], uv).rgb;
     }
     
+    // Final output
     outColor = vec4(diffuseLight * albedo + emissive, mat.albedo_tint.a);
 }

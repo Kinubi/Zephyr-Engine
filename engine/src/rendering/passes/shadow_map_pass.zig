@@ -25,26 +25,31 @@ const RenderSystem = ecs.RenderSystem;
 const PointLight = ecs.PointLight;
 const Transform = ecs.Transform;
 
-/// Shadow map resolution (square)
-pub const SHADOW_MAP_SIZE: u32 = 2048;
+/// Shadow map resolution (square, per face)
+pub const SHADOW_MAP_SIZE: u32 = 1024;
 
-/// Push constants for shadow pass (just model matrix multiplied by lightSpaceMatrix)
+/// Near and far planes for shadow cube projection
+const SHADOW_NEAR: f32 = 0.1; // Close enough for most scenes
+const SHADOW_FAR: f32 = 50.0;
+
+/// Push constants for shadow pass (model matrix + light info + view/proj for current face)
 pub const ShadowPushConstants = extern struct {
-    light_space_model: [16]f32 = Math.Mat4x4.identity().data,
+    model_matrix: [16]f32 = Math.Mat4x4.identity().data,
+    light_pos: [4]f32 = .{ 0, 0, 0, 0 }, // xyz = position, w = far plane
+    view_proj: [16]f32 = Math.Mat4x4.identity().data, // view * projection for current face
 };
 
-/// Shadow data to pass to main rendering (add to GlobalUbo or separate buffer)
+/// Shadow data to pass to main rendering
 pub const ShadowData = extern struct {
-    light_space_matrix: [16]f32 = Math.Mat4x4.identity().data,
-    shadow_bias: f32 = 0.005,
+    light_pos: [4]f32 = .{ 0, 0, 0, 0 }, // xyz = position, w = far plane
+    shadow_bias: f32 = 0.02,
     shadow_enabled: u32 = 0,
     _padding: [2]f32 = .{ 0, 0 },
 };
 
-/// ShadowMapPass - Renders scene depth from light's perspective
+/// ShadowMapPass - Renders scene depth from light's perspective using cube shadow maps
 ///
-/// Creates a depth-only render target that geometry pass can sample
-/// Currently supports the first shadow-casting point light (omnidirectional approximated as directional)
+/// Creates a 6-face cube depth texture for omnidirectional point light shadows
 pub const ShadowMapPass = struct {
     base: RenderPass,
     allocator: std.mem.Allocator,
@@ -57,10 +62,10 @@ pub const ShadowMapPass = struct {
     texture_manager: *TextureManager,
     ecs_world: *World,
 
-    // Shadow map resources (custom sampler is stored in ManagedTexture)
-    shadow_map: ?*ManagedTexture = null,
+    // Cube shadow map (ManagedTexture with is_cube = true)
+    shadow_cube: ?*ManagedTexture = null,
 
-    // Shadow data buffer (light-space matrix, bias, etc.)
+    // Shadow data buffer (light position, bias, etc.)
     shadow_data_buffers: [MAX_FRAMES_IN_FLIGHT]?*ManagedBuffer = .{null} ** MAX_FRAMES_IN_FLIGHT,
 
     // Pipeline
@@ -73,8 +78,13 @@ pub const ShadowMapPass = struct {
 
     // Current shadow data (updated each frame)
     current_shadow_data: ShadowData = .{},
-    // Cached light space matrix as Mat4x4 for efficient access during rendering
-    light_space_matrix: Math.Mat4x4 = Math.Mat4x4.identity(),
+    // Light position cached for rendering
+    light_position: Math.Vec3 = Math.Vec3.init(0, 10, 0),
+
+    // 6 face view matrices (computed once per frame)
+    face_view_matrices: [6]Math.Mat4x4 = .{Math.Mat4x4.identity()} ** 6,
+    // Perspective projection for cube shadow map
+    shadow_projection: Math.Mat4x4 = Math.Mat4x4.identity(),
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -125,17 +135,17 @@ pub const ShadowMapPass = struct {
         const self: *ShadowMapPass = @fieldParentPtr("base", base);
         _ = graph;
 
-        // Create depth-only pipeline
+        // Create shadow pipeline with fragment shader for linear depth
         const DepthStencilState = @import("../pipeline_builder.zig").DepthStencilState;
 
         const pipeline_config = PipelineConfig{
             .name = "shadow_map_pass",
             .vertex_shader = "assets/shaders/shadow.vert",
-            .fragment_shader = null, // Depth-only, no fragment shader needed
+            .fragment_shader = "assets/shaders/shadow.frag", // Fragment shader writes linear depth
             .render_pass = .null_handle, // Dynamic rendering
             .vertex_input_bindings = vertex_formats.mesh_bindings[0..],
             .vertex_input_attributes = vertex_formats.mesh_attributes[0..],
-            .cull_mode = .{ .front_bit = true }, // Cull front faces to reduce shadow acne
+            .cull_mode = .{ .back_bit = true }, // Cull back faces - render front faces
             .front_face = .counter_clockwise,
             .depth_stencil_state = DepthStencilState{
                 .depth_test_enable = true,
@@ -146,7 +156,7 @@ pub const ShadowMapPass = struct {
             .dynamic_rendering_color_formats = &[_]vk.Format{}, // No color output
             .dynamic_rendering_depth_format = .d32_sfloat,
             .push_constant_ranges = &[_]vk.PushConstantRange{.{
-                .stage_flags = .{ .vertex_bit = true },
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
                 .offset = 0,
                 .size = @sizeOf(ShadowPushConstants),
             }},
@@ -167,36 +177,20 @@ pub const ShadowMapPass = struct {
         // Shadow pass uses only push constants (no descriptor bindings needed)
         // The shadow map texture and ShadowUbo are consumed by geometry_pass, not here
 
-        log(.INFO, "shadow_map_pass", "Setup complete - shadow map {}x{}", .{ SHADOW_MAP_SIZE, SHADOW_MAP_SIZE });
+        log(.INFO, "shadow_map_pass", "Setup complete - shadow cube map {}x{} per face", .{ SHADOW_MAP_SIZE, SHADOW_MAP_SIZE });
     }
 
     fn createShadowMapTexture(self: *ShadowMapPass) !void {
-        const TextureConfig = @import("../texture_manager.zig").TextureConfig;
-        const SamplerConfig = @import("../texture_manager.zig").TextureManager.SamplerConfig;
-
-        // Create depth texture with comparison sampler for shadow mapping (PCF)
-        self.shadow_map = try self.texture_manager.createTextureWithSampler(
-            TextureConfig{
-                .name = "shadow_map",
-                .format = .d32_sfloat,
-                .extent = .{ .width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE, .depth = 1 },
-                .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
-                .samples = .{ .@"1_bit" = true },
-            },
-            SamplerConfig{
-                .mag_filter = .linear,
-                .min_filter = .linear,
-                .mipmap_mode = .nearest,
-                .address_mode_u = .clamp_to_border,
-                .address_mode_v = .clamp_to_border,
-                .address_mode_w = .clamp_to_border,
-                .border_color = .float_opaque_white, // Outside shadow = lit
-                .compare_enable = true, // Enable depth comparison for PCF
-                .compare_op = .less_or_equal,
-            },
+        // Create cube depth texture with comparison sampler for shadow mapping (PCF)
+        self.shadow_cube = try self.texture_manager.createCubeDepthTexture(
+            "shadow_cube",
+            SHADOW_MAP_SIZE,
+            .d32_sfloat,
+            true, // compare_enable for PCF
+            .less_or_equal, // Lit if fragment depth <= stored depth (closer to light)
         );
 
-        log(.INFO, "shadow_map_pass", "Created shadow map texture with comparison sampler", .{});
+        log(.INFO, "shadow_map_pass", "Created cube shadow map texture with comparison sampler", .{});
     }
 
     fn createShadowDataBuffers(self: *ShadowMapPass) !void {
@@ -238,38 +232,11 @@ pub const ShadowMapPass = struct {
             }
         }
 
-        // Calculate light-space matrix
-        // For point lights, we approximate with a directional projection looking at scene center
-        const light_target = Math.Vec3.init(0, 0, 0); // Look at origin
-        const light_up = Math.Vec3.init(0, 1, 0);
-
-        // Orthographic projection for directional-style shadows
-        const shadow_extent: f32 = 50.0; // Scene bounds for shadow map
-        const near_plane: f32 = 0.1;
-        const far_plane: f32 = 100.0;
-
-        const light_view = Math.Mat4x4.lookAt(light_pos, light_target, light_up);
-
-        // Build orthographic projection matrix manually
-        // Using Vulkan clip space conventions (Y-down, Z 0-1)
-        const left = -shadow_extent;
-        const right = shadow_extent;
-        const bottom = -shadow_extent;
-        const top = shadow_extent;
-        var light_projection = Math.Mat4x4.identity();
-        light_projection.data[0] = 2.0 / (right - left);
-        light_projection.data[5] = 2.0 / (bottom - top); // Vulkan Y flip
-        light_projection.data[10] = 1.0 / (far_plane - near_plane);
-        light_projection.data[12] = -(right + left) / (right - left);
-        light_projection.data[13] = -(bottom + top) / (bottom - top);
-        light_projection.data[14] = -near_plane / (far_plane - near_plane);
-
-        // Store the combined light-space matrix
-        const light_space_mat = light_projection.mul(light_view);
-        self.light_space_matrix = light_space_mat; // Cache for rendering
+        // Store light position for cube shadow map sampling
+        self.light_position = light_pos;
         self.current_shadow_data = ShadowData{
-            .light_space_matrix = light_space_mat.data,
-            .shadow_bias = 0.005,
+            .light_pos = .{ light_pos.x, light_pos.y, light_pos.z, SHADOW_FAR },
+            .shadow_bias = 0.001, // Small bias - normal check handles back faces
             .shadow_enabled = if (found_shadow_light) 1 else 0,
         };
 
@@ -289,52 +256,72 @@ pub const ShadowMapPass = struct {
         }
     }
 
+    /// Build perspective projection matrix for cube shadow map (90 degree FOV)
+    /// Uses Vulkan conventions: Z range [0,1], Y flipped
+    fn buildShadowProjection() Math.Mat4x4 {
+        const aspect: f32 = 1.0; // Square faces
+        const fov: f32 = std.math.pi / 2.0; // 90 degrees - required for cube maps
+        const near = SHADOW_NEAR;
+        const far = SHADOW_FAR;
+
+        const tan_half_fov = @tan(fov / 2.0);
+        var proj = Math.Mat4x4.identity();
+        proj.data[0] = 1.0 / (aspect * tan_half_fov);
+        proj.data[5] = -1.0 / tan_half_fov; // Negative for Vulkan Y-flip
+        proj.data[10] = far / (far - near); // Vulkan depth range [0,1]
+        proj.data[11] = 1.0;
+        proj.data[14] = -(far * near) / (far - near);
+        proj.data[15] = 0.0;
+        return proj;
+    }
+
+    /// Build view matrix for a cube face.
+    ///
+    /// Cube map face indices: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+    ///
+    /// Standard cube map convention - look toward face direction.
+    fn buildFaceViewMatrix(light_pos: Math.Vec3, face: u32) Math.Mat4x4 {
+        // Look toward face direction - but X faces are swapped to match cube map convention
+        const directions = [6]Math.Vec3{
+            Math.Vec3.init(-1, 0, 0), // Face 0 (+X): look toward -X (swapped)
+            Math.Vec3.init(1, 0, 0), // Face 1 (-X): look toward +X (swapped)
+            Math.Vec3.init(0, 1, 0), // Face 2 (+Y): look toward +Y
+            Math.Vec3.init(0, -1, 0), // Face 3 (-Y): look toward -Y
+            Math.Vec3.init(0, 0, 1), // Face 4 (+Z): look toward +Z
+            Math.Vec3.init(0, 0, -1), // Face 5 (-Z): look toward -Z
+        };
+
+        // Up vectors - standard for cube maps
+        const ups = [6]Math.Vec3{
+            Math.Vec3.init(0, -1, 0), // +X: up is -Y
+            Math.Vec3.init(0, -1, 0), // -X: up is -Y
+            Math.Vec3.init(0, 0, 1), // +Y: up is +Z
+            Math.Vec3.init(0, 0, -1), // -Y: up is -Z
+            Math.Vec3.init(0, -1, 0), // +Z: up is -Y
+            Math.Vec3.init(0, -1, 0), // -Z: up is -Y
+        };
+
+        const target = Math.Vec3.add(light_pos, directions[face]);
+        return Math.Mat4x4.lookAt(light_pos, target, ups[face]);
+    }
+
     fn executeImpl(base: *RenderPass, frame_info: FrameInfo) !void {
         const self: *ShadowMapPass = @fieldParentPtr("base", base);
 
         // Skip if no shadow-casting lights
         if (self.current_shadow_data.shadow_enabled == 0) return;
 
-        // Skip if shadow map not ready
-        const shadow_map = self.shadow_map orelse return;
-        if (shadow_map.generation == 0) return;
+        // Skip if shadow cube not ready
+        const shadow_cube = self.shadow_cube orelse return;
+        if (shadow_cube.generation == 0) return;
 
         const cmd = frame_info.command_buffer;
         const gc = self.graphics_context;
 
-        // Begin dynamic rendering for depth-only pass
-        const depth_attachment = vk.RenderingAttachmentInfo{
-            .s_type = .rendering_attachment_info,
-            .image_view = shadow_map.texture.image_view,
-            .image_layout = .general,
-            .resolve_mode = .{},
-            .resolve_image_layout = .undefined,
-            .resolve_image_view = .null_handle,
-            .load_op = .clear,
-            .store_op = .store,
-            .clear_value = .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
-            .p_next = null,
-        };
+        // Build projection matrix (same for all faces)
+        const projection = buildShadowProjection();
 
-        const rendering_info = vk.RenderingInfo{
-            .s_type = .rendering_info,
-            .render_area = .{
-                .offset = .{ .x = 0, .y = 0 },
-                .extent = .{ .width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE },
-            },
-            .layer_count = 1,
-            .view_mask = 0,
-            .color_attachment_count = 0,
-            .p_color_attachments = null,
-            .p_depth_attachment = &depth_attachment,
-            .p_stencil_attachment = null,
-            .flags = .{},
-            .p_next = null,
-        };
-
-        gc.vkd.cmdBeginRendering(cmd, &rendering_info);
-
-        // Set viewport and scissor for shadow map
+        // Set viewport and scissor (same for all faces)
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
@@ -343,28 +330,69 @@ pub const ShadowMapPass = struct {
             .min_depth = 0.0,
             .max_depth = 1.0,
         };
-        gc.vkd.cmdSetViewport(cmd, 0, 1, @ptrCast(&viewport));
 
         const scissor = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
             .extent = .{ .width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE },
         };
-        gc.vkd.cmdSetScissor(cmd, 0, 1, @ptrCast(&scissor));
 
-        // Bind shadow pipeline
-        if (self.cached_pipeline_handle != .null_handle) {
-            gc.vkd.cmdBindPipeline(cmd, .graphics, self.cached_pipeline_handle);
+        // Render all 6 cube faces
+        for (0..6) |face| {
+            // Get face view from cube texture
+            const face_view = shadow_cube.getFaceView(@intCast(face)) orelse continue;
 
-            // Render shadow casters
-            try self.renderShadowCasters(cmd, frame_info);
+            // Build view matrix for this face
+            const view = buildFaceViewMatrix(self.light_position, @intCast(face));
+            const view_proj = projection.mul(view);
+
+            // Begin dynamic rendering for this face
+            const depth_attachment = vk.RenderingAttachmentInfo{
+                .s_type = .rendering_attachment_info,
+                .image_view = face_view,
+                .image_layout = .general,
+                .resolve_mode = .{},
+                .resolve_image_layout = .undefined,
+                .resolve_image_view = .null_handle,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
+                .p_next = null,
+            };
+
+            const rendering_info = vk.RenderingInfo{
+                .s_type = .rendering_info,
+                .render_area = .{
+                    .offset = .{ .x = 0, .y = 0 },
+                    .extent = .{ .width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE },
+                },
+                .layer_count = 1,
+                .view_mask = 0,
+                .color_attachment_count = 0,
+                .p_color_attachments = null,
+                .p_depth_attachment = &depth_attachment,
+                .p_stencil_attachment = null,
+                .flags = .{},
+                .p_next = null,
+            };
+
+            gc.vkd.cmdBeginRendering(cmd, &rendering_info);
+            gc.vkd.cmdSetViewport(cmd, 0, 1, @ptrCast(&viewport));
+            gc.vkd.cmdSetScissor(cmd, 0, 1, @ptrCast(&scissor));
+
+            // Bind shadow pipeline
+            if (self.cached_pipeline_handle != .null_handle) {
+                gc.vkd.cmdBindPipeline(cmd, .graphics, self.cached_pipeline_handle);
+
+                // Render shadow casters for this face
+                try self.renderShadowCastersForFace(cmd, view_proj);
+            }
+
+            gc.vkd.cmdEndRendering(cmd);
         }
-
-        gc.vkd.cmdEndRendering(cmd);
     }
 
-    fn renderShadowCasters(self: *ShadowMapPass, cmd: vk.CommandBuffer, frame_info: FrameInfo) !void {
+    fn renderShadowCastersForFace(self: *ShadowMapPass, cmd: vk.CommandBuffer, view_proj: Math.Mat4x4) !void {
         const gc = self.graphics_context;
-        _ = frame_info;
 
         // Get rasterization data from render system
         const raster_data = try self.render_system.getRasterData();
@@ -378,7 +406,6 @@ pub const ShadowMapPass = struct {
 
                 const mesh = batch.mesh_handle.getMesh();
 
-                // Bind vertex buffer
                 // Bind vertex buffer (required)
                 const vb = mesh.vertex_buffer orelse continue;
                 const vertex_buffers = [_]vk.Buffer{vb.buffer};
@@ -397,15 +424,17 @@ pub const ShadowMapPass = struct {
                         .data = instance.transform,
                     };
 
-                    // Push lightSpaceMatrix * modelMatrix
+                    // Push model matrix, light position, and view/proj for this face
                     const push_constants = ShadowPushConstants{
-                        .light_space_model = self.light_space_matrix.mul(model_matrix).data,
+                        .model_matrix = model_matrix.data,
+                        .light_pos = .{ self.light_position.x, self.light_position.y, self.light_position.z, SHADOW_FAR },
+                        .view_proj = view_proj.data,
                     };
 
                     gc.vkd.cmdPushConstants(
                         cmd,
                         self.cached_pipeline_layout,
-                        .{ .vertex_bit = true },
+                        .{ .vertex_bit = true, .fragment_bit = true },
                         0,
                         @sizeOf(ShadowPushConstants),
                         std.mem.asBytes(&push_constants),
@@ -430,7 +459,7 @@ pub const ShadowMapPass = struct {
     fn teardownImpl(base: *RenderPass) void {
         const self: *ShadowMapPass = @fieldParentPtr("base", base);
 
-        // Shadow map texture and its custom sampler are managed by TextureManager
+        // Shadow cube texture is managed by TextureManager
 
         // Destroy shadow data buffers
         for (self.shadow_data_buffers) |buffer_opt| {
@@ -439,7 +468,9 @@ pub const ShadowMapPass = struct {
             }
         }
 
-        self.texture_manager.*.destroyTexture(self.shadow_map.?);
+        if (self.shadow_cube) |cube| {
+            self.texture_manager.destroyTexture(cube);
+        }
 
         self.resource_binder.deinit();
         self.allocator.destroy(self);
@@ -461,10 +492,10 @@ pub const ShadowMapPass = struct {
 
     // Public API for other passes to access shadow data
 
-    /// Get the shadow map texture for binding in geometry pass
-    /// The ManagedTexture includes the custom comparison sampler for PCF
-    pub fn getShadowMap(self: *ShadowMapPass) ?*ManagedTexture {
-        return self.shadow_map;
+    /// Get the shadow cube texture for binding in geometry pass
+    /// The ManagedTexture (with is_cube=true) includes the comparison sampler for PCF
+    pub fn getShadowCube(self: *ShadowMapPass) ?*ManagedTexture {
+        return self.shadow_cube;
     }
 
     /// Get shadow data for the current frame

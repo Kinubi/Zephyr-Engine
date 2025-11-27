@@ -19,11 +19,11 @@
       "options_hash": "13509613240315378116",
       "compile_time": 1762666055
     },
-    "assets/shaders/particles.comp": {
-      "cached_spirv_path": "assets/shaders/cached/particles.comp.spv",
-      "file_hash": "8409876718775694080",
+    "assets/shaders/textured.frag": {
+      "cached_spirv_path": "assets/shaders/cached/textured.frag.spv",
+      "file_hash": "15713550107885117711",
       "options_hash": "13509613240315378116",
-      "compile_time": 1762666054
+      "compile_time": 1764254875
     },
     "assets/shaders/imgui.frag": {
       "cached_spirv_path": "assets/shaders/cached/imgui.frag.spv",
@@ -51,9 +51,9 @@
     },
     "assets/shaders/shadow.vert": {
       "cached_spirv_path": "assets/shaders/cached/shadow.vert.spv",
-      "file_hash": "9448185209057819493",
+      "file_hash": "16072647797898343676",
       "options_hash": "13509613240315378116",
-      "compile_time": 1764236194
+      "compile_time": 1764244187
     },
     "assets/shaders/point_light.vert": {
       "cached_spirv_path": "assets/shaders/cached/point_light.vert.spv",
@@ -79,11 +79,23 @@
       "options_hash": "13509613240315378116",
       "compile_time": 1762666054
     },
+    "assets/shaders/shadow.frag": {
+      "cached_spirv_path": "assets/shaders/cached/shadow.frag.spv",
+      "file_hash": "4360895283666411728",
+      "options_hash": "13509613240315378116",
+      "compile_time": 1764250863
+    },
     "assets/shaders/textured.vert": {
       "cached_spirv_path": "assets/shaders/cached/textured.vert.spv",
       "file_hash": "3680755129384432237",
       "options_hash": "13509613240315378116",
       "compile_time": 1762753246
+    },
+    "assets/shaders/RayTracingTriangle.rmiss.hlsl": {
+      "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rmiss.hlsl.spv",
+      "file_hash": "14911948285004227738",
+      "options_hash": "13509613240315378116",
+      "compile_time": 1762666054
     },
     "assets/shaders/skybox.frag": {
       "cached_spirv_path": "assets/shaders/cached/skybox.frag.spv",
@@ -91,15 +103,9 @@
       "options_hash": "13509613240315378116",
       "compile_time": 1764234803
     },
-    "assets/shaders/textured.frag": {
-      "cached_spirv_path": "assets/shaders/cached/textured.frag.spv",
-      "file_hash": "13079631743627964222",
-      "options_hash": "13509613240315378116",
-      "compile_time": 1764240634
-    },
-    "assets/shaders/RayTracingTriangle.rmiss.hlsl": {
-      "cached_spirv_path": "assets/shaders/cached/RayTracingTriangle.rmiss.hlsl.spv",
-      "file_hash": "14911948285004227738",
+    "assets/shaders/particles.comp": {
+      "cached_spirv_path": "assets/shaders/cached/particles.comp.spv",
+      "file_hash": "8409876718775694080",
       "options_hash": "13509613240315378116",
       "compile_time": 1762666054
     }

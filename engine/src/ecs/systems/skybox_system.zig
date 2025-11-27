@@ -29,11 +29,11 @@ pub const SkyboxGPUData = extern struct {
 };
 
 /// SkyboxSystem manages environment map loading and skybox state
-/// 
+///
 /// Two-phase update pattern (for SystemScheduler):
 /// - prepare(): Query ECS for changes, detect if texture reload needed (main thread)
 /// - update(): Process pending changes, load textures (render thread)
-/// 
+///
 /// The environment map is stored as a ManagedTexture for automatic version tracking
 /// when bound via ResourceBinder.
 pub const SkyboxSystem = struct {
@@ -150,11 +150,21 @@ pub const SkyboxSystem = struct {
         const texture_changed = path_hash != self.current_path_hash or
             skybox.source_type != self.pending_source_type;
 
-        // Store pending state
+        // Check if GPU data changed (compare bytes)
+        const old_bytes = std.mem.asBytes(&self.gpu_data);
+        const new_bytes = std.mem.asBytes(&new_gpu_data);
+        const gpu_data_changed = !std.mem.eql(u8, old_bytes, new_bytes);
+
+        // Store pending state only if something changed
         self.active_entity = active_entity;
-        self.pending_gpu_data = new_gpu_data;
         self.pending_path_hash = path_hash;
         self.pending_source_type = skybox.source_type;
+
+        // Only set pending_gpu_data if it actually changed
+        if (gpu_data_changed) {
+            self.pending_gpu_data = new_gpu_data;
+        }
+
         // Only load texture if path is confirmed by user (Enter pressed)
         self.pending_texture_load = texture_changed and skybox.source_type != .procedural and path.len > 0 and skybox.path_confirmed;
     }
@@ -166,13 +176,19 @@ pub const SkyboxSystem = struct {
     /// Process pending changes from prepare phase
     /// Returns true if anything changed
     pub fn processPendingChanges(self: *SkyboxSystem, world: *World) !bool {
-        const pending_data = self.pending_gpu_data orelse return false;
+        // Early exit if nothing to do
+        if (self.pending_gpu_data == null and !self.pending_texture_load) {
+            return false;
+        }
 
         var changed = false;
 
-        // Update GPU data
-        self.gpu_data = pending_data;
-        changed = true;
+        // Update GPU data if changed
+        if (self.pending_gpu_data) |pending_data| {
+            self.gpu_data = pending_data;
+            self.pending_gpu_data = null;
+            changed = true;
+        }
 
         // Load texture if needed
         if (self.pending_texture_load) {
@@ -186,6 +202,7 @@ pub const SkyboxSystem = struct {
                 }
             }
             self.pending_texture_load = false;
+            changed = true;
         } else if (self.pending_source_type == .procedural and self.env_texture.generation > 0) {
             // Switching to procedural, reset texture to unloaded state
             self.env_texture.generation = 0;
@@ -193,9 +210,6 @@ pub const SkyboxSystem = struct {
             self.current_path_hash = 0;
             changed = true;
         }
-
-        // Clear pending state
-        self.pending_gpu_data = null;
 
         if (changed) {
             self.generation +%= 1;

@@ -53,6 +53,11 @@ pub const Texture = struct {
     gc: *GraphicsContext,
     memory_size: u64 = 0, // Track memory size for proper untracking
 
+    // Cube texture support - optional fields for 6-face cube maps
+    is_cube: bool = false,
+    /// Individual face views for rendering to cube faces (order: +X, -X, +Y, -Y, +Z, -Z)
+    /// Only valid when is_cube = true
+    face_views: ?[6]vk.ImageView = null,
     pub fn init(
         gc: *GraphicsContext,
         format: vk.Format,
@@ -1109,11 +1114,180 @@ pub const Texture = struct {
             }
         }
 
+        // Destroy face views if this is a cube texture
+        if (self.face_views) |views| {
+            for (views) |view| {
+                self.gc.vkd.destroyImageView(self.gc.dev, view, null);
+            }
+        }
+
         // Destroy Vulkan resources in reverse order of creation
         self.gc.vkd.destroySampler(self.gc.dev, self.sampler, null);
         self.gc.vkd.destroyImageView(self.gc.dev, self.image_view, null);
         self.gc.vkd.destroyImage(self.gc.dev, self.image, null);
         self.gc.vkd.freeMemory(self.gc.dev, self.memory, null);
+    }
+
+    /// Get a specific face view for rendering (only valid for cube textures)
+    pub fn getFaceView(self: *const Texture, face: u32) ?vk.ImageView {
+        if (self.face_views) |views| {
+            return views[face];
+        }
+        return null;
+    }
+
+    /// Initialize a cube depth texture for shadow mapping
+    /// Creates a 6-layer cube-compatible image with depth format
+    pub fn initCubeDepth(
+        gc: *GraphicsContext,
+        size: u32,
+        format: vk.Format,
+        compare_enable: bool,
+        compare_op: vk.CompareOp,
+    ) !Texture {
+        const extent = vk.Extent3D{ .width = size, .height = size, .depth = 1 };
+
+        // Create cube-compatible image with 6 array layers
+        const image_info = vk.ImageCreateInfo{
+            .s_type = vk.StructureType.image_create_info,
+            .image_type = .@"2d",
+            .format = format,
+            .extent = extent,
+            .mip_levels = 1,
+            .array_layers = 6,
+            .samples = .{ .@"1_bit" = true },
+            .tiling = vk.ImageTiling.optimal,
+            .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
+            .initial_layout = vk.ImageLayout.undefined,
+            .sharing_mode = vk.SharingMode.exclusive,
+            .flags = .{ .cube_compatible_bit = true },
+            .p_next = null,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = null,
+        };
+
+        var image: vk.Image = undefined;
+        var memory: vk.DeviceMemory = undefined;
+        try gc.createImageWithInfo(image_info, vk.MemoryPropertyFlags{ .device_local_bit = true }, &image, &memory);
+
+        // Query memory size for tracking
+        const mem_reqs = gc.vkd.getImageMemoryRequirements(gc.dev, image);
+        const memory_size = mem_reqs.size;
+
+        const aspect_mask = vk.ImageAspectFlags{ .depth_bit = true };
+
+        // Create cube image view for sampling (all 6 layers as cube)
+        const cube_view_info = vk.ImageViewCreateInfo{
+            .s_type = vk.StructureType.image_view_create_info,
+            .view_type = .cube,
+            .format = format,
+            .subresource_range = .{
+                .aspect_mask = aspect_mask,
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 6,
+            },
+            .image = image,
+            .components = .{
+                .r = vk.ComponentSwizzle.identity,
+                .g = vk.ComponentSwizzle.identity,
+                .b = vk.ComponentSwizzle.identity,
+                .a = vk.ComponentSwizzle.identity,
+            },
+            .flags = .{},
+            .p_next = null,
+        };
+        const cube_view = gc.vkd.createImageView(gc.dev, &cube_view_info, null) catch return error.FailedToCreateImageView;
+
+        // Create individual face views for rendering
+        var face_views: [6]vk.ImageView = undefined;
+        for (0..6) |i| {
+            const face_view_info = vk.ImageViewCreateInfo{
+                .s_type = vk.StructureType.image_view_create_info,
+                .view_type = .@"2d",
+                .format = format,
+                .subresource_range = .{
+                    .aspect_mask = aspect_mask,
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = @intCast(i),
+                    .layer_count = 1,
+                },
+                .image = image,
+                .components = .{
+                    .r = vk.ComponentSwizzle.identity,
+                    .g = vk.ComponentSwizzle.identity,
+                    .b = vk.ComponentSwizzle.identity,
+                    .a = vk.ComponentSwizzle.identity,
+                },
+                .flags = .{},
+                .p_next = null,
+            };
+            face_views[i] = gc.vkd.createImageView(gc.dev, &face_view_info, null) catch return error.FailedToCreateImageView;
+        }
+
+        // Transition all layers to general layout
+        const cmd = try gc.beginSingleTimeCommands();
+        gc.transitionImageLayout(
+            cmd,
+            image,
+            vk.ImageLayout.undefined,
+            vk.ImageLayout.general,
+            .{
+                .aspect_mask = aspect_mask,
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 6,
+            },
+        );
+        try gc.endSingleTimeCommands(cmd);
+
+        // Create comparison sampler for shadow mapping
+        // Using less_or_equal: returns 1.0 if reference <= stored (fragment is lit)
+        const sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = vk.Filter.linear,
+            .min_filter = vk.Filter.linear,
+            .mipmap_mode = vk.SamplerMipmapMode.nearest,
+            .address_mode_u = vk.SamplerAddressMode.clamp_to_edge,
+            .address_mode_v = vk.SamplerAddressMode.clamp_to_edge,
+            .address_mode_w = vk.SamplerAddressMode.clamp_to_edge,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = 1.0,
+            .min_lod = 0.0,
+            .max_lod = 1.0,
+            .border_color = vk.BorderColor.float_opaque_white,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = if (compare_enable) .true else .false,
+            .compare_op = compare_op, // Fragment lit if its depth <= stored depth
+            .anisotropy_enable = .false,
+        };
+        const sampler = gc.vkd.createSampler(gc.dev, &sampler_info, null) catch return error.FailedToCreateSampler;
+
+        log(.INFO, "texture", "Created cube depth texture {}x{} (6 layers)", .{ size, size });
+
+        return Texture{
+            .image = image,
+            .image_view = cube_view, // Main view is the cube view for sampling
+            .memory = memory,
+            .sampler = sampler,
+            .mip_levels = 1,
+            .extent = extent,
+            .format = format,
+            .descriptor = vk.DescriptorImageInfo{
+                .sampler = sampler,
+                .image_view = cube_view,
+                .image_layout = vk.ImageLayout.general,
+            },
+            .gc = gc,
+            .memory_size = memory_size,
+            .is_cube = true,
+            .face_views = face_views,
+        };
     }
 };
 

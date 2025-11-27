@@ -44,11 +44,11 @@ pub const SystemStage = struct {
     // Split into separate caches for prepare and update to allow concurrent execution
     prepare_items_cache: std.ArrayList(WorkItem),
     update_items_cache: std.ArrayList(WorkItem),
-    
+
     // Persistent contexts for work items (allocated on heap to ensure stable addresses)
     prepare_context: *StageContext,
     update_context: *StageContext,
-    
+
     prepare_count: usize = 0,
     update_count: usize = 0,
 
@@ -303,14 +303,6 @@ pub const SystemScheduler = struct {
         // Stage 1: Independent systems that can run in parallel
         // (Transform, Animation, Particle updates)
         _ = try scheduler.addStage("ParallelUpdates");
-
-        // Stage 2: Systems that depend on Stage 1
-        // (Physics, Collision detection)
-        _ = try scheduler.addStage("PhysicsAndCollision");
-
-        // Stage 3: Render preparation
-        // (Frustum culling, LOD selection, render data extraction)
-        _ = try scheduler.addStage("RenderPreparation");
 
         return scheduler;
     }
