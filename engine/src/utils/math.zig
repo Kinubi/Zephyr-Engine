@@ -430,8 +430,8 @@ pub const Plane = struct {
     d: f32,
 
     /// Distance from point to plane (positive = in front, negative = behind)
-    pub fn distanceToPoint(self: Plane, point: Vec3) f32 {
-        return Vec3.dot(self.normal, point) + self.d;
+    pub inline fn distanceToPoint(self: Plane, point: Vec3) f32 {
+        return self.normal.x * point.x + self.normal.y * point.y + self.normal.z * point.z + self.d;
     }
 };
 

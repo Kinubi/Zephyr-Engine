@@ -2062,9 +2062,11 @@ pub const RenderSystem = struct {
 };
 
 /// Compare two 4x4 matrices for approximate equality (for camera change detection)
-fn matricesApproxEqual(a: math.Mat4, b: math.Mat4) bool {
+/// Optimized with compile-time unrolling and early exit
+inline fn matricesApproxEqual(a: math.Mat4, b: math.Mat4) bool {
     const epsilon: f32 = 0.0001;
-    for (0..16) |i| {
+    // Unroll completely for better branch prediction
+    inline for (0..16) |i| {
         if (@abs(a.data[i] - b.data[i]) > epsilon) {
             return false;
         }
