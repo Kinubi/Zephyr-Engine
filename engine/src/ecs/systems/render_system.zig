@@ -2334,7 +2334,16 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
         }
         // OPTIMIZATION: If only transforms changed, skip full cache rebuild
         else if (snapshot.render_changes.transform_only_change and !is_first_frame) {
-            try self.updateCachesForTransformsOnly(snapshot);
+            // Try fast path, but fall back to full rebuild if caches are missing
+            // (can happen after scene reload during Play/Pause transitions)
+            self.updateCachesForTransformsOnly(snapshot) catch |err| {
+                if (err == error.CacheMissing) {
+                    log(.DEBUG, "render_system", "Cache missing during transform-only update, falling back to full rebuild", .{});
+                    try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
+                } else {
+                    return err;
+                }
+            };
         } else {
             try self.rebuildCachesFromSnapshot(snapshot, asset_manager);
         }

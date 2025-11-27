@@ -4,8 +4,10 @@ const Math = zephyr.math;
 const c = @import("backend/imgui_c.zig").c;
 
 const Camera = zephyr.Camera;
+const CameraComponent = zephyr.ecs.Camera;
 const Scene = zephyr.Scene;
 const MeshRenderer = zephyr.MeshRenderer;
+const PointLight = zephyr.ecs.PointLight;
 const AssetManager = zephyr.AssetManager;
 const Model = zephyr.Model;
 const MeshModule = zephyr.Mesh;
@@ -166,14 +168,35 @@ pub fn rayFromMouse(camera: *Camera, mouse_x: f32, mouse_y: f32, vp_size: [2]f32
 pub fn computeEntityWorldAABB(scene: *Scene, entity: zephyr.Entity) ?AxisAlignedBoundingBox {
     if (entity == zephyr.Entity.invalid) return null;
 
+    const transform = scene.ecs_world.get(zephyr.Transform, entity) orelse return null;
+    const world_mat = &transform.world_matrix;
+
+    // Check for PointLight - use a small sphere AABB
+    if (scene.ecs_world.has(PointLight, entity)) {
+        const light_size: f32 = 0.3; // Visual size for picking
+        const local_aabb = AxisAlignedBoundingBox{
+            .min = Math.Vec3.init(-light_size, -light_size, -light_size),
+            .max = Math.Vec3.init(light_size, light_size, light_size),
+        };
+        return transformAABB(world_mat, local_aabb);
+    }
+
+    // Check for Camera - use a small box AABB
+    if (scene.ecs_world.has(CameraComponent, entity)) {
+        const cam_size: f32 = 0.4; // Visual size for picking
+        const local_aabb = AxisAlignedBoundingBox{
+            .min = Math.Vec3.init(-cam_size, -cam_size, -cam_size),
+            .max = Math.Vec3.init(cam_size, cam_size, cam_size),
+        };
+        return transformAABB(world_mat, local_aabb);
+    }
+
+    // Check for MeshRenderer
     const mr = scene.ecs_world.get(MeshRenderer, entity) orelse return null;
     if (!mr.hasValidAssets()) return null;
 
     const model_ptr = scene.asset_manager.getLoadedModelConst(mr.model_asset.?) orelse return null;
     const model = model_ptr.*;
-
-    const transform = scene.ecs_world.get(zephyr.Transform, entity) orelse return null;
-    const world_mat = &transform.world_matrix;
 
     var combined_min = Math.Vec3.init(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
     var combined_max = Math.Vec3.init(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
@@ -224,16 +247,52 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
     var best_entity: ?zephyr.Entity = null;
     var best_pos: Math.Vec3 = Math.Vec3.zero();
 
-    var object_count: usize = 0;
-    var tested_count: usize = 0;
-
     // Iterate scene objects
     for (scene.iterateObjects()) |*game_obj| {
-        object_count += 1;
         const eid = game_obj.entity_id;
         if (eid == zephyr.Entity.invalid) continue;
 
-        // Skip if no MeshRenderer
+        // Get transform for object
+        const transform = scene.ecs_world.get(zephyr.Transform, eid) orelse continue;
+        const world_mat = &transform.world_matrix;
+
+        // Check for PointLight
+        if (scene.ecs_world.has(PointLight, eid)) {
+            const light_size: f32 = 0.3;
+            const local_aabb = AxisAlignedBoundingBox{
+                .min = Math.Vec3.init(-light_size, -light_size, -light_size),
+                .max = Math.Vec3.init(light_size, light_size, light_size),
+            };
+            const world_aabb = transformAABB(world_mat, local_aabb);
+            if (rayIntersectsAABB(orig, dir, world_aabb)) |t| {
+                if (t < best_t) {
+                    best_t = t;
+                    best_entity = eid;
+                    best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
+                }
+            }
+            continue;
+        }
+
+        // Check for Camera (but skip the active editor camera)
+        if (scene.ecs_world.has(CameraComponent, eid)) {
+            const cam_size: f32 = 0.4;
+            const local_aabb = AxisAlignedBoundingBox{
+                .min = Math.Vec3.init(-cam_size, -cam_size, -cam_size),
+                .max = Math.Vec3.init(cam_size, cam_size, cam_size),
+            };
+            const world_aabb = transformAABB(world_mat, local_aabb);
+            if (rayIntersectsAABB(orig, dir, world_aabb)) |t| {
+                if (t < best_t) {
+                    best_t = t;
+                    best_entity = eid;
+                    best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
+                }
+            }
+            continue;
+        }
+
+        // Check for MeshRenderer
         const mr = scene.ecs_world.get(MeshRenderer, eid) orelse continue;
         if (!mr.hasValidAssets()) continue;
 
@@ -241,18 +300,9 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
         const model_ptr = scene.asset_manager.getLoadedModelConst(mr.model_asset.?) orelse continue;
         const model = model_ptr.*;
 
-        // Get transform for object
-        const transform = scene.ecs_world.get(zephyr.Transform, eid) orelse continue;
-        const world_mat = &transform.world_matrix;
-
-        tested_count += 1;
-
-        var mesh_count: usize = 0;
-
         // For each mesh in the model
         for (model.meshes.items) |model_mesh| {
             const mesh = model_mesh.geometry.mesh;
-            mesh_count += 1;
 
             const local_aabb = computeMeshAABB(mesh);
             const world_aabb = transformAABB(world_mat, local_aabb);

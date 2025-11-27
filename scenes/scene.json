@@ -1,5 +1,5 @@
 {
-    "name": "cornell_box",
+    "name": "avoider_game",
     "entities": [
         {
             "uuid": "8711bd61-ca02-4781-b8e8-9e3c122d6119",
@@ -251,7 +251,7 @@
                     "receives_shadows": true
                 },
                 "ParticleEmitter": {
-                    "emission_rate": 50,
+                    "emission_rate": 10,
                     "particle_lifetime": 2.5,
                     "velocity_min": {
                         "x": -1.5,
@@ -293,7 +293,7 @@
                 },
                 "RoughnessMaterial": {
                     "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-roughness3.png",
-                    "factor": 1
+                    "factor": 0.5
                 }
             }
         },
@@ -379,7 +379,7 @@
                     "run_once": false
                 },
                 "ParticleEmitter": {
-                    "emission_rate": 50,
+                    "emission_rate": 10,
                     "particle_lifetime": 2.5,
                     "velocity_min": {
                         "x": -1.5,
@@ -418,6 +418,76 @@
                         1,
                         1
                     ]
+                }
+            }
+        },
+        {
+            "uuid": "d737a1b6-9b4f-4075-9e78-266c21ffd7aa",
+            "components": {
+                "Name": {
+                    "name": "light"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 1.4888447523117065,
+                        "y": 0.5,
+                        "z": -0.18259543180465698
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1.9613823890686035,
+                        "y": 2.6055920124053955,
+                        "z": 3.9738705158233643
+                    }
+                },
+                "PointLight": {
+                    "color": {
+                        "x": 1,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "intensity": 9.354000091552734,
+                    "range": 10,
+                    "cast_shadows": false
+                }
+            }
+        },
+        {
+            "uuid": "67fa47d4-7b3c-4fa6-a7a6-7ebab72cd9e3",
+            "components": {
+                "Name": {
+                    "name": "Camera"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 7.053055763244629,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0.030739545822143555,
+                        "y": 0.7090682983398438,
+                        "z": 0.01960816979408264,
+                        "w": -0.7041965126991272
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "Camera": {
+                    "projection_type": "perspective",
+                    "is_primary": true,
+                    "near_plane": 0.10000000149011612,
+                    "far_plane": 1000,
+                    "fov": 45,
+                    "aspect_ratio": 1.7777777910232544
                 }
             }
         }

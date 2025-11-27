@@ -17,7 +17,7 @@ pub const CameraController = struct {
 
     // Tuning (instance fields)
     move_speed: f32 = 3.0,
-    look_speed: f32 = 1.5,
+    mouse_sensitivity: f32 = 0.003, // Radians per pixel of mouse movement
     fov: f32 = 75.0,
 
     // State
@@ -25,6 +25,10 @@ pub const CameraController = struct {
     last_mouse_valid: bool = false,
     last_mouse_x: f64 = 0.0,
     last_mouse_y: f64 = 0.0,
+    
+    // Smoothing for mouse look (accumulated delta applied in update)
+    pending_yaw: f32 = 0.0,
+    pending_pitch: f32 = 0.0,
 
     keys: struct {
         w: bool = false,
@@ -94,10 +98,9 @@ pub const CameraController = struct {
                 if (self.last_mouse_valid) {
                     const dx = x - self.last_mouse_x;
                     const dy = y - self.last_mouse_y;
-                    self.rotation.y += @as(f32, @floatCast(dx)) * self.look_speed * 0.002; // sensitivity
-                    self.rotation.x -= @as(f32, @floatCast(dy)) * self.look_speed * 0.002;
-                    // Clamp pitch
-                    self.rotation.x = std.math.clamp(self.rotation.x, -1.5, 1.5);
+                    // Accumulate rotation delta - applied smoothly in update()
+                    self.pending_yaw += @as(f32, @floatCast(dx)) * self.mouse_sensitivity;
+                    self.pending_pitch -= @as(f32, @floatCast(dy)) * self.mouse_sensitivity;
                 }
                 self.last_mouse_x = x;
                 self.last_mouse_y = y;
@@ -115,6 +118,24 @@ pub const CameraController = struct {
 
     /// Apply continuous motion and update the camera view/projection
     pub fn update(self: *CameraController, camera: *Camera, dt: f32) void {
+        // Apply pending mouse rotation with smoothing
+        // Use exponential smoothing for responsive but smooth camera movement
+        const smooth_factor: f32 = 15.0; // Higher = snappier, lower = smoother
+        const blend = 1.0 - @exp(-smooth_factor * dt);
+        
+        if (@abs(self.pending_yaw) > 0.0001 or @abs(self.pending_pitch) > 0.0001) {
+            self.rotation.y += self.pending_yaw * blend;
+            self.rotation.x += self.pending_pitch * blend;
+            
+            // Decay pending rotation
+            self.pending_yaw *= (1.0 - blend);
+            self.pending_pitch *= (1.0 - blend);
+            
+            // Clamp pitch to prevent gimbal lock
+            self.rotation.x = std.math.clamp(self.rotation.x, -1.5, 1.5);
+        }
+        
+        // Movement
         var dir = Math.Vec3.init(0, 0, 0);
         if (self.keys.w) dir.z -= 1;
         if (self.keys.s) dir.z += 1;

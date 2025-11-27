@@ -334,41 +334,6 @@ pub const App = struct {
         // Register PointLight component in scene's ECS world
         try scene.ecs_world.registerComponent(new_ecs.PointLight);
 
-        // // Main light (white, center-top)
-        // const main_light = try scene.ecs_world.createEntity();
-        // const main_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(0, 1.5, 1.0));
-        // try scene.ecs_world.emplace(new_ecs.Transform, main_light, main_light_transform);
-        // try scene.ecs_world.emplace(new_ecs.PointLight, main_light, new_ecs.PointLight.initWithRange(
-        //     Math.Vec3.init(1.0, 1.0, 1.0), // White
-        //     3.0, // Intensity
-        //     10.0, // Range
-        // ));
-        // log(.INFO, "app", "Scene v2: Added main light", .{});
-
-        // Warm accent light (left side, orange)
-        // const warm_light = try scene.ecs_world.createEntity();
-        // const warm_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(-1.5, 0.5, 1.0));
-        // try scene.ecs_world.emplace(new_ecs.Transform, warm_light, warm_light_transform);
-        // try scene.ecs_world.emplace(new_ecs.PointLight, warm_light, new_ecs.PointLight.initWithRange(
-        //     Math.Vec3.init(1.0, 0.6, 0.2), // Orange
-        //     2.0, // Intensity
-        //     8.0, // Range
-        // ));
-        // log(.INFO, "app", "Scene v2: Added warm accent light", .{});
-
-        // // Cool accent light (right side, blue)
-        // const cool_light = try scene.ecs_world.createEntity();
-        // const cool_light_transform = new_ecs.Transform.initWithPosition(Math.Vec3.init(1.5, 0.5, 1.0));
-        // try scene.ecs_world.emplace(new_ecs.Transform, cool_light, cool_light_transform);
-        // try scene.ecs_world.emplace(new_ecs.PointLight, cool_light, new_ecs.PointLight.initWithRange(
-        //     Math.Vec3.init(0.2, 0.5, 1.0), // Blue
-        //     2.0, // Intensity
-        //     8.0, // Range
-        // ));
-        // log(.INFO, "app", "Scene v2: Added cool accent light", .{});
-
-        log(.INFO, "app", "Scene v2: Lights added successfully", .{});
-
         // NOTE: TextureSystem and MaterialSystem now handle their own updates
         // (RenderGraph already initialized above before spawning props)
 

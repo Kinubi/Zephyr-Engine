@@ -790,6 +790,11 @@ pub const SceneHierarchyPanel = struct {
                     }
 
                     c.ImGui_Separator();
+                    c.ImGui_Text("Lighting");
+
+                    self.addComponentMenuItem(scene.ecs_world, entity, PointLight, "Point Light");
+
+                    c.ImGui_Separator();
                     c.ImGui_Text("Physics");
 
                     self.addComponentMenuItem(scene.ecs_world, entity, RigidBody, "Rigid Body");

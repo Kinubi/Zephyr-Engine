@@ -122,7 +122,8 @@ pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_pos: [2]f
                     const cross_len = Math.Vec3.length(cross);
                     const dot = Math.Vec3.dot(state.*.drag_origin, cur_vec);
                     const angle = std.math.atan2(@as(f32, cross_len), @as(f32, dot));
-                    const sign: f32 = if (Math.Vec3.dot(cross, axis_world) >= 0.0) @as(f32, 1.0) else @as(f32, -1.0);
+                    // Sign is negative of the dot product with axis to match expected rotation direction
+                    const sign: f32 = if (Math.Vec3.dot(cross, axis_world) >= 0.0) @as(f32, -1.0) else @as(f32, 1.0);
                     var signed_angle: f32 = angle * sign;
                     if (io.*.KeyShift) signed_angle *= 0.1; // precision
                     var new_rot = state.*.initial_rot;
