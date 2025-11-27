@@ -5,11 +5,6 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Frustum Culling (CPU)",
-          "desc": "Implement CPU-side frustum culling in RenderSystem.\n\nCurrently rendering ALL entities every frame regardless of visibility. This will kill performance as scenes grow.\n\nImplementation:\n1. Extract 6 frustum planes from view-projection matrix\n2. Store AABB bounds in Mesh assets (min/max corners)\n3. Transform AABB to world space using entity Transform\n4. Test AABB against frustum planes (sphere approximation for speed)\n5. Skip adding to render list if fully outside frustum\n\nOptional: Add debug visualization (draw frustum, highlight culled objects)",
-          "labels": ["Optimization", "High Priority"]
-        },
-        {
           "name": "Shadow Mapping",
           "desc": "Implement shadow mapping for rasterization path.\n\nCurrently NO shadows - scenes look flat and unrealistic. This is the single biggest visual quality improvement available.\n\nImplementation:\n1. Add ShadowMapPass to render graph (renders depth from light perspective)\n2. For PointLights: Use cube shadow maps (6 faces)\n3. For DirectionalLights (if added): Use Cascaded Shadow Maps\n4. Bind shadow maps in lighting shaders\n5. Sample shadow map and compare depth\n6. Add PCF (Percentage Closer Filtering) for soft edges\n\nConsider: Shadow atlas to batch multiple lights",
           "labels": ["Feature", "High Priority"]
@@ -39,6 +34,11 @@
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Frustum Culling (CPU)",
+          "desc": "Implemented CPU-side frustum culling for instanced rendering in RenderSystem.\n\nCompleted:\n1. Extract 6 frustum planes from view-projection matrix using `Frustum.fromViewProjection()`.\n2. Store AABB bounds in Mesh assets (min/max corners from geometry bounds).\n3. Transform AABB to world space using entity Transform with optimized `AABB.transform()` (fully unrolled loop).\n4. Test AABB against frustum planes using `Frustum.testAABB()` with compile-time `inline for`.\n5. Skip adding instances to render batches if AABB is fully outside frustum.\n\nOptimizations Applied:\n- All hot-path math functions inlined (`AABB.transform`, `Frustum.testAABB`, `Plane.distanceToPoint`).\n- Matrix comparison optimized with `inline for` loop unrolling.\n- Direct memcpy to GPU-mapped instance buffer (no intermediate ArrayList).\n- Frustum pre-validated once per frame, not per-mesh.\n- Added `AABB.boundingSphereRadius()` and `Frustum.testAABBWithSphere()` for potential sphere pre-test.\n\nFiles Modified:\n- `engine/src/utils/math.zig`: AABB, Frustum, Plane optimizations\n- `engine/src/ecs/systems/render_system.zig`: Culling integration, buffer upload optimization",
+          "labels": ["Optimization", "Engine"]
+        },
         {
           "name": "Editor Camera Separation",
           "desc": "Separated the Editor camera from the Game camera.\n\nCompleted:\n1. `CameraController` now has helper methods `getViewMatrix()`, `getInverseViewMatrix()`, `getPosition()` using YXZ Euler angles matching Camera.setViewYXZ.\n2. `SceneLayer.prepare()` handles camera switching based on scene state (Edit vs Play).\n3. In Edit mode: Uses CameraController's matrices directly.\n4. In Play mode: Uses scene's active Camera component.\n5. Removed redundant camera overrides from EditorApp.\n6. Fixed viewport camera mismatch that caused incorrect AABB calculations.",
@@ -203,6 +203,26 @@
           "name": "Asset Management: Path Lookup",
           "desc": "Ensure AssetManager can return file path for AssetId (for saving) and AssetId for file path (for loading).",
           "labels": ["Engine"]
+        },
+        {
+          "name": "Multi-component Queries",
+          "desc": "Implemented complex ECS queries with `World.query(struct { ... })`.\n\nCompleted:\n- `QueryIterator` in `engine/src/ecs/query.zig` supports any struct with component pointer fields.\n- Required components drive iteration, optional components (nullable pointers) are fetched if present.\n- EntityId field support for getting the entity being iterated.\n- Compile-time validation ensures at least one required component.\n- Used throughout codebase: PhysicsSystem, RenderSystem, etc.\n\nExample:\n```zig\nvar query = try world.query(struct {\n    entity: EntityId,\n    transform: *Transform,\n    mesh: *MeshRenderer,\n    light: ?*PointLight,  // optional\n});\nwhile (query.next()) |item| { ... }\n```",
+          "labels": ["Feature", "Engine"]
+        },
+        {
+          "name": "Mesh Deduplication for Instancing",
+          "desc": "Implemented instanced rendering with mesh deduplication in RenderSystem.\n\nCompleted:\n- `BatchBuilder` groups entities by MeshId and MaterialSetId.\n- `InstancedBatch` struct holds mesh pointer, instance count, and instance buffer offset.\n- Single `vkCmdDrawIndexedIndirect` per batch with `instanceCount > 1`.\n- Instance data (model matrix, normal matrix) uploaded to GPU SSBO.\n- Material sets further partition batches for correct descriptor binding.\n- Frustum culling integrated at batch build time.\n\nFiles:\n- `engine/src/ecs/systems/render_system.zig`: BatchBuilder, uploadInstanceBufferFromBatches()\n- `engine/src/rendering/render_data_types.zig`: InstancedBatch struct\n- `engine/src/rendering/passes/geometry_pass.zig`: Instanced draw calls",
+          "labels": ["Optimization", "Engine"]
+        },
+        {
+          "name": "Asset Streaming System",
+          "desc": "Implemented async asset loading with background streaming.\n\nCompleted:\n- `AssetLoader` in `engine/src/assets/asset_loader.zig` handles background loading.\n- `loadAssetAsync()` queues load requests with priority levels.\n- ThreadPool workers process load queue in parallel.\n- Staging buffers used for GPU upload to avoid frame stutters.\n- Asset state tracking (Unloaded, Loading, Loaded, Failed).\n- Hot reload integration via FileWatcher.\n\nFiles:\n- `engine/src/assets/asset_manager.zig`: loadAssetAsync(), AssetLoader integration\n- `engine/src/assets/asset_loader.zig`: Background loading implementation\n- `engine/src/threading/thread_pool.zig`: Worker thread management",
+          "labels": ["Feature", "Engine"]
+        },
+        {
+          "name": "Tonemapping Pass",
+          "desc": "Implemented HDR to LDR tonemapping as final render pass.\n\nCompleted:\n- `TonemapPass` in render graph converts HDR geometry buffer to LDR swapchain.\n- Configurable tonemapping curve (ACES, Reinhard, etc.).\n- Proper resource dependencies declared for execution ordering.\n\nFiles:\n- `engine/src/rendering/passes/tonemap_pass.zig`\n- `assets/shaders/tonemap.frag`",
+          "labels": ["Feature", "Engine"]
         }
       ]
     },
@@ -218,16 +238,6 @@
           "name": "Remove global BLAS registry",
           "desc": "Remove the global BLAS registry in `multithreaded_bvh_builder.zig` once ownership is moved to Meshes. This eliminates a global state bottleneck and simplifies the `RenderSystem`.",
           "labels": ["Refactor", "High Priority"]
-        },
-        {
-          "name": "Implement mesh deduplication for instancing",
-          "desc": "Optimize instancing in `render_system.zig`.\n\nDetails:\n- Instead of iterating entities and drawing immediately, bucket them by `MeshId` and `MaterialId`.\n- Build a `std.ArrayList(InstanceData)` for each bucket.\n- Issue one `vkCmdDrawIndexed` per bucket with `instanceCount > 1`.\n- This will significantly reduce draw call overhead.",
-          "labels": ["Optimization", "High Priority"]
-        },
-        {
-          "name": "Implement asset streaming system",
-          "desc": "Implement proper asset streaming in `asset_manager.zig`.\n\nDetails:\n- Use `std.Thread` to load assets in the background.\n- Implement a `LoadRequestQueue`.\n- Upload to GPU incrementally (staging buffers) to avoid frame stutters.\n- Handle `AssetId` placeholders while loading.",
-          "labels": ["Feature", "High Priority"]
         },
         {
           "name": "Archetype-based storage optimization",
@@ -250,11 +260,6 @@
       "name": "Backlog - Rendering",
       "cards": [
         {
-          "name": "Frustum Culling (CPU)",
-          "desc": "Implement CPU-side frustum culling in `RenderSystem`.\n\nDetails:\n- Extract camera frustum planes.\n- Iterate entities.\n- Calculate AABB from `Mesh` bounds + `Transform`.\n- Check AABB vs Frustum.\n- Skip adding to render list if outside.",
-          "labels": ["Optimization"]
-        },
-        {
           "name": "Occlusion Culling (GPU)",
           "desc": "Implement GPU-side occlusion culling.\n\nDetails:\n- Use Hi-Z buffer generation (downsample depth buffer).\n- Use Compute Shader to check object AABBs against Hi-Z buffer.\n- Generate indirect draw commands for visible objects.",
           "labels": ["Optimization"]
@@ -265,18 +270,13 @@
           "labels": ["Optimization"]
         },
         {
-          "name": "Shadow Mapping",
-          "desc": "Implement shadow mapping for the rasterization path.\n\nDetails:\n- Render scene depth from light perspectives into shadow maps (Cascaded Shadow Maps for Directional, Cube Maps for Point).\n- Bind shadow maps in lighting shaders.\n- Perform PCF (Percentage Closer Filtering) for soft shadows.",
-          "labels": ["Feature"]
-        },
-        {
           "name": "Volumetric Light Scattering",
           "desc": "Implement volumetric lighting (God rays).\n\nDetails:\n- Raymarch through shadow maps in a post-process shader.\n- Or use screen-space radial blur from the light source position.",
           "labels": ["Feature"]
         },
         {
           "name": "Post-processing Pipeline",
-          "desc": "Implement a post-processing stack.\n\nDetails:\n- Bloom: Threshold -> Downsample -> Blur -> Upsample -> Combine.\n- Tonemapping: Apply ACES or Reinhard curve.\n- FXAA: Fast Approximate Anti-Aliasing pass.",
+          "desc": "Implement a post-processing stack.\n\nDetails:\n- Bloom: Threshold -> Downsample -> Blur -> Upsample -> Combine.\n- FXAA: Fast Approximate Anti-Aliasing pass.\n\nNote: Tonemapping is ALREADY COMPLETE (TonemapPass in render graph).",
           "labels": ["Feature"]
         }
       ]
@@ -284,11 +284,6 @@
     {
       "name": "Backlog - Editor",
       "cards": [
-        {
-          "name": "Undo/Redo System",
-          "desc": "Implement the Command pattern for editor actions.\n\nDetails:\n- Create `ICommand` interface with `execute()` and `undo()`.\n- Implement commands: `MoveEntityCommand`, `ChangePropertyCommand`, `DeleteEntityCommand`.\n- Maintain a history stack in `EditorApp`.\n- Map Ctrl+Z/Ctrl+Y to stack operations.",
-          "labels": ["Feature"]
-        },
         {
           "name": "Selection System",
           "desc": "Implement multi-entity selection in the Editor.\n\nDetails:\n- Update `SelectionContext` to hold `ArrayList(EntityId)`.\n- Render selection outlines: Render selected entities to a stencil buffer or separate color attachment, then edge-detect in post-process.",
@@ -300,13 +295,8 @@
       "name": "Backlog - ECS & Systems",
       "cards": [
         {
-          "name": "Multi-component Queries",
-          "desc": "Support complex ECS queries.\n\nDetails:\n- Implement `World.query(.{Transform, MeshRenderer})`.\n- Return an iterator that skips entities missing any required component.\n- Optimize using bitmasks or archetypes.",
-          "labels": ["Feature"]
-        },
-        {
           "name": "Event System for Components",
-          "desc": "Implement an event system for components.\n\nDetails:\n- Components can trigger events (e.g., `OnCollision`, `OnDestroy`).\n- Systems can subscribe to these events.\n- Use a message bus or observer pattern within the ECS.",
+          "desc": "Implement an event system for components.\n\nDetails:\n- Components can trigger events (e.g., `OnCollision`, `OnDestroy`).\n- Systems can subscribe to these events.\n- Use a message bus or observer pattern within the ECS.\n\nNote: CollisionEvent already exists in PhysicsSystem - this is about generalizing it.",
           "labels": ["Feature"]
         },
         {
@@ -319,11 +309,6 @@
     {
       "name": "Backlog - Assets",
       "cards": [
-        {
-          "name": "GLTF/GLB Support",
-          "desc": "Add native support for loading GLTF/GLB models.\n\nDetails:\n- Use `cgltf` or a Zig library.\n- Parse nodes, meshes, materials, and animations.\n- Convert to engine internal formats (`Mesh`, `MaterialSet`, `Animation`).",
-          "labels": ["Feature"]
-        },
         {
           "name": "Compressed Texture Support",
           "desc": "Support loading and rendering compressed texture formats.\n\nDetails:\n- Support BC7 (high quality) and ASTC (mobile/efficient).\n- Update `TextureManager` to handle block-compressed data upload.\n- Reduces VRAM usage significantly.",
