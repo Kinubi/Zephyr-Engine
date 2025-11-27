@@ -409,13 +409,26 @@ pub const ShadowSystem = struct {
             }
         }
 
-        self.generation +%= 1;
-
+        // Handle lights_changed: need to update all frame buffers
+        // We track this separately so we don't keep resetting frame_buffers_initialized
         if (delta.lights_changed) {
             log(.INFO, "shadow_system", "Shadow lights changed: {} active", .{self.active_light_count});
-            // Reset frame buffer tracking so all frames get updated with new light data
-            self.frame_buffers_initialized = 0;
+            // Clear lights_changed but keep dirty indices until all frames are updated
+            self.pending_delta.lights_changed = false;
         }
+
+        // Check if all frame buffers are now initialized
+        const all_frames_mask: u32 = (@as(u32, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
+        if (self.frame_buffers_initialized == all_frames_mask) {
+            // All frames have valid data - clear the pending delta
+            const cleared_count = self.pending_delta.dirty_light_indices.items.len;
+            self.pending_delta.dirty_light_indices.clearRetainingCapacity();
+            if (cleared_count > 0) {
+                log(.INFO, "shadow_system", "All {} frame buffers initialized, cleared {} dirty indices", .{ MAX_FRAMES_IN_FLIGHT, cleared_count });
+            }
+        }
+
+        self.generation +%= 1;
 
         return true;
     }
