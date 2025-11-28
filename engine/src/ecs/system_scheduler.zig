@@ -114,7 +114,7 @@ pub const SystemStage = struct {
         if (self.prepare_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (self.prepare_count <= 2 or thread_pool == null) {
+        if (self.prepare_count < 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.prepare_fn) |prepare_fn| {
                     try prepare_fn(world, dt);
@@ -159,7 +159,7 @@ pub const SystemStage = struct {
         if (self.update_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (self.update_count <= 2 or thread_pool == null) {
+        if (self.update_count < 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.update_fn) |update_fn| {
                     try update_fn(world, frame_info);

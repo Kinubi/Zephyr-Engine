@@ -37,20 +37,25 @@ pub const LightData = struct {
 };
 
 /// System for extracting light data from ECS for rendering
+/// Uses generation-based change detection to avoid re-extracting every frame
 pub const LightSystem = struct {
     allocator: std.mem.Allocator,
 
     // Cache to avoid re-extracting lights every frame
     cached_light_data: ?LightData = null,
     last_light_count: usize = 0,
-    lights_dirty: bool = true,
+
+    // Generation-based change tracking (matches ShadowSystem pattern)
+    generation: u32 = 0,
+    last_position_hash: u64 = 0, // Hash of all light positions for change detection
 
     pub fn init(allocator: std.mem.Allocator) LightSystem {
         return .{
             .allocator = allocator,
             .cached_light_data = null,
             .last_light_count = 0,
-            .lights_dirty = true,
+            .generation = 0,
+            .last_position_hash = 0,
         };
     }
 
@@ -60,6 +65,11 @@ pub const LightSystem = struct {
         }
     }
 
+    /// Get current generation (for external change detection)
+    pub fn getGeneration(self: *const LightSystem) u32 {
+        return self.generation;
+    }
+
     /// Get lights (uses cache if nothing changed, otherwise re-extracts)
     /// Returns a pointer to the cached data - do NOT deinit it!
     pub fn getLights(self: *LightSystem, world: *World) !*const LightData {
@@ -67,22 +77,53 @@ pub const LightSystem = struct {
         var view = try world.view(PointLight);
         const count = view.len();
 
-        // Check if we need to re-extract
+        // Check if count changed (fast path)
         const count_changed = count != self.last_light_count;
-        if (count_changed or self.lights_dirty or self.cached_light_data == null) {
 
-            // Initialize cache if needed
-            if (self.cached_light_data == null) {
-                self.cached_light_data = LightData.init(self.allocator);
-            }
+        // Initialize cache if needed
+        if (self.cached_light_data == null) {
+            self.cached_light_data = LightData.init(self.allocator);
+        }
 
-            // Re-extract lights into existing cache
+        if (count_changed) {
+            // Count changed - must re-extract
             try self.extractLightsInto(world, &self.cached_light_data.?);
             self.last_light_count = count;
-            //self.lights_dirty = false;
+            self.generation +%= 1;
+        } else if (count > 0) {
+            // Same count - check if positions changed using a quick hash
+            const new_hash = try self.computePositionHash(world);
+            if (new_hash != self.last_position_hash) {
+                try self.extractLightsInto(world, &self.cached_light_data.?);
+                self.last_position_hash = new_hash;
+                self.generation +%= 1;
+            }
         }
 
         return &(self.cached_light_data.?);
+    }
+
+    /// Compute a hash of all light positions for quick change detection
+    fn computePositionHash(self: *LightSystem, world: *World) !u64 {
+        _ = self;
+        var hasher = std.hash.Wyhash.init(0);
+
+        var view = try world.view(PointLight);
+        var iter = view.iterator();
+        while (iter.next()) |entry| {
+            const transform = world.get(Transform, entry.entity) orelse continue;
+            // Hash position components
+            hasher.update(std.mem.asBytes(&transform.position.x));
+            hasher.update(std.mem.asBytes(&transform.position.y));
+            hasher.update(std.mem.asBytes(&transform.position.z));
+            // Also hash intensity and color for visual changes
+            hasher.update(std.mem.asBytes(&entry.component.intensity));
+            hasher.update(std.mem.asBytes(&entry.component.color.x));
+            hasher.update(std.mem.asBytes(&entry.component.color.y));
+            hasher.update(std.mem.asBytes(&entry.component.color.z));
+        }
+
+        return hasher.final();
     }
 
     /// Extract all point lights from the ECS world into provided LightData
@@ -116,12 +157,6 @@ pub const LightSystem = struct {
                 ),
             });
         }
-    }
-
-    /// Mark lights as dirty to force re-extraction next frame
-    /// Call this when lights are added/removed/modified programmatically
-    pub fn markDirty(self: *LightSystem) void {
-        self.lights_dirty = true;
     }
 };
 

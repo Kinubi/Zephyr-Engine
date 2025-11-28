@@ -128,9 +128,25 @@ pub const SceneLayer = struct {
                     }) catch |err| {
                         log(.WARN, "scene_layer", "Failed to add transform system: {}", .{err});
                     };
+                } else |err| {
+                    log(.WARN, "scene_layer", "Failed to add stage 2: {}", .{err});
+                }
+
+                // Stage 3: Particle emitter updates (reads transforms)
+                if (sched.addStage("ParticleEmitterUpdates")) |stage3| {
+                    stage3.addSystem(.{
+                        .name = "ParticleEmitterSystem",
+                        .prepare_fn = ecs.updateParticleEmittersSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{ "ParticleEmitter", "Transform" },
+                            .writes = &[_][]const u8{},
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add particle emitter system: {}", .{err});
+                    };
 
                     // ShadowSystem runs after transforms to detect light position changes
-                    stage2.addSystem(.{
+                    stage3.addSystem(.{
                         .name = "ShadowSystem",
                         .prepare_fn = ecs.prepareShadowSystem,
                         .update_fn = ecs.updateShadowSystem,
@@ -141,31 +157,7 @@ pub const SceneLayer = struct {
                     }) catch |err| {
                         log(.WARN, "scene_layer", "Failed to add shadow system: {}", .{err});
                     };
-                } else |err| {
-                    log(.WARN, "scene_layer", "Failed to add stage 2: {}", .{err});
-                }
-
-                // Stage 3: Particle emitter updates (reads transforms)
-                if (sched.addStage("ParticleEmitterUpdates")) |stage4| {
-                    stage4.addSystem(.{
-                        .name = "ParticleEmitterSystem",
-                        .prepare_fn = ecs.updateParticleEmittersSystem,
-                        .access = .{
-                            .reads = &[_][]const u8{ "ParticleEmitter", "Transform" },
-                            .writes = &[_][]const u8{},
-                        },
-                    }) catch |err| {
-                        log(.WARN, "scene_layer", "Failed to add particle emitter system: {}", .{err});
-                    };
-                } else |err| {
-                    log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
-                }
-
-                // Stage 4: Render system updates (change detection only - no cache building)
-                // Sets dirty flags when scene changes are detected
-                // Actual cache building happens on render thread via rebuildCachesFromSnapshot()
-                if (sched.addStage("RenderSystemUpdates")) |stage4| {
-                    stage4.addSystem(.{
+                    stage3.addSystem(.{
                         .name = "RenderSystem",
                         .prepare_fn = ecs.prepareRenderSystem,
                         .update_fn = ecs.updateRenderSystem,
@@ -177,7 +169,7 @@ pub const SceneLayer = struct {
                         log(.WARN, "scene_layer", "Failed to add render system: {}", .{err});
                     };
                 } else |err| {
-                    log(.WARN, "scene_layer", "Failed to add stage 4: {}", .{err});
+                    log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
                 }
             }
         }

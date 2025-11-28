@@ -1307,10 +1307,6 @@ pub const RenderSystem = struct {
             }
         }
 
-        if (culled_count > 0) {
-            log(.DEBUG, "render_system", "Frustum culled {} of {} objects", .{ culled_count, mesh_idx });
-        }
-
         // Build final batch lists
         const batch_lists = try self.allocator.alloc(render_data_types.RasterizationData.BatchList, builders.count());
         var list_idx: usize = 0;
