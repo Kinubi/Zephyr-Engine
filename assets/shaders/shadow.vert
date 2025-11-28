@@ -32,7 +32,8 @@ struct ShadowLightGPU {
 
 layout(set = 0, binding = 0) readonly buffer ShadowDataSSBO {
     uint numShadowLights;
-    uint _padding[3];
+    uint maxShadowLights;
+    uint _padding[2];
     ShadowLightGPU lights[8];  // MAX_SHADOW_LIGHTS
 } shadowData;
 

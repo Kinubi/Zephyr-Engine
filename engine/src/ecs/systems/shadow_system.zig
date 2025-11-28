@@ -7,6 +7,7 @@ const World = @import("../world.zig").World;
 const EntityId = @import("../entity_registry.zig").EntityId;
 const Transform = @import("../components/transform.zig").Transform;
 const PointLight = @import("../components/point_light.zig").PointLight;
+const ShadowDataSet = @import("../components/shadow_data_set.zig").ShadowDataSet;
 const Scene = @import("../../scene/scene.zig").Scene;
 const FrameInfo = @import("../../rendering/frameinfo.zig").FrameInfo;
 const BufferManager = @import("../../rendering/buffer_manager.zig").BufferManager;
@@ -129,11 +130,12 @@ pub const ShadowSystem = struct {
     last_light_version: u32 = 0,
 
     // System generation - incremented on any change
-    generation: u32 = 0,
+    // Start at 1 so first update always triggers (frame_generations start at 0)
+    generation: u32 = 1,
 
-    // Track which frame buffers have been initialized with data
-    // Each bit corresponds to a frame index - set when that buffer is updated
-    frame_buffers_initialized: u32 = 0,
+    // Per-frame generation tracking - tracks what generation each frame buffer has
+    // When snapshot.shadow_generation > frame_generations[frame], that buffer needs updating
+    frame_generations: [MAX_FRAMES_IN_FLIGHT]u32 = .{0} ** MAX_FRAMES_IN_FLIGHT,
 
     pub fn init(allocator: std.mem.Allocator) ShadowSystem {
         return .{
@@ -199,15 +201,11 @@ pub const ShadowSystem = struct {
     // Prepare Phase - Query ECS for changes (called from main thread)
     // ========================================================================
 
-    /// Query ECS for shadow-casting lights and detect changes
-    /// Stores pending delta for update phase to process
+    /// Query ECS for shadow-casting lights, compute matrices, and store in ShadowDataSet
+    /// The snapshot system will capture this data for each render frame
     pub fn prepareFromECS(self: *ShadowSystem, world: *World) !void {
-        // Only reset delta if all frame buffers have been initialized
-        // Otherwise we lose the "dirty" state before all buffers are updated
-        const all_frames_init = self.frame_buffers_initialized == ((@as(u32, 1) << MAX_FRAMES_IN_FLIGHT) - 1);
-        if (all_frames_init) {
-            self.pending_delta.reset(self.allocator);
-        }
+        // Reset delta each frame
+        self.pending_delta.reset(self.allocator);
 
         // Query for all shadow-casting lights (include EntityId to track which entity)
         var query = world.query(struct {
@@ -246,12 +244,14 @@ pub const ShadowSystem = struct {
         self.pending_delta.active_count = new_light_count;
 
         // Detect if light list changed (added/removed)
+        var any_change = false;
         if (new_light_count != self.active_light_count) {
             self.pending_delta.lights_changed = true;
+            any_change = true;
             log(.DEBUG, "shadow_system", "Light count changed: {} -> {}", .{ self.active_light_count, new_light_count });
         }
 
-        // Check each light for changes
+        // Check each light for changes and update cache + compute matrices
         for (0..new_light_count) |i| {
             const idx: u32 = @intCast(i);
             const entity = found_entities[i];
@@ -264,25 +264,28 @@ pub const ShadowSystem = struct {
             {
                 slot_changed = true;
                 self.pending_delta.lights_changed = true;
-                log(.DEBUG, "shadow_system", "Light {} slot changed (was_active={}, entity_match={})", .{
-                    i,
-                    self.light_cache[i].active,
-                    std.meta.eql(self.light_cache[i].entity, entity),
-                });
             }
 
             // Check if position changed (comparing floats with tolerance)
+            // Threshold 0.000001 = movement of ~0.001 units triggers update
             const old_pos = self.light_cache[i].position;
             const pos_diff = Math.Vec3.sub(new_pos, old_pos);
-            const pos_changed = Math.Vec3.dot(pos_diff, pos_diff) > 0.0001;
+            const dist_sq = Math.Vec3.dot(pos_diff, pos_diff);
+            const pos_changed = dist_sq > 0.000001; // Much more sensitive threshold
 
             if (slot_changed or pos_changed) {
-                // Mark this light as dirty
+                // Mark this light as dirty and recompute matrices
                 try self.pending_delta.dirty_light_indices.append(self.allocator, idx);
-                log(.DEBUG, "shadow_system", "Marked light {} dirty (slot_changed={}, pos_changed={})", .{ i, slot_changed, pos_changed });
+                any_change = true;
+
+                // Compute all 6 face view*projection matrices immediately (in prepare phase!)
+                for (0..6) |face| {
+                    const view = buildFaceViewMatrix(new_pos, @intCast(face));
+                    self.light_cache[i].face_view_projs[face] = self.shadow_projection.mul(view);
+                }
             }
 
-            // Update cache immediately (prepare can modify state)
+            // Update cache
             self.light_cache[i].entity = entity;
             self.light_cache[i].position = new_pos;
             self.light_cache[i].active = true;
@@ -293,76 +296,13 @@ pub const ShadowSystem = struct {
             if (self.light_cache[i].active) {
                 self.light_cache[i].active = false;
                 self.pending_delta.lights_changed = true;
+                any_change = true;
             }
         }
 
         self.active_light_count = new_light_count;
-    }
 
-    // ========================================================================
-    // Update Phase - Process changes (called from render thread)
-    // ========================================================================
-
-    /// Process pending delta: recompute view matrices for dirty lights and update GPU buffers
-    /// frame_index specifies which buffer to update
-    /// Returns true if anything changed
-    pub fn processPendingChanges(self: *ShadowSystem, frame_index: u32) bool {
-        const delta = &self.pending_delta;
-
-        // Check if this frame buffer needs initialization
-        const frame_bit: u32 = @as(u32, 1) << @intCast(frame_index);
-        const frame_needs_init = (self.frame_buffers_initialized & frame_bit) == 0;
-
-        // Early exit if nothing changed AND this frame buffer is already initialized
-        if (delta.dirty_light_indices.items.len == 0 and !delta.lights_changed and !frame_needs_init) {
-            return false;
-        }
-
-        log(.DEBUG, "shadow_system", "processPendingChanges: frame={}, dirty={}, lights_changed={}, frame_needs_init={}", .{
-            frame_index,
-            delta.dirty_light_indices.items.len,
-            delta.lights_changed,
-            frame_needs_init,
-        });
-
-        // If frame needs init, compute matrices for ALL active lights (not just dirty ones)
-        // This ensures all frame buffers have complete data
-        if (frame_needs_init) {
-            for (0..self.active_light_count) |i| {
-                const cache = &self.light_cache[i];
-                if (!cache.active) continue;
-
-                // Compute all 6 face view*projection matrices
-                for (0..6) |face| {
-                    const view = buildFaceViewMatrix(cache.position, @intCast(face));
-                    cache.face_view_projs[face] = self.shadow_projection.mul(view);
-                }
-
-                log(.DEBUG, "shadow_system", "Init: Computed view matrices for light {} at ({d:.2}, {d:.2}, {d:.2})", .{
-                    i, cache.position.x, cache.position.y, cache.position.z,
-                });
-            }
-        } else {
-            // Only recompute for dirty lights
-            for (delta.dirty_light_indices.items) |light_idx| {
-                if (light_idx >= MAX_SHADOW_LIGHTS) continue;
-
-                const cache = &self.light_cache[light_idx];
-                if (!cache.active) continue;
-
-                // Compute all 6 face view*projection matrices
-                for (0..6) |face| {
-                    const view = buildFaceViewMatrix(cache.position, @intCast(face));
-                    cache.face_view_projs[face] = self.shadow_projection.mul(view);
-                }
-
-                log(.DEBUG, "shadow_system", "Recomputed view matrices for light {} at ({d:.2}, {d:.2}, {d:.2})", .{
-                    light_idx, cache.position.x, cache.position.y, cache.position.z,
-                });
-            }
-        }
-
-        // Update GPU SSBO struct with all light data including view_proj matrices
+        // Build GPU SSBO data from cache (always, so snapshot has latest data)
         self.gpu_ssbo.num_shadow_lights = self.active_light_count;
         for (0..MAX_SHADOW_LIGHTS) |i| {
             const cache = &self.light_cache[i];
@@ -396,41 +336,78 @@ pub const ShadowSystem = struct {
             };
         }
 
-        // Upload SSBO to GPU buffer for this frame
-        if (self.buffers_initialized and frame_index < MAX_FRAMES_IN_FLIGHT) {
+        // Update the ShadowDataSet singleton for snapshot capture
+        if (any_change) {
+            self.generation +%= 1;
+        }
+
+        const singleton_entity = try world.getOrCreateSingletonEntity();
+        if (world.get(ShadowDataSet, singleton_entity)) |shadow_set| {
+            shadow_set.gpu_ssbo = self.gpu_ssbo;
+            shadow_set.legacy_shadow_data = self.legacy_shadow_data;
+            shadow_set.active_light_count = self.active_light_count;
+            shadow_set.changed = any_change;
+            shadow_set.generation = self.generation;
+        } else {
+            // Create the component if it doesn't exist
+            try world.emplace(ShadowDataSet, singleton_entity, ShadowDataSet{
+                .gpu_ssbo = self.gpu_ssbo,
+                .legacy_shadow_data = self.legacy_shadow_data,
+                .active_light_count = self.active_light_count,
+                .changed = any_change,
+                .generation = self.generation,
+            });
+        }
+    }
+
+    // ========================================================================
+    // Update Phase - Process changes (called from render thread)
+    // ========================================================================
+
+    /// Upload shadow data from snapshot to ALL GPU buffers when generation changes
+    /// Matches material system pattern: update all frames at once for consistency
+    pub fn processFromSnapshot(self: *ShadowSystem, frame_info: *FrameInfo) bool {
+        const snapshot = frame_info.snapshot orelse return false;
+        const current_frame = frame_info.current_frame;
+
+        // Check if this snapshot has newer shadow data than what we've uploaded
+        // Compare against current frame's generation to detect if ANY frame needs update
+        if (snapshot.shadow_generation == self.frame_generations[current_frame]) {
+            // This frame already has the latest data
+            return false;
+        }
+
+        // Upload to ALL frame buffers at once (like material system does)
+        if (self.buffers_initialized) {
             if (self.buffer_manager) |bm| {
-                const buffer = self.shadow_data_buffers[frame_index];
-                const data = std.mem.asBytes(&self.gpu_ssbo);
-                bm.updateBuffer(buffer, data, frame_index) catch |err| {
-                    log(.WARN, "shadow_system", "Failed to update shadow SSBO: {}", .{err});
-                };
-                // Mark this frame buffer as initialized
-                self.frame_buffers_initialized |= (@as(u32, 1) << @intCast(frame_index));
+                const data = std.mem.asBytes(&snapshot.shadow_gpu_ssbo);
+
+                // Update all frame buffers to ensure consistency
+                for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+                    const buffer = self.shadow_data_buffers[i];
+                    bm.updateBuffer(buffer, data, @intCast(i)) catch |err| {
+                        log(.WARN, "shadow_system", "Failed to update shadow SSBO frame {}: {}", .{ i, err });
+                        continue;
+                    };
+                    // Mark buffer as updated - sets pending_bind_mask for descriptor rebinding
+                    buffer.markUpdated();
+                    // Mark this frame as having the latest generation
+                    self.frame_generations[i] = snapshot.shadow_generation;
+                }
             }
         }
-
-        // Handle lights_changed: need to update all frame buffers
-        // We track this separately so we don't keep resetting frame_buffers_initialized
-        if (delta.lights_changed) {
-            log(.INFO, "shadow_system", "Shadow lights changed: {} active", .{self.active_light_count});
-            // Clear lights_changed but keep dirty indices until all frames are updated
-            self.pending_delta.lights_changed = false;
-        }
-
-        // Check if all frame buffers are now initialized
-        const all_frames_mask: u32 = (@as(u32, 1) << MAX_FRAMES_IN_FLIGHT) - 1;
-        if (self.frame_buffers_initialized == all_frames_mask) {
-            // All frames have valid data - clear the pending delta
-            const cleared_count = self.pending_delta.dirty_light_indices.items.len;
-            self.pending_delta.dirty_light_indices.clearRetainingCapacity();
-            if (cleared_count > 0) {
-                log(.INFO, "shadow_system", "All {} frame buffers initialized, cleared {} dirty indices", .{ MAX_FRAMES_IN_FLIGHT, cleared_count });
-            }
-        }
-
-        self.generation +%= 1;
 
         return true;
+    }
+
+    /// Legacy method - now just calls processFromSnapshot
+    /// Returns true if anything changed
+    pub fn processPendingChanges(self: *ShadowSystem, frame_index: u32) bool {
+        _ = self;
+        _ = frame_index;
+        // This is now a no-op - use processFromSnapshot instead
+        // Kept for backwards compatibility
+        return false;
     }
 
     // ========================================================================
@@ -561,14 +538,15 @@ pub fn prepare(world: *World, dt: f32) !void {
     }
 }
 
-/// Update phase - process pending changes and recompute matrices (render thread)
+/// Update phase - upload shadow data from snapshot to GPU (render thread)
+/// Uses triple-buffered snapshots for proper synchronization
 pub fn update(world: *World, frame_info: *FrameInfo) !void {
     // Get the scene from world userdata
     const scene_ptr = world.getUserData("scene") orelse return;
     const scene: *Scene = @ptrCast(@alignCast(scene_ptr));
 
-    // Get shadow system from scene
+    // Use snapshot data for GPU upload
     if (scene.shadow_system) |shadow_system| {
-        _ = shadow_system.processPendingChanges(frame_info.current_frame);
+        _ = shadow_system.processFromSnapshot(frame_info);
     }
 }

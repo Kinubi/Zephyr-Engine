@@ -37,6 +37,7 @@ pub const MaterialSetDelta = @import("ecs/components/material_deltas_set.zig").M
 pub const GPUMaterial = @import("ecs/components/material_deltas_set.zig").GPUMaterial;
 pub const MaterialChange = @import("ecs/components/material_deltas_set.zig").MaterialChange;
 pub const InstanceDeltasSet = @import("ecs/components/instance_deltas_set.zig").InstanceDeltasSet;
+pub const ShadowDataSet = @import("ecs/components/shadow_data_set.zig").ShadowDataSet;
 const material_props = @import("ecs/components/material_properties.zig");
 pub const AlbedoMaterial = material_props.AlbedoMaterial;
 pub const RoughnessMaterial = material_props.RoughnessMaterial;

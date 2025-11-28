@@ -793,6 +793,12 @@ pub const Scene = struct {
         if (self.particle_system) |ps| {
             ps.deinit();
         }
+        if (self.shadow_system) |ss| {
+            ss.deinit();
+        }
+        if (self.skybox_system) |ss| {
+            ss.deinit();
+        }
 
         if (self.physics_system) |ps| {
             log(.INFO, "scene", "Deinitializing physics system...", .{});
