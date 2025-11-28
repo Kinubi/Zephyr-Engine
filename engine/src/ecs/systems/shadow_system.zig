@@ -329,24 +329,50 @@ pub const ShadowSystem = struct {
 
         self.active_light_count = new_light_count;
 
-        // Build GPU SSBO data from cache (always, so snapshot has latest data)
-        self.gpu_ssbo.num_shadow_lights = self.active_light_count;
-        for (0..MAX_SHADOW_LIGHTS) |i| {
-            const cache = &self.light_cache[i];
-            self.gpu_ssbo.lights[i] = ShadowLightGPU{
-                .light_pos = .{ cache.position.x, cache.position.y, cache.position.z, SHADOW_FAR },
-                .shadow_bias = 0.001,
-                .shadow_enabled = if (cache.active) 1 else 0,
-                .light_index = @intCast(i),
-                .face_view_projs = .{
-                    cache.face_view_projs[0].data,
-                    cache.face_view_projs[1].data,
-                    cache.face_view_projs[2].data,
-                    cache.face_view_projs[3].data,
-                    cache.face_view_projs[4].data,
-                    cache.face_view_projs[5].data,
-                },
-            };
+        // Only rebuild GPU SSBO data if something changed
+        if (any_change or self.pending_delta.dirty_light_indices.items.len > 0) {
+            self.gpu_ssbo.num_shadow_lights = self.active_light_count;
+            // Only update dirty lights (or all if lights_changed)
+            if (self.pending_delta.lights_changed) {
+                // Full rebuild
+                for (0..MAX_SHADOW_LIGHTS) |i| {
+                    const cache = &self.light_cache[i];
+                    self.gpu_ssbo.lights[i] = ShadowLightGPU{
+                        .light_pos = .{ cache.position.x, cache.position.y, cache.position.z, SHADOW_FAR },
+                        .shadow_bias = 0.001,
+                        .shadow_enabled = if (cache.active) 1 else 0,
+                        .light_index = @intCast(i),
+                        .face_view_projs = .{
+                            cache.face_view_projs[0].data,
+                            cache.face_view_projs[1].data,
+                            cache.face_view_projs[2].data,
+                            cache.face_view_projs[3].data,
+                            cache.face_view_projs[4].data,
+                            cache.face_view_projs[5].data,
+                        },
+                    };
+                }
+            } else {
+                // Incremental update - only dirty lights
+                for (self.pending_delta.dirty_light_indices.items) |idx| {
+                    const i = idx;
+                    const cache = &self.light_cache[i];
+                    self.gpu_ssbo.lights[i] = ShadowLightGPU{
+                        .light_pos = .{ cache.position.x, cache.position.y, cache.position.z, SHADOW_FAR },
+                        .shadow_bias = 0.001,
+                        .shadow_enabled = if (cache.active) 1 else 0,
+                        .light_index = @intCast(i),
+                        .face_view_projs = .{
+                            cache.face_view_projs[0].data,
+                            cache.face_view_projs[1].data,
+                            cache.face_view_projs[2].data,
+                            cache.face_view_projs[3].data,
+                            cache.face_view_projs[4].data,
+                            cache.face_view_projs[5].data,
+                        },
+                    };
+                }
+            }
         }
 
         // Update legacy single-light data (first shadow light) for geometry pass

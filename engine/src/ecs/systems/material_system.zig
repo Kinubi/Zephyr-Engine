@@ -762,6 +762,37 @@ pub const MaterialSystem = struct {
         // DON'T clear delta here - it will be cleared AFTER writeDeltasToComponent copies it
         // Clearing here would lose the delta if prepareFromECS is called multiple times per frame
 
+        // OPTIMIZATION: Cache DenseSet pointers outside the loop to avoid repeated HashMap lookups
+        // This reduces 7 storage lookups per entity to 0 (all cached upfront)
+        const albedo_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.AlbedoMaterial)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.AlbedoMaterial), @ptrCast(@alignCast(ptr)));
+        };
+        const roughness_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.RoughnessMaterial)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.RoughnessMaterial), @ptrCast(@alignCast(ptr)));
+        };
+        const metallic_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.MetallicMaterial)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.MetallicMaterial), @ptrCast(@alignCast(ptr)));
+        };
+        const normal_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.NormalMaterial)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.NormalMaterial), @ptrCast(@alignCast(ptr)));
+        };
+        const emissive_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.EmissiveMaterial)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.EmissiveMaterial), @ptrCast(@alignCast(ptr)));
+        };
+        const occlusion_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.OcclusionMaterial)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.OcclusionMaterial), @ptrCast(@alignCast(ptr)));
+        };
+        const material_set_storage = blk: {
+            const ptr = world.storages.get(@typeName(ecs.MaterialSet)) orelse break :blk null;
+            break :blk @as(?*ecs.DenseSet(ecs.MaterialSet), @ptrCast(@alignCast(ptr)));
+        };
+
         // OPTIMIZATION: Try to reuse existing texture map (Optimistic Path)
         // If the set of textures hasn't changed (or is a subset), we can skip collection/sorting/map building
         const optimistic_success = blk: {
@@ -782,13 +813,13 @@ pub const MaterialSystem = struct {
             try gpu_materials.ensureTotalCapacity(self.allocator, entities.len);
 
             for (entities) |entity| {
-                // Batch get all material components at once
-                const albedo = world.get(ecs.AlbedoMaterial, entity);
-                const roughness = world.get(ecs.RoughnessMaterial, entity);
-                const metallic = world.get(ecs.MetallicMaterial, entity);
-                const normal = world.get(ecs.NormalMaterial, entity);
-                const emissive = world.get(ecs.EmissiveMaterial, entity);
-                const occlusion = world.get(ecs.OcclusionMaterial, entity);
+                // Use cached storage pointers - avoids repeated HashMap lookups
+                const albedo = if (albedo_storage) |s| s.getConst(entity) else null;
+                const roughness = if (roughness_storage) |s| s.getConst(entity) else null;
+                const metallic = if (metallic_storage) |s| s.getConst(entity) else null;
+                const normal = if (normal_storage) |s| s.getConst(entity) else null;
+                const emissive = if (emissive_storage) |s| s.getConst(entity) else null;
+                const occlusion = if (occlusion_storage) |s| s.getConst(entity) else null;
 
                 // Build GPU material using EXISTING map
                 // If any texture is missing from map, abort optimistic path
@@ -808,10 +839,11 @@ pub const MaterialSystem = struct {
                     .occlusion_strength = if (occlusion) |occ| occ.strength else 1.0,
                 };
 
-                // CRITICAL: Write material_buffer_index to component
-                const material_set = world.getMut(ecs.MaterialSet, entity) orelse continue;
+                // CRITICAL: Write material_buffer_index to component (use cached storage)
+                const material_set = if (material_set_storage) |s| s.getMut(entity) else null;
+                if (material_set == null) continue;
                 const mat_index: u32 = @intCast(gpu_materials.items.len);
-                material_set.material_buffer_index = mat_index;
+                material_set.?.material_buffer_index = mat_index;
 
                 // Fast change detection
                 var changed = false;
@@ -846,18 +878,18 @@ pub const MaterialSystem = struct {
             set_data.pending_delta.clear();
             set_data.scratch_gpu_materials.clearRetainingCapacity();
 
-            // 1. Collect unique texture IDs
+            // 1. Collect unique texture IDs (using cached storage pointers)
             set_data.scratch_unique_textures.clearRetainingCapacity();
             var unique_textures = &set_data.scratch_unique_textures;
             try unique_textures.put(0, {});
 
             for (entities) |entity| {
-                if (world.get(ecs.AlbedoMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
-                if (world.get(ecs.RoughnessMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
-                if (world.get(ecs.MetallicMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
-                if (world.get(ecs.NormalMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
-                if (world.get(ecs.EmissiveMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
-                if (world.get(ecs.OcclusionMaterial, entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+                if (albedo_storage) |s| if (s.getConst(entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+                if (roughness_storage) |s| if (s.getConst(entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+                if (metallic_storage) |s| if (s.getConst(entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+                if (normal_storage) |s| if (s.getConst(entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+                if (emissive_storage) |s| if (s.getConst(entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
+                if (occlusion_storage) |s| if (s.getConst(entity)) |c| try unique_textures.put(c.texture_id.toU64(), {});
             }
 
             // 2. Sort IDs
@@ -884,12 +916,13 @@ pub const MaterialSystem = struct {
             try gpu_materials.ensureTotalCapacity(self.allocator, entities.len);
 
             for (entities) |entity| {
-                const albedo = world.get(ecs.AlbedoMaterial, entity);
-                const roughness = world.get(ecs.RoughnessMaterial, entity);
-                const metallic = world.get(ecs.MetallicMaterial, entity);
-                const normal = world.get(ecs.NormalMaterial, entity);
-                const emissive = world.get(ecs.EmissiveMaterial, entity);
-                const occlusion = world.get(ecs.OcclusionMaterial, entity);
+                // Use cached storage pointers for fast lookups
+                const albedo = if (albedo_storage) |s| s.getConst(entity) else null;
+                const roughness = if (roughness_storage) |s| s.getConst(entity) else null;
+                const metallic = if (metallic_storage) |s| s.getConst(entity) else null;
+                const normal = if (normal_storage) |s| s.getConst(entity) else null;
+                const emissive = if (emissive_storage) |s| s.getConst(entity) else null;
+                const occlusion = if (occlusion_storage) |s| s.getConst(entity) else null;
 
                 const gpu_mat = GPUMaterial{
                     .albedo_idx = if (albedo) |alb| (texture_map.get(alb.texture_id.toU64()) orelse 0) else 0,
@@ -907,9 +940,11 @@ pub const MaterialSystem = struct {
                     .occlusion_strength = if (occlusion) |occ| occ.strength else 1.0,
                 };
 
-                const material_set = world.getMut(ecs.MaterialSet, entity) orelse continue;
+                // Use cached storage for MaterialSet
+                const material_set = if (material_set_storage) |s| s.getMut(entity) else null;
+                if (material_set == null) continue;
                 const mat_index: u32 = @intCast(gpu_materials.items.len);
-                material_set.material_buffer_index = mat_index;
+                material_set.?.material_buffer_index = mat_index;
 
                 var changed = false;
                 if (needs_realloc) {

@@ -3,7 +3,6 @@ const World = @import("world.zig").World;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
-const log = @import("../utils/log.zig").log;
 
 /// Component types that systems can read/write
 /// Used for dependency analysis
@@ -37,8 +36,9 @@ pub const SystemDef = struct {
 pub const SystemStage = struct {
     name: []const u8,
     systems: std.ArrayList(SystemDef),
-    prepare_completion: std.atomic.Value(u32),
-    update_completion: std.atomic.Value(u32),
+    // Semaphores for completion signaling - cleaner than atomic+futex
+    prepare_semaphore: std.Thread.Semaphore,
+    update_semaphore: std.Thread.Semaphore,
     allocator: std.mem.Allocator,
     // Reusable storage to avoid per-frame allocations for work items
     // Split into separate caches for prepare and update to allow concurrent execution
@@ -61,8 +61,8 @@ pub const SystemStage = struct {
         return .{
             .name = name,
             .systems = std.ArrayList(SystemDef){},
-            .prepare_completion = std.atomic.Value(u32).init(0),
-            .update_completion = std.atomic.Value(u32).init(0),
+            .prepare_semaphore = std.Thread.Semaphore{},
+            .update_semaphore = std.Thread.Semaphore{},
             .allocator = allocator,
             .prepare_items_cache = std.ArrayList(WorkItem){},
             .update_items_cache = std.ArrayList(WorkItem){},
@@ -114,7 +114,7 @@ pub const SystemStage = struct {
         if (self.prepare_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (self.prepare_count < 2 or thread_pool == null) {
+        if (self.prepare_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.prepare_fn) |prepare_fn| {
                     try prepare_fn(world, dt);
@@ -125,16 +125,13 @@ pub const SystemStage = struct {
 
         const pool = thread_pool.?;
 
-        // Initialize completion counter
-        self.prepare_completion.store(@intCast(self.prepare_count), .release);
-
-        // Update context
+        // Update context with semaphore for completion signaling
         self.prepare_context.* = .{
             .world = world,
             .dt = dt,
             .frame_info = null, // No frame info for prepare phase
             .systems = self.systems.items,
-            .completion = &self.prepare_completion,
+            .semaphore = &self.prepare_semaphore,
             .phase = .prepare,
         };
 
@@ -146,11 +143,9 @@ pub const SystemStage = struct {
         // log(.INFO, "system_scheduler", "Dispatching {} prepare jobs for stage '{s}'", .{ prepare_count, self.name });
         try pool.submitBatch(self.prepare_items_cache.items);
 
-        // Wait for completion
-        var curr = self.prepare_completion.load(.acquire);
-        while (curr > 0) {
-            std.Thread.Futex.wait(&self.prepare_completion, curr);
-            curr = self.prepare_completion.load(.acquire);
+        // Wait for all workers to complete - each posts once
+        for (0..self.prepare_count) |_| {
+            self.prepare_semaphore.wait();
         }
     }
 
@@ -159,7 +154,7 @@ pub const SystemStage = struct {
         if (self.update_count == 0) return;
 
         // Small-stage fast path: sequential is cheaper than dispatch
-        if (self.update_count < 2 or thread_pool == null) {
+        if (self.update_count <= 2 or thread_pool == null) {
             for (self.systems.items) |system| {
                 if (system.update_fn) |update_fn| {
                     try update_fn(world, frame_info);
@@ -170,17 +165,14 @@ pub const SystemStage = struct {
 
         const pool = thread_pool.?;
 
-        // Initialize completion counter
-        self.update_completion.store(@intCast(self.update_count), .release);
-
-        // Update context
+        // Update context with semaphore for completion signaling
         const dt = if (frame_info.snapshot) |s| s.delta_time else 0.0;
         self.update_context.* = .{
             .world = world,
             .dt = dt,
             .frame_info = frame_info,
             .systems = self.systems.items,
-            .completion = &self.update_completion,
+            .semaphore = &self.update_semaphore,
             .phase = .update,
         };
 
@@ -191,11 +183,9 @@ pub const SystemStage = struct {
 
         try pool.submitBatch(self.update_items_cache.items);
 
-        // Wait for completion
-        var curr = self.update_completion.load(.acquire);
-        while (curr > 0) {
-            std.Thread.Futex.wait(&self.update_completion, curr);
-            curr = self.update_completion.load(.acquire);
+        // Wait for all workers to complete - each posts once
+        for (0..self.update_count) |_| {
+            self.update_semaphore.wait();
         }
     }
 };
@@ -206,7 +196,7 @@ const StageContext = struct {
     dt: f32,
     frame_info: ?*FrameInfo, // Only set for update phase
     systems: []const SystemDef,
-    completion: *std.atomic.Value(u32),
+    semaphore: *std.Thread.Semaphore, // Signal completion
     phase: enum { prepare, update },
 };
 
@@ -215,34 +205,25 @@ fn systemWorker(context: *anyopaque, work_item: WorkItem) void {
     const ctx = @as(*StageContext, @ptrCast(@alignCast(context)));
     const job_index: usize = @intCast(work_item.data.ecs_update.job_index);
     const sys = ctx.systems[job_index];
-    // Capture completion pointer locally to avoid Use-After-Free if main thread returns early
-    const completion_ptr = ctx.completion;
+    // Capture semaphore pointer locally to avoid Use-After-Free if main thread returns early
+    const sem = ctx.semaphore;
 
     defer {
-        _ = completion_ptr.fetchSub(1, .release);
-        // Always wake the main thread to ensure it sees the progress
-        // This prevents "lost wake" scenarios where the value changes but the main thread
-        // is sleeping on the old value and doesn't get woken.
-        std.Thread.Futex.wake(completion_ptr, 1);
+        // Signal completion - main thread waits for N posts
+        sem.post();
     }
 
     // Execute the appropriate phase function
     switch (ctx.phase) {
         .prepare => {
             if (sys.prepare_fn) |prepare_fn| {
-                prepare_fn(ctx.world, ctx.dt) catch |err| {
-                    log(.ERROR, "system_scheduler", "System '{s}' prepare failed with error: {}", .{ sys.name, err });
-                };
+                prepare_fn(ctx.world, ctx.dt) catch {};
             }
         },
         .update => {
             if (sys.update_fn) |update_fn| {
                 if (ctx.frame_info) |frame_info| {
-                    update_fn(ctx.world, frame_info) catch |err| {
-                        log(.ERROR, "system_scheduler", "System '{s}' update failed with error: {}", .{ sys.name, err });
-                    };
-                } else {
-                    log(.ERROR, "system_scheduler", "System '{s}' update called but frame_info is null", .{sys.name});
+                    update_fn(ctx.world, frame_info) catch {};
                 }
             }
         },

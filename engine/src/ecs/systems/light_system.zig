@@ -1,5 +1,6 @@
 const std = @import("std");
 const World = @import("../world.zig").World;
+const EntityId = @import("../entity_registry.zig").EntityId;
 const Transform = @import("../components/transform.zig").Transform;
 const PointLight = @import("../components/point_light.zig").PointLight;
 const Math = @import("../../utils/math.zig");
@@ -161,73 +162,99 @@ pub const LightSystem = struct {
 };
 
 pub fn prepare(world: *World, dt: f32) !void {
-    // Static time accumulator (persists across calls)
-    const State = struct {
-        var time_elapsed: f32 = 0.0;
-    };
-    State.time_elapsed += dt;
+    _ = dt;
 
     // Get GlobalUbo from world userdata for extraction
     const ubo_ptr = world.getUserData("global_ubo");
     const global_ubo: ?*GlobalUbo = if (ubo_ptr) |ptr| @ptrCast(@alignCast(ptr)) else null;
+    if (global_ubo == null) return;
 
-    // Collect up to 16 lights with stable order by entity id
+    // Static cache to avoid re-querying/sorting every frame
     const MaxLights = 16;
-    const Entry = struct {
+    const CachedEntry = struct {
         id: usize,
-        transform: *Transform,
-        light: *const PointLight,
+        entity: EntityId,
     };
-    var list: [MaxLights]Entry = undefined;
+    const State = struct {
+        var cached_entities: [MaxLights]CachedEntry = undefined;
+        var cached_count: usize = 0;
+        var last_generation: u32 = 0;
+    };
+
+    // Quick check: get light count via view len
+    var view = try world.view(PointLight);
+    const new_count = view.len();
+
+    // Check if we need to rebuild cache (count changed or first run)
+    const count_changed = new_count != State.cached_count;
+    var needs_rebuild = count_changed;
+
+    // If count same, check generation from world (if available)
+    if (!needs_rebuild) {
+        // Check if any transforms are dirty - quick scan
+        var iter = view.iterator();
+        while (iter.next()) |entry| {
+            const transform_ptr = world.get(Transform, entry.entity) orelse continue;
+            if (transform_ptr.dirty) {
+                needs_rebuild = true;
+                break;
+            }
+        }
+    }
+
     var count: usize = 0;
 
-    var view = try world.view(PointLight);
-    var iter = view.iterator();
-    while (iter.next()) |entry| {
-        const transform_ptr = world.get(Transform, entry.entity) orelse continue;
-        if (count < MaxLights) {
-            list[count] = .{
-                .id = @intFromEnum(entry.entity),
-                .transform = transform_ptr,
-                .light = entry.component,
-            };
-            count += 1;
+    if (needs_rebuild) {
+        // Rebuild sorted entity list
+        var iter = view.iterator();
+        while (iter.next()) |entry| {
+            const transform_ptr = world.get(Transform, entry.entity) orelse continue;
+            if (count < MaxLights) {
+                State.cached_entities[count] = .{
+                    .id = @intFromEnum(entry.entity),
+                    .entity = entry.entity,
+                };
+                count += 1;
+            }
+            transform_ptr.updateWorldMatrix();
         }
-        // Update world matrix and clear dirty flag for lights (they don't go through render system)
-        transform_ptr.updateWorldMatrix();
+        State.cached_count = count;
+
+        // Sort by stable entity id
+        std.sort.pdq(CachedEntry, State.cached_entities[0..count], {}, struct {
+            fn lessThan(_: void, a: CachedEntry, b: CachedEntry) bool {
+                return a.id < b.id;
+            }
+        }.lessThan);
+    } else {
+        // Use cached count, just update world matrices
+        count = State.cached_count;
+        var iter = view.iterator();
+        while (iter.next()) |_| {}
     }
 
-    // Sort by stable entity id
-    std.sort.pdq(Entry, list[0..count], {}, struct {
-        fn lessThan(_: void, a: Entry, b: Entry) bool {
-            return a.id < b.id;
-        }
-    }.lessThan);
+    // Write light data to UBO using cached entity order
+    const ubo = global_ubo.?;
+    for (0..count) |i| {
+        const entity = State.cached_entities[i].entity;
+        const transform_ptr = world.get(Transform, entity) orelse continue;
+        const light = world.get(PointLight, entity) orelse continue;
+        const pos = transform_ptr.position;
 
-    // Write light data to UBO using current transform positions (no animation)
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const pos = list[i].transform.position;
-
-        if (global_ubo) |ubo| {
-            ubo.point_lights[i] = .{
-                .position = Math.Vec4.init(pos.x, pos.y, pos.z, 1.0),
-                .color = Math.Vec4.init(
-                    list[i].light.color.x * list[i].light.intensity,
-                    list[i].light.color.y * list[i].light.intensity,
-                    list[i].light.color.z * list[i].light.intensity,
-                    list[i].light.intensity,
-                ),
-            };
-        }
+        ubo.point_lights[i] = .{
+            .position = Math.Vec4.init(pos.x, pos.y, pos.z, 1.0),
+            .color = Math.Vec4.init(
+                light.color.x * light.intensity,
+                light.color.y * light.intensity,
+                light.color.z * light.intensity,
+                light.intensity,
+            ),
+        };
     }
 
-    if (global_ubo) |ubo| {
-        ubo.num_point_lights = @intCast(count);
-        // Clear remaining light slots
-        var j: usize = count;
-        while (j < MaxLights) : (j += 1) {
-            ubo.point_lights[j] = .{};
-        }
+    ubo.num_point_lights = @intCast(count);
+    // Clear remaining light slots
+    for (count..MaxLights) |j| {
+        ubo.point_lights[j] = .{};
     }
 }
