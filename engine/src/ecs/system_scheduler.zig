@@ -3,6 +3,7 @@ const World = @import("world.zig").World;
 const ThreadPool = @import("../threading/thread_pool.zig").ThreadPool;
 const WorkItem = @import("../threading/thread_pool.zig").WorkItem;
 const FrameInfo = @import("../rendering/frameinfo.zig").FrameInfo;
+const log = @import("../utils/log.zig").log;
 
 /// Component types that systems can read/write
 /// Used for dependency analysis
@@ -217,13 +218,17 @@ fn systemWorker(context: *anyopaque, work_item: WorkItem) void {
     switch (ctx.phase) {
         .prepare => {
             if (sys.prepare_fn) |prepare_fn| {
-                prepare_fn(ctx.world, ctx.dt) catch {};
+                prepare_fn(ctx.world, ctx.dt) catch |err| {
+                    log(.ERROR, "scheduler", "System '{s}' prepare failed: {}", .{ sys.name, err });
+                };
             }
         },
         .update => {
             if (sys.update_fn) |update_fn| {
                 if (ctx.frame_info) |frame_info| {
-                    update_fn(ctx.world, frame_info) catch {};
+                    update_fn(ctx.world, frame_info) catch |err| {
+                        log(.ERROR, "scheduler", "System '{s}' update failed: {}", .{ sys.name, err });
+                    };
                 }
             }
         },

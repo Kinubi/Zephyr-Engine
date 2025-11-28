@@ -54,7 +54,6 @@ struct ShadowLight {
 layout(set = 0, binding = 2) readonly buffer ShadowDataSSBO {
     uint numShadowLights;
     uint maxShadowLights;
-
     ShadowLight lights[8];  // MAX_SHADOW_LIGHTS = 8
 } shadowData;
 
@@ -159,7 +158,7 @@ float calculateShadowForLight(vec3 worldPos, vec3 surfNormal, vec3 pointLightPos
     
     // Calculate array layer: layout is [face0_light0..N, face1_light0..N, ...]
     // layer = faceIndex * numLights + shadowLightIndex
-    float layer = faceUV.z * 8.0 + float(shadowIdx); // 8 = MAX_SHADOW_LIGHTS
+    float layer = faceUV.z * float(shadowData.maxShadowLights) + float(shadowIdx);
     
     // Sample with comparison using 2D array
     // vec4(u, v, layer, depth_compare)
@@ -195,7 +194,7 @@ vec4 debugShadowForLight(vec3 worldPos, vec3 surfNormal, vec3 pointLightPos) {
     vec3 faceUV = directionToFaceUV(normalize(lightToFrag));
     
     // Calculate array layer: layout is [face0_light0..N, face1_light0..N, ...]
-    float layer = faceUV.z * 8.0 + float(shadowIdx);
+    float layer = faceUV.z * float(shadowData.maxShadowLights) + float(shadowIdx);
     
     // Sample the shadow map
     float shadowVal = texture(shadowArrayMap, vec4(faceUV.xy, layer, normalizedDepth));

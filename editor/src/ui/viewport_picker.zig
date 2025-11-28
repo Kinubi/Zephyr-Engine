@@ -252,71 +252,15 @@ pub fn pickScene(scene: *Scene, camera: *Camera, mouse_x: f32, mouse_y: f32, vp_
         const eid = game_obj.entity_id;
         if (eid == zephyr.Entity.invalid) continue;
 
-        // Get transform for object
-        const transform = scene.ecs_world.get(zephyr.Transform, eid) orelse continue;
-        const world_mat = &transform.world_matrix;
+        // Use computeEntityWorldAABB for unified AABB calculation
+        // This handles PointLight, CameraComponent, and MeshRenderer consistently
+        const world_aabb = computeEntityWorldAABB(scene, eid) orelse continue;
 
-        // Check for PointLight
-        if (scene.ecs_world.has(PointLight, eid)) {
-            const light_size: f32 = 0.3;
-            const local_aabb = AxisAlignedBoundingBox{
-                .min = Math.Vec3.init(-light_size, -light_size, -light_size),
-                .max = Math.Vec3.init(light_size, light_size, light_size),
-            };
-            const world_aabb = transformAABB(world_mat, local_aabb);
-            if (rayIntersectsAABB(orig, dir, world_aabb)) |t| {
-                if (t < best_t) {
-                    best_t = t;
-                    best_entity = eid;
-                    best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
-                }
-            }
-            continue;
-        }
-
-        // Check for Camera (but skip the active editor camera)
-        if (scene.ecs_world.has(CameraComponent, eid)) {
-            const cam_size: f32 = 0.4;
-            const local_aabb = AxisAlignedBoundingBox{
-                .min = Math.Vec3.init(-cam_size, -cam_size, -cam_size),
-                .max = Math.Vec3.init(cam_size, cam_size, cam_size),
-            };
-            const world_aabb = transformAABB(world_mat, local_aabb);
-            if (rayIntersectsAABB(orig, dir, world_aabb)) |t| {
-                if (t < best_t) {
-                    best_t = t;
-                    best_entity = eid;
-                    best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
-                }
-            }
-            continue;
-        }
-
-        // Check for MeshRenderer
-        const mr = scene.ecs_world.get(MeshRenderer, eid) orelse continue;
-        if (!mr.hasValidAssets()) continue;
-
-        // Get loaded model (const safe access)
-        const model_ptr = scene.asset_manager.getLoadedModelConst(mr.model_asset.?) orelse continue;
-        const model = model_ptr.*;
-
-        // For each mesh in the model
-        for (model.meshes.items) |model_mesh| {
-            const mesh = model_mesh.geometry.mesh;
-
-            const local_aabb = computeMeshAABB(mesh);
-            const world_aabb = transformAABB(world_mat, local_aabb);
-            const aabb_hit = rayIntersectsAABB(orig, dir, world_aabb);
-
-            if (aabb_hit == null) {
-                continue;
-            }
-            if (aabb_hit) |t| {
-                if (t < best_t) {
-                    best_t = t;
-                    best_entity = eid;
-                    best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
-                }
+        if (rayIntersectsAABB(orig, dir, world_aabb)) |t| {
+            if (t < best_t) {
+                best_t = t;
+                best_entity = eid;
+                best_pos = Math.Vec3.add(orig, Math.Vec3.scale(dir, t));
             }
         }
     }
