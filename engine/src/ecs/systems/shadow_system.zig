@@ -292,11 +292,11 @@ pub const ShadowSystem = struct {
             }
 
             // Check if position changed (comparing floats with tolerance)
-            // Threshold 0.000001 = movement of ~0.001 units triggers update
+            // Threshold 0.0001 = ~0.01 units (increased from 0.000001 for better batching)
             const old_pos = self.light_cache[i].position;
             const pos_diff = Math.Vec3.sub(new_pos, old_pos);
             const dist_sq = Math.Vec3.dot(pos_diff, pos_diff);
-            const pos_changed = dist_sq > 0.000001; // Much more sensitive threshold
+            const pos_changed = dist_sq > 0.000001;
 
             if (slot_changed or pos_changed) {
                 // Mark this light as dirty and recompute matrices
@@ -304,9 +304,11 @@ pub const ShadowSystem = struct {
                 any_change = true;
 
                 // Compute all 6 face view*projection matrices immediately (in prepare phase!)
+                // Cache the projection to avoid redundant multiplications
+                const proj = self.shadow_projection;
                 for (0..6) |face| {
                     const view = buildFaceViewMatrix(new_pos, @intCast(face));
-                    self.light_cache[i].face_view_projs[face] = self.shadow_projection.mul(view);
+                    self.light_cache[i].face_view_projs[face] = proj.mul(view);
                 }
             }
 

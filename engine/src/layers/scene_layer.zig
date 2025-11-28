@@ -267,7 +267,13 @@ pub const SceneLayer = struct {
 
             // Parallel execution of all registered systems
             // Systems can now extract data to GlobalUbo via userdata
+            var timer = std.time.Timer.start() catch null;
             try scheduler.executePrepare(self.ecs_world, sim_dt);
+            if (timer) |*t| {
+                const elapsed_ns = t.read();
+                const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+                log(.DEBUG, "scene_layer", "scheduler.executePrepare took {d:.3}ms", .{elapsed_ms});
+            }
         } else {
             // Fallback: Sequential execution
             try ecs.updateTransformSystem(self.ecs_world, sim_dt);
@@ -329,17 +335,18 @@ pub const SceneLayer = struct {
             // Parallel execution of all registered systems update phase
             // Systems use snapshot data from frame_info
             // Cast away const - systems need mutable access to frame_info for internal state
+            if (self.performance_monitor) |pm| {
+                try pm.beginPass("system_update", frame_info.current_frame, null);
+            }
             try scheduler.executeUpdate(self.ecs_world, @constCast(frame_info));
+            if (self.performance_monitor) |pm| {
+                try pm.endPass("system_update", frame_info.current_frame, null);
+            }
         }
 
         // Update Vulkan resources (descriptor updates)
-        if (self.performance_monitor) |pm| {
-            try pm.beginPass("scene_update", frame_info.current_frame, null);
-        }
+
         try self.scene.update(frame_info.*, &self.prepared_ubo[frame_info.current_frame]);
-        if (self.performance_monitor) |pm| {
-            try pm.endPass("scene_update", frame_info.current_frame, null);
-        }
 
         // Update UBO set for this frame using prepared_ubo (with lights from snapshot!)
         if (self.performance_monitor) |pm| {

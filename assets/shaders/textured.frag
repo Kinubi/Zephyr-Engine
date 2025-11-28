@@ -114,11 +114,13 @@ vec3 directionToFaceUV(vec3 dir) {
 // Calculate shadow factor for a single point light
 // Find shadow light index that matches a point light position
 // Returns -1 if no matching shadow light found
+// Optimized: uses squared distance to avoid sqrt, early exit
 int findShadowLightForPosition(vec3 lightPos) {
+    const float TOLERANCE_SQ = 0.0001; // 0.01^2
     for (uint i = 0; i < shadowData.numShadowLights; i++) {
-        vec3 shadowLightPos = shadowData.lights[i].lightPos.xyz;
-        // Compare positions with small tolerance
-        if (distance(lightPos, shadowLightPos) < 0.01) {
+        if (shadowData.lights[i].shadowEnabled == 0) continue;
+        vec3 diff = shadowData.lights[i].lightPos.xyz - lightPos;
+        if (dot(diff, diff) < TOLERANCE_SQ) {
             return int(i);
         }
     }
@@ -132,16 +134,15 @@ float calculateShadowForLight(vec3 worldPos, vec3 surfNormal, vec3 pointLightPos
     
     ShadowLight light = shadowData.lights[shadowIdx];
     
-    if (light.shadowEnabled == 0) return 1.0;
-    
     // Vector from light to fragment - this is the cube map lookup direction
     vec3 lightToFrag = worldPos - light.lightPos.xyz;
-    vec3 lightDir = normalize(-lightToFrag); // Direction TO light
     
-    // Check if surface faces the light - back faces are always in shadow
-    float NdotL = dot(surfNormal, lightDir);
-    if (NdotL <= 0.0) {
-        return 0.0; // Surface faces away from light = shadowed
+    // Early check: if surface faces away from light, it's always shadowed
+    // Do this BEFORE expensive normalize/texture operations
+    vec3 lightDir = -lightToFrag; // Not normalized yet
+    float NdotLUnnormalized = dot(surfNormal, lightDir);
+    if (NdotLUnnormalized <= 0.0) {
+        return 0.0; // Back face culling
     }
     
     // Distance from light to fragment (for depth comparison)
@@ -149,14 +150,12 @@ float calculateShadowForLight(vec3 worldPos, vec3 surfNormal, vec3 pointLightPos
     
     // Normalize depth to [0,1] using far plane (matches what shadow.frag writes)
     float farPlane = light.lightPos.w;
-    float normalizedDepth = currentDepth / farPlane;
-    
-    // Apply bias to avoid shadow acne
-    normalizedDepth -= light.shadowBias;
+    float normalizedDepth = (currentDepth / farPlane) - light.shadowBias;
     
     // Convert direction to face index and UV
-    // directionToFaceUV handles coordinate flips internally
-    vec3 faceUV = directionToFaceUV(normalize(lightToFrag));
+    // Normalize direction for cubemap lookup
+    vec3 lightToFragNorm = lightToFrag / currentDepth; // Reuse length calculation
+    vec3 faceUV = directionToFaceUV(lightToFragNorm);
     
     // Calculate array layer: layout is [face0_light0..N, face1_light0..N, ...]
     // layer = faceIndex * numLights + shadowLightIndex

@@ -280,6 +280,9 @@ pub const ShadowMapPass = struct {
     fn renderShadowCasters(self: *ShadowMapPass, cmd: vk.CommandBuffer, active_light_count: u32) !void {
         const gc = self.graphics_context;
 
+        // Early exit if no lights
+        if (active_light_count == 0) return;
+
         // Get pipeline layout from pipeline system
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.shadow_pipeline);
 
