@@ -62,6 +62,14 @@ pub const GameStateSnapshot = struct {
     // Instance data delta updates (from RenderSystem.prepare)
     instance_delta: ?InstanceDelta,
 
+    // Shadow system data (from ShadowSystem.prepare via ShadowDataSet)
+    // Pre-computed GPU SSBO data for shadow rendering
+    shadow_gpu_ssbo: ecs.ShadowDataSSBO = .{},
+    shadow_legacy_data: ecs.ShadowData = .{},
+    shadow_active_count: u32 = 0,
+    shadow_changed: bool = false,
+    shadow_generation: u32 = 0,
+
     // Particle system data (if needed)
     // particles: []ParticleData,
 
@@ -102,6 +110,11 @@ pub const GameStateSnapshot = struct {
             .render_changes = .{},
             .material_deltas = &.{},
             .instance_delta = null,
+            .shadow_gpu_ssbo = .{},
+            .shadow_legacy_data = .{},
+            .shadow_active_count = 0,
+            .shadow_changed = false,
+            .shadow_generation = 0,
         };
     }
 
@@ -179,6 +192,11 @@ pub fn captureSnapshot(
         .point_lights = undefined,
         .point_light_count = 0,
         .instance_delta = null,
+        .shadow_gpu_ssbo = .{},
+        .shadow_legacy_data = .{},
+        .shadow_active_count = 0,
+        .shadow_changed = false,
+        .shadow_generation = 0,
     };
     // Copy camera state
     // Camera position is stored in the translation column of inverseViewMatrix
@@ -282,6 +300,16 @@ pub fn captureSnapshot(
                 .changed_data = data,
             };
         }
+    }
+
+    // Capture shadow data from ShadowDataSet singleton component
+    // This contains pre-computed GPU SSBO data from ShadowSystem.prepare()
+    if (world.get(ecs.ShadowDataSet, singleton_entity)) |shadow_data_set| {
+        snapshot.shadow_gpu_ssbo = shadow_data_set.gpu_ssbo;
+        snapshot.shadow_legacy_data = shadow_data_set.legacy_shadow_data;
+        snapshot.shadow_active_count = shadow_data_set.active_light_count;
+        snapshot.shadow_changed = shadow_data_set.changed;
+        snapshot.shadow_generation = shadow_data_set.generation;
     }
 
     return snapshot;

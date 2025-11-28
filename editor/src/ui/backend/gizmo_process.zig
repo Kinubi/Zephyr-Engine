@@ -44,8 +44,8 @@ pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_pos: [2]f
                 state.*.active_axis = pick.axis;
                 state.*.dragging = true;
                 state.*.initial_pos = transform.position;
-                // Transform.rotation is a quaternion now; store Euler angles for gizmo state
-                state.*.initial_rot = transform.rotation.toEuler();
+                // Store initial rotation as quaternion for proper local-space rotation
+                state.*.initial_rot = transform.rotation;
                 state.*.initial_scale = transform.scale;
 
                 // Initialize drag based on current tool
@@ -122,45 +122,29 @@ pub fn process(state: *Gizmo.State, draw_list: *c.ImDrawList, viewport_pos: [2]f
                     const cross_len = Math.Vec3.length(cross);
                     const dot = Math.Vec3.dot(state.*.drag_origin, cur_vec);
                     const angle = std.math.atan2(@as(f32, cross_len), @as(f32, dot));
+                    // Sign based on cross product direction relative to axis
                     const sign: f32 = if (Math.Vec3.dot(cross, axis_world) >= 0.0) @as(f32, 1.0) else @as(f32, -1.0);
                     var signed_angle: f32 = angle * sign;
                     if (io.*.KeyShift) signed_angle *= 0.1; // precision
-                    var new_rot = state.*.initial_rot;
-                    if (state.*.active_axis == .X) {
-                        new_rot.x = state.*.initial_rot.x + signed_angle;
-                    } else if (state.*.active_axis == .Y) {
-                        new_rot.y = state.*.initial_rot.y + signed_angle;
-                    } else if (state.*.active_axis == .Z) {
-                        new_rot.z = state.*.initial_rot.z + signed_angle;
-                    }
                     // Snap
                     if (io.*.KeyCtrl) {
                         const snap_deg: f32 = 15.0;
                         const snap_rad = Math.radians(snap_deg);
-                        if (state.*.active_axis == .X) {
-                            new_rot.x = @round(new_rot.x / snap_rad) * snap_rad;
-                        } else if (state.*.active_axis == .Y) {
-                            new_rot.y = @round(new_rot.y / snap_rad) * snap_rad;
-                        } else if (state.*.active_axis == .Z) {
-                            new_rot.z = @round(new_rot.z / snap_rad) * snap_rad;
-                        }
+                        signed_angle = @round(signed_angle / snap_rad) * snap_rad;
                     }
-                    transform.setRotation(new_rot);
+                    // World-space rotation: post-multiply delta
+                    const delta_quat = Math.Quat.fromAxisAngle(axis_world, signed_angle);
+                    const new_rot = state.*.initial_rot.mul(delta_quat).normalize();
+                    transform.setRotationQuat(new_rot);
                 } else {
                     // couldn't intersect plane — fallback to small mouse-delta based rotation
                     const dx = io.*.MouseDelta.x;
                     const dy = io.*.MouseDelta.y;
-                    var ang_delta: f32 = (dx - dy) * 0.01;
+                    var ang_delta: f32 = (dx - dy) * -0.01; // negated
                     if (io.*.KeyShift) ang_delta *= 0.1;
-                    var new_rot = state.*.initial_rot;
-                    if (state.*.active_axis == .X) {
-                        new_rot.x += ang_delta;
-                    } else if (state.*.active_axis == .Y) {
-                        new_rot.y += ang_delta;
-                    } else if (state.*.active_axis == .Z) {
-                        new_rot.z += ang_delta;
-                    }
-                    transform.setRotation(new_rot);
+                    const delta_quat = Math.Quat.fromAxisAngle(axis_world, ang_delta);
+                    const new_rot = transform.rotation.mul(delta_quat).normalize();
+                    transform.setRotationQuat(new_rot);
                 }
             } else if (state.*.tool == .Scale) {
                 const new_pt = UIMath.closestPointOnLine(world_pos, GizmoModule.axisDir(state.*.active_axis), ray.origin, ray.dir);

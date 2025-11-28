@@ -65,6 +65,12 @@ pub const LightVolumePass = struct {
     light_volume_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer,
     max_lights: u32,
 
+    // Per-frame generation tracking - avoids redundant SSBO updates
+    frame_generations: [MAX_FRAMES_IN_FLIGHT]u32 = .{0} ** MAX_FRAMES_IN_FLIGHT,
+
+    // Reusable buffer for light volume data (avoids per-frame allocations)
+    light_volume_staging: []LightVolumeData = &.{},
+
     pub fn create(
         allocator: std.mem.Allocator,
         graphics_context: *GraphicsContext,
@@ -118,6 +124,7 @@ pub const LightVolumePass = struct {
             .light_system = LightSystem.init(allocator),
             .light_volume_buffers = light_volume_buffers,
             .max_lights = max_lights,
+            .light_volume_staging = try allocator.alloc(LightVolumeData, max_lights),
         };
 
         log(.INFO, "light_volume_pass", "Created LightVolumePass", .{});
@@ -248,35 +255,39 @@ pub const LightVolumePass = struct {
         const cmd = frame_info.command_buffer;
         const frame_index = frame_info.current_frame;
 
-        // Get cached lights (light system handles caching internally)
+        // Get cached lights (light system handles caching internally with generation tracking)
         const light_data = try self.light_system.getLights(self.ecs_world);
+        const light_count = @min(light_data.lights.items.len, self.max_lights);
 
-        if (light_data.lights.items.len == 0) {
+        if (light_count == 0) {
             return; // No lights to render
         }
 
-        // Update SSBO with light data for this frame
-        const light_count = @min(light_data.lights.items.len, self.max_lights);
-        var light_volumes = try self.allocator.alloc(LightVolumeData, light_count);
-        defer self.allocator.free(light_volumes);
+        // Check if we need to update the SSBO (generation-based)
+        const current_gen = self.light_system.getGeneration();
+        if (current_gen != self.frame_generations[frame_index]) {
+            // Light data changed - update staging buffer and upload
+            for (light_data.lights.items[0..light_count], 0..) |light, i| {
+                self.light_volume_staging[i] = LightVolumeData{
+                    .position = [4]f32{ light.position.x, light.position.y, light.position.z, 1.0 },
+                    .color = [4]f32{
+                        light.color.x * light.intensity,
+                        light.color.y * light.intensity,
+                        light.color.z * light.intensity,
+                        1.0,
+                    },
+                    .radius = @max(0.1, light.intensity * 0.2),
+                };
+            }
 
-        for (light_data.lights.items[0..light_count], 0..) |light, i| {
-            light_volumes[i] = LightVolumeData{
-                .position = [4]f32{ light.position.x, light.position.y, light.position.z, 1.0 },
-                .color = [4]f32{
-                    light.color.x * light.intensity,
-                    light.color.y * light.intensity,
-                    light.color.z * light.intensity,
-                    1.0,
-                },
-                .radius = @max(0.1, light.intensity * 0.2),
-            };
+            // Write to SSBO (no allocation needed - using pre-allocated staging buffer)
+            const buffer_size = @sizeOf(LightVolumeData) * light_count;
+            const light_bytes = std.mem.sliceAsBytes(self.light_volume_staging[0..light_count]);
+            self.light_volume_buffers[frame_index].buffer.writeToBuffer(light_bytes, buffer_size, 0);
+
+            // Mark this frame as updated
+            self.frame_generations[frame_index] = current_gen;
         }
-
-        // Write to SSBO (ManagedBuffer)
-        const buffer_size = @sizeOf(LightVolumeData) * light_count;
-        const light_bytes = std.mem.sliceAsBytes(light_volumes);
-        self.light_volume_buffers[frame_index].buffer.writeToBuffer(light_bytes, buffer_size, 0);
 
         // Setup dynamic rendering with load operations (don't clear, render on top of geometry)
         const helper = DynamicRenderingHelper.initLoad(
@@ -318,6 +329,11 @@ pub const LightVolumePass = struct {
             self.buffer_manager.destroyBuffer(buffer) catch |err| {
                 log(.ERROR, "light_volume_pass", "Failed to destroy buffer: {}", .{err});
             };
+        }
+
+        // Free staging buffer
+        if (self.light_volume_staging.len > 0) {
+            self.allocator.free(self.light_volume_staging);
         }
 
         self.light_system.deinit();

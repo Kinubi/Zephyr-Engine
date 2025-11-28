@@ -1,5 +1,5 @@
 {
-    "name": "cornell_box",
+    "name": "avoider_game",
     "entities": [
         {
             "uuid": "8711bd61-ca02-4781-b8e8-9e3c122d6119",
@@ -251,7 +251,7 @@
                     "receives_shadows": true
                 },
                 "ParticleEmitter": {
-                    "emission_rate": 50,
+                    "emission_rate": 10,
                     "particle_lifetime": 2.5,
                     "velocity_min": {
                         "x": -1.5,
@@ -293,7 +293,7 @@
                 },
                 "RoughnessMaterial": {
                     "texture": "assets/textures/granitesmooth1-bl/granitesmooth1-roughness3.png",
-                    "factor": 1
+                    "factor": 0.5
                 }
             }
         },
@@ -349,7 +349,7 @@
             "components": {
                 "Transform": {
                     "position": {
-                        "x": 14.34052848815918,
+                        "x": 14.350528717041016,
                         "y": -0.5,
                         "z": 0.5
                     },
@@ -379,7 +379,7 @@
                     "run_once": false
                 },
                 "ParticleEmitter": {
-                    "emission_rate": 50,
+                    "emission_rate": 10,
                     "particle_lifetime": 2.5,
                     "velocity_min": {
                         "x": -1.5,
@@ -418,6 +418,151 @@
                         1,
                         1
                     ]
+                }
+            }
+        },
+        {
+            "uuid": "d737a1b6-9b4f-4075-9e78-266c21ffd7aa",
+            "components": {
+                "Name": {
+                    "name": "light"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0.34521061182022095,
+                        "y": 0.13074089586734772,
+                        "z": -0.10860180854797363
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "PointLight": {
+                    "color": {
+                        "x": 1,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "intensity": 1.8389999866485596,
+                    "range": 10,
+                    "cast_shadows": true
+                }
+            }
+        },
+        {
+            "uuid": "67fa47d4-7b3c-4fa6-a7a6-7ebab72cd9e3",
+            "components": {
+                "Name": {
+                    "name": "Camera"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0.1150503158569336,
+                        "y": 0,
+                        "z": -3.7300000190734863
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "Camera": {
+                    "projection_type": "perspective",
+                    "is_primary": true,
+                    "near_plane": 0.10000000149011612,
+                    "far_plane": 1000,
+                    "fov": 45,
+                    "aspect_ratio": 1.7777777910232544
+                }
+            }
+        },
+        {
+            "uuid": "bccfc32f-6833-4350-9d6e-46cda15dabe3",
+            "components": {
+                "Name": {
+                    "name": "Skybox"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "Skybox": {
+                    "source_type": "equirectangular",
+                    "texture_path": "assets/environment_maps/meadow_2_2k.hdr",
+                    "rotation": 0,
+                    "exposure": 1,
+                    "tint": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    },
+                    "is_active": true,
+                    "path_confirmed": true
+                }
+            }
+        },
+        {
+            "uuid": "73bbfea3-60ce-4f17-9716-7c840ebd43bb",
+            "components": {
+                "Name": {
+                    "name": "light"
+                },
+                "Transform": {
+                    "position": {
+                        "x": 1.1931926012039185,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    },
+                    "scale": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    }
+                },
+                "PointLight": {
+                    "color": {
+                        "x": 1,
+                        "y": 1,
+                        "z": 1
+                    },
+                    "intensity": 1.437000036239624,
+                    "range": 10,
+                    "cast_shadows": true
                 }
             }
         }

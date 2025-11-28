@@ -25,7 +25,7 @@ pub const Gizmo = struct {
         drag_origin: Math.Vec3 = Math.Vec3.zero(),
         drag_mouse_start: [2]f32 = .{ 0.0, 0.0 },
         initial_pos: Math.Vec3 = Math.Vec3.zero(),
-        initial_rot: Math.Vec3 = Math.Vec3.zero(),
+        initial_rot: Math.Quat = Math.Quat.identity(),
         initial_scale: Math.Vec3 = Math.Vec3.init(1, 1, 1),
     };
 
@@ -203,74 +203,80 @@ pub fn pickAxisOrRing(center: Math.Vec3, vp_size: [2]f32, mouse_x: f32, mouse_y:
 
     // Rotation ring pick: only in Rotate mode
     if (tool == .Rotate) {
-        // Pick 3D rotation rings by projecting ring segments and checking screen-space distance
+        // Pick 3D rotation rings by projecting ring segments and checking screen-space distance to segments
         const world_radius = dist * 0.12;
-        const num_segments: u32 = 32; // Fewer segments for picking (performance)
+        const num_segments: u32 = 32;
         const angle_step = (2.0 * std.math.pi) / @as(f32, @floatFromInt(num_segments));
-        const pick_threshold: f32 = 12.0;
+        const pick_threshold: f32 = 10.0;
 
         var best_ring_axis: Gizmo.Axis = .None;
         var best_ring_dist: f32 = 1e9;
 
-        // Check X-axis ring (YZ plane)
+        // Check X-axis ring (YZ plane) - check distance to line segments
         {
+            var prev_screen: ?[2]f32 = null;
             var i: u32 = 0;
-            while (i < num_segments) : (i += 1) {
-                const angle = @as(f32, @floatFromInt(i)) * angle_step;
+            while (i <= num_segments) : (i += 1) {
+                const angle = @as(f32, @floatFromInt(i % num_segments)) * angle_step;
                 const y = @cos(angle) * world_radius;
                 const z = @sin(angle) * world_radius;
                 const world_point = Math.Vec3.init(center.x, center.y + y, center.z + z);
 
                 if (UIMath.project(camera, vp_size, world_point)) |screen| {
-                    const dx = mouse_x - screen[0];
-                    const dy = mouse_y - screen[1];
-                    const d = @sqrt(dx * dx + dy * dy);
-                    if (d < best_ring_dist) {
-                        best_ring_dist = d;
-                        best_ring_axis = .X;
+                    if (prev_screen) |prev| {
+                        const d = UIMath.distancePointToSegment(mouse_x, mouse_y, prev[0], prev[1], screen[0], screen[1]);
+                        if (d < best_ring_dist) {
+                            best_ring_dist = d;
+                            best_ring_axis = .X;
+                        }
                     }
+                    prev_screen = screen;
                 }
             }
         }
 
         // Check Y-axis ring (XZ plane)
         {
+            var prev_screen: ?[2]f32 = null;
             var i: u32 = 0;
-            while (i < num_segments) : (i += 1) {
-                const angle = @as(f32, @floatFromInt(i)) * angle_step;
+            while (i <= num_segments) : (i += 1) {
+                const angle = @as(f32, @floatFromInt(i % num_segments)) * angle_step;
                 const x = @cos(angle) * world_radius;
                 const z = @sin(angle) * world_radius;
                 const world_point = Math.Vec3.init(center.x + x, center.y, center.z + z);
 
                 if (UIMath.project(camera, vp_size, world_point)) |screen| {
-                    const dx = mouse_x - screen[0];
-                    const dy = mouse_y - screen[1];
-                    const d = @sqrt(dx * dx + dy * dy);
-                    if (d < best_ring_dist) {
-                        best_ring_dist = d;
-                        best_ring_axis = .Y;
+                    if (prev_screen) |prev| {
+                        const d = UIMath.distancePointToSegment(mouse_x, mouse_y, prev[0], prev[1], screen[0], screen[1]);
+                        if (d < best_ring_dist) {
+                            best_ring_dist = d;
+                            best_ring_axis = .Y;
+                        }
                     }
+                    prev_screen = screen;
                 }
             }
         }
 
         // Check Z-axis ring (XY plane)
         {
+            var prev_screen: ?[2]f32 = null;
             var i: u32 = 0;
-            while (i < num_segments) : (i += 1) {
-                const angle = @as(f32, @floatFromInt(i)) * angle_step;
+            while (i <= num_segments) : (i += 1) {
+                const angle = @as(f32, @floatFromInt(i % num_segments)) * angle_step;
                 const x = @cos(angle) * world_radius;
                 const y = @sin(angle) * world_radius;
                 const world_point = Math.Vec3.init(center.x + x, center.y + y, center.z);
 
                 if (UIMath.project(camera, vp_size, world_point)) |screen| {
-                    const dx = mouse_x - screen[0];
-                    const dy = mouse_y - screen[1];
-                    const d = @sqrt(dx * dx + dy * dy);
-                    if (d < best_ring_dist) {
-                        best_ring_dist = d;
-                        best_ring_axis = .Z;
+                    if (prev_screen) |prev| {
+                        const d = UIMath.distancePointToSegment(mouse_x, mouse_y, prev[0], prev[1], screen[0], screen[1]);
+                        if (d < best_ring_dist) {
+                            best_ring_dist = d;
+                            best_ring_axis = .Z;
+                        }
                     }
+                    prev_screen = screen;
                 }
             }
         }

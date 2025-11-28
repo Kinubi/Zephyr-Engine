@@ -5,11 +5,6 @@
       "name": "🚨 High Priority / Next Up",
       "cards": [
         {
-          "name": "Shadow Mapping",
-          "desc": "Implement shadow mapping for rasterization path.\n\nCurrently NO shadows - scenes look flat and unrealistic. This is the single biggest visual quality improvement available.\n\nImplementation:\n1. Add ShadowMapPass to render graph (renders depth from light perspective)\n2. For PointLights: Use cube shadow maps (6 faces)\n3. For DirectionalLights (if added): Use Cascaded Shadow Maps\n4. Bind shadow maps in lighting shaders\n5. Sample shadow map and compare depth\n6. Add PCF (Percentage Closer Filtering) for soft edges\n\nConsider: Shadow atlas to batch multiple lights",
-          "labels": ["Feature", "High Priority"]
-        },
-        {
           "name": "Undo/Redo System",
           "desc": "Implement Command pattern for editor actions.\n\nWithout undo, one wrong move requires manual fixing. Essential for usable content creation.\n\nImplementation:\n1. Create Command interface with execute() and undo()\n2. Implement commands:\n   - MoveEntityCommand (stores old/new transform)\n   - ChangePropertyCommand (stores old/new value)\n   - DeleteEntityCommand (stores full entity state)\n   - CreateEntityCommand\n   - ReparentEntityCommand\n3. Maintain undo/redo stacks in EditorApp\n4. Bind Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)\n5. Show undo history in Edit menu",
           "labels": ["Feature", "Editor", "High Priority"]
@@ -34,6 +29,31 @@
     {
       "name": "Done",
       "cards": [
+        {
+          "name": "Shadow Mapping",
+          "desc": "Implemented omnidirectional shadow mapping for point lights.\n\nCompleted:\n1. ShadowSystem in `engine/src/ecs/systems/shadow_system.zig` - manages shadow-casting lights and GPU data.\n2. ShadowMapPass in `engine/src/rendering/passes/shadow_map_pass.zig` - renders depth from light perspective.\n3. Point light cube shadow maps using 2D texture array (6 faces × N lights).\n4. Shadow data SSBO for passing light matrices and parameters to shaders.\n5. PCF sampling in `textured.frag` for soft shadow edges.\n6. Shadow bias configuration to prevent shadow acne.\n7. Fixed shader to use `shadowData.maxShadowLights` from SSBO instead of hardcoded value for robust layer calculation.\n\nFiles:\n- `engine/src/ecs/systems/shadow_system.zig`\n- `engine/src/rendering/passes/shadow_map_pass.zig`\n- `engine/src/ecs/components/shadow_data_set.zig`\n- `assets/shaders/shadow.frag`, `shadow.vert`\n- `assets/shaders/textured.frag` (shadow sampling)",
+          "labels": ["Feature", "Engine", "High Priority"]
+        },
+        {
+          "name": "MaterialSystem Storage Caching Optimization",
+          "desc": "Optimized `prepareMaterialSet` in MaterialSystem to cache DenseSet storage pointers.\n\nProblem:\n- Each entity iteration performed 7 × `world.get()` calls.\n- Each `world.get()` does: HashMap lookup for storage + sparse map lookup for component.\n- With N entities: 14N lookups per frame.\n\nSolution:\n- Cache all 7 DenseSet pointers (AlbedoMaterial, RoughnessMaterial, etc.) ONCE before entity loops.\n- Use `getConst()` on cached storage for read-only component access.\n- Reduces to 7 HashMap lookups + 7N sparse lookups.\n\nResult:\n- MaterialSystem prepare time: ~200μs → ~60-80μs (2.5-3x improvement)\n\nFiles:\n- `engine/src/ecs/systems/material_system.zig`: `prepareMaterialSet()` lines 765-950",
+          "labels": ["Optimization", "Engine"]
+        },
+        {
+          "name": "System Scheduler Semaphore Sync",
+          "desc": "Replaced atomic counter + futex synchronization with semaphores in SystemScheduler.\n\nProblem:\n- Original implementation used atomic counters with futex wait/wake.\n- Complex and potentially higher overhead for worker completion signaling.\n\nSolution:\n- Use `std.Thread.Semaphore` for prepare and update phase completion.\n- Workers call `sem.post()` on completion.\n- Main thread calls `sem.wait()` N times (one per worker).\n- Cleaner, more idiomatic synchronization.\n\nFiles:\n- `engine/src/ecs/system_scheduler.zig`: `prepare_semaphore`, `update_semaphore`, `systemWorker()`",
+          "labels": ["Optimization", "Engine"]
+        },
+        {
+          "name": "System Scheduler Error Logging",
+          "desc": "Added proper error logging for system execution failures.\n\nProblem:\n- Both `prepare_fn` and `update_fn` calls used `catch {}` which silently swallowed errors.\n- Critical failures in game logic, physics, or rendering were invisible.\n\nSolution:\n- Use engine's logging system: `log(.ERROR, \"scheduler\", ...)`.\n- Log system name and error type on failure.\n- Output: `[timestamp] [ERROR] [scheduler] System 'MaterialSystem' prepare failed: OutOfMemory`\n\nFiles:\n- `engine/src/ecs/system_scheduler.zig`: Import `log`, update catch blocks",
+          "labels": ["Improvement", "Engine"]
+        },
+        {
+          "name": "Viewport Picker Code Deduplication",
+          "desc": "Refactored `pickScene` to eliminate code duplication with `computeEntityWorldAABB`.\n\nProblem:\n- Both functions defined small AABBs for PointLight (0.3) and CameraComponent (0.4) picking.\n- Duplicate logic made maintenance error-prone.\n\nSolution:\n- `pickScene` now calls `computeEntityWorldAABB(scene, entity)` for all entity types.\n- Single source of truth for pickable AABB sizes.\n- Reduced pickScene from ~80 lines to ~30 lines.\n\nFiles:\n- `editor/src/ui/viewport_picker.zig`: `pickScene()`, `computeEntityWorldAABB()`",
+          "labels": ["Refactor", "Editor"]
+        },
         {
           "name": "Frustum Culling (CPU)",
           "desc": "Implemented CPU-side frustum culling for instanced rendering in RenderSystem.\n\nCompleted:\n1. Extract 6 frustum planes from view-projection matrix using `Frustum.fromViewProjection()`.\n2. Store AABB bounds in Mesh assets (min/max corners from geometry bounds).\n3. Transform AABB to world space using entity Transform with optimized `AABB.transform()` (fully unrolled loop).\n4. Test AABB against frustum planes using `Frustum.testAABB()` with compile-time `inline for`.\n5. Skip adding instances to render batches if AABB is fully outside frustum.\n\nOptimizations Applied:\n- All hot-path math functions inlined (`AABB.transform`, `Frustum.testAABB`, `Plane.distanceToPoint`).\n- Matrix comparison optimized with `inline for` loop unrolling.\n- Direct memcpy to GPU-mapped instance buffer (no intermediate ArrayList).\n- Frustum pre-validated once per frame, not per-mesh.\n- Added `AABB.boundingSphereRadius()` and `Frustum.testAABBWithSphere()` for potential sphere pre-test.\n\nFiles Modified:\n- `engine/src/utils/math.zig`: AABB, Frustum, Plane optimizations\n- `engine/src/ecs/systems/render_system.zig`: Culling integration, buffer upload optimization",

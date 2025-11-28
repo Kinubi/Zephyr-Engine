@@ -26,6 +26,7 @@ pub const TextureStats = struct {
 };
 
 /// Managed texture with generation tracking for automatic rebinding
+/// Supports both 2D textures and cube textures (check texture.is_cube)
 pub const ManagedTexture = struct {
     texture: Texture,
     name: []const u8,
@@ -38,6 +39,9 @@ pub const ManagedTexture = struct {
     resize_source: ?*ManagedTexture = null,
     match_format: bool = false,
     binding_info: ?BindingInfo = null,
+    /// Optional custom sampler (e.g., for shadow maps with depth comparison)
+    /// If set, this sampler is used instead of the texture's default sampler
+    custom_sampler: ?vk.Sampler = null,
 
     pub const BindingInfo = struct {
         set: u32,
@@ -46,8 +50,46 @@ pub const ManagedTexture = struct {
     };
 
     /// Get descriptor info for manual binding
+    /// Uses custom_sampler if set, otherwise uses the texture's default sampler
     pub fn getDescriptorInfo(self: *const ManagedTexture) vk.DescriptorImageInfo {
-        return self.texture.getDescriptorInfo();
+        var info = self.texture.getDescriptorInfo();
+        if (self.custom_sampler) |sampler| {
+            info.sampler = sampler;
+        }
+        return info;
+    }
+
+    /// Get a specific face view for cube textures (returns null for 2D textures)
+    pub fn getFaceView(self: *const ManagedTexture, face: u32) ?vk.ImageView {
+        return self.texture.getFaceView(face);
+    }
+
+    /// Get a face array view for cube array textures with multiview support
+    /// Returns a 2D_ARRAY view covering the same face across all cubes
+    pub fn getFaceArrayView(self: *const ManagedTexture, face: u32) ?vk.ImageView {
+        return self.texture.getFaceArrayView(face);
+    }
+
+    /// Get the full array image view for cube array textures
+    /// Returns a 2D_ARRAY view covering ALL layers (6 faces × N cubes)
+    /// Used for single-pass shadow rendering with gl_Layer output
+    pub fn getFullArrayView(self: *const ManagedTexture) vk.ImageView {
+        return self.texture.image_view;
+    }
+
+    /// Check if this is a cube texture
+    pub fn isCube(self: *const ManagedTexture) bool {
+        return self.texture.is_cube;
+    }
+
+    /// Check if this is a cube array texture (for multi-light shadows)
+    pub fn isCubeArray(self: *const ManagedTexture) bool {
+        return self.texture.cube_count > 0;
+    }
+
+    /// Get the number of cubes in a cube array texture (0 if not a cube array)
+    pub fn getCubeCount(self: *const ManagedTexture) u32 {
+        return self.texture.cube_count;
     }
 
     /// Check if linked texture changed and auto-resize/format-match if needed
@@ -204,6 +246,239 @@ pub const TextureManager = struct {
         return managed;
     }
 
+    /// Sampler configuration for custom samplers (e.g., shadow map comparison samplers)
+    pub const SamplerConfig = struct {
+        mag_filter: vk.Filter = .linear,
+        min_filter: vk.Filter = .linear,
+        mipmap_mode: vk.SamplerMipmapMode = .linear,
+        address_mode_u: vk.SamplerAddressMode = .clamp_to_border,
+        address_mode_v: vk.SamplerAddressMode = .clamp_to_border,
+        address_mode_w: vk.SamplerAddressMode = .clamp_to_border,
+        border_color: vk.BorderColor = .float_opaque_white,
+        /// Enable depth comparison for shadow mapping
+        compare_enable: bool = false,
+        compare_op: vk.CompareOp = .less_or_equal,
+        anisotropy_enable: bool = false,
+        max_anisotropy: f32 = 1.0,
+    };
+
+    /// Create managed texture with a custom sampler
+    /// Use this for special textures like shadow maps that need comparison samplers
+    pub fn createTextureWithSampler(
+        self: *TextureManager,
+        config: TextureConfig,
+        sampler_config: SamplerConfig,
+    ) !*ManagedTexture {
+        // Duplicate the name for ownership
+        const owned_name = try self.allocator.dupe(u8, config.name);
+        errdefer self.allocator.free(owned_name);
+
+        // Create the texture using initSingleTime to avoid command pool dependency
+        const texture = try Texture.initSingleTime(
+            self.graphics_context,
+            config.format,
+            config.extent,
+            config.usage,
+            config.samples,
+        );
+
+        // Create custom sampler
+        const sampler_info = vk.SamplerCreateInfo{
+            .s_type = vk.StructureType.sampler_create_info,
+            .mag_filter = sampler_config.mag_filter,
+            .min_filter = sampler_config.min_filter,
+            .mipmap_mode = sampler_config.mipmap_mode,
+            .address_mode_u = sampler_config.address_mode_u,
+            .address_mode_v = sampler_config.address_mode_v,
+            .address_mode_w = sampler_config.address_mode_w,
+            .mip_lod_bias = 0.0,
+            .max_anisotropy = sampler_config.max_anisotropy,
+            .min_lod = 0.0,
+            .max_lod = 1.0,
+            .border_color = sampler_config.border_color,
+            .flags = .{},
+            .p_next = null,
+            .unnormalized_coordinates = .false,
+            .compare_enable = if (sampler_config.compare_enable) .true else .false,
+            .compare_op = sampler_config.compare_op,
+            .anisotropy_enable = if (sampler_config.anisotropy_enable) .true else .false,
+        };
+        const custom_sampler = self.graphics_context.vkd.createSampler(
+            self.graphics_context.dev,
+            &sampler_info,
+            null,
+        ) catch return error.FailedToCreateSampler;
+
+        // Allocate the managed texture on the heap so we can track it
+        const managed = try self.allocator.create(ManagedTexture);
+        errdefer self.allocator.destroy(managed);
+
+        managed.* = ManagedTexture{
+            .texture = texture,
+            .name = owned_name,
+            .format = config.format,
+            .extent = config.extent,
+            .usage = config.usage,
+            .samples = config.samples,
+            .created_frame = self.frame_counter,
+            .generation = 1, // Start at generation 1
+            .resize_source = config.resize_source,
+            .match_format = config.match_format,
+            .custom_sampler = custom_sampler,
+        };
+
+        // Add to statistics
+        try self.all_textures.put(owned_name, TextureStats{
+            .format = config.format,
+            .extent = config.extent,
+            .created_frame = self.frame_counter,
+            .last_updated = self.frame_counter,
+        });
+
+        // Automatically register for resize updates
+        try self.registerTexture(managed);
+
+        log(.INFO, "texture_manager", "Created texture with custom sampler '{s}' ({}x{}x{}, format: {}, compare: {})", .{
+            config.name,
+            config.extent.width,
+            config.extent.height,
+            config.extent.depth,
+            config.format,
+            sampler_config.compare_enable,
+        });
+
+        return managed;
+    }
+
+    /// Create a managed cube depth texture for omnidirectional shadow mapping
+    /// Returns a pointer to the managed texture (with texture.is_cube = true)
+    pub fn createCubeDepthTexture(
+        self: *TextureManager,
+        name: []const u8,
+        size: u32,
+        format: vk.Format,
+        compare_enable: bool,
+        compare_op: vk.CompareOp,
+    ) !*ManagedTexture {
+        // Duplicate the name for ownership
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        // Create the cube depth texture
+        const cube_texture = try Texture.initCubeDepth(
+            self.graphics_context,
+            size,
+            format,
+            compare_enable,
+            compare_op,
+        );
+
+        // Allocate the managed texture on the heap
+        const managed = try self.allocator.create(ManagedTexture);
+        errdefer self.allocator.destroy(managed);
+
+        const extent = vk.Extent3D{ .width = size, .height = size, .depth = 1 };
+        managed.* = ManagedTexture{
+            .texture = cube_texture,
+            .name = owned_name,
+            .format = format,
+            .extent = extent,
+            .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
+            .samples = .{ .@"1_bit" = true },
+            .created_frame = self.frame_counter,
+            .generation = 1,
+        };
+
+        // Add to statistics
+        try self.all_textures.put(owned_name, TextureStats{
+            .format = format,
+            .extent = extent,
+            .created_frame = self.frame_counter,
+            .last_updated = self.frame_counter,
+        });
+
+        // Automatically register for updates
+        try self.registerTexture(managed);
+
+        log(.INFO, "texture_manager", "Created cube depth texture '{s}' ({}x{} per face, format: {}, compare: {})", .{
+            name,
+            size,
+            size,
+            format,
+            compare_enable,
+        });
+
+        return managed;
+    }
+
+    /// Create a managed cube depth array texture for multi-light shadow mapping with VK_KHR_multiview
+    /// Creates cube_count cubes for simultaneous rendering of all shadow-casting lights
+    /// Returns a pointer to the managed texture (with texture.cube_count > 0)
+    ///
+    /// Memory layout optimized for multiview: [face0_light0..N, face1_light0..N, ...]
+    /// This allows one render pass per face to update all lights via multiview
+    pub fn createCubeDepthArrayTexture(
+        self: *TextureManager,
+        name: []const u8,
+        size: u32,
+        cube_count: u32,
+        format: vk.Format,
+        compare_enable: bool,
+        compare_op: vk.CompareOp,
+    ) !*ManagedTexture {
+        // Duplicate the name for ownership
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        // Create the cube depth array texture
+        const cube_array_texture = try Texture.initCubeDepthArray(
+            self.graphics_context,
+            size,
+            cube_count,
+            format,
+            compare_enable,
+            compare_op,
+        );
+
+        // Allocate the managed texture on the heap
+        const managed = try self.allocator.create(ManagedTexture);
+        errdefer self.allocator.destroy(managed);
+
+        const extent = vk.Extent3D{ .width = size, .height = size, .depth = 1 };
+        managed.* = ManagedTexture{
+            .texture = cube_array_texture,
+            .name = owned_name,
+            .format = format,
+            .extent = extent,
+            .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
+            .samples = .{ .@"1_bit" = true },
+            .created_frame = self.frame_counter,
+            .generation = 1,
+        };
+
+        // Add to statistics
+        try self.all_textures.put(owned_name, TextureStats{
+            .format = format,
+            .extent = extent,
+            .created_frame = self.frame_counter,
+            .last_updated = self.frame_counter,
+        });
+
+        // Automatically register for updates
+        try self.registerTexture(managed);
+
+        log(.INFO, "texture_manager", "Created cube depth array texture '{s}' ({}x{} per face, {} cubes, format: {}, compare: {})", .{
+            name,
+            size,
+            size,
+            cube_count,
+            format,
+            compare_enable,
+        });
+
+        return managed;
+    }
+
     /// Find an existing texture by name
     pub fn findTexture(self: *TextureManager, name: []const u8) ?*ManagedTexture {
         for (self.managed_textures.items) |managed| {
@@ -304,6 +579,11 @@ pub const TextureManager = struct {
     pub fn destroyTexture(self: *TextureManager, managed: *ManagedTexture) void {
         // Unregister from update list
         self.unregisterTexture(managed);
+
+        // Destroy custom sampler if present
+        if (managed.custom_sampler) |sampler| {
+            self.graphics_context.vkd.destroySampler(self.graphics_context.dev, sampler, null);
+        }
 
         // Defer texture cleanup to avoid in-flight frame issues
         self.deferTextureCleanup(managed.texture) catch |err| {

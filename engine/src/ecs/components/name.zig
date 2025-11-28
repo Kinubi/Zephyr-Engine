@@ -4,23 +4,27 @@ const std = @import("std");
 /// Used for debugging, editor UI, and entity queries by name
 pub const Name = struct {
     pub const json_name = "Name";
-    /// Entity name (owned string)
+    /// Entity name (owned or static string)
     name: []const u8,
+    /// Whether this name owns its string (needs freeing)
+    owned: bool = true,
 
     /// Create name component with owned copy of string
     pub fn init(allocator: std.mem.Allocator, name: []const u8) !Name {
         const owned_name = try allocator.dupe(u8, name);
-        return Name{ .name = owned_name };
+        return Name{ .name = owned_name, .owned = true };
     }
 
     /// Create name component from string literal (no allocation)
     pub fn initStatic(name: []const u8) Name {
-        return Name{ .name = name };
+        return Name{ .name = name, .owned = false };
     }
 
-    /// Free owned string
+    /// Free owned string (only if we own it)
     pub fn deinit(self: *Name, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
+        if (self.owned) {
+            allocator.free(self.name);
+        }
     }
 
     /// Serialize Name component

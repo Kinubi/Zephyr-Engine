@@ -16,6 +16,7 @@ pub const Transform = @import("ecs/components/transform.zig").Transform;
 pub const MeshRenderer = @import("ecs/components/mesh_renderer.zig").MeshRenderer;
 pub const Camera = @import("ecs/components/camera.zig").Camera;
 pub const PointLight = @import("ecs/components/point_light.zig").PointLight;
+pub const Skybox = @import("ecs/components/skybox.zig").Skybox;
 pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").ParticleEmitter;
 pub const Name = @import("ecs/components/name.zig").Name;
 pub const UuidComponent = @import("ecs/components/uuid.zig").UuidComponent;
@@ -36,6 +37,7 @@ pub const MaterialSetDelta = @import("ecs/components/material_deltas_set.zig").M
 pub const GPUMaterial = @import("ecs/components/material_deltas_set.zig").GPUMaterial;
 pub const MaterialChange = @import("ecs/components/material_deltas_set.zig").MaterialChange;
 pub const InstanceDeltasSet = @import("ecs/components/instance_deltas_set.zig").InstanceDeltasSet;
+pub const ShadowDataSet = @import("ecs/components/shadow_data_set.zig").ShadowDataSet;
 const material_props = @import("ecs/components/material_properties.zig");
 pub const AlbedoMaterial = material_props.AlbedoMaterial;
 pub const RoughnessMaterial = material_props.RoughnessMaterial;
@@ -53,6 +55,15 @@ pub const ParticleBuffers = @import("ecs/systems/particle_system.zig").ParticleB
 pub const ParticleGPUResources = @import("ecs/systems/particle_system.zig").ParticleGPUResources;
 pub const ScriptingSystem = @import("ecs/systems/scripting_system.zig").ScriptingSystem;
 pub const PhysicsSystem = @import("ecs/systems/physics_system.zig").PhysicsSystem;
+pub const SkyboxSystem = @import("ecs/systems/skybox_system.zig").SkyboxSystem;
+pub const SkyboxGPUData = @import("ecs/systems/skybox_system.zig").SkyboxGPUData;
+pub const ShadowSystem = @import("ecs/systems/shadow_system.zig").ShadowSystem;
+pub const ShadowData = @import("ecs/systems/shadow_system.zig").ShadowData;
+pub const ShadowDataSSBO = @import("ecs/systems/shadow_system.zig").ShadowDataSSBO;
+pub const ShadowLightGPU = @import("ecs/systems/shadow_system.zig").ShadowLightGPU;
+pub const ShadowGPUResources = @import("ecs/systems/shadow_system.zig").ShadowGPUResources;
+pub const MAX_SHADOW_LIGHTS = @import("ecs/systems/shadow_system.zig").MAX_SHADOW_LIGHTS;
+pub const SHADOW_FAR = @import("ecs/systems/shadow_system.zig").SHADOW_FAR;
 
 // System functions for parallel execution
 pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").update;
@@ -65,6 +76,10 @@ pub const prepareRenderSystem = @import("ecs/systems/render_system.zig").prepare
 pub const updateRenderSystem = @import("ecs/systems/render_system.zig").update;
 pub const prepareMaterialSystem = @import("ecs/systems/material_system.zig").prepare;
 pub const updateMaterialSystem = @import("ecs/systems/material_system.zig").update;
+pub const prepareSkyboxSystem = @import("ecs/systems/skybox_system.zig").prepare;
+pub const updateSkyboxSystem = @import("ecs/systems/skybox_system.zig").update;
+pub const prepareShadowSystem = @import("ecs/systems/shadow_system.zig").prepare;
+pub const updateShadowSystem = @import("ecs/systems/shadow_system.zig").update;
 
 // Parallel System Execution
 pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;

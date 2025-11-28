@@ -210,6 +210,9 @@ pub const UILayer = struct {
             self.ui_renderer.renderPanels(stats);
         }
 
+        // Draw editor icons (lights, cameras) as billboards in the viewport
+        self.ui_renderer.renderEditorIcons(self.scene, self.camera);
+
         // Draw overlays (gizmo) and give the gizmo a chance to consume mouse clicks
         const gizmo_consumed: bool = self.ui_renderer.renderSelectionOverlay(self.scene, self.camera);
 

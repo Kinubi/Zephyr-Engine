@@ -80,6 +80,7 @@ pub const SceneSerializer = struct {
                 try self.serializeComponent(ecs.MeshRenderer, entity, writer);
                 try self.serializeComponent(ecs.Camera, entity, writer);
                 try self.serializeComponent(ecs.PointLight, entity, writer);
+                try self.serializeComponent(ecs.Skybox, entity, writer);
                 try self.serializeComponent(ecs.ScriptComponent, entity, writer);
                 try self.serializeComponent(ecs.ParticleEmitter, entity, writer);
                 try self.serializeComponent(ecs.MaterialSet, entity, writer);
@@ -165,6 +166,7 @@ pub const SceneSerializer = struct {
             try self.deserializeComponent(ecs.MeshRenderer, entity, components_val);
             try self.deserializeComponent(ecs.Camera, entity, components_val);
             try self.deserializeComponent(ecs.PointLight, entity, components_val);
+            try self.deserializeComponent(ecs.Skybox, entity, components_val);
             try self.deserializeComponent(ecs.ScriptComponent, entity, components_val);
             try self.deserializeComponent(ecs.ParticleEmitter, entity, components_val);
             try self.deserializeComponent(ecs.MaterialSet, entity, components_val);

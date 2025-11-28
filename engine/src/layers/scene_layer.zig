@@ -104,6 +104,18 @@ pub const SceneLayer = struct {
                     log(.WARN, "scene_layer", "Failed to add material system: {}", .{err});
                 };
 
+                stage1.addSystem(.{
+                    .name = "SkyboxSystem",
+                    .prepare_fn = ecs.prepareSkyboxSystem,
+                    .update_fn = ecs.updateSkyboxSystem,
+                    .access = .{
+                        .reads = &[_][]const u8{"Skybox"},
+                        .writes = &[_][]const u8{},
+                    },
+                }) catch |err| {
+                    log(.WARN, "scene_layer", "Failed to add skybox system: {}", .{err});
+                };
+
                 // Stage 2: Systems that depend on Stage 1
                 if (sched.addStage("DependentSystems")) |stage2| {
                     stage2.addSystem(.{
@@ -121,8 +133,8 @@ pub const SceneLayer = struct {
                 }
 
                 // Stage 3: Particle emitter updates (reads transforms)
-                if (sched.addStage("ParticleEmitterUpdates")) |stage4| {
-                    stage4.addSystem(.{
+                if (sched.addStage("ParticleEmitterUpdates")) |stage3| {
+                    stage3.addSystem(.{
                         .name = "ParticleEmitterSystem",
                         .prepare_fn = ecs.updateParticleEmittersSystem,
                         .access = .{
@@ -132,15 +144,20 @@ pub const SceneLayer = struct {
                     }) catch |err| {
                         log(.WARN, "scene_layer", "Failed to add particle emitter system: {}", .{err});
                     };
-                } else |err| {
-                    log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
-                }
 
-                // Stage 4: Render system updates (change detection only - no cache building)
-                // Sets dirty flags when scene changes are detected
-                // Actual cache building happens on render thread via rebuildCachesFromSnapshot()
-                if (sched.addStage("RenderSystemUpdates")) |stage4| {
-                    stage4.addSystem(.{
+                    // ShadowSystem runs after transforms to detect light position changes
+                    stage3.addSystem(.{
+                        .name = "ShadowSystem",
+                        .prepare_fn = ecs.prepareShadowSystem,
+                        .update_fn = ecs.updateShadowSystem,
+                        .access = .{
+                            .reads = &[_][]const u8{ "Transform", "PointLight" },
+                            .writes = &[_][]const u8{},
+                        },
+                    }) catch |err| {
+                        log(.WARN, "scene_layer", "Failed to add shadow system: {}", .{err});
+                    };
+                    stage3.addSystem(.{
                         .name = "RenderSystem",
                         .prepare_fn = ecs.prepareRenderSystem,
                         .update_fn = ecs.updateRenderSystem,
@@ -152,7 +169,7 @@ pub const SceneLayer = struct {
                         log(.WARN, "scene_layer", "Failed to add render system: {}", .{err});
                     };
                 } else |err| {
-                    log(.WARN, "scene_layer", "Failed to add stage 4: {}", .{err});
+                    log(.WARN, "scene_layer", "Failed to add stage 3: {}", .{err});
                 }
             }
         }
@@ -247,9 +264,7 @@ pub const SceneLayer = struct {
         // Update ECS systems (CPU work, no Vulkan)
         // Use parallel scheduler if available, otherwise fallback to sequential
         if (self.system_scheduler) |*scheduler| {
-
             // Parallel execution of all registered systems
-            // Systems can now extract data to GlobalUbo via userdata
             try scheduler.executePrepare(self.ecs_world, sim_dt);
         } else {
             // Fallback: Sequential execution
@@ -312,17 +327,18 @@ pub const SceneLayer = struct {
             // Parallel execution of all registered systems update phase
             // Systems use snapshot data from frame_info
             // Cast away const - systems need mutable access to frame_info for internal state
+            if (self.performance_monitor) |pm| {
+                try pm.beginPass("system_update", frame_info.current_frame, null);
+            }
             try scheduler.executeUpdate(self.ecs_world, @constCast(frame_info));
+            if (self.performance_monitor) |pm| {
+                try pm.endPass("system_update", frame_info.current_frame, null);
+            }
         }
 
         // Update Vulkan resources (descriptor updates)
-        if (self.performance_monitor) |pm| {
-            try pm.beginPass("scene_update", frame_info.current_frame, null);
-        }
+
         try self.scene.update(frame_info.*, &self.prepared_ubo[frame_info.current_frame]);
-        if (self.performance_monitor) |pm| {
-            try pm.endPass("scene_update", frame_info.current_frame, null);
-        }
 
         // Update UBO set for this frame using prepared_ubo (with lights from snapshot!)
         if (self.performance_monitor) |pm| {

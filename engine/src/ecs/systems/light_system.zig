@@ -1,5 +1,6 @@
 const std = @import("std");
 const World = @import("../world.zig").World;
+const EntityId = @import("../entity_registry.zig").EntityId;
 const Transform = @import("../components/transform.zig").Transform;
 const PointLight = @import("../components/point_light.zig").PointLight;
 const Math = @import("../../utils/math.zig");
@@ -37,20 +38,25 @@ pub const LightData = struct {
 };
 
 /// System for extracting light data from ECS for rendering
+/// Uses generation-based change detection to avoid re-extracting every frame
 pub const LightSystem = struct {
     allocator: std.mem.Allocator,
 
     // Cache to avoid re-extracting lights every frame
     cached_light_data: ?LightData = null,
     last_light_count: usize = 0,
-    lights_dirty: bool = true,
+
+    // Generation-based change tracking (matches ShadowSystem pattern)
+    generation: u32 = 0,
+    last_position_hash: u64 = 0, // Hash of all light positions for change detection
 
     pub fn init(allocator: std.mem.Allocator) LightSystem {
         return .{
             .allocator = allocator,
             .cached_light_data = null,
             .last_light_count = 0,
-            .lights_dirty = true,
+            .generation = 0,
+            .last_position_hash = 0,
         };
     }
 
@@ -60,6 +66,11 @@ pub const LightSystem = struct {
         }
     }
 
+    /// Get current generation (for external change detection)
+    pub fn getGeneration(self: *const LightSystem) u32 {
+        return self.generation;
+    }
+
     /// Get lights (uses cache if nothing changed, otherwise re-extracts)
     /// Returns a pointer to the cached data - do NOT deinit it!
     pub fn getLights(self: *LightSystem, world: *World) !*const LightData {
@@ -67,22 +78,53 @@ pub const LightSystem = struct {
         var view = try world.view(PointLight);
         const count = view.len();
 
-        // Check if we need to re-extract
+        // Check if count changed (fast path)
         const count_changed = count != self.last_light_count;
-        if (count_changed or self.lights_dirty or self.cached_light_data == null) {
 
-            // Initialize cache if needed
-            if (self.cached_light_data == null) {
-                self.cached_light_data = LightData.init(self.allocator);
-            }
+        // Initialize cache if needed
+        if (self.cached_light_data == null) {
+            self.cached_light_data = LightData.init(self.allocator);
+        }
 
-            // Re-extract lights into existing cache
+        if (count_changed) {
+            // Count changed - must re-extract
             try self.extractLightsInto(world, &self.cached_light_data.?);
             self.last_light_count = count;
-            //self.lights_dirty = false;
+            self.generation +%= 1;
+        } else if (count > 0) {
+            // Same count - check if positions changed using a quick hash
+            const new_hash = try self.computePositionHash(world);
+            if (new_hash != self.last_position_hash) {
+                try self.extractLightsInto(world, &self.cached_light_data.?);
+                self.last_position_hash = new_hash;
+                self.generation +%= 1;
+            }
         }
 
         return &(self.cached_light_data.?);
+    }
+
+    /// Compute a hash of all light positions for quick change detection
+    fn computePositionHash(self: *LightSystem, world: *World) !u64 {
+        _ = self;
+        var hasher = std.hash.Wyhash.init(0);
+
+        var view = try world.view(PointLight);
+        var iter = view.iterator();
+        while (iter.next()) |entry| {
+            const transform = world.get(Transform, entry.entity) orelse continue;
+            // Hash position components
+            hasher.update(std.mem.asBytes(&transform.position.x));
+            hasher.update(std.mem.asBytes(&transform.position.y));
+            hasher.update(std.mem.asBytes(&transform.position.z));
+            // Also hash intensity and color for visual changes
+            hasher.update(std.mem.asBytes(&entry.component.intensity));
+            hasher.update(std.mem.asBytes(&entry.component.color.x));
+            hasher.update(std.mem.asBytes(&entry.component.color.y));
+            hasher.update(std.mem.asBytes(&entry.component.color.z));
+        }
+
+        return hasher.final();
     }
 
     /// Extract all point lights from the ECS world into provided LightData
@@ -117,91 +159,102 @@ pub const LightSystem = struct {
             });
         }
     }
-
-    /// Mark lights as dirty to force re-extraction next frame
-    /// Call this when lights are added/removed/modified programmatically
-    pub fn markDirty(self: *LightSystem) void {
-        self.lights_dirty = true;
-    }
 };
 
 pub fn prepare(world: *World, dt: f32) !void {
-    // Static time accumulator (persists across calls)
-    const State = struct {
-        var time_elapsed: f32 = 0.0;
-    };
-    State.time_elapsed += dt;
+    _ = dt;
 
     // Get GlobalUbo from world userdata for extraction
     const ubo_ptr = world.getUserData("global_ubo");
     const global_ubo: ?*GlobalUbo = if (ubo_ptr) |ptr| @ptrCast(@alignCast(ptr)) else null;
+    if (global_ubo == null) return;
 
-    // Collect up to 16 lights with stable order by entity id
+    // Static cache to avoid re-querying/sorting every frame
     const MaxLights = 16;
-    const Entry = struct {
+    const CachedEntry = struct {
         id: usize,
-        transform: *Transform,
-        light: *const PointLight,
+        entity: EntityId,
     };
-    var list: [MaxLights]Entry = undefined;
+    const State = struct {
+        var cached_entities: [MaxLights]CachedEntry = undefined;
+        var cached_count: usize = 0;
+        var last_generation: u32 = 0;
+    };
+
+    // Quick check: get light count via view len
+    var view = try world.view(PointLight);
+    const new_count = view.len();
+
+    // Check if we need to rebuild cache (count changed or first run)
+    const count_changed = new_count != State.cached_count;
+    var needs_rebuild = count_changed;
+
+    // If count same, check generation from world (if available)
+    if (!needs_rebuild) {
+        // Check if any transforms are dirty - quick scan
+        var iter = view.iterator();
+        while (iter.next()) |entry| {
+            const transform_ptr = world.get(Transform, entry.entity) orelse continue;
+            if (transform_ptr.dirty) {
+                needs_rebuild = true;
+                break;
+            }
+        }
+    }
+
     var count: usize = 0;
 
-    var view = try world.view(PointLight);
-    var iter = view.iterator();
-    while (iter.next()) |entry| {
-        const transform_ptr = world.get(Transform, entry.entity) orelse continue;
-        if (count < MaxLights) {
-            list[count] = .{
-                .id = @intFromEnum(entry.entity),
-                .transform = transform_ptr,
-                .light = entry.component,
-            };
-            count += 1;
+    if (needs_rebuild) {
+        // Rebuild sorted entity list
+        var iter = view.iterator();
+        while (iter.next()) |entry| {
+            const transform_ptr = world.get(Transform, entry.entity) orelse continue;
+            if (count < MaxLights) {
+                State.cached_entities[count] = .{
+                    .id = @intFromEnum(entry.entity),
+                    .entity = entry.entity,
+                };
+                count += 1;
+            }
+            transform_ptr.updateWorldMatrix();
         }
+        State.cached_count = count;
+
+        // Sort by stable entity id
+        std.sort.pdq(CachedEntry, State.cached_entities[0..count], {}, struct {
+            fn lessThan(_: void, a: CachedEntry, b: CachedEntry) bool {
+                return a.id < b.id;
+            }
+        }.lessThan);
+    } else {
+        // Use cached count, just update world matrices
+        count = State.cached_count;
+        var iter = view.iterator();
+        while (iter.next()) |_| {}
     }
 
-    // Sort by stable entity id
-    std.sort.pdq(Entry, list[0..count], {}, struct {
-        fn lessThan(_: void, a: Entry, b: Entry) bool {
-            return a.id < b.id;
-        }
-    }.lessThan);
+    // Write light data to UBO using cached entity order
+    const ubo = global_ubo.?;
+    for (0..count) |i| {
+        const entity = State.cached_entities[i].entity;
+        const transform_ptr = world.get(Transform, entity) orelse continue;
+        const light = world.get(PointLight, entity) orelse continue;
+        const pos = transform_ptr.position;
 
-    // Animate and write to UBO in sorted order with even angular spacing
-    const radius: f32 = 1.5;
-    const height: f32 = 0.5;
-    const speed: f32 = 1.0;
-    const two_pi: f32 = 2.0 * std.math.pi;
-
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const phase = if (count > 0) (@as(f32, @floatFromInt(i)) * (two_pi / @as(f32, @floatFromInt(count)))) else 0.0;
-        const angle = State.time_elapsed * speed + phase;
-        const x = @cos(angle) * radius;
-        const z = @sin(angle) * radius;
-
-        // Update transform position and UBO
-        list[i].transform.setPosition(Math.Vec3.init(x, height, z));
-
-        if (global_ubo) |ubo| {
-            ubo.point_lights[i] = .{
-                .position = Math.Vec4.init(x, height, z, 1.0),
-                .color = Math.Vec4.init(
-                    list[i].light.color.x * list[i].light.intensity,
-                    list[i].light.color.y * list[i].light.intensity,
-                    list[i].light.color.z * list[i].light.intensity,
-                    list[i].light.intensity,
-                ),
-            };
-        }
+        ubo.point_lights[i] = .{
+            .position = Math.Vec4.init(pos.x, pos.y, pos.z, 1.0),
+            .color = Math.Vec4.init(
+                light.color.x * light.intensity,
+                light.color.y * light.intensity,
+                light.color.z * light.intensity,
+                light.intensity,
+            ),
+        };
     }
 
-    if (global_ubo) |ubo| {
-        ubo.num_point_lights = @intCast(count);
-        // Clear remaining light slots
-        var j: usize = count;
-        while (j < MaxLights) : (j += 1) {
-            ubo.point_lights[j] = .{};
-        }
+    ubo.num_point_lights = @intCast(count);
+    // Clear remaining light slots
+    for (count..MaxLights) |j| {
+        ubo.point_lights[j] = .{};
     }
 }

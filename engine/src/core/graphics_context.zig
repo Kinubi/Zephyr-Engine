@@ -1367,6 +1367,9 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .buffer_device_address_multi_device = .true,
         // Host query reset (promoted to Vulkan 1.2) - for performance monitoring
         .host_query_reset = .true,
+        // Shader layer/viewport output from vertex shader (for single-pass cube shadow maps)
+        .shader_output_layer = .true,
+        .shader_output_viewport_index = .true,
     };
     accel_create.p_next = &vulkan12_features;
 
@@ -1381,6 +1384,22 @@ fn initializeCandidate(allocator: Allocator, vki: InstanceWrapper, candidate: De
         .synchronization_2 = .true,
     };
     dynamic_rendering_features.p_next = &sync2_features;
+
+    // Enable Vulkan 1.1 features (multiview for efficient multi-light shadow rendering)
+    var vulkan11_features = vk.PhysicalDeviceVulkan11Features{
+        .multiview = .true, // For GL_EXT_multiview in shadow shaders
+    };
+    sync2_features.p_next = &vulkan11_features;
+
+    // Enable Vulkan 1.0 core features
+    var features2 = vk.PhysicalDeviceFeatures2{
+        .features = .{
+            .sampler_anisotropy = .true, // For texture filtering
+            .image_cube_array = .true, // For samplerCubeArrayShadow (multi-light shadows)
+            .geometry_shader = .true, // For single-pass shadow map rendering
+        },
+    };
+    vulkan11_features.p_next = &features2;
 
     create_info.p_next = &ray_query_create;
     return try vki.createDevice(candidate.pdev, &create_info, null);

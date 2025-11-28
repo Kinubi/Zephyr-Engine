@@ -29,6 +29,7 @@ const Mesh = @import("../mesh.zig").Mesh;
 
 const World = ecs.World;
 const RenderSystem = ecs.RenderSystem;
+const ShadowMapPass = @import("shadow_map_pass.zig").ShadowMapPass;
 
 /// GeometryPass renders opaque ECS entities using dynamic rendering
 /// Uses automatic resource management: binds resources once in setup,
@@ -66,6 +67,9 @@ pub const GeometryPass = struct {
 
     // Shared render system (pointer to scene's render system)
     render_system: *RenderSystem,
+
+    // Shadow pass for accessing shadow map texture
+    shadow_pass: ?*ShadowMapPass = null,
 
     // Target material set name (e.g. "opaque", "transparent")
     target_set_name: []const u8,
@@ -257,6 +261,28 @@ pub const GeometryPass = struct {
             self.global_ubo_set.frame_buffers,
         );
 
+        // Bind shadow data SSBO and shadow cube array map if shadow pass is available
+        log(.INFO, "geometry_pass", "bindResources: shadow_pass = {}", .{@intFromPtr(self.shadow_pass)});
+        if (self.shadow_pass) |shadow_pass| {
+            // Bind shadow data SSBO (all lights' data from ShadowSystem)
+            try self.resource_binder.bindStorageBufferArrayNamed(
+                self.geometry_pipeline,
+                "ShadowDataSSBO",
+                shadow_pass.shadow_system.shadow_data_buffers,
+            );
+
+            // Bind shadow 2D array texture with comparison sampler
+            if (shadow_pass.getShadowCube()) |shadow_cube| {
+                try self.resource_binder.bindTextureNamed(
+                    self.geometry_pipeline,
+                    "shadowArrayMap",
+                    shadow_cube,
+                );
+            }
+        } else {
+            log(.WARN, "geometry_pass", "No shadow_pass available during bindResources", .{});
+        }
+
         // Bind instance data SSBO from render system (generation tracked automatically)
         // RenderSystem owns and manages this buffer (starts as dummy, gets replaced when instances exist)
         // Buffer is guaranteed to exist after Scene.initRenderGraph()
@@ -283,13 +309,11 @@ pub const GeometryPass = struct {
         // Get batches for this specific material set (e.g. "opaque")
         const batches = raster_data.getBatches(self.target_set_name);
 
-        // Setup dynamic rendering with helper
-        const rendering = DynamicRenderingHelper.init(
+        // Setup dynamic rendering with LOAD (skybox already rendered, don't clear)
+        const rendering = DynamicRenderingHelper.initLoad(
             frame_info.hdr_texture.?.image_view,
             frame_info.depth_image_view,
             frame_info.extent,
-            .{ 0.01, 0.01, 0.01, 1.0 }, // clear color (dark gray)
-            1.0, // clear depth
         );
 
         // Begin rendering (also sets viewport and scissor) - always do this to clear the framebuffer

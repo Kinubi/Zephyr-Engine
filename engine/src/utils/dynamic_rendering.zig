@@ -154,4 +154,61 @@ pub const DynamicRenderingHelper = struct {
         _ = self;
         gc.vkd.cmdEndRendering(cmd);
     }
+
+    /// Initialize for depth-only rendering (shadow maps)
+    /// Supports multiview via view_mask for rendering to multiple layers simultaneously
+    pub fn initDepthOnly(
+        depth_view: vk.ImageView,
+        extent: vk.Extent2D,
+        clear_depth: f32,
+        view_mask: u32,
+        layer_count: u32,
+    ) DynamicRenderingHelper {
+        const depth_attachment = vk.RenderingAttachmentInfo{
+            .s_type = .rendering_attachment_info,
+            .p_next = null,
+            .image_view = depth_view,
+            .image_layout = .general, // Unified layout - no transitions needed
+            .resolve_mode = .{},
+            .resolve_image_view = .null_handle,
+            .resolve_image_layout = .undefined,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_value = .{ .depth_stencil = .{ .depth = clear_depth, .stencil = 0 } },
+        };
+
+        var helper = DynamicRenderingHelper{
+            .color_attachment = undefined, // Not used for depth-only
+            .depth_attachment = depth_attachment,
+            .rendering_info = undefined,
+            .viewport = vk.Viewport{
+                .x = 0.0,
+                .y = 0.0,
+                .width = @floatFromInt(extent.width),
+                .height = @floatFromInt(extent.height),
+                .min_depth = 0.0,
+                .max_depth = 1.0,
+            },
+            .scissor = vk.Rect2D{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = extent,
+            },
+        };
+
+        // Build rendering info with multiview support
+        helper.rendering_info = vk.RenderingInfo{
+            .s_type = .rendering_info,
+            .p_next = null,
+            .flags = .{},
+            .render_area = helper.scissor,
+            .layer_count = layer_count,
+            .view_mask = view_mask, // Multiview: bits indicate which views to render
+            .color_attachment_count = 0,
+            .p_color_attachments = null,
+            .p_depth_attachment = @ptrCast(&helper.depth_attachment),
+            .p_stencil_attachment = null,
+        };
+
+        return helper;
+    }
 };

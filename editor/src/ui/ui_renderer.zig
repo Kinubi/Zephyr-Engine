@@ -488,6 +488,229 @@ pub const UIRenderer = struct {
         }
     }
 
+    /// Draw editor icons (billboards) for cameras and lights in the viewport
+    pub fn renderEditorIcons(self: *UIRenderer, scene: *Scene, camera: *Camera) void {
+        if (self.viewport_draw_list == null) return;
+        if (self.viewport_size[0] < 1.0 or self.viewport_size[1] < 1.0) return;
+
+        const draw_list = self.viewport_draw_list.?;
+
+        // Clip to viewport
+        const clip_min = c.ImVec2{ .x = self.viewport_pos[0], .y = self.viewport_pos[1] };
+        const clip_max = c.ImVec2{ .x = self.viewport_pos[0] + self.viewport_size[0], .y = self.viewport_pos[1] + self.viewport_size[1] };
+        c.ImDrawList_PushClipRect(draw_list, clip_min, clip_max, true);
+
+        // Get camera position for distance-based sizing
+        const inv_view = &camera.inverseViewMatrix;
+        const cam_pos = Math.Vec3.init(inv_view.get(3, 0).*, inv_view.get(3, 1).*, inv_view.get(3, 2).*);
+
+        // Iterate all scene objects and draw icons for lights and cameras
+        for (scene.iterateObjects()) |*game_obj| {
+            const eid = game_obj.entity_id;
+            if (eid == zephyr.Entity.invalid) continue;
+
+            const transform = scene.ecs_world.get(zephyr.Transform, eid) orelse continue;
+
+            // Get world position from transform matrix
+            const world_mat = &transform.world_matrix;
+            const world_pos = Math.Vec3.init(world_mat.get(3, 0).*, world_mat.get(3, 1).*, world_mat.get(3, 2).*);
+
+            // Calculate screen-space icon size based on distance
+            const dist = Math.Vec3.sub(world_pos, cam_pos).length();
+            const base_size: f32 = 24.0; // Base icon size in pixels
+            const min_size: f32 = 12.0;
+            const max_size: f32 = 48.0;
+            // Size decreases with distance but stays within bounds
+            const icon_size = std.math.clamp(base_size * (5.0 / @max(dist, 1.0)), min_size, max_size);
+
+            // Check for PointLight
+            if (scene.ecs_world.has(zephyr.ecs.PointLight, eid)) {
+                if (UIMath.project(camera, self.viewport_size, world_pos)) |screen_vp| {
+                    const screen_x = screen_vp[0] + self.viewport_pos[0];
+                    const screen_y = screen_vp[1] + self.viewport_pos[1];
+                    drawLightIcon(draw_list, screen_x, screen_y, icon_size);
+                }
+            }
+
+            // Check for Camera component
+            if (scene.ecs_world.has(zephyr.ecs.Camera, eid)) {
+                if (UIMath.project(camera, self.viewport_size, world_pos)) |screen_vp| {
+                    const screen_x = screen_vp[0] + self.viewport_pos[0];
+                    const screen_y = screen_vp[1] + self.viewport_pos[1];
+                    
+                    // Extract forward direction from transform (Z-axis in world matrix)
+                    // In scene.zig, forward is taken from rot_mat.data[8,9,10] which is column 2
+                    const forward = Math.Vec3.init(
+                        world_mat.get(2, 0).*,
+                        world_mat.get(2, 1).*,
+                        world_mat.get(2, 2).*
+                    ).normalize();
+                    
+                    // Draw camera icon with direction indicator
+                    drawCameraIconWithFrustum(self, draw_list, camera, world_pos, forward, screen_x, screen_y, icon_size);
+                }
+            }
+        }
+
+        c.ImDrawList_PopClipRect(draw_list);
+    }
+
+    fn drawLightIcon(draw_list: *c.ImDrawList, x: f32, y: f32, size: f32) void {
+        // Draw a sun/light bulb icon: circle with rays
+        const center = c.ImVec2{ .x = x, .y = y };
+        const radius = size * 0.35;
+        const ray_len = size * 0.25;
+        const ray_start = radius + 2.0;
+
+        // Yellow color for light
+        const fill_col = UIMath.makeColor(255, 220, 50, 200);
+        const outline_col = UIMath.makeColor(255, 180, 0, 255);
+
+        // Draw filled circle (bulb)
+        c.ImDrawList_AddCircleFilled(draw_list, center, radius, fill_col, 12);
+        c.ImDrawList_AddCircleEx(draw_list, center, radius, outline_col, 12, 1.5);
+
+        // Draw rays (8 directions)
+        const num_rays: usize = 8;
+        var i: usize = 0;
+        while (i < num_rays) : (i += 1) {
+            const angle = @as(f32, @floatFromInt(i)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(num_rays)));
+            const cos_a = @cos(angle);
+            const sin_a = @sin(angle);
+            const start = c.ImVec2{ .x = x + cos_a * ray_start, .y = y + sin_a * ray_start };
+            const end = c.ImVec2{ .x = x + cos_a * (ray_start + ray_len), .y = y + sin_a * (ray_start + ray_len) };
+            c.ImDrawList_AddLineEx(draw_list, start, end, outline_col, 1.5);
+        }
+    }
+
+    fn drawCameraIcon(draw_list: *c.ImDrawList, x: f32, y: f32, size: f32) void {
+        // Draw a camera icon: box body with lens cone
+        const half_w = size * 0.4;
+        const half_h = size * 0.3;
+        const lens_w = size * 0.25;
+        const lens_h = size * 0.2;
+
+        // Light blue color for camera
+        const fill_col = UIMath.makeColor(100, 180, 255, 180);
+        const outline_col = UIMath.makeColor(50, 120, 200, 255);
+
+        // Camera body (rectangle)
+        const body_min = c.ImVec2{ .x = x - half_w, .y = y - half_h };
+        const body_max = c.ImVec2{ .x = x + half_w, .y = y + half_h };
+        c.ImDrawList_AddRectFilledEx(draw_list, body_min, body_max, fill_col, 3.0, 0);
+        c.ImDrawList_AddRectEx(draw_list, body_min, body_max, outline_col, 3.0, 0, 1.5);
+
+        // Lens (triangle/cone pointing right)
+        const lens_tip = c.ImVec2{ .x = x + half_w + lens_w, .y = y };
+        const lens_top = c.ImVec2{ .x = x + half_w, .y = y - lens_h };
+        const lens_bot = c.ImVec2{ .x = x + half_w, .y = y + lens_h };
+        c.ImDrawList_AddTriangleFilled(draw_list, lens_tip, lens_top, lens_bot, fill_col);
+        c.ImDrawList_AddTriangleEx(draw_list, lens_tip, lens_top, lens_bot, outline_col, 1.5);
+
+        // Small viewfinder bump on top
+        const vf_min = c.ImVec2{ .x = x - half_w * 0.3, .y = y - half_h - size * 0.15 };
+        const vf_max = c.ImVec2{ .x = x + half_w * 0.3, .y = y - half_h };
+        c.ImDrawList_AddRectFilledEx(draw_list, vf_min, vf_max, fill_col, 2.0, 0);
+        c.ImDrawList_AddRectEx(draw_list, vf_min, vf_max, outline_col, 2.0, 0, 1.5);
+    }
+
+    fn drawCameraIconWithFrustum(self: *UIRenderer, draw_list: *c.ImDrawList, editor_camera: *Camera, world_pos: Math.Vec3, forward: Math.Vec3, screen_x: f32, screen_y: f32, icon_size: f32) void {
+        // Draw the basic camera icon at the screen position
+        drawCameraIcon(draw_list, screen_x, screen_y, icon_size);
+
+        // Draw a frustum/direction indicator in 3D space
+        // We'll draw lines from the camera position to 4 corners of a "near plane" quad
+        const frustum_length: f32 = 2.0; // Length of the frustum in world units
+        const frustum_width: f32 = 1.2; // Width at the far end
+        const frustum_height: f32 = 0.8; // Height at the far end
+
+        // Get right and up vectors from the forward direction
+        // Use world up as reference, unless forward is parallel to it
+        const world_up = Math.Vec3.init(0, 1, 0);
+        var right: Math.Vec3 = undefined;
+        var up: Math.Vec3 = undefined;
+
+        if (@abs(Math.Vec3.dot(forward, world_up)) > 0.99) {
+            // Forward is nearly parallel to world up, use world forward as reference
+            const world_forward = Math.Vec3.init(0, 0, 1);
+            right = Math.Vec3.cross(world_forward, forward).normalize();
+            up = Math.Vec3.cross(forward, right).normalize();
+        } else {
+            right = Math.Vec3.cross(world_up, forward).normalize();
+            up = Math.Vec3.cross(forward, right).normalize();
+        }
+
+        // Calculate the 4 corners of the frustum's far plane
+        const far_center = Math.Vec3.add(world_pos, Math.Vec3.scale(forward, frustum_length));
+        const half_w = frustum_width * 0.5;
+        const half_h = frustum_height * 0.5;
+
+        const corners = [4]Math.Vec3{
+            Math.Vec3.add(Math.Vec3.add(far_center, Math.Vec3.scale(right, -half_w)), Math.Vec3.scale(up, half_h)), // top-left
+            Math.Vec3.add(Math.Vec3.add(far_center, Math.Vec3.scale(right, half_w)), Math.Vec3.scale(up, half_h)), // top-right
+            Math.Vec3.add(Math.Vec3.add(far_center, Math.Vec3.scale(right, half_w)), Math.Vec3.scale(up, -half_h)), // bottom-right
+            Math.Vec3.add(Math.Vec3.add(far_center, Math.Vec3.scale(right, -half_w)), Math.Vec3.scale(up, -half_h)), // bottom-left
+        };
+
+        // Project all corners to screen space
+        var screen_corners: [4]?[2]f32 = .{ null, null, null, null };
+        var valid_corners: usize = 0;
+        for (corners, 0..) |corner, i| {
+            if (UIMath.project(editor_camera, self.viewport_size, corner)) |screen_vp| {
+                screen_corners[i] = .{ screen_vp[0] + self.viewport_pos[0], screen_vp[1] + self.viewport_pos[1] };
+                valid_corners += 1;
+            }
+        }
+
+        // Project the camera origin too
+        const origin_screen = UIMath.project(editor_camera, self.viewport_size, world_pos);
+
+        // Colors for frustum
+        const frustum_fill = UIMath.makeColor(100, 180, 255, 40);
+        const frustum_line = UIMath.makeColor(100, 180, 255, 180);
+
+        // Draw the frustum edges (from origin to each corner)
+        if (origin_screen) |orig| {
+            const orig_pos = c.ImVec2{ .x = orig[0] + self.viewport_pos[0], .y = orig[1] + self.viewport_pos[1] };
+            for (screen_corners) |maybe_corner| {
+                if (maybe_corner) |corner| {
+                    const corner_pos = c.ImVec2{ .x = corner[0], .y = corner[1] };
+                    c.ImDrawList_AddLine(draw_list, orig_pos, corner_pos, frustum_line);
+                }
+            }
+        }
+
+        // Draw the far plane quad (if all 4 corners are visible)
+        if (valid_corners == 4) {
+            const c0 = screen_corners[0].?;
+            const c1 = screen_corners[1].?;
+            const c2 = screen_corners[2].?;
+            const c3 = screen_corners[3].?;
+
+            // Draw filled triangles for the far plane
+            c.ImDrawList_AddTriangleFilled(
+                draw_list,
+                c.ImVec2{ .x = c0[0], .y = c0[1] },
+                c.ImVec2{ .x = c1[0], .y = c1[1] },
+                c.ImVec2{ .x = c2[0], .y = c2[1] },
+                frustum_fill,
+            );
+            c.ImDrawList_AddTriangleFilled(
+                draw_list,
+                c.ImVec2{ .x = c0[0], .y = c0[1] },
+                c.ImVec2{ .x = c2[0], .y = c2[1] },
+                c.ImVec2{ .x = c3[0], .y = c3[1] },
+                frustum_fill,
+            );
+
+            // Draw the outline of the far plane
+            c.ImDrawList_AddLine(draw_list, c.ImVec2{ .x = c0[0], .y = c0[1] }, c.ImVec2{ .x = c1[0], .y = c1[1] }, frustum_line);
+            c.ImDrawList_AddLine(draw_list, c.ImVec2{ .x = c1[0], .y = c1[1] }, c.ImVec2{ .x = c2[0], .y = c2[1] }, frustum_line);
+            c.ImDrawList_AddLine(draw_list, c.ImVec2{ .x = c2[0], .y = c2[1] }, c.ImVec2{ .x = c3[0], .y = c3[1] }, frustum_line);
+            c.ImDrawList_AddLine(draw_list, c.ImVec2{ .x = c3[0], .y = c3[1] }, c.ImVec2{ .x = c0[0], .y = c0[1] }, frustum_line);
+        }
+    }
+
     // Projection and matrix helpers moved to `ui_math.zig` and reused here via UIMath
 
     // Color helper moved to `ui_math.zig` and reused via UIMath

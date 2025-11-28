@@ -651,12 +651,14 @@ pub const Engine = struct {
         try self.ecs_world.?.registerComponent(ecs.SphereCollider);
         try self.ecs_world.?.registerComponent(ecs.CapsuleCollider);
         try self.ecs_world.?.registerComponent(ecs.MeshCollider);
+        try self.ecs_world.?.registerComponent(ecs.Skybox);
 
         // Register material components
         try self.ecs_world.?.registerComponent(ecs.MaterialSet);
         try self.ecs_world.?.registerComponent(ecs.RenderablesSet);
         try self.ecs_world.?.registerComponent(ecs.MaterialDeltasSet);
         try self.ecs_world.?.registerComponent(ecs.InstanceDeltasSet);
+        try self.ecs_world.?.registerComponent(ecs.ShadowDataSet);
         try self.ecs_world.?.registerComponent(ecs.AlbedoMaterial);
         try self.ecs_world.?.registerComponent(ecs.RoughnessMaterial);
         try self.ecs_world.?.registerComponent(ecs.MetallicMaterial);

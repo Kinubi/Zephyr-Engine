@@ -38,8 +38,178 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 ambientColor;
     PointLight pointLights[16];
     int numPointLights;
-    float dt;
 } ubo;
+
+// Shadow light data structure (matches ShadowLightGPU in shadow_system.zig)
+struct ShadowLight {
+   vec4 lightPos;      // xyz = position, w = far plane
+    float shadowBias;
+    uint shadowEnabled;
+    uint lightIndex;
+    float _padding;
+    mat4 faceViewProjs[6];
+};
+
+// Shadow data SSBO (set 0, binding 2) - from ShadowSystem
+layout(set = 0, binding = 2) readonly buffer ShadowDataSSBO {
+    uint numShadowLights;
+    uint maxShadowLights;
+    ShadowLight lights[8];  // MAX_SHADOW_LIGHTS = 8
+} shadowData;
+
+// Shadow 2D array map sampler (set 0, binding 3)
+// Layout: [face0_light0..N, face1_light0..N, ...] for multiview rendering
+// We manually compute face index and UV from cube direction
+layout(set = 0, binding = 3) uniform sampler2DArrayShadow shadowArrayMap;
+
+// Convert cube direction to face index and UV coordinates
+// Returns: x,y = UV coords [0,1], z = face index [0-5]
+vec3 directionToFaceUV(vec3 dir) {
+    // Flip Y to match shadow map rendering coordinate system
+    dir.y = -dir.y;
+
+    
+    vec3 absDir = abs(dir);
+    float maxAxis = max(max(absDir.x, absDir.y), absDir.z);
+    
+    int faceIndex;
+    vec2 uv;
+    
+    if (absDir.x >= absDir.y && absDir.x >= absDir.z) {
+        // X axis dominant - flip face selection (swap +X/-X)
+        if (dir.x > 0.0) {
+            faceIndex = 1; // Was +X, now -X
+            uv = vec2(dir.z, -dir.y) / absDir.x;
+        } else {
+            faceIndex = 0; // Was -X, now +X
+            uv = vec2(-dir.z, -dir.y) / absDir.x;
+        }
+    } else if (absDir.y >= absDir.x && absDir.y >= absDir.z) {
+        // Y axis dominant
+        if (dir.y > 0.0) {
+            faceIndex = 2; // +Y
+            uv = vec2(dir.x, -dir.z) / absDir.y;
+        } else {
+            faceIndex = 3; // -Y
+            uv = vec2(dir.x, dir.z) / absDir.y;
+        }
+    } else {
+        // Z axis dominant
+        if (dir.z > 0.0) {
+            faceIndex = 4; // +Z
+            uv = vec2(dir.x, -dir.y) / absDir.z;
+        } else {
+            faceIndex = 5; // -Z
+            uv = vec2(-dir.x, -dir.y) / absDir.z;
+        }
+    }
+    
+    // Convert from [-1,1] to [0,1]
+    uv = uv * 0.5 + 0.5;
+    
+    return vec3(uv, float(faceIndex));
+}
+
+// Calculate shadow factor for a single point light
+// Find shadow light index that matches a point light position
+// Returns -1 if no matching shadow light found
+// Optimized: uses squared distance to avoid sqrt, early exit
+int findShadowLightForPosition(vec3 lightPos) {
+    const float TOLERANCE_SQ = 0.0001; // 0.01^2
+    for (uint i = 0; i < shadowData.numShadowLights; i++) {
+        if (shadowData.lights[i].shadowEnabled == 0) continue;
+        vec3 diff = shadowData.lights[i].lightPos.xyz - lightPos;
+        if (dot(diff, diff) < TOLERANCE_SQ) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+float calculateShadowForLight(vec3 worldPos, vec3 surfNormal, vec3 pointLightPos) {
+    // Find matching shadow light by position
+    int shadowIdx = findShadowLightForPosition(pointLightPos);
+    if (shadowIdx < 0) return 1.0; // No shadow light for this point light
+    
+    ShadowLight light = shadowData.lights[shadowIdx];
+    
+    // Vector from light to fragment - this is the cube map lookup direction
+    vec3 lightToFrag = worldPos - light.lightPos.xyz;
+    
+    // Early check: if surface faces away from light, it's always shadowed
+    // Do this BEFORE expensive normalize/texture operations
+    vec3 lightDir = -lightToFrag; // Not normalized yet
+    float NdotLUnnormalized = dot(surfNormal, lightDir);
+    if (NdotLUnnormalized <= 0.0) {
+        return 0.0; // Back face culling
+    }
+    
+    // Distance from light to fragment (for depth comparison)
+    float currentDepth = length(lightToFrag);
+    
+    // Normalize depth to [0,1] using far plane (matches what shadow.frag writes)
+    float farPlane = light.lightPos.w;
+    float normalizedDepth = (currentDepth / farPlane) - light.shadowBias;
+    
+    // Convert direction to face index and UV
+    // Normalize direction for cubemap lookup
+    vec3 lightToFragNorm = lightToFrag / currentDepth; // Reuse length calculation
+    vec3 faceUV = directionToFaceUV(lightToFragNorm);
+    
+    // Calculate array layer: layout is [face0_light0..N, face1_light0..N, ...]
+    // layer = faceIndex * numLights + shadowLightIndex
+    float layer = faceUV.z * float(shadowData.maxShadowLights) + float(shadowIdx);
+    
+    // Sample with comparison using 2D array
+    // vec4(u, v, layer, depth_compare)
+    float shadowVal = texture(shadowArrayMap, vec4(faceUV.xy, layer, normalizedDepth));
+    
+    return shadowVal;
+}
+
+// Debug version that outputs color info
+vec4 debugShadowForLight(vec3 worldPos, vec3 surfNormal, vec3 pointLightPos) {
+    // Find matching shadow light by position
+    int shadowIdx = findShadowLightForPosition(pointLightPos);
+    if (shadowIdx < 0) return vec4(1.0, 0.5, 0.0, 1.0); // Orange = no shadow light
+    
+    ShadowLight light = shadowData.lights[shadowIdx];
+    
+    // Red = shadow disabled
+    if (light.shadowEnabled == 0) return vec4(1.0, 0.0, 0.0, 1.0);
+    
+    vec3 lightToFrag = worldPos - light.lightPos.xyz;
+    vec3 lightDir = normalize(-lightToFrag);
+    
+    float NdotL = dot(surfNormal, lightDir);
+    // Yellow = back face
+    if (NdotL <= 0.0) return vec4(1.0, 1.0, 0.0, 1.0);
+    
+    float currentDepth = length(lightToFrag);
+    float farPlane = light.lightPos.w;
+    float normalizedDepth = currentDepth / farPlane;
+    normalizedDepth -= light.shadowBias;
+    
+    // Get face UV (Z flip is now inside directionToFaceUV)
+    vec3 faceUV = directionToFaceUV(normalize(lightToFrag));
+    
+    // Calculate array layer: layout is [face0_light0..N, face1_light0..N, ...]
+    float layer = faceUV.z * float(shadowData.maxShadowLights) + float(shadowIdx);
+    
+    // Sample the shadow map
+    float shadowVal = texture(shadowArrayMap, vec4(faceUV.xy, layer, normalizedDepth));
+    
+    // Green = lit (shadow=1), Blue = shadowed (shadow=0)
+    return vec4(0.0, shadowVal, 1.0 - shadowVal, 1.0);
+}
+
+// Calculate combined shadow factor for all shadow-casting lights
+float calculateShadow(vec3 worldPos, vec3 surfNormal) {
+    if (shadowData.numShadowLights == 0) return 1.0;
+    
+    // For now, use first shadow light (multi-light contribution is handled per-light in main loop)
+    return calculateShadowForLight(worldPos, surfNormal, shadowData.lights[0].lightPos.xyz);
+}
 
 layout(set = 1, binding = 0) readonly buffer MaterialBuffer {
     Material materials[];
@@ -54,6 +224,14 @@ layout(push_constant) uniform Push {
 } push;
 
 void main() {
+    // DEBUG: Visualize shadow state - uncomment to debug
+    // Red = shadow disabled, Yellow = back face, Green = lit, Blue = shadowed, Orange = no matching shadow light
+    // if (shadowData.numShadowLights > 0) {
+    //     vec4 debugColor = debugShadowForLight(positionWorld, normalize(normal), shadowData.lights[0].lightPos.xyz);
+    //     outColor = debugColor;
+    //     return;
+    // }
+    
     // Get material for this object
     // Use materialIndex from vertex shader (per-instance data from SSBO)
     Material mat = materials[materialIndex];
@@ -104,10 +282,10 @@ void main() {
         occlusion = mix(1.0, texture(textures[mat.occlusion_idx], uv).r, mat.occlusion_strength);
     }
 
-    // Start with ambient lighting
+    // Start with ambient lighting (not affected by shadows)
     vec3 diffuseLight = ubo.ambientColor.xyz * ubo.ambientColor.w * occlusion;
 
-    // Add point light contributions
+    // Add point light contributions (affected by shadows)
     for (int i = 0; i < ubo.numPointLights; i++) {
         PointLight light = ubo.pointLights[i];
         vec3 directionToLight = light.position.xyz - positionWorld;
@@ -122,7 +300,9 @@ void main() {
         float diffuseFactor = cosAngIncidence * (1.0 - roughness * 0.5) * (1.0 - metallic * 0.8);
         
         vec3 lightColor = light.color.xyz * light.color.w * attenuation;
-        diffuseLight += lightColor * diffuseFactor * occlusion;
+        // Apply shadow factor - find matching shadow light by position
+        float lightShadow = calculateShadowForLight(positionWorld, surfaceNormal, light.position.xyz);
+        diffuseLight += lightColor * diffuseFactor * occlusion * lightShadow;
     }
 
     // Add emissive contribution
@@ -131,5 +311,6 @@ void main() {
         emissive *= texture(textures[mat.emissive_idx], uv).rgb;
     }
     
+    // Final output
     outColor = vec4(diffuseLight * albedo + emissive, mat.albedo_tint.a);
 }
