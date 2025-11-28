@@ -1,5 +1,4 @@
 #version 450
-#extension GL_EXT_multiview : enable
 
 // Cube shadow map fragment shader - writes linear depth
 
@@ -8,7 +7,7 @@ layout(location = 1) flat in uint lightIndex;
 
 layout(push_constant) uniform Push {
     mat4 modelMatrix;
-    uint faceIndex;
+    uint numActiveLights;
     uint _padding[3];
 } push;
 
@@ -24,8 +23,9 @@ struct ShadowLightGPU {
 
 layout(set = 0, binding = 0) readonly buffer ShadowDataSSBO {
     uint numShadowLights;
-    uint _padding[3];
-    ShadowLightGPU lights[8];  // MAX_SHADOW_LIGHTS
+    uint maxShadowLights;
+    uint _padding[2];
+    ShadowLightGPU lights[8];
 } shadowData;
 
 void main() {

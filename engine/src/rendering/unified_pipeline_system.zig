@@ -366,6 +366,15 @@ pub const UnifiedPipelineSystem = struct {
                     try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .vertex_bit = true });
                 }
 
+                if (config.geometry_shader) |geometry_path| {
+                    const compiled_shader = try self.shader_manager.loadShader(geometry_path, config.shader_options);
+                    const shader = try self.allocator.create(Shader);
+                    const entry_point = if (config.geometry_entry_point) |name| entry_point_definition{ .name = name } else null;
+                    shader.* = try Shader.create(self.graphics_context.*, compiled_shader.compiled_shader.spirv_code, .{ .geometry_bit = true }, entry_point, compiled_shader.compiled_shader.reflection);
+                    try shaders.append(self.allocator, shader);
+                    try self.extractDescriptorLayout(&descriptor_layout_info, compiled_shader.compiled_shader.reflection, .{ .geometry_bit = true });
+                }
+
                 if (config.fragment_shader) |fragment_path| {
                     const compiled_shader = try self.shader_manager.loadShader(fragment_path, config.shader_options);
                     const shader = try self.allocator.create(Shader);
@@ -561,6 +570,11 @@ pub const UnifiedPipelineSystem = struct {
 
             for (shaders.items) |shader| {
                 if (shader.shader_type.vertex_bit and !shader.shader_type.compute_bit) {
+                    _ = try builder.addShaderStage(shader.shader_type, shader);
+                }
+            }
+            for (shaders.items) |shader| {
+                if (shader.shader_type.geometry_bit) {
                     _ = try builder.addShaderStage(shader.shader_type, shader);
                 }
             }

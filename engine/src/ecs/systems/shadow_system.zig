@@ -41,7 +41,8 @@ pub const ShadowLightGPU = extern struct {
 /// Header + array of lights with all their data
 pub const ShadowDataSSBO = extern struct {
     num_shadow_lights: u32 = 0,
-    _padding: [3]u32 = .{ 0, 0, 0 },
+    max_shadow_lights: u32 = MAX_SHADOW_LIGHTS,
+    _padding: [2]u32 = .{ 0, 0 },
     lights: [MAX_SHADOW_LIGHTS]ShadowLightGPU = .{ShadowLightGPU{}} ** MAX_SHADOW_LIGHTS,
 };
 
@@ -239,6 +240,30 @@ pub const ShadowSystem = struct {
             found_entities[new_light_count] = data.entity;
             found_positions[new_light_count] = pos;
             new_light_count += 1;
+        }
+
+        // Sort by entity ID to match light_system ordering
+        // This ensures shadow light index matches point light index
+        const SortEntry = struct {
+            entity: EntityId,
+            position: Math.Vec3,
+        };
+        var sort_list: [MAX_SHADOW_LIGHTS]SortEntry = undefined;
+        for (0..new_light_count) |i| {
+            sort_list[i] = .{
+                .entity = found_entities[i],
+                .position = found_positions[i],
+            };
+        }
+        std.sort.pdq(SortEntry, sort_list[0..new_light_count], {}, struct {
+            fn lessThan(_: void, a: SortEntry, b: SortEntry) bool {
+                return @intFromEnum(a.entity) < @intFromEnum(b.entity);
+            }
+        }.lessThan);
+        // Copy back sorted results
+        for (0..new_light_count) |i| {
+            found_entities[i] = sort_list[i].entity;
+            found_positions[i] = sort_list[i].position;
         }
 
         self.pending_delta.active_count = new_light_count;
@@ -495,10 +520,13 @@ pub const ShadowSystem = struct {
     ///
     /// Standard cube map convention - look toward face direction.
     pub fn buildFaceViewMatrix(light_pos: Math.Vec3, face: u32) Math.Mat4x4 {
-        // Look toward face direction - but X faces are swapped to match cube map convention
+        // Standard OpenGL cube map face directions
+        // Face 0 (+X): captures fragments in +X direction from light
+        // Face 1 (-X): captures fragments in -X direction from light
+        // etc.
         const directions = [6]Math.Vec3{
-            Math.Vec3.init(-1, 0, 0), // Face 0 (+X): look toward -X (swapped)
-            Math.Vec3.init(1, 0, 0), // Face 1 (-X): look toward +X (swapped)
+            Math.Vec3.init(1, 0, 0), // Face 0 (+X): look toward +X
+            Math.Vec3.init(-1, 0, 0), // Face 1 (-X): look toward -X
             Math.Vec3.init(0, 1, 0), // Face 2 (+Y): look toward +Y
             Math.Vec3.init(0, -1, 0), // Face 3 (-Y): look toward -Y
             Math.Vec3.init(0, 0, 1), // Face 4 (+Z): look toward +Z

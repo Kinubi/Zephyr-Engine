@@ -33,11 +33,11 @@ pub const MAX_SHADOW_LIGHTS: u32 = 8;
 const SHADOW_NEAR: f32 = 0.1;
 const SHADOW_FAR: f32 = 50.0;
 
-/// Push constants for shadow pass (multiview mode)
-/// Model matrix + face index - light selection via gl_ViewIndex
+/// Push constants for shadow pass (single-pass with geometry shader)
+/// Model matrix + active light count for geometry shader culling
 pub const ShadowPushConstants = extern struct {
     model_matrix: [16]f32 = Math.Mat4x4.identity().data,
-    face_index: u32 = 0, // Which cube face (0-5) we're rendering
+    num_active_lights: u32 = MAX_SHADOW_LIGHTS,
     _padding: [3]u32 = .{ 0, 0, 0 },
 };
 
@@ -118,13 +118,14 @@ pub const ShadowMapPass = struct {
         const self: *ShadowMapPass = @fieldParentPtr("base", base);
         _ = graph;
 
-        // Create shadow pipeline with fragment shader for linear depth
+        // Create shadow pipeline with geometry shader for single-pass layered rendering
         const DepthStencilState = @import("../pipeline_builder.zig").DepthStencilState;
 
         const pipeline_config = PipelineConfig{
             .name = "shadow_map_pass",
             .vertex_shader = "assets/shaders/shadow.vert",
-            .fragment_shader = "assets/shaders/shadow.frag", // Fragment shader writes linear depth
+            .geometry_shader = "assets/shaders/shadow.geom", // Broadcasts to all layers
+            .fragment_shader = "assets/shaders/shadow.frag",
             .render_pass = .null_handle, // Dynamic rendering
             .vertex_input_bindings = vertex_formats.mesh_bindings[0..],
             .vertex_input_attributes = vertex_formats.mesh_attributes[0..],
@@ -138,10 +139,9 @@ pub const ShadowMapPass = struct {
             },
             .dynamic_rendering_color_formats = &[_]vk.Format{}, // No color output
             .dynamic_rendering_depth_format = .d32_sfloat,
-            // Pipeline view_mask must cover all possible active lights for multiview rendering
-            .dynamic_rendering_view_mask = (@as(u32, 1) << MAX_SHADOW_LIGHTS) - 1,
+            .dynamic_rendering_view_mask = 0, // No multiview - geometry shader handles layers
             .push_constant_ranges = &[_]vk.PushConstantRange{.{
-                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+                .stage_flags = .{ .vertex_bit = true, .geometry_bit = true, .fragment_bit = true },
                 .offset = 0,
                 .size = @sizeOf(ShadowPushConstants),
             }},
@@ -241,55 +241,46 @@ pub const ShadowMapPass = struct {
         // Bind pipeline with all descriptor sets (SSBO binding handled by resource_binder.updateFrame)
         try self.pipeline_system.bindPipelineWithDescriptorSets(cmd, self.shadow_pipeline, frame_info.current_frame);
 
-        // Render 6 passes - one per cube face, all lights rendered simultaneously via multiview
-        // view_mask must match pipeline's view_mask (MAX_SHADOW_LIGHTS) - we always render all layers
-        // even if not all lights are active (inactive lights will just have garbage data that won't be sampled)
-        const view_mask: u32 = (@as(u32, 1) << MAX_SHADOW_LIGHTS) - 1;
-
-        for (0..6) |face_idx| {
-            try self.renderFaceForAllLights(cmd, shadow_cube, @intCast(face_idx), view_mask, active_light_count);
-        }
+        // Single-pass rendering using geometry shader with invocations
+        try self.renderAllFacesAndLights(cmd, shadow_cube, active_light_count);
     }
 
-    /// Render one cube face for ALL lights simultaneously using multiview
-    fn renderFaceForAllLights(
+    /// Render all cube faces for ALL lights in a single render pass
+    /// Uses geometry shader with invocations to broadcast to all 48 layers
+    fn renderAllFacesAndLights(
         self: *ShadowMapPass,
         cmd: vk.CommandBuffer,
         shadow_cube: *ManagedTexture,
-        face_index: u32,
-        view_mask: u32,
-        layer_count: u32,
+        active_light_count: u32,
     ) !void {
         const gc = self.graphics_context;
 
-        // Get face array view for this face - covers this face across all cubes
-        // Memory layout: [face0_light0..N, face1_light0..N, ...]
-        // So face_array_views[face] covers contiguous layers for all lights on this face
-        const face_view = shadow_cube.getFaceArrayView(face_index) orelse return;
-
-        // Use DynamicRenderingHelper for depth-only multiview
+        // Get the full array view covering all layers (6 faces × MAX_LIGHTS = 48)
+        const full_view = shadow_cube.getFullArrayView();
         const extent = vk.Extent2D{ .width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE };
+        const total_layers: u32 = 6 * MAX_SHADOW_LIGHTS;
+
+        // Use layered rendering with all 48 layers
+        // Geometry shader's gl_Layer output selects the target layer
         const helper = DynamicRenderingHelper.initDepthOnly(
-            face_view,
+            full_view,
             extent,
-            1.0, // clear depth
-            view_mask, // render to all active lights
-            layer_count,
+            1.0, // clear depth to 1.0 (far)
+            0, // No multiview
+            total_layers, // All 48 layers accessible
         );
 
         helper.begin(gc, cmd);
-
-        // Render all shadow casters for this face (all lights via multiview)
-        try self.renderShadowCasters(cmd, face_index);
-
+        try self.renderShadowCasters(cmd, active_light_count);
         helper.end(gc, cmd);
     }
 
-    /// Render all shadow casters with the given face index in push constants
-    fn renderShadowCasters(self: *ShadowMapPass, cmd: vk.CommandBuffer, face_index: u32) !void {
+    /// Render all shadow casters - geometry shader broadcasts to all 6 faces
+    /// Each mesh is drawn with instanceCount = numActiveLights
+    fn renderShadowCasters(self: *ShadowMapPass, cmd: vk.CommandBuffer, active_light_count: u32) !void {
         const gc = self.graphics_context;
 
-        // Get pipeline layout from pipeline system (ensures correct layout during hot-reload)
+        // Get pipeline layout from pipeline system
         const pipeline_layout = try self.pipeline_system.getPipelineLayout(self.shadow_pipeline);
 
         // Get rasterization data from render system
@@ -315,28 +306,30 @@ pub const ShadowMapPass = struct {
                     gc.vkd.cmdBindIndexBuffer(cmd, ib.buffer, 0, .uint32);
                 }
 
-                // Draw each instance with its transform
+                // Draw each mesh with instanceCount = active_light_count
+                // Each instance renders to one light, geometry shader broadcasts to 6 faces
                 for (batch.instances) |instance| {
-                    // Push model matrix and face index (light selection via gl_ViewIndex)
                     const push_constants = ShadowPushConstants{
                         .model_matrix = instance.transform,
-                        .face_index = face_index,
+                        .num_active_lights = active_light_count,
                     };
 
                     gc.vkd.cmdPushConstants(
                         cmd,
                         pipeline_layout,
-                        .{ .vertex_bit = true, .fragment_bit = true },
+                        .{ .vertex_bit = true, .geometry_bit = true, .fragment_bit = true },
                         0,
                         @sizeOf(ShadowPushConstants),
                         std.mem.asBytes(&push_constants),
                     );
 
-                    // Draw - multiview renders to all lights in one draw
+                    // Draw with instanceCount = active lights
+                    // Vertex shader: gl_InstanceIndex = light index
+                    // Geometry shader: 6 invocations per primitive = 6 faces
                     if (mesh.index_buffer != null) {
-                        gc.vkd.cmdDrawIndexed(cmd, @intCast(mesh.indices.items.len), 1, 0, 0, 0);
+                        gc.vkd.cmdDrawIndexed(cmd, @intCast(mesh.indices.items.len), active_light_count, 0, 0, 0);
                     } else {
-                        gc.vkd.cmdDraw(cmd, @intCast(mesh.vertices.items.len), 1, 0, 0);
+                        gc.vkd.cmdDraw(cmd, @intCast(mesh.vertices.items.len), active_light_count, 0, 0);
                     }
                 }
             }

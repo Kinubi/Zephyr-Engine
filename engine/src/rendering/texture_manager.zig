@@ -70,6 +70,13 @@ pub const ManagedTexture = struct {
         return self.texture.getFaceArrayView(face);
     }
 
+    /// Get the full array image view for cube array textures
+    /// Returns a 2D_ARRAY view covering ALL layers (6 faces × N cubes)
+    /// Used for single-pass shadow rendering with gl_Layer output
+    pub fn getFullArrayView(self: *const ManagedTexture) vk.ImageView {
+        return self.texture.image_view;
+    }
+
     /// Check if this is a cube texture
     pub fn isCube(self: *const ManagedTexture) bool {
         return self.texture.is_cube;
