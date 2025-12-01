@@ -19,6 +19,8 @@ const BoxCollider = ecs.BoxCollider;
 const SphereCollider = ecs.SphereCollider;
 const CapsuleCollider = ecs.CapsuleCollider;
 const MeshCollider = ecs.MeshCollider;
+const AnimationComponent = ecs.AnimationComponent;
+const SkeletonComponent = ecs.SkeletonComponent;
 
 const Scene = zephyr.Scene;
 const Math = zephyr.math;
@@ -570,6 +572,12 @@ pub const SceneHierarchyPanel = struct {
                 // Physics: MeshCollider
                 self.renderComponentInspector(scene, entity, MeshCollider, "Mesh Collider", renderMeshColliderInspector);
 
+                // Animation: AnimationComponent
+                self.renderComponentInspector(scene, entity, AnimationComponent, "Animation", renderAnimationInspector);
+
+                // Animation: SkeletonComponent
+                self.renderComponentInspector(scene, entity, SkeletonComponent, "Skeleton", renderSkeletonInspector);
+
                 // Script component inspector/editor
                 if (scene.ecs_world.get(ScriptComponent, entity)) |sc| {
                     if (c.ImGui_CollapsingHeader("Script", c.ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -800,6 +808,12 @@ pub const SceneHierarchyPanel = struct {
                     self.addComponentMenuItem(scene.ecs_world, entity, SphereCollider, "Sphere Collider");
                     self.addComponentMenuItem(scene.ecs_world, entity, CapsuleCollider, "Capsule Collider");
                     self.addComponentMenuItem(scene.ecs_world, entity, MeshCollider, "Mesh Collider");
+
+                    c.ImGui_Separator();
+                    c.ImGui_Text("Animation");
+
+                    self.addComponentMenuItem(scene.ecs_world, entity, AnimationComponent, "Animation");
+                    self.addComponentMenuItem(scene.ecs_world, entity, SkeletonComponent, "Skeleton");
 
                     c.ImGui_EndPopup();
                 }
@@ -1328,6 +1342,181 @@ pub const SceneHierarchyPanel = struct {
             if (scene.ecs_world.get(RigidBody, entity)) |rb| {
                 rb.body_id = .invalid;
             }
+        }
+    }
+
+    /// Render AnimationComponent inspector with playback controls
+    fn renderAnimationInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, anim: *AnimationComponent) void {
+        _ = self;
+        _ = scene;
+        _ = entity;
+
+        // Display current clip info
+        c.ImGui_Text("Clip Count: %d", anim.clip_count);
+
+        if (anim.current_clip >= 0) {
+            if (anim.clips[@intCast(anim.current_clip)]) |clip| {
+                c.ImGui_Text("Current Clip: %s", clip.getName().ptr);
+                c.ImGui_Text("Duration: %.2f s", clip.duration);
+            }
+        } else {
+            c.ImGui_Text("Current Clip: None");
+        }
+
+        // Playback state display
+        c.ImGui_Separator();
+        c.ImGui_Text("Playback");
+
+        // Time display
+        c.ImGui_Text("Time: %.2f s", anim.state.current_time);
+
+        // Progress bar (if we have a current clip)
+        if (anim.current_clip >= 0) {
+            if (anim.clips[@intCast(anim.current_clip)]) |clip| {
+                if (clip.duration > 0) {
+                    const progress = anim.state.current_time / clip.duration;
+                    c.ImGui_ProgressBar(progress, .{ .x = -1, .y = 0 }, "");
+                }
+            }
+        }
+
+        // Playback speed
+        var speed = anim.state.speed;
+        if (c.ImGui_SliderFloat("Speed", &speed, 0.0, 3.0)) {
+            anim.state.speed = speed;
+        }
+
+        // Looping checkbox
+        var looping = anim.state.looping;
+        if (c.ImGui_Checkbox("Loop", &looping)) {
+            anim.state.looping = looping;
+        }
+
+        // Playback controls
+        c.ImGui_Spacing();
+        if (anim.state.playing) {
+            if (c.ImGui_Button("Pause")) {
+                anim.pause();
+            }
+        } else {
+            if (c.ImGui_Button("Play")) {
+                if (anim.current_clip < 0 and anim.clip_count > 0) {
+                    anim.play(0);
+                } else {
+                    anim.unpause();
+                }
+            }
+        }
+
+        c.ImGui_SameLine();
+        if (c.ImGui_Button("Stop")) {
+            anim.stop();
+            anim.state.current_time = 0;
+        }
+
+        c.ImGui_SameLine();
+        if (c.ImGui_Button("Restart")) {
+            anim.state.current_time = 0;
+            anim.state.playing = true;
+        }
+
+        // Clip list
+        if (anim.clip_count > 0) {
+            c.ImGui_Separator();
+            c.ImGui_Text("Available Clips:");
+
+            for (0..anim.clip_count) |i| {
+                if (anim.clips[i]) |clip| {
+                    const is_current = @as(i8, @intCast(i)) == anim.current_clip;
+                    var label_buf: [128]u8 = undefined;
+                    const label = std.fmt.bufPrintZ(&label_buf, "{s} ({d:.2}s){s}", .{
+                        clip.getName(),
+                        clip.duration,
+                        if (is_current) " [Playing]" else "",
+                    }) catch "Clip";
+
+                    if (c.ImGui_SelectableEx(label.ptr, is_current, 0, .{ .x = 0, .y = 0 })) {
+                        anim.play(@intCast(i));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render SkeletonComponent inspector with bone hierarchy
+    fn renderSkeletonInspector(self: *SceneHierarchyPanel, scene: *Scene, entity: EntityId, skeleton: *SkeletonComponent) void {
+        _ = self;
+        _ = scene;
+        _ = entity;
+
+        c.ImGui_Text("Bone Count: %d", skeleton.bone_count);
+        c.ImGui_Text("Root Bones: %d", skeleton.root_bone_count);
+
+        // Show dirty state
+        if (skeleton.dirty) {
+            c.ImGui_TextColored(.{ .x = 1.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "[Dirty]");
+        } else {
+            c.ImGui_TextColored(.{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "[Clean]");
+        }
+
+        c.ImGui_Separator();
+
+        // Bone hierarchy tree
+        if (c.ImGui_TreeNode("Bones")) {
+            // Render root bones first
+            for (skeleton.root_bones[0..skeleton.root_bone_count]) |root_idx| {
+                if (root_idx < skeleton.bone_count) {
+                    renderBoneNode(skeleton, root_idx);
+                }
+            }
+            c.ImGui_TreePop();
+        }
+    }
+
+    fn renderBoneNode(skeleton: *SkeletonComponent, bone_idx: u16) void {
+        if (bone_idx >= skeleton.bone_count) return;
+
+        const bone = &skeleton.bones[bone_idx];
+        const bone_name = bone.getName();
+
+        var label_buf: [128]u8 = undefined;
+        const label = std.fmt.bufPrintZ(&label_buf, "{s} [{}]", .{ bone_name, bone_idx }) catch "Bone";
+
+        // Check if this bone has children
+        var has_children = false;
+        for (0..skeleton.bone_count) |i| {
+            if (skeleton.bones[i].parent_index == @as(i16, @intCast(bone_idx))) {
+                has_children = true;
+                break;
+            }
+        }
+
+        var flags: c_int = 0;
+        if (!has_children) {
+            flags = c.ImGuiTreeNodeFlags_Leaf;
+        }
+
+        if (c.ImGui_TreeNodeEx(label.ptr, flags)) {
+            // Show bone properties
+            c.ImGui_Text("Parent: %d", bone.parent_index);
+
+            const pos = bone.local_position;
+            c.ImGui_Text("Pos: (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
+
+            const rot = bone.local_rotation.toEuler();
+            c.ImGui_Text("Rot: (%.1f, %.1f, %.1f)", rot.x * 57.2958, rot.y * 57.2958, rot.z * 57.2958);
+
+            const scl = bone.local_scale;
+            c.ImGui_Text("Scale: (%.2f, %.2f, %.2f)", scl.x, scl.y, scl.z);
+
+            // Render children
+            for (0..skeleton.bone_count) |i| {
+                if (skeleton.bones[i].parent_index == @as(i16, @intCast(bone_idx))) {
+                    renderBoneNode(skeleton, @intCast(i));
+                }
+            }
+
+            c.ImGui_TreePop();
         }
     }
 

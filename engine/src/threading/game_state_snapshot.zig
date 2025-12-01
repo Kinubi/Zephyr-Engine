@@ -70,6 +70,9 @@ pub const GameStateSnapshot = struct {
     shadow_changed: bool = false,
     shadow_generation: u32 = 0,
 
+    // Skeletal animation bone palettes - flat array of bone matrices
+    bone_palettes: []const Math.Mat4x4 = &[_]Math.Mat4x4{},
+
     // Particle system data (if needed)
     // particles: []ParticleData,
 
@@ -82,6 +85,8 @@ pub const GameStateSnapshot = struct {
         layer: u8,
         casts_shadows: bool,
         receives_shadows: bool,
+        bone_palette_offset: u32 = 0, // Offset into bone_palettes array (for skeletal animation)
+        bone_count: u16 = 0, // Number of bones (0 for static meshes)
     };
 
     pub const PointLightData = struct {

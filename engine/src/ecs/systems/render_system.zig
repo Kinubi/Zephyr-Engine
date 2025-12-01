@@ -3,6 +3,8 @@ const World = @import("../world.zig").World;
 const View = @import("../view.zig").View;
 const Transform = @import("../components/transform.zig").Transform;
 const MeshRenderer = @import("../components/mesh_renderer.zig").MeshRenderer;
+const animation_components = @import("../components/animation.zig");
+const SkeletonComponent = animation_components.SkeletonComponent;
 const Camera = @import("../components/camera.zig").Camera;
 const EntityId = @import("../entity_registry.zig").EntityId;
 const math = @import("../../utils/math.zig");
@@ -63,6 +65,10 @@ pub const RenderSystem = struct {
     // Always valid - starts as dummy buffer, gets replaced with real data
     instance_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer, // Heap-allocated pointers (similar to MaterialSystem)
     instance_capacity: usize = 0, // Current capacity in number of instances
+
+    // Bone palette SSBO (per-frame) for GPU skinning
+    bone_palette_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer,
+    bone_palette_capacity: usize = 0, // Capacity in number of matrices
 
     // Track last instance data for delta detection
     last_instance_data: std.ArrayList(render_data_types.RasterizationData.InstanceData),
@@ -141,12 +147,59 @@ pub const RenderSystem = struct {
             buf.buffer.unmap();
         }
 
+        // Create dummy bone palette buffers (single identity matrix per frame)
+        const dummy_palette = math.Mat4.identity();
+        const palette_entry_size = @sizeOf(math.Mat4);
+        var bone_palette_buffers: [MAX_FRAMES_IN_FLIGHT]*ManagedBuffer = undefined;
+        for (&bone_palette_buffers, 0..) |*buf_ptr, frame_idx| {
+            const frame = @as(u32, @intCast(frame_idx));
+
+            const buf = try allocator.create(ManagedBuffer);
+            errdefer allocator.destroy(buf);
+            buf_ptr.* = buf;
+
+            const buffer_name = try std.fmt.allocPrint(allocator, "BonePaletteBuffer_frame_{d}", .{frame});
+            errdefer allocator.free(buffer_name);
+
+            buf.* = ManagedBuffer{
+                .buffer = undefined,
+                .name = buffer_name,
+                .size = palette_entry_size,
+                .strategy = .host_visible,
+                .created_frame = 0,
+                .generation = 1,
+                .binding_info = null,
+                .arena_offset = null,
+                .pending_bind_mask = std.atomic.Value(u8).init((@as(u8, 1) << MAX_FRAMES_IN_FLIGHT) - 1),
+            };
+
+            const alloc_result = try bm.allocateFromFrameArena(
+                frame,
+                buf,
+                palette_entry_size,
+                @alignOf(math.Mat4),
+            );
+
+            buf.buffer = alloc_result.buffer.buffer;
+            buf.arena_offset = alloc_result.offset;
+            buf.size = palette_entry_size;
+            buf.markUpdated();
+
+            try buf.buffer.map(palette_entry_size, buf.arena_offset orelse 0);
+            const data_ptr: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+            const bytes = std.mem.asBytes(&dummy_palette);
+            @memcpy(data_ptr[0..bytes.len], bytes);
+            buf.buffer.unmap();
+        }
+
         return .{
             .allocator = allocator,
             .thread_pool = thread_pool,
             .buffer_manager = buffer_manager,
             .instance_buffers = instance_buffers,
             .instance_capacity = 1, // Start with 1 dummy instance
+            .bone_palette_buffers = bone_palette_buffers,
+            .bone_palette_capacity = 1,
             .last_instance_data = std.ArrayList(render_data_types.RasterizationData.InstanceData){},
             .scratch_arena = std.heap.ArenaAllocator.init(allocator),
         };
@@ -174,6 +227,21 @@ pub const RenderSystem = struct {
                     };
                 }
             }
+
+            for (&self.bone_palette_buffers, 0..) |buf_ptr, frame_idx| {
+                const frame = @as(u32, @intCast(frame_idx));
+                const buf = buf_ptr;
+
+                if (buf.arena_offset != null) {
+                    bm.freeFromFrameArena(frame, buf);
+                    self.allocator.free(buf.name);
+                    self.allocator.destroy(buf);
+                } else {
+                    bm.destroyBuffer(buf) catch |err| {
+                        log(.WARN, "render_system", "Failed to destroy bone palette buffer for frame {}: {}", .{ frame, err });
+                    };
+                }
+            }
         }
 
         // Clean up tracking
@@ -191,6 +259,9 @@ pub const RenderSystem = struct {
         // Free first raster slot if it exists
         if (raster0) |cache| {
             self.allocator.free(cache.objects);
+            if (cache.bone_palettes.len > 0) {
+                self.allocator.free(cache.bone_palettes);
+            }
             for (cache.batch_lists) |list| {
                 for (list.batches) |batch| {
                     self.allocator.free(batch.instances);
@@ -202,6 +273,9 @@ pub const RenderSystem = struct {
         // Free second raster slot only if different from first
         if (raster1 != null and !same_raster_batches) {
             self.allocator.free(raster1.?.objects);
+            if (raster1.?.bone_palettes.len > 0) {
+                self.allocator.free(raster1.?.bone_palettes);
+            }
             for (raster1.?.batch_lists) |list| {
                 for (list.batches) |batch| {
                     self.allocator.free(batch.instances);
@@ -253,6 +327,8 @@ pub const RenderSystem = struct {
         layer: u8,
         casts_shadows: bool,
         receives_shadows: bool,
+        bone_palette_offset: u32 = 0,
+        bone_count: u16 = 0,
     };
 
     /// Camera data extracted from Camera + Transform
@@ -533,6 +609,9 @@ pub const RenderSystem = struct {
         // Clean up old cached data in the WRITE buffer (safe - render thread reads ACTIVE buffer)
         if (self.cached_raster_data[write_idx]) |data| {
             self.allocator.free(data.objects);
+            if (data.bone_palettes.len > 0) {
+                self.allocator.free(data.bone_palettes);
+            }
             // Clean up instanced batches
             for (data.batch_lists) |list| {
                 for (list.batches) |batch| {
@@ -558,9 +637,9 @@ pub const RenderSystem = struct {
 
         // Use parallel cache building if thread_pool available and enough work
         if (self.thread_pool != null and entities.len >= 50) {
-            try self.buildCachesFromSnapshotParallel(entities, asset_manager, write_idx, frustum);
+            try self.buildCachesFromSnapshotParallel(entities, snapshot.bone_palettes, asset_manager, write_idx, frustum);
         } else {
-            try self.buildCachesFromSnapshotSingleThreaded(entities, asset_manager, write_idx, frustum);
+            try self.buildCachesFromSnapshotSingleThreaded(entities, snapshot.bone_palettes, asset_manager, write_idx, frustum);
         }
 
         const cache_build_time_ns = std.time.nanoTimestamp() - cache_build_start;
@@ -600,6 +679,9 @@ pub const RenderSystem = struct {
         // Do NOT touch RT data - it stays in the active buffer and is not affected by frustum culling
         if (self.cached_raster_data[write_idx]) |data| {
             self.allocator.free(data.objects);
+            if (data.bone_palettes.len > 0) {
+                self.allocator.free(data.bone_palettes);
+            }
             for (data.batch_lists) |list| {
                 for (list.batches) |batch| {
                     self.allocator.free(batch.instances);
@@ -617,7 +699,7 @@ pub const RenderSystem = struct {
         const frustum = if (self.frustum_culling_enabled) &snapshot.camera_frustum else null;
 
         // Build only raster cache with frustum culling
-        try self.buildRasterCacheOnly(entities, asset_manager, write_idx, frustum);
+        try self.buildRasterCacheOnly(entities, snapshot.bone_palettes, asset_manager, write_idx, frustum);
 
         // Upload instance data to GPU after rebuilding batches
         // This syncs the instance buffer with the new culled batch layout
@@ -635,6 +717,7 @@ pub const RenderSystem = struct {
     fn buildRasterCacheOnly(
         self: *RenderSystem,
         entities: []const GameStateSnapshot.EntityRenderData,
+        bone_palettes: []const math.Mat4,
         asset_manager: *AssetManager,
         write_idx: u8,
         frustum: ?*const math.Frustum,
@@ -698,6 +781,8 @@ pub const RenderSystem = struct {
                     .material_index = material_index,
                     .visible = is_visible,
                     .entity_index = @intCast(i),
+                    .bone_palette_offset = entity_data.bone_palette_offset,
+                    .bone_count = entity_data.bone_count,
                 };
 
                 // Only add visible objects to batches
@@ -728,11 +813,21 @@ pub const RenderSystem = struct {
         // Increment cache generation
         self.cache_generation +%= 1;
 
+        var palette_copy: []math.Mat4 = &.{};
+        if (bone_palettes.len > 0) {
+            palette_copy = try self.allocator.dupe(math.Mat4, bone_palettes);
+        }
+        errdefer {
+            if (palette_copy.len > 0) self.allocator.free(palette_copy);
+        }
+
         // Store raster data only
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
             .batch_lists = batch_lists,
+            .bone_palettes = palette_copy,
         };
+        palette_copy = &.{};
 
         // Atomically flip to make the new cache active
         self.active_cache_index.store(write_idx, .release);
@@ -824,6 +919,81 @@ pub const RenderSystem = struct {
                 }
             }
             buf.buffer.unmap();
+        }
+    }
+
+    /// Upload bone palette data to GPU for skinning
+    fn uploadBonePalettes(self: *RenderSystem, palette_data: []const math.Mat4) !void {
+        const buffer_manager = self.buffer_manager orelse return;
+
+        if (self.bone_palette_buffers.len == 0) return;
+
+        const palette_entry_size = @sizeOf(math.Mat4);
+        const required_count: usize = @max(palette_data.len, @as(usize, 1));
+
+        if (required_count > self.bone_palette_capacity) {
+            const buffer_size = required_count * palette_entry_size;
+
+            for (&self.bone_palette_buffers, 0..) |*buf_ptr, frame_idx| {
+                const frame = @as(u32, @intCast(frame_idx));
+                const buf = buf_ptr.*;
+
+                const alloc_result = buffer_manager.allocateFromFrameArena(
+                    frame,
+                    buf,
+                    buffer_size,
+                    @alignOf(math.Mat4),
+                ) catch |err| {
+                    if (err == error.ArenaRequiresCompaction) {
+                        log(.WARN, "render_system", "Bone palette arena full for frame {}, creating dedicated buffer", .{frame});
+                        self.allocator.free(buf.name);
+                        self.allocator.destroy(buf);
+
+                        const dedicated_name = try std.fmt.allocPrint(self.allocator, "bone_palette_buffer_frame{d}_dedicated", .{frame});
+                        defer self.allocator.free(dedicated_name);
+                        const dedicated = try buffer_manager.createBuffer(
+                            .{
+                                .name = dedicated_name,
+                                .size = buffer_size,
+                                .strategy = .device_local,
+                                .usage = .{ .storage_buffer_bit = true, .transfer_dst_bit = true },
+                            },
+                            frame,
+                        );
+                        buf_ptr.* = dedicated;
+                        dedicated.markUpdated();
+                        continue;
+                    }
+                    return err;
+                };
+
+                buf.buffer = alloc_result.buffer.buffer;
+                buf.arena_offset = alloc_result.offset;
+                buf.size = buffer_size;
+                buf.markUpdated();
+            }
+
+            self.bone_palette_capacity = required_count;
+        }
+
+        const copy_bytes = if (palette_data.len > 0)
+            palette_data.len * palette_entry_size
+        else
+            palette_entry_size;
+
+        for (&self.bone_palette_buffers) |buf| {
+            try buf.buffer.map(copy_bytes, buf.arena_offset orelse 0);
+            const dst: [*]u8 = @ptrCast(buf.buffer.mapped.?);
+            if (palette_data.len > 0) {
+                const bytes = std.mem.sliceAsBytes(palette_data);
+                @memcpy(dst[0..bytes.len], bytes);
+            } else {
+                const identity = math.Mat4.identity();
+                const bytes = std.mem.asBytes(&identity);
+                @memcpy(dst[0..bytes.len], bytes);
+            }
+            buf.buffer.unmap();
+            buf.markUpdated();
         }
     }
 
@@ -943,6 +1113,42 @@ pub const RenderSystem = struct {
         }
     }
 
+    fn refreshSkinningPalettes(self: *RenderSystem, world: *World, renderables_set: *components.RenderablesSet) void {
+        _ = self; // Currently unused but kept for future debugging/metrics
+        if (renderables_set.renderables.len == 0 or renderables_set.pose_palette_data.len == 0) {
+            // Nothing to update
+            return;
+        }
+
+        for (renderables_set.renderables) |renderable| {
+            if (renderable.bone_count == 0) continue;
+
+            const offset = renderable.bone_palette_offset;
+            const end_index = offset + renderable.bone_count;
+            if (end_index > renderables_set.pose_palette_data.len) {
+                log(.WARN, "render_system", "Bone palette offset out of range for entity {} (offset {} count {} total {})", .{
+                    @intFromEnum(renderable.entity_id),
+                    offset,
+                    renderable.bone_count,
+                    renderables_set.pose_palette_data.len,
+                });
+                continue;
+            }
+
+            if (world.get(SkeletonComponent, renderable.entity_id)) |skeleton| {
+                const src = skeleton.pose_palette[0..renderable.bone_count];
+                const dst = renderables_set.pose_palette_data[offset..end_index];
+                @memcpy(dst, src);
+                skeleton.dirty = false;
+            } else {
+                // If the skeleton component is missing, fill with identity matrices to avoid stale data
+                for (renderables_set.pose_palette_data[offset..end_index]) |*mat| {
+                    mat.* = math.Mat4.identity();
+                }
+            }
+        }
+    }
+
     /// Calculate instance deltas and store in InstanceDeltasSet component
     /// ALWAYS creates a delta - on first frame/reallocation, delta contains ALL instances
     fn calculateInstanceDeltas(
@@ -993,6 +1199,8 @@ pub const RenderSystem = struct {
                     .data = .{
                         .transform = renderable.transform.data,
                         .material_index = material_index,
+                        .bone_palette_offset = renderable.bone_palette_offset,
+                        .bone_count = renderable.bone_count,
                     },
                 });
             }
@@ -1182,6 +1390,8 @@ pub const RenderSystem = struct {
                     instances[inst_idx] = .{
                         .transform = obj.transform,
                         .material_index = obj.material_index,
+                        .bone_palette_offset = obj.bone_palette_offset,
+                        .bone_count = obj.bone_count,
                     };
                 }
 
@@ -1203,6 +1413,7 @@ pub const RenderSystem = struct {
     fn buildCachesFromSnapshotSingleThreaded(
         self: *RenderSystem,
         entities: []const GameStateSnapshot.EntityRenderData,
+        bone_palettes: []const math.Mat4,
         asset_manager: *AssetManager,
         write_idx: u8,
         frustum: ?*const math.Frustum,
@@ -1281,6 +1492,8 @@ pub const RenderSystem = struct {
                     .material_index = material_index,
                     .visible = is_visible,
                     .entity_index = @intCast(i),
+                    .bone_palette_offset = entity_data.bone_palette_offset,
+                    .bone_count = entity_data.bone_count,
                 };
 
                 // Only add visible objects to raster batches (RT gets everything)
@@ -1326,11 +1539,21 @@ pub const RenderSystem = struct {
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
 
+        var palette_copy: []math.Mat4 = &.{};
+        if (bone_palettes.len > 0) {
+            palette_copy = try self.allocator.dupe(math.Mat4, bone_palettes);
+        }
+        errdefer {
+            if (palette_copy.len > 0) self.allocator.free(palette_copy);
+        }
+
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
             .batch_lists = batch_lists,
+            .bone_palettes = palette_copy,
         };
+        palette_copy = &.{};
 
         self.cached_raytracing_data[write_idx] = .{
             .instances = instances,
@@ -1346,6 +1569,7 @@ pub const RenderSystem = struct {
     fn buildCachesFromSnapshotParallel(
         self: *RenderSystem,
         entities: []const GameStateSnapshot.EntityRenderData,
+        bone_palettes: []const math.Mat4,
         asset_manager: *AssetManager,
         write_idx: u8,
         frustum: ?*const math.Frustum,
@@ -1491,11 +1715,21 @@ pub const RenderSystem = struct {
         // Increment cache generation to invalidate GPU buffers
         self.cache_generation +%= 1;
 
+        var palette_copy: []math.Mat4 = &.{};
+        if (bone_palettes.len > 0) {
+            palette_copy = try self.allocator.dupe(math.Mat4, bone_palettes);
+        }
+        errdefer {
+            if (palette_copy.len > 0) self.allocator.free(palette_copy);
+        }
+
         // Store cached data in WRITE buffer
         self.cached_raster_data[write_idx] = .{
             .objects = raster_objects,
             .batch_lists = batch_lists,
+            .bone_palettes = palette_copy,
         };
+        palette_copy = &.{};
 
         self.cached_raytracing_data[write_idx] = .{
             .instances = instances,
@@ -1713,6 +1947,8 @@ pub const RenderSystem = struct {
                     .material_index = material_index,
                     .visible = true,
                     .entity_index = @intCast(entity_idx),
+                    .bone_palette_offset = renderable.bone_palette_offset,
+                    .bone_count = renderable.bone_count,
                 };
 
                 ctx.geometries[output_idx] = .{
@@ -1871,9 +2107,15 @@ pub const RenderSystem = struct {
                 };
             }
 
+            var palette_copy: []math.Mat4 = &.{};
+            if (cached.bone_palettes.len > 0) {
+                palette_copy = try self.allocator.dupe(math.Mat4, cached.bone_palettes);
+            }
+
             return RasterizationData{
                 .objects = objects_copy,
                 .batch_lists = batch_lists_copy,
+                .bone_palettes = palette_copy,
             };
         }
 
@@ -1881,6 +2123,7 @@ pub const RenderSystem = struct {
         return RasterizationData{
             .objects = &[_]RasterizationData.RenderableObject{},
             .batch_lists = &[_]RasterizationData.BatchList{},
+            .bone_palettes = &[_]math.Mat4{},
         };
     }
 
@@ -2025,11 +2268,21 @@ pub const RenderSystem = struct {
         // Increment cache generation
         self.cache_generation +%= 1;
 
+        var palette_copy: []math.Mat4 = &.{};
+        if (active_raster.bone_palettes.len > 0) {
+            palette_copy = try self.allocator.dupe(math.Mat4, active_raster.bone_palettes);
+        }
+        errdefer {
+            if (palette_copy.len > 0) self.allocator.free(palette_copy);
+        }
+
         // Store caches in WRITE buffer
         self.cached_raster_data[write_idx] = RasterizationData{
             .objects = raster_objects,
             .batch_lists = batch_lists,
+            .bone_palettes = palette_copy,
         };
+        palette_copy = &.{};
         self.cached_raytracing_data[write_idx] = RaytracingData{
             .instances = instances,
             .geometries = geometries,
@@ -2152,10 +2405,24 @@ pub fn prepare(world: *World, dt: f32) !void {
             var iter = mesh_view.iterator();
             var mesh_idx: usize = 0;
             var transform_dirty_detected = false;
+            var renderable_idx: usize = 0;
 
             outer: while (iter.next()) |entry| {
                 const renderer = entry.component;
                 if (!renderer.enabled or !renderer.hasValidAssets()) continue;
+
+                // Detect skeleton attachment/detachment or bone count changes
+                if (renderable_idx < renderables_set.renderables.len) {
+                    const renderable = renderables_set.renderables[renderable_idx];
+                    const skeleton = world.get(SkeletonComponent, entry.entity);
+                    const current_bone_count: u16 = if (skeleton) |skel| skel.bone_count else 0;
+                    if (current_bone_count != renderable.bone_count) {
+                        changes_detected = true;
+                        is_transform_only = false;
+                        reason = "skeleton_structure_changed";
+                        break :outer;
+                    }
+                }
 
                 // Check mesh pointers (Geometry change)
                 if (asset_manager.getModel(renderer.model_asset.?)) |model| {
@@ -2182,6 +2449,8 @@ pub fn prepare(world: *World, dt: f32) !void {
                         }
                     }
                 }
+
+                renderable_idx += 1;
             }
 
             // Also check if we have fewer meshes than before
@@ -2234,8 +2503,13 @@ pub fn prepare(world: *World, dt: f32) !void {
             // Pre-allocate with expected capacity to avoid reallocations
             // Use scratch allocator for temporary extraction list
             var extracted_renderables = std.ArrayList(components.ExtractedRenderable){};
-            try extracted_renderables.ensureTotalCapacity(self.scratch_arena.allocator(), current_count);
-            defer extracted_renderables.deinit(self.scratch_arena.allocator());
+            const scratch_alloc = self.scratch_arena.allocator();
+            try extracted_renderables.ensureTotalCapacity(scratch_alloc, current_count);
+            defer extracted_renderables.deinit(scratch_alloc);
+
+            var palette_data = std.ArrayList(math.Mat4){};
+            defer palette_data.deinit(scratch_alloc);
+            var total_palette_entries: usize = 0;
 
             // Single-pass extraction: clear dirty flags and extract in one loop
             var iter = mesh_view.iterator();
@@ -2259,6 +2533,20 @@ pub fn prepare(world: *World, dt: f32) !void {
                 const material_buffer_index = if (material_set) |ms| ms.material_buffer_index else null;
                 const material_set_name = if (material_set) |ms| ms.set_name else "opaque";
 
+                var palette_offset: u32 = 0;
+                var bone_count: u16 = 0;
+                if (world.get(SkeletonComponent, entry.entity)) |skeleton| {
+                    const current_bones: u16 = skeleton.bone_count;
+                    if (current_bones > 0) {
+                        const start_index = palette_data.items.len;
+                        palette_offset = @intCast(start_index);
+                        try palette_data.appendSlice(scratch_alloc, skeleton.pose_palette[0..current_bones]);
+                        total_palette_entries += current_bones;
+                        bone_count = current_bones;
+                    }
+                    skeleton.dirty = false;
+                }
+
                 extracted_renderables.appendAssumeCapacity(.{
                     .entity_id = entry.entity,
                     .transform = world_matrix,
@@ -2268,6 +2556,8 @@ pub fn prepare(world: *World, dt: f32) !void {
                     .layer = renderer.layer,
                     .casts_shadows = renderer.casts_shadows,
                     .receives_shadows = renderer.receives_shadows,
+                    .bone_count = bone_count,
+                    .bone_palette_offset = palette_offset,
                 });
             }
 
@@ -2287,7 +2577,11 @@ pub fn prepare(world: *World, dt: f32) !void {
 
             // Store extracted renderables in RenderablesSet component
             const renderables_copy = try self.allocator.dupe(components.ExtractedRenderable, extracted_renderables.items);
-            renderables_set.setRenderables(self.allocator, renderables_copy);
+            var palette_copy: []math.Mat4 = @constCast(&[_]math.Mat4{});
+            if (total_palette_entries > 0) {
+                palette_copy = try self.allocator.dupe(math.Mat4, palette_data.items);
+            }
+            renderables_set.setRenderables(self.allocator, renderables_copy, palette_copy);
 
             renderables_set.markDirty(is_transform_only);
 
@@ -2297,6 +2591,8 @@ pub fn prepare(world: *World, dt: f32) !void {
             }
         }
     }
+
+    self.refreshSkinningPalettes(world, renderables_set);
 }
 
 /// RENDER THREAD: Update phase - build GPU caches from snapshot
@@ -2351,6 +2647,8 @@ pub fn update(world: *World, frame_info: *FrameInfo) !void {
             renderables_set.clearDirty();
         }
     }
+
+    try self.uploadBonePalettes(snapshot.bone_palettes);
 }
 
 // ============================================================================

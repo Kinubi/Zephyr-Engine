@@ -14,6 +14,10 @@ pub const ExtractedRenderable = struct {
     layer: u8,
     casts_shadows: bool,
     receives_shadows: bool,
+    /// Number of bones if this is a skinned mesh (0 for static meshes)
+    bone_count: u16 = 0,
+    /// Offset into bone palette array (only valid if bone_count > 0)
+    bone_palette_offset: u32 = 0,
 };
 
 /// RenderablesSet component - tracks render change state and extracted data for snapshot system
@@ -29,6 +33,11 @@ pub const RenderablesSet = struct {
     /// Extracted renderable entities (from prepare phase)
     /// Allocated and owned by this component
     renderables: []ExtractedRenderable = &.{},
+
+    /// Bone palette matrices for skeletal animation (from prepare phase)
+    /// Flat array of bone matrices, indexed by each renderable's bone_palette_offset
+    pose_palette_data: []Math.Mat4x4 = &.{},
+
     allocator: ?std.mem.Allocator = null,
 
     pub fn init() RenderablesSet {
@@ -46,12 +55,16 @@ pub const RenderablesSet = struct {
             if (self.renderables.len > 0) {
                 allocator.free(self.renderables);
             }
+            if (self.pose_palette_data.len > 0) {
+                allocator.free(self.pose_palette_data);
+            }
         }
         self.renderables = &.{};
+        self.pose_palette_data = &.{};
         self.allocator = null;
     }
 
-    pub fn setRenderables(self: *RenderablesSet, allocator: std.mem.Allocator, renderables: []ExtractedRenderable) void {
+    pub fn setRenderables(self: *RenderablesSet, allocator: std.mem.Allocator, renderables: []ExtractedRenderable, pose_palette_data: []Math.Mat4x4) void {
         // Safety: If we're given a non-empty slice, we must have a valid allocator
         // This ensures the invariant that renderables.len > 0 implies allocator != null
         if (renderables.len > 0) {
@@ -62,6 +75,7 @@ pub const RenderablesSet = struct {
         self.deinit();
         // Store new data
         self.renderables = renderables;
+        self.pose_palette_data = pose_palette_data;
         self.allocator = allocator;
     }
 

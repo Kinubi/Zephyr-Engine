@@ -82,6 +82,8 @@ pub const AssetManager = @import("assets/asset_manager.zig").AssetManager;
 pub const AssetRegistry = @import("assets/asset_registry.zig").AssetRegistry;
 pub const AssetLoader = @import("assets/asset_loader.zig").AssetLoader;
 pub const ShaderManager = @import("assets/shader_manager.zig").ShaderManager;
+pub const GltfLoader = @import("assets/gltf_loader.zig").GltfLoader;
+pub const GltfLoadResult = @import("assets/gltf_loader.zig").GltfLoadResult;
 
 // Re-export commonly used asset-related types so downstream modules (editor)
 // can reference them via the single `zephyr` module and avoid duplicate imports.

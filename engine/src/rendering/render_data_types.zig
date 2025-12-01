@@ -12,7 +12,9 @@ pub const RasterizationData = struct {
     pub const InstanceData = struct {
         transform: [16]f32, // Model matrix
         material_index: u32, // Index into material buffer
-        padding: [3]u32 = .{ 0, 0, 0 }, // Align to 16 bytes for SSBO
+        bone_palette_offset: u32 = 0, // Offset into bone palette array (for skeletal animation)
+        bone_count: u16 = 0, // Number of bones (0 for static meshes)
+        padding: u16 = 0, // Align to 16 bytes for SSBO
     };
 
     /// A batch of instances sharing the same mesh
@@ -54,6 +56,8 @@ pub const RasterizationData = struct {
         material_index: u32,
         visible: bool = true,
         entity_index: u32 = 0, // Index into snapshot entities array (for fast updates)
+        bone_palette_offset: u32 = 0, // Offset into bone palette array (for skeletal animation)
+        bone_count: u16 = 0, // Number of bones (0 for static meshes)
     };
 
     pub const MaterialData = struct {
@@ -75,6 +79,10 @@ pub const RasterizationData = struct {
     // Instanced rendering data (preferred)
     // Partitioned by material set (e.g. "opaque", "transparent")
     batch_lists: []const BatchList = &[_]BatchList{},
+
+    // Skeletal animation bone palettes - flat array of bone matrices
+    // Each entity uses bone_palette_offset and bone_count to index into this
+    bone_palettes: []const @import("../utils/math.zig").Mat4 = &[_]@import("../utils/math.zig").Mat4{},
 
     pub fn getVisibleObjects(self: *const RasterizationData) []const RenderableObject {
         return self.objects;

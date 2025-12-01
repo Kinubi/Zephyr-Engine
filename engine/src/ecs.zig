@@ -21,6 +21,18 @@ pub const ParticleEmitter = @import("ecs/components/particle_emitter.zig").Parti
 pub const Name = @import("ecs/components/name.zig").Name;
 pub const UuidComponent = @import("ecs/components/uuid.zig").UuidComponent;
 
+// Animation Components
+const animation_components = @import("ecs/components/animation.zig");
+pub const AnimationComponent = animation_components.AnimationComponent;
+pub const SkeletonComponent = animation_components.SkeletonComponent;
+pub const AnimationClip = animation_components.AnimationClip;
+pub const AnimationChannel = animation_components.AnimationChannel;
+pub const Bone = animation_components.Bone;
+pub const Keyframe = animation_components.Keyframe;
+pub const AnimationState = animation_components.AnimationState;
+pub const MAX_BONES = animation_components.MAX_BONES;
+pub const MAX_ANIMATION_CLIPS = animation_components.MAX_ANIMATION_CLIPS;
+
 // Physics Components
 pub const RigidBody = @import("ecs/components/physics_components.zig").RigidBody;
 pub const BoxCollider = @import("ecs/components/physics_components.zig").BoxCollider;
@@ -64,6 +76,7 @@ pub const ShadowLightGPU = @import("ecs/systems/shadow_system.zig").ShadowLightG
 pub const ShadowGPUResources = @import("ecs/systems/shadow_system.zig").ShadowGPUResources;
 pub const MAX_SHADOW_LIGHTS = @import("ecs/systems/shadow_system.zig").MAX_SHADOW_LIGHTS;
 pub const SHADOW_FAR = @import("ecs/systems/shadow_system.zig").SHADOW_FAR;
+pub const AnimationSystem = @import("ecs/systems/animation_system.zig").AnimationSystem;
 
 // System functions for parallel execution
 pub const updateTransformSystem = @import("ecs/systems/transform_system.zig").update;
@@ -80,6 +93,8 @@ pub const prepareSkyboxSystem = @import("ecs/systems/skybox_system.zig").prepare
 pub const updateSkyboxSystem = @import("ecs/systems/skybox_system.zig").update;
 pub const prepareShadowSystem = @import("ecs/systems/shadow_system.zig").prepare;
 pub const updateShadowSystem = @import("ecs/systems/shadow_system.zig").update;
+pub const prepareAnimationSystem = @import("ecs/systems/animation_system.zig").prepare;
+pub const updateAnimationSystem = @import("ecs/systems/animation_system.zig").update;
 
 // Parallel System Execution
 pub const SystemScheduler = @import("ecs/system_scheduler.zig").SystemScheduler;

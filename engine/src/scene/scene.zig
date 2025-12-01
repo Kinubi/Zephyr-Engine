@@ -101,6 +101,9 @@ pub const Scene = struct {
     scripting_system: *ecs.ScriptingSystem,
     physics_system: ?*ecs.PhysicsSystem = null,
 
+    // Animation system (owned by the Scene)
+    animation_system: ?*ecs.AnimationSystem = null,
+
     // Rendering domain systems (owned by the Scene)
     material_system: ?*MaterialSystem = null,
     particle_system: ?*ecs.ParticleSystem = null,
@@ -167,6 +170,10 @@ pub const Scene = struct {
         const scripting_system = try allocator.create(ecs.ScriptingSystem);
         scripting_system.* = try ecs.ScriptingSystem.init(allocator, thread_pool, 4);
 
+        // Initialize animation system
+        const animation_system = try allocator.create(ecs.AnimationSystem);
+        animation_system.* = ecs.AnimationSystem.init(allocator);
+
         var scene = Scene{
             .ecs_world = ecs_world,
             .asset_manager = asset_manager,
@@ -179,6 +186,7 @@ pub const Scene = struct {
             .light_system = ecs.LightSystem.init(allocator),
             .render_system = render_system,
             .scripting_system = scripting_system,
+            .animation_system = animation_system,
             .physics_system = try ecs.PhysicsSystem.init(allocator),
             .graphics_context = graphics_context,
             .pipeline_system = pipeline_system,
@@ -784,6 +792,12 @@ pub const Scene = struct {
         // Deinit scripting system
         self.scripting_system.deinit();
         self.allocator.destroy(self.scripting_system);
+
+        // Deinit animation system
+        if (self.animation_system) |anim_sys| {
+            anim_sys.deinit();
+            self.allocator.destroy(anim_sys);
+        }
 
         // Deinit rendering domain systems
         // NOTE: TextureSystem now owned by Engine
